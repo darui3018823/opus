@@ -4,13 +4,13 @@ import "errors"
 
 // Decoder is a range decoder for entropy decoding.
 type Decoder struct {
-	buffer []byte  // Input buffer
-	pos    int     // Current position in buffer
-	low    uint32  // Low end of current range
-	rng    uint32  // Size of current range
-	val    uint32  // Current value
-	err    error   // Error state
-	nbits  int     // Number of bits consumed
+	buffer []byte // Input buffer
+	pos    int    // Current position in buffer
+	low    uint32 // Low end of current range
+	rng    uint32 // Size of current range
+	val    uint32 // Current value
+	err    error  // Error state
+	nbits  int    // Number of bits consumed
 }
 
 // NewDecoder creates a new range decoder.
@@ -90,10 +90,11 @@ func (dec *Decoder) DecodeSymbol(icdf ICdf) int {
 
 	r := dec.rng
 	ft := uint32(16384) // Total frequency (2^14)
-	
+
 	// Find symbol
-	c := (dec.val - dec.low) * ft / r
-	
+	// Find symbol
+	c := uint32(uint64(dec.val-dec.low) * uint64(ft) / uint64(r))
+
 	// Binary search in ICDF
 	symbol := 0
 	for symbol < len(icdf)-1 && uint32(icdf[symbol+1]) > c {

@@ -40,6 +40,11 @@ func NewMDCT(size int) *MDCT {
 	return mdct
 }
 
+// Size returns the MDCT output size (number of coefficients)
+func (m *MDCT) Size() int {
+	return m.size
+}
+
 // Forward performs the forward MDCT transform.
 // Input: 2*N samples, Output: N coefficients.
 func (m *MDCT) Forward(input []float64) []float64 {

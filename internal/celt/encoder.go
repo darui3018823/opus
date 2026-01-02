@@ -1,0 +1,301 @@
+package celt
+
+import (
+	"errors"
+	"github.com/darui3018823/opus/internal/dsp"
+	"github.com/darui3018823/opus/internal/entcode"
+	"math"
+)
+
+// Encoder is a CELT encoder instance
+type Encoder struct {
+	mode             *Mode
+	mdct             *dsp.MDCT
+	bandProc         *BandProcessor
+	transientDet     *TransientDetector
+	overlap          [][]float64 // Overlap buffer per channel
+	
+	// Encoder configuration
+	bitrate          int     // Target bitrate in bits per second
+	complexity       int     // Encoding complexity (0-10)
+	vbr              bool    // Variable bitrate mode
+	
+	// State
+	prevBandEnergies []float64 // Previous frame energies
+}
+
+// EncoderConfig holds encoder configuration
+type EncoderConfig struct {
+	Bitrate    int  // Target bitrate in bps
+	Complexity int  // Complexity level (0-10)
+	VBR        bool // Variable bitrate
+}
+
+// DefaultEncoderConfig returns default encoder configuration
+func DefaultEncoderConfig() *EncoderConfig {
+	return &EncoderConfig{
+		Bitrate:    64000, // 64 kbps
+		Complexity: 5,     // Medium complexity
+		VBR:        false,
+	}
+}
+
+// NewEncoder creates a new CELT encoder
+func NewEncoder(frameSize, sampleRate, channels int, config *EncoderConfig) (*Encoder, error) {
+	if channels < 1 || channels > 2 {
+		return nil, errors.New("celt: only mono and stereo supported")
+	}
+	
+	if config == nil {
+		config = DefaultEncoderConfig()
+	}
+	
+	mode := NewMode(frameSize, sampleRate, channels)
+	
+	// MDCT size must be power of 2
+	mdctSize := 1
+	for mdctSize < frameSize {
+		mdctSize *= 2
+	}
+	
+	mdct := dsp.NewMDCT(mdctSize)
+	
+	e := &Encoder{
+		mode:         mode,
+		mdct:         mdct,
+		bandProc:     NewBandProcessor(mode),
+		transientDet: NewTransientDetector(mode),
+		overlap:      make([][]float64, channels),
+		bitrate:      config.Bitrate,
+		complexity:   config.Complexity,
+		vbr:          config.VBR,
+	}
+	
+	// Initialize overlap buffers
+	for i := 0; i < channels; i++ {
+		e.overlap[i] = make([]float64, mdctSize)
+	}
+	
+	// Initialize previous band energies
+	e.prevBandEnergies = make([]float64, mode.Bands.NumBands)
+	for i := range e.prevBandEnergies {
+		e.prevBandEnergies[i] = 1.0
+	}
+	
+	return e, nil
+}
+
+// Encode encodes PCM samples to a CELT frame
+func (e *Encoder) Encode(samples []float64) ([]byte, error) {
+	expectedSize := e.mode.FrameSize * e.mode.Channels
+	if len(samples) != expectedSize {
+		return nil, errors.New("celt: invalid input size")
+	}
+	
+	// Detect transients
+	monoSamples := e.convertToMono(samples)
+	isTransient, _ := e.transientDet.Detect(monoSamples)
+	
+	// Encode each channel
+	allCoeffs := make([][]float64, e.mode.Channels)
+	allEnergies := make([][]float64, e.mode.Channels)
+	
+	for ch := 0; ch < e.mode.Channels; ch++ {
+		// Extract channel samples
+		chSamples := e.extractChannel(samples, ch)
+		
+		// Perform MDCT analysis
+		mdctSize := e.mdct.Size()
+		
+		// Pad channel samples to mdctSize if necessary
+		mdctInput := make([]float64, mdctSize)
+		copySize := minInt(len(chSamples), mdctSize)
+		copy(mdctInput, chSamples[:copySize])
+		
+		// Forward MDCT with overlap
+		coeffs := e.mdct.ForwardOverlap(mdctInput, e.overlap[ch])
+		allCoeffs[ch] = coeffs
+		
+		// Compute band energies
+		bandEnergies := e.computeBandEnergies(coeffs)
+		allEnergies[ch] = bandEnergies
+	}
+	
+	// Use first channel energies for bit allocation
+	bandEnergies := allEnergies[0]
+	
+	// Calculate target bits for this frame
+	frameDuration := float64(e.mode.FrameSize) / float64(e.mode.SampleRate)
+	targetBits := int(float64(e.bitrate) * frameDuration)
+	
+	// Perform bit allocation
+	bitAlloc := NewBitAllocation(e.mode, targetBits)
+	bitAlloc.Allocate(bandEnergies)
+	
+	// Encode frame
+	enc := entcode.NewEncoder(targetBits / 8)
+	
+	// Encode band energies
+	e.encodeBandEnergies(enc, bandEnergies, isTransient)
+	
+	// Quantize and encode band coefficients
+	for i := 0; i < e.mode.Bands.NumBands; i++ {
+		// Extract band coefficients for first channel
+		bandStart := e.mode.Bands.BandStart[i]
+		bandSize := e.mode.Bands.BandSizes[i]
+		bandEnd := bandStart + bandSize
+		
+		if bandEnd > len(allCoeffs[0]) {
+			bandEnd = len(allCoeffs[0])
+		}
+		
+		bandCoeffs := allCoeffs[0][bandStart:bandEnd]
+		
+		// Normalize band
+		_ = NormalizeBand(bandCoeffs)
+		
+		// Get pulse count from bit allocation
+		pulses := bitAlloc.GetPulseCount(i)
+		
+		// Encode using PVQ
+		pvqIndex := PVQEncode(bandCoeffs, pulses)
+		
+		// Write PVQ index (simplified - should use range coder)
+		if pulses > 0 {
+			enc.EncodeUint(uint32(pvqIndex), pulses+1)
+		}
+		
+		// Encode fine energy
+		fineEnergy := bitAlloc.GetFineEnergy(i)
+		if fineEnergy > 0 {
+			enc.EncodeUint(uint32(fineEnergy), 4)
+		}
+	}
+	
+	// Flush encoder
+	enc.Flush()
+	
+	// Update state
+	copy(e.prevBandEnergies, bandEnergies)
+	
+	return enc.Bytes(), nil
+}
+
+// convertToMono converts interleaved stereo to mono for analysis
+func (e *Encoder) convertToMono(samples []float64) []float64 {
+	if e.mode.Channels == 1 {
+		return samples
+	}
+	
+	mono := make([]float64, len(samples)/2)
+	for i := 0; i < len(mono); i++ {
+		mono[i] = (samples[i*2] + samples[i*2+1]) * 0.5
+	}
+	return mono
+}
+
+// extractChannel extracts a single channel from interleaved samples
+func (e *Encoder) extractChannel(samples []float64, channel int) []float64 {
+	if e.mode.Channels == 1 {
+		return samples
+	}
+	
+	result := make([]float64, len(samples)/e.mode.Channels)
+	for i := 0; i < len(result); i++ {
+		result[i] = samples[i*e.mode.Channels+channel]
+	}
+	return result
+}
+
+// computeBandEnergies computes energy for each frequency band
+func (e *Encoder) computeBandEnergies(coeffs []float64) []float64 {
+	energies := make([]float64, e.mode.Bands.NumBands)
+	
+	for i := 0; i < e.mode.Bands.NumBands; i++ {
+		bandStart := e.mode.Bands.BandStart[i]
+		bandSize := e.mode.Bands.BandSizes[i]
+		bandEnd := bandStart + bandSize
+		
+		if bandEnd > len(coeffs) {
+			bandEnd = len(coeffs)
+		}
+		
+		energy := 0.0
+		for j := bandStart; j < bandEnd; j++ {
+			energy += coeffs[j] * coeffs[j]
+		}
+		
+		energies[i] = energy
+	}
+	
+	return energies
+}
+
+// encodeBandEnergies encodes band energies with temporal prediction
+func (e *Encoder) encodeBandEnergies(enc *entcode.Encoder, energies []float64, isTransient bool) {
+	for i := 0; i < len(energies); i++ {
+		// Compute log energy
+		logEnergy := 0.0
+		if energies[i] > 1e-10 {
+			logEnergy = math.Log(energies[i])
+		}
+		
+		// Temporal prediction
+		predicted := e.prevBandEnergies[i]
+		if !isTransient {
+			predicted *= 0.9 // Decay for continuous signals
+		}
+		
+		predictedLog := 0.0
+		if predicted > 1e-10 {
+			predictedLog = math.Log(predicted)
+		}
+		
+		// Quantize difference
+		diff := logEnergy - predictedLog
+		quantized := int(diff*2.0 + 8.0) // Scale and offset
+		
+		// Clamp to valid range
+		if quantized < 0 {
+			quantized = 0
+		}
+		if quantized > 15 {
+			quantized = 15
+		}
+		
+		// Encode
+		enc.EncodeUint(uint32(quantized), 16)
+	}
+}
+
+// Reset resets the encoder state
+func (e *Encoder) Reset() {
+	// Clear overlap buffers
+	for ch := 0; ch < e.mode.Channels; ch++ {
+		for i := range e.overlap[ch] {
+			e.overlap[ch][i] = 0
+		}
+	}
+	
+	// Reset energies
+	for i := range e.prevBandEnergies {
+		e.prevBandEnergies[i] = 1.0
+	}
+	
+	// Reset transient detector
+	e.transientDet.Reset()
+}
+
+// SetBitrate sets the target bitrate
+func (e *Encoder) SetBitrate(bitrate int) {
+	if bitrate > 0 {
+		e.bitrate = bitrate
+	}
+}
+
+// SetComplexity sets the encoding complexity
+func (e *Encoder) SetComplexity(complexity int) {
+	if complexity >= 0 && complexity <= 10 {
+		e.complexity = complexity
+	}
+}

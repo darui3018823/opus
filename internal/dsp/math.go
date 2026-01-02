@@ -187,3 +187,22 @@ func RMS(x []float64) float64 {
 	}
 	return math.Sqrt(Energy(x) / float64(len(x)))
 }
+
+// Abs returns the absolute value of a float64
+func Abs(x float64) float64 {
+	return math.Abs(x)
+}
+
+// Sin returns the sine of x (in radians)
+func Sin(x float64) float64 {
+	return math.Sin(x)
+}
+
+// Cos returns the cosine of x (in radians)
+func Cos(x float64) float64 {
+	return math.Cos(x)
+}
+
+// Pi is the mathematical constant π
+const Pi = math.Pi
+

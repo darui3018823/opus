@@ -2,7 +2,7 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/darui3018823/opus.svg)](https://pkg.go.dev/github.com/darui3018823/opus)
 [![Go Report Card](https://goreportcard.com/badge/github.com/darui3018823/opus)](https://goreportcard.com/report/github.com/darui3018823/opus)
-[![License](https://img.shields.io/badge/license-BSD--3--Clause-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)](LICENSE)
 
 [日本語](README_ja.md) | English
 
@@ -65,30 +65,36 @@ func main() {
 package main
 
 import (
-    "github.com/darui3018823/opus"
+	"log"
+
+	"github.com/darui3018823/opus"
 )
 
 func main() {
-    // Create decoder for 48kHz stereo audio
-    dec, err := opus.NewDecoder(48000, 2)
-    if err != nil {
-        panic(err)
-    }
-    
-    // Decode Opus packet
-    decoded := make([]int16, 960*2) // Buffer for decoded PCM
-    n, err := dec.Decode(compressed, decoded)
-    if err != nil {
-        panic(err)
-    }
-    
-    // decoded[:n*2] contains interleaved stereo PCM
-    
-    // Packet loss concealment (for lost packets)
-    n, err = dec.DecodePLC(decoded, 960)
-    if err != nil {
-        panic(err)
-    }
+	// Create decoder for 48kHz stereo audio
+	dec, err := opus.NewDecoder(48000, 2)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Assuming 'compressed' contains a valid Opus packet from previous example
+	// In a real app, this would come from a network source or file
+	// compressed := ... 
+
+	// Decode Opus packet
+	decoded := make([]int16, 960*2) // Buffer for decoded PCM
+	n, err := dec.Decode(compressed, decoded)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// decoded[:n*2] contains interleaved stereo PCM
+
+	// Packet loss concealment (for lost packets)
+	n, err = dec.DecodePLC(decoded, 960)
+	if err != nil {
+		log.Fatal(err)
+	}
 }
 ```
 

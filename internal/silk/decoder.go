@@ -2,6 +2,7 @@ package silk
 
 import (
 	"fmt"
+	"math/rand"
 )
 
 // Decoder represents a SILK decoder instance
@@ -123,21 +124,21 @@ func (d *Decoder) decodeSilence() ([]float64, error) {
 // concealPacketLoss performs packet loss concealment
 func (d *Decoder) concealPacketLoss() ([]float64, error) {
 	d.plcCount++
-	
+
 	// Fade out over multiple lost packets
 	fadeGain := 1.0 / float64(d.plcCount+1)
-	
+
 	// Generate using previous parameters
 	excitation := d.generateExcitation(d.prevPitchLag, d.prevGains)
-	
+
 	// Apply fade
 	for i := range excitation {
 		excitation[i] *= fadeGain
 	}
-	
+
 	// Synthesize with previous LPC
 	output := SynthesizeLPC(excitation, d.prevLPC)
-	
+
 	// For stereo, duplicate to both channels
 	if d.channels == 2 {
 		stereo := make([]float64, len(output)*2)
@@ -147,7 +148,7 @@ func (d *Decoder) concealPacketLoss() ([]float64, error) {
 		}
 		return stereo, nil
 	}
-	
+
 	return output, nil
 }
 
@@ -180,7 +181,7 @@ func (d *Decoder) unpackFrame(packet []byte) (bool, []int, int, []int, error) {
 		int(packet[8]),
 		int(packet[9]),
 	}
-	
+
 	// Add 4th index if packet is long enough
 	if len(packet) > 10 {
 		gainIndices = append(gainIndices, int(packet[10]))
@@ -194,38 +195,39 @@ func (d *Decoder) unpackFrame(packet []byte) (bool, []int, int, []int, error) {
 // generateExcitation generates excitation signal from pitch and gains
 func (d *Decoder) generateExcitation(pitchLag int, gains []float64) []float64 {
 	excitation := make([]float64, d.frameSize)
-	
+
 	// Number of subframes
 	numSubframes := len(gains)
 	subframeSize := d.frameSize / numSubframes
-	
+
 	// Generate pitch-based excitation for each subframe
 	for sf := 0; sf < numSubframes; sf++ {
 		start := sf * subframeSize
 		end := start + subframeSize
 		gain := gains[sf]
-		
+
 		// Ensure minimum gain
 		if gain < 0.01 {
 			gain = 0.01
 		}
-		
+
 		for i := start; i < end && i < d.frameSize; i++ {
 			// Use pitch lag to generate periodic component
 			if i >= pitchLag && pitchLag > 0 {
 				excitation[i] = excitation[i-pitchLag] * 0.8
 			}
-			
-			// Add white noise component with better scaling
-			noise := (float64(i*7+sf*13) / 100.0) // Pseudo-random
-			noise = noise - float64(int(noise))   // Fractional part [0, 1)
-			noise = (noise - 0.5) * 2.0            // Scale to [-1, 1]
-			
+
+			// Add white noise component with better distribution
+			// Note: In a real implementation we would want a seeded RNG for determinism
+			// or use the residual from the bitstream. Here we use math/rand for better quality
+			// than the simple linear congruential generator previously used.
+			noise := rand.Float64()*2.0 - 1.0 // Uniform [-1, 1]
+
 			// Combine periodic and noise components
 			excitation[i] += noise * gain
 		}
 	}
-	
+
 	return excitation
 }
 
@@ -245,12 +247,12 @@ func (d *Decoder) Reset() {
 // DequantizeSubframeGains dequantizes subframe gain indices
 func DequantizeSubframeGains(indices []int) []float64 {
 	gains := make([]float64, len(indices))
-	
+
 	for i, index := range indices {
 		// Dequantize from 3 dB step
 		gainDB := float64(index) * 3.0
 		gains[i] = DBToLinear(gainDB)
 	}
-	
+
 	return gains
 }

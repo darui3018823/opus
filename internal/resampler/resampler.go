@@ -252,8 +252,10 @@ func (r *Resampler) processChannel(ch int, input []float64) []float64 {
 	}
 
 	// Calculate expected output length
+	// Calculate expected output length
 	outputLen := (inputLen * r.outRate) / r.inRate
-	output := make([]float64, 0, outputLen+10)
+	// Pre-allocate to exact size plus small margin for rounding
+	output := make([]float64, 0, outputLen+2)
 
 	// Steps for rational resampling tracking
 	// step = inRate / outRate = stepNum / stepDen

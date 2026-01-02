@@ -14,8 +14,8 @@ type Band struct {
 
 // BandProcessor handles band-level operations
 type BandProcessor struct {
-	mode   *Mode
-	bands  []*Band
+	mode  *Mode
+	bands []*Band
 }
 
 // NewBandProcessor creates a new band processor
@@ -24,7 +24,7 @@ func NewBandProcessor(mode *Mode) *BandProcessor {
 		mode:  mode,
 		bands: make([]*Band, mode.Bands.NumBands),
 	}
-	
+
 	// Initialize bands
 	for i := 0; i < mode.Bands.NumBands; i++ {
 		bp.bands[i] = &Band{
@@ -33,7 +33,7 @@ func NewBandProcessor(mode *Mode) *BandProcessor {
 			Coeffs: make([]float64, mode.Bands.BandSizes[i]),
 		}
 	}
-	
+
 	return bp
 }
 
@@ -44,7 +44,7 @@ func (bp *BandProcessor) DecodeBandEnergies(energyBits []int) {
 		// Convert quantized energy to linear scale
 		// In CELT, energies are coded in log domain
 		// energyBits[i] represents quantized log energy
-		
+
 		// Simple mapping: each bit represents ~3dB
 		logEnergy := float64(energyBits[i]) * 0.5 // 0.5 corresponds to ~3dB
 		bp.bands[i].Energy = math.Exp(logEnergy)
@@ -60,7 +60,7 @@ func (bp *BandProcessor) DenormalizeBands() {
 			for _, coeff := range band.Coeffs {
 				currentEnergy += coeff * coeff
 			}
-			
+
 			if currentEnergy > 0 {
 				// Scale coefficients to match target energy
 				scale := math.Sqrt(band.Energy / currentEnergy)
@@ -79,14 +79,14 @@ func (bp *BandProcessor) AssembleMDCT() []float64 {
 	for _, band := range bp.bands {
 		totalCoeffs = max(totalCoeffs, band.Start+band.Size)
 	}
-	
+
 	mdct := make([]float64, totalCoeffs)
-	
+
 	// Copy band coefficients to MDCT spectrum
 	for _, band := range bp.bands {
 		copy(mdct[band.Start:band.Start+band.Size], band.Coeffs)
 	}
-	
+
 	return mdct
 }
 
@@ -95,12 +95,12 @@ func (bp *BandProcessor) DecodeBandCoeffs(bandIdx int, pvqIndex uint32, pulses i
 	if bandIdx < 0 || bandIdx >= len(bp.bands) {
 		return
 	}
-	
+
 	band := bp.bands[bandIdx]
-	
+
 	// Decode PVQ index to unit vector
 	coeffs := PVQDecode(band.Size, pulses, pvqIndex)
-	
+
 	// Copy to band
 	copy(band.Coeffs, coeffs)
 }
@@ -110,9 +110,9 @@ func (bp *BandProcessor) ApplyFineEnergy(bandIdx int, fineEnergy int) {
 	if bandIdx < 0 || bandIdx >= len(bp.bands) {
 		return
 	}
-	
+
 	band := bp.bands[bandIdx]
-	
+
 	// Fine energy is typically a small adjustment in dB
 	// Each step is approximately 0.5 dB
 	adjustment := math.Pow(10.0, float64(fineEnergy)*0.05)
@@ -159,9 +159,4 @@ func (bp *BandProcessor) InterpolateBandEnergies() {
 	}
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
+// max function removed - using built-in max

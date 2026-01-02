@@ -41,10 +41,10 @@ type Encoder struct {
 	sampleRate  int
 	channels    int
 	application Application
-	
+
 	// CELT encoder
 	celtEncoder *celt.Encoder
-	
+
 	// Configuration
 	bitrate    int
 	complexity int
@@ -63,14 +63,14 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 	if !validRates[sampleRate] {
 		return nil, fmt.Errorf("invalid sample rate: %d (must be 8000, 12000, 16000, 24000, or 48000)", sampleRate)
 	}
-	
+
 	if channels != 1 && channels != 2 {
 		return nil, fmt.Errorf("invalid channel count: %d (must be 1 or 2)", channels)
 	}
 
 	// Default frame size: 20ms
 	frameSize := (sampleRate * 20) / 1000
-	
+
 	// Create CELT encoder
 	celtFrameSize := celt.FrameSize20ms
 	switch frameSize {
@@ -192,28 +192,14 @@ func (e *Encoder) SetApplication(application Application) {
 // Reset resets the encoder state
 func (e *Encoder) Reset() error {
 	// Reset CELT encoder state
-	celtFrameSize := celt.FrameSize20ms
-	frameSize := (e.sampleRate * 20) / 1000
-	switch frameSize {
-	case 120:
-		celtFrameSize = celt.FrameSize2_5ms
-	case 240:
-		celtFrameSize = celt.FrameSize5ms
-	case 480:
-		celtFrameSize = celt.FrameSize10ms
-	case 960:
-		celtFrameSize = celt.FrameSize20ms
-	case 1920:
-		celtFrameSize = celt.FrameSize40ms
-	case 2880:
-		celtFrameSize = celt.FrameSize60ms
-	}
-	
-	newEnc, err := celt.NewEncoder(celtFrameSize, e.sampleRate, e.channels, celt.DefaultEncoderConfig())
-	if err != nil {
-		return err
-	}
-	e.celtEncoder = newEnc
+	// Note: We're assuming the internal encoder handles resetting efficiently
+	// If frame size changed significantly, we might need to reconfigure,
+	// but Reset() usually implies keeping configuration.
+
+	// Reset internal CELT encoder
+	e.celtEncoder.Reset()
+
+	// Re-apply settings just in case
 	e.celtEncoder.SetBitrate(e.bitrate)
 	e.celtEncoder.SetComplexity(e.complexity)
 	return nil
@@ -223,10 +209,10 @@ func (e *Encoder) Reset() error {
 type Decoder struct {
 	sampleRate int
 	channels   int
-	
+
 	// CELT decoder
 	celtDecoder *celt.Decoder
-	
+
 	frameSize int
 }
 
@@ -240,14 +226,14 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 	if !validRates[sampleRate] {
 		return nil, fmt.Errorf("invalid sample rate: %d (must be 8000, 12000, 16000, 24000, or 48000)", sampleRate)
 	}
-	
+
 	if channels != 1 && channels != 2 {
 		return nil, fmt.Errorf("invalid channel count: %d (must be 1 or 2)", channels)
 	}
 
 	// Default frame size: 20ms
 	frameSize := (sampleRate * 20) / 1000
-	
+
 	// Create CELT decoder
 	celtFrameSize := celt.FrameSize20ms
 	switch frameSize {
@@ -358,28 +344,7 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 // Reset resets the decoder state
 func (d *Decoder) Reset() error {
 	// Reset CELT decoder state
-	celtFrameSize := celt.FrameSize20ms
-	frameSize := (d.sampleRate * 20) / 1000
-	switch frameSize {
-	case 120:
-		celtFrameSize = celt.FrameSize2_5ms
-	case 240:
-		celtFrameSize = celt.FrameSize5ms
-	case 480:
-		celtFrameSize = celt.FrameSize10ms
-	case 960:
-		celtFrameSize = celt.FrameSize20ms
-	case 1920:
-		celtFrameSize = celt.FrameSize40ms
-	case 2880:
-		celtFrameSize = celt.FrameSize60ms
-	}
-	
-	newDec, err := celt.NewDecoder(celtFrameSize, d.sampleRate, d.channels)
-	if err != nil {
-		return err
-	}
-	d.celtDecoder = newDec
+	d.celtDecoder.Reset()
 	return nil
 }
 

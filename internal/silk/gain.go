@@ -194,3 +194,23 @@ func (g *GainQuantizer) SmoothGains(gains []float64, smoothingFactor float64) {
 		gains[i] = smoothingFactor*gains[i-1] + (1-smoothingFactor)*gains[i]
 	}
 }
+
+// LinearToDB converts linear gain to dB (standalone function)
+func LinearToDB(linearGain float64) float64 {
+	if linearGain <= 0 {
+		return GainMinDB
+	}
+	db := 20.0 * math.Log10(linearGain)
+	if db < GainMinDB {
+		return GainMinDB
+	}
+	if db > GainMaxDB {
+		return GainMaxDB
+	}
+	return db
+}
+
+// DBToLinear converts dB gain to linear (standalone function)
+func DBToLinear(dbGain float64) float64 {
+	return math.Pow(10.0, dbGain/20.0)
+}

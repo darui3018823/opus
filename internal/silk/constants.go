@@ -32,6 +32,8 @@ const (
 const (
 	PitchLagMin     = 2   // Minimum pitch lag
 	PitchLagMax     = 300 // Maximum pitch lag
+	MinPitchLag     = PitchLagMin // Alias for compatibility
+	MaxPitchLag     = PitchLagMax // Alias for compatibility
 	PitchSubframes  = 4   // Number of subframes for pitch analysis
 )
 

@@ -263,3 +263,46 @@ func (q *NLSFQuantizer) getCodebook(stage int, index int) []float64 {
 
 	return codebook
 }
+
+// InterpolateNLSF interpolates between two NLSF vectors
+func InterpolateNLSF(nlsf1, nlsf2 []float64, factor float64) []float64 {
+	if len(nlsf1) != len(nlsf2) {
+		return nil
+	}
+	
+	result := make([]float64, len(nlsf1))
+	for i := range nlsf1 {
+		result[i] = nlsf1[i]*(1-factor) + nlsf2[i]*factor
+	}
+	
+	return result
+}
+
+// QuantizeNLSF is a simplified wrapper for NLSF quantization
+func QuantizeNLSF(nlsf []float64) ([]float64, []int) {
+	quantizer := NewNLSFQuantizer(len(nlsf))
+	if quantizer == nil {
+		return nlsf, []int{0, 0}
+	}
+	
+	indices, err := quantizer.Quantize(nlsf)
+	if err != nil {
+		return nlsf, []int{0, 0}
+	}
+	
+	quantized, _ := quantizer.Dequantize(indices)
+	return quantized, indices
+}
+
+// DequantizeNLSF dequantizes NLSF from indices
+func DequantizeNLSF(indices []int) []float64 {
+	// Assume order 10 for narrowband (can be adjusted)
+	quantizer := NewNLSFQuantizer(10)
+	if quantizer == nil {
+		// Return default NLSF
+		return make([]float64, 10)
+	}
+	
+	result, _ := quantizer.Dequantize(indices)
+	return result
+}

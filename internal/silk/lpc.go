@@ -189,3 +189,72 @@ func (lpc *LPCAnalysis) GetReflectionCoefficients() []float64 {
 func (lpc *LPCAnalysis) GetGain() float64 {
 	return lpc.gain
 }
+
+// LSFToLPC converts Line Spectral Frequencies to LPC coefficients
+func LSFToLPC(lsf []float64) []float64 {
+	lpc := NewLPCAnalysis(len(lsf))
+	if lpc == nil {
+		return nil
+	}
+	
+	err := lpc.FromLSF(lsf)
+	if err != nil {
+		return nil
+	}
+	
+	return lpc.GetCoefficients()
+}
+
+// AnalyzeLPC analyzes a signal and returns LPC coefficients
+func AnalyzeLPC(signal []float64, order int) []float64 {
+	lpc := NewLPCAnalysis(order)
+	if lpc == nil {
+		return nil
+	}
+	
+	err := lpc.Analyze(signal)
+	if err != nil {
+		return nil
+	}
+	
+	return lpc.GetCoefficients()
+}
+
+// LPCToLSF converts LPC coefficients to Line Spectral Frequencies
+func LPCToLSF(lpcCoeffs []float64) []float64 {
+	lpc := NewLPCAnalysis(len(lpcCoeffs))
+	if lpc == nil {
+		return nil
+	}
+	
+	// Set coefficients
+	copy(lpc.coeffs, lpcCoeffs)
+	
+	return lpc.ToLSF()
+}
+
+// ComputeResidual computes the residual signal from LPC analysis
+func ComputeResidual(signal []float64, lpcCoeffs []float64) []float64 {
+	lpc := NewLPCAnalysis(len(lpcCoeffs))
+	if lpc == nil {
+		return nil
+	}
+	
+	// Set coefficients
+	copy(lpc.coeffs, lpcCoeffs)
+	
+	return lpc.ComputeResidual(signal)
+}
+
+// SynthesizeLPC synthesizes signal from residual using LPC coefficients
+func SynthesizeLPC(residual []float64, lpcCoeffs []float64) []float64 {
+	lpc := NewLPCAnalysis(len(lpcCoeffs))
+	if lpc == nil {
+		return nil
+	}
+	
+	// Set coefficients
+	copy(lpc.coeffs, lpcCoeffs)
+	
+	return lpc.Synthesize(residual)
+}

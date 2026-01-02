@@ -197,3 +197,56 @@ func (pa *PitchAnalyzer) UpdateHistory(signal []float64) {
 		copy(pa.history[len(pa.history)-n:], signal)
 	}
 }
+
+// DetectPitch is a standalone function for pitch detection
+func DetectPitch(signal []float64, minLag, maxLag int) (int, float64) {
+	pa := NewPitchAnalyzer(8000) // Default sample rate
+	if pa == nil {
+		return 100, 0.5 // Default values
+	}
+	
+	return pa.Analyze(signal)
+}
+
+// ApplyPitchPrediction applies pitch prediction to a signal
+func ApplyPitchPrediction(signal []float64, lag int, gain float64) []float64 {
+	pa := NewPitchAnalyzer(8000)
+	if pa == nil {
+		return signal
+	}
+	
+	return pa.ApplyPitchFilter(signal, lag, gain)
+}
+
+// ComputeSubframeGains computes gain for each subframe
+func ComputeSubframeGains(signal []float64, numSubframes int) []float64 {
+	if numSubframes <= 0 {
+		return []float64{1.0}
+	}
+	
+	gains := make([]float64, numSubframes)
+	subframeLen := len(signal) / numSubframes
+	
+	for i := 0; i < numSubframes; i++ {
+		start := i * subframeLen
+		end := start + subframeLen
+		if end > len(signal) {
+			end = len(signal)
+		}
+		
+		// Compute RMS energy for subframe
+		energy := 0.0
+		for j := start; j < end; j++ {
+			energy += signal[j] * signal[j]
+		}
+		energy /= float64(end - start)
+		gains[i] = math.Sqrt(energy)
+		
+		// Ensure minimum gain
+		if gains[i] < 0.01 {
+			gains[i] = 0.01
+		}
+	}
+	
+	return gains
+}

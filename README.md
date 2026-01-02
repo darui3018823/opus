@@ -6,7 +6,7 @@ A complete Pure Go implementation of the Opus audio codec without CGO dependenci
 
 This is an active development project implementing a Pure Go Opus codec based on the official libopus specification.
 
-### Completed (Phase 2 - Foundation)
+### Completed (Phase 2 - Foundation) - 90% Complete
 
 #### DSP Package (`internal/dsp/`)
 - ✅ **FFT Implementation**: Cooley-Tukey radix-2 FFT with bit-reversal
@@ -33,6 +33,15 @@ This is an active development project implementing a Pure Go Opus codec based on
   - Bit manipulation utilities
   - Clamping and range functions
 
+#### Resampler Package (`internal/resampler/`) - NEW ✅
+- ✅ **Polyphase Resampler**: High-quality sample rate conversion
+  - Kaiser-windowed sinc FIR filters
+  - Quality levels 0-10 (16-80 tap filters)
+  - All Opus sample rates (8, 12, 16, 24, 48 kHz)
+  - Mono and stereo support
+  - Stateful processing with memory buffers
+  - Comprehensive test coverage (8/8 passing)
+
 #### Entropy Coding Package (`internal/entcode/`)
 - ✅ **Range Coder**: Basic range encoder/decoder
   - Bit-level encoding/decoding
@@ -56,6 +65,8 @@ github.com/darui3018823/opus/
 │   │   ├── common.go     # Shared utilities
 │   │   ├── encoder.go    # Range encoder
 │   │   └── decoder.go    # Range decoder
+│   ├── resampler/        # Sample rate conversion
+│   │   └── resampler.go  # Polyphase FIR resampler
 │   ├── celt/             # CELT codec (planned)
 │   ├── silk/             # SILK codec (planned)
 │   └── resampler/        # Sample rate conversion (planned)
@@ -79,12 +90,12 @@ github.com/darui3018823/opus/
 
 ## Development Roadmap
 
-### Phase 2: Core Math Library ✅ (Current)
+### Phase 2: Core Math Library ✅ (90% Complete)
 - [x] FFT implementation
 - [x] MDCT/IMDCT transforms
 - [x] Window functions
 - [x] Range encoder/decoder foundation
-- [ ] Polyphase resampler
+- [x] Polyphase resampler
 - [ ] Refine range coder for full compatibility
 
 ### Phase 3: CELT Implementation (Next)

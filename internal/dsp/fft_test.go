@@ -14,7 +14,10 @@ func TestFFTBasic(t *testing.T) {
 		{Real: 0, Imag: 0},
 	}
 
-	output := FFT(input)
+	output, err := FFT(input)
+	if err != nil {
+		t.Fatalf("FFT failed: %v", err)
+	}
 
 	// FFT of an impulse should be all ones
 	for i, c := range output {
@@ -37,8 +40,14 @@ func TestFFTIFFTRoundtrip(t *testing.T) {
 		{Real: 8, Imag: 0},
 	}
 
-	fft := FFT(input)
-	ifft := IFFT(fft)
+	fft, err := FFT(input)
+	if err != nil {
+		t.Fatalf("FFT failed: %v", err)
+	}
+	ifft, err := IFFT(fft)
+	if err != nil {
+		t.Fatalf("IFFT failed: %v", err)
+	}
 
 	for i := range input {
 		if math.Abs(ifft[i].Real-input[i].Real) > 1e-10 ||
@@ -51,7 +60,10 @@ func TestFFTIFFTRoundtrip(t *testing.T) {
 func TestRealFFT(t *testing.T) {
 	// Test real FFT
 	input := []float64{1, 2, 3, 4, 5, 6, 7, 8}
-	output := RealFFT(input)
+	output, err := RealFFT(input)
+	if err != nil {
+		t.Fatalf("RealFFT failed: %v", err)
+	}
 
 	// Should return N/2 + 1 = 5 complex values
 	if len(output) != 5 {
@@ -67,8 +79,14 @@ func TestRealFFT(t *testing.T) {
 
 func TestRealFFTIFFTRoundtrip(t *testing.T) {
 	input := []float64{1, 2, 3, 4, 5, 6, 7, 8}
-	fft := RealFFT(input)
-	ifft := RealIFFT(fft, len(input))
+	fft, err := RealFFT(input)
+	if err != nil {
+		t.Fatalf("RealFFT failed: %v", err)
+	}
+	ifft, err := RealIFFT(fft, len(input))
+	if err != nil {
+		t.Fatalf("RealIFFT failed: %v", err)
+	}
 
 	for i := range input {
 		if math.Abs(ifft[i]-input[i]) > 1e-10 {
@@ -79,7 +97,10 @@ func TestRealFFTIFFTRoundtrip(t *testing.T) {
 
 func TestFFTConfig(t *testing.T) {
 	// Test FFT with precomputed config
-	cfg := NewFFTConfig(8)
+	cfg, err := NewFFTConfig(8)
+	if err != nil {
+		t.Fatalf("NewFFTConfig failed: %v", err)
+	}
 
 	input := []Complex{
 		{Real: 1, Imag: 0},
@@ -93,8 +114,14 @@ func TestFFTConfig(t *testing.T) {
 	}
 
 	// Compare with basic FFT
-	expected := FFT(input)
-	actual := cfg.Execute(input)
+	expected, err := FFT(input)
+	if err != nil {
+		t.Fatalf("FFT failed: %v", err)
+	}
+	actual, err := cfg.Execute(input)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
 
 	for i := range expected {
 		if math.Abs(actual[i].Real-expected[i].Real) > 1e-10 ||
@@ -105,15 +132,24 @@ func TestFFTConfig(t *testing.T) {
 }
 
 func TestFFTConfigRoundtrip(t *testing.T) {
-	cfg := NewFFTConfig(16)
+	cfg, err := NewFFTConfig(16)
+	if err != nil {
+		t.Fatalf("NewFFTConfig failed: %v", err)
+	}
 
 	input := make([]Complex, 16)
 	for i := range input {
 		input[i] = Complex{Real: float64(i + 1), Imag: 0}
 	}
 
-	fft := cfg.Execute(input)
-	ifft := cfg.ExecuteInverse(fft)
+	fft, err := cfg.Execute(input)
+	if err != nil {
+		t.Fatalf("Execute failed: %v", err)
+	}
+	ifft, err := cfg.ExecuteInverse(fft)
+	if err != nil {
+		t.Fatalf("ExecuteInverse failed: %v", err)
+	}
 
 	for i := range input {
 		if math.Abs(ifft[i].Real-input[i].Real) > 1e-10 ||
@@ -131,7 +167,7 @@ func BenchmarkFFT128(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		FFT(input)
+		_, _ = FFT(input)
 	}
 }
 
@@ -143,12 +179,12 @@ func BenchmarkFFT1024(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		FFT(input)
+		_, _ = FFT(input)
 	}
 }
 
 func BenchmarkFFTConfig1024(b *testing.B) {
-	cfg := NewFFTConfig(1024)
+	cfg, _ := NewFFTConfig(1024)
 	input := make([]Complex, 1024)
 	for i := range input {
 		input[i] = Complex{Real: float64(i), Imag: 0}
@@ -156,7 +192,7 @@ func BenchmarkFFTConfig1024(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		cfg.Execute(input)
+		_, _ = cfg.Execute(input)
 	}
 }
 
@@ -168,6 +204,6 @@ func BenchmarkRealFFT1024(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		RealFFT(input)
+		_, _ = RealFFT(input)
 	}
 }

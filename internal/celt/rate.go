@@ -7,10 +7,10 @@ import (
 // BitAllocation handles dynamic bit allocation across frequency bands
 type BitAllocation struct {
 	mode        *Mode
-	targetBits  int       // Total bits available for this frame
-	bandBits    []int     // Bits allocated to each band
-	fineEnergy  []int     // Fine energy bits per band
-	pulseCounts []int     // Pulse counts per band (for PVQ)
+	targetBits  int   // Total bits available for this frame
+	bandBits    []int // Bits allocated to each band
+	fineEnergy  []int // Fine energy bits per band
+	pulseCounts []int // Pulse counts per band (for PVQ)
 }
 
 // NewBitAllocation creates a new bit allocation instance
@@ -28,43 +28,43 @@ func NewBitAllocation(mode *Mode, targetBits int) *BitAllocation {
 // This implements a simplified version of CELT's rate allocation
 func (ba *BitAllocation) Allocate(bandEnergies []float64) error {
 	numBands := ba.mode.Bands.NumBands
-	
+
 	// Reserve bits for header and overhead
 	overheadBits := 20 // Simplified overhead estimate
 	availableBits := ba.targetBits - overheadBits
 	if availableBits < 0 {
 		availableBits = 0
 	}
-	
+
 	// Compute band importance based on energy
 	importance := make([]float64, numBands)
 	totalImportance := 0.0
-	
+
 	for i := 0; i < numBands; i++ {
 		// Log energy with floor to avoid log(0)
 		energy := bandEnergies[i]
 		if energy < 1e-10 {
 			energy = 1e-10
 		}
-		
+
 		// Importance is roughly proportional to log energy
 		// Weighted by band size (larger bands get more weight)
 		bandSize := float64(ba.mode.Bands.BandSizes[i])
 		importance[i] = math.Log(energy) * math.Sqrt(bandSize)
-		
+
 		// Add a small bias to ensure all bands get at least some bits
 		importance[i] += 1.0
-		
+
 		totalImportance += importance[i]
 	}
-	
+
 	// Allocate coarse energy bits (fixed allocation)
 	coarseEnergyBits := numBands * 4 // 4 bits per band for coarse energy
 	remainingBits := availableBits - coarseEnergyBits
 	if remainingBits < 0 {
 		remainingBits = 0
 	}
-	
+
 	// Distribute remaining bits proportionally to importance
 	for i := 0; i < numBands; i++ {
 		if totalImportance > 0 {
@@ -73,28 +73,28 @@ func (ba *BitAllocation) Allocate(bandEnergies []float64) error {
 		} else {
 			ba.bandBits[i] = remainingBits / numBands
 		}
-		
+
 		// Ensure minimum allocation
 		if ba.bandBits[i] < 0 {
 			ba.bandBits[i] = 0
 		}
 	}
-	
+
 	// Split band bits into fine energy and PVQ pulses
 	for i := 0; i < numBands; i++ {
 		// Reserve 0-3 bits for fine energy
-		fineEnergyBits := minInt(3, ba.bandBits[i]/4)
+		fineEnergyBits := min(3, ba.bandBits[i]/4)
 		ba.fineEnergy[i] = fineEnergyBits
-		
+
 		// Remaining bits go to PVQ pulses
 		pvqBits := ba.bandBits[i] - fineEnergyBits
-		
+
 		// Convert bits to pulse count (simplified)
 		// More bits = more pulses for higher fidelity
 		bandSize := ba.mode.Bands.BandSizes[i]
 		ba.pulseCounts[i] = computePulseCount(pvqBits, bandSize)
 	}
-	
+
 	return nil
 }
 
@@ -103,23 +103,23 @@ func computePulseCount(bits, bandSize int) int {
 	if bits <= 0 {
 		return 0
 	}
-	
+
 	// Rough heuristic: more bits allow more pulses
 	// The actual relationship depends on the PVQ codebook size
 	// codebook_size = C(N+K-1, K) where N=bandSize, K=pulses
-	
+
 	// Start with a guess
 	pulses := bits / 2
 	if pulses < 1 {
 		pulses = 1
 	}
-	
+
 	// Limit pulses based on band size
 	maxPulses := bandSize * 2
 	if pulses > maxPulses {
 		pulses = maxPulses
 	}
-	
+
 	return pulses
 }
 
@@ -161,17 +161,17 @@ func (ba *BitAllocation) TotalAllocatedBits() int {
 func (ba *BitAllocation) RefineBitAllocation() {
 	target := ba.targetBits - 20 // Account for overhead
 	current := ba.TotalAllocatedBits()
-	
+
 	// If we're close enough, we're done
 	if abs(current-target) < 10 {
 		return
 	}
-	
+
 	// If we have too many bits, reduce from least important bands
 	if current > target {
 		excess := current - target
 		for i := len(ba.bandBits) - 1; i >= 0 && excess > 0; i-- {
-			reduction := minInt(excess, ba.bandBits[i]/2)
+			reduction := min(excess, ba.bandBits[i]/2)
 			ba.bandBits[i] -= reduction
 			excess -= reduction
 		}
@@ -179,18 +179,11 @@ func (ba *BitAllocation) RefineBitAllocation() {
 		// If we have too few bits, add to most important bands
 		deficit := target - current
 		for i := 0; i < len(ba.bandBits) && deficit > 0; i++ {
-			addition := minInt(deficit, 10) // Add up to 10 bits at a time
+			addition := min(deficit, 10) // Add up to 10 bits at a time
 			ba.bandBits[i] += addition
 			deficit -= addition
 		}
 	}
-}
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func abs(x int) int {

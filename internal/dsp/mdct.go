@@ -1,6 +1,9 @@
 package dsp
 
-import "math"
+import (
+	"errors"
+	"math"
+)
 
 // MDCT represents a Modified Discrete Cosine Transform configuration.
 // MDCT is used extensively in audio coding, particularly in CELT.
@@ -14,16 +17,21 @@ type MDCT struct {
 
 // NewMDCT creates a new MDCT configuration.
 // size is the number of output coefficients (input is 2*size samples).
-func NewMDCT(size int) *MDCT {
+func NewMDCT(size int) (*MDCT, error) {
 	if !IsPowerOf2(size) {
-		panic("dsp: MDCT size must be a power of 2")
+		return nil, errors.New("dsp: MDCT size must be a power of 2")
 	}
 
 	fftSize := size / 2
+	fftCfg, err := NewFFTConfig(fftSize)
+	if err != nil {
+		return nil, err
+	}
+
 	mdct := &MDCT{
 		size:     size,
 		fftSize:  fftSize,
-		fftCfg:   NewFFTConfig(fftSize),
+		fftCfg:   fftCfg,
 		window:   Window(WindowVorbis, 2*size),
 		twiddles: make([]Complex, size),
 	}
@@ -37,7 +45,7 @@ func NewMDCT(size int) *MDCT {
 		}
 	}
 
-	return mdct
+	return mdct, nil
 }
 
 // Size returns the MDCT output size (number of coefficients)
@@ -47,10 +55,10 @@ func (m *MDCT) Size() int {
 
 // Forward performs the forward MDCT transform.
 // Input: 2*N samples, Output: N coefficients.
-func (m *MDCT) Forward(input []float64) []float64 {
+func (m *MDCT) Forward(input []float64) ([]float64, error) {
 	n := m.size
 	if len(input) != 2*n {
-		panic("dsp: MDCT input must be 2*N samples")
+		return nil, errors.New("dsp: MDCT input must be 2*N samples")
 	}
 
 	// Apply window
@@ -83,7 +91,10 @@ func (m *MDCT) Forward(input []float64) []float64 {
 	}
 
 	// Perform FFT
-	fftOutput := m.fftCfg.Execute(fftInput)
+	fftOutput, err := m.fftCfg.Execute(fftInput)
+	if err != nil {
+		return nil, err
+	}
 
 	// Post-rotation to get MDCT coefficients
 	output := make([]float64, n)
@@ -97,15 +108,15 @@ func (m *MDCT) Forward(input []float64) []float64 {
 		output[i] = 2.0 * (fftOutput[k].Real*cos + fftOutput[k].Imag*sin)
 	}
 
-	return output
+	return output, nil
 }
 
 // Inverse performs the inverse MDCT transform (IMDCT).
 // Input: N coefficients, Output: 2*N samples.
-func (m *MDCT) Inverse(input []float64) []float64 {
+func (m *MDCT) Inverse(input []float64) ([]float64, error) {
 	n := m.size
 	if len(input) != n {
-		panic("dsp: IMDCT input must be N coefficients")
+		return nil, errors.New("dsp: IMDCT input must be N coefficients")
 	}
 
 	// Pre-rotation
@@ -127,7 +138,10 @@ func (m *MDCT) Inverse(input []float64) []float64 {
 	}
 
 	// Perform IFFT
-	fftOutput := m.fftCfg.ExecuteInverse(fftInput)
+	fftOutput, err := m.fftCfg.ExecuteInverse(fftInput)
+	if err != nil {
+		return nil, err
+	}
 
 	// Post-rotation and unfolding
 	output := make([]float64, 2*n)
@@ -156,14 +170,14 @@ func (m *MDCT) Inverse(input []float64) []float64 {
 		output[i] *= m.window[i]
 	}
 
-	return output
+	return output, nil
 }
 
 // ForwardOverlap performs forward MDCT with proper overlap handling for streaming.
-func (m *MDCT) ForwardOverlap(input []float64, overlap []float64) []float64 {
+func (m *MDCT) ForwardOverlap(input []float64, overlap []float64) ([]float64, error) {
 	n := m.size
 	if len(input) != n || len(overlap) != n {
-		panic("dsp: ForwardOverlap requires N input samples and N overlap samples")
+		return nil, errors.New("dsp: ForwardOverlap requires N input samples and N overlap samples")
 	}
 
 	// Combine overlap and new input
@@ -176,14 +190,17 @@ func (m *MDCT) ForwardOverlap(input []float64, overlap []float64) []float64 {
 }
 
 // InverseOverlap performs inverse MDCT with proper overlap-add for streaming.
-func (m *MDCT) InverseOverlap(coeffs []float64, overlap []float64) []float64 {
+func (m *MDCT) InverseOverlap(coeffs []float64, overlap []float64) ([]float64, error) {
 	n := m.size
 	if len(coeffs) != n || len(overlap) != n {
-		panic("dsp: InverseOverlap requires N coefficients and N overlap buffer")
+		return nil, errors.New("dsp: InverseOverlap requires N coefficients and N overlap buffer")
 	}
 
 	// Perform inverse MDCT
-	output := m.Inverse(coeffs)
+	output, err := m.Inverse(coeffs)
+	if err != nil {
+		return nil, err
+	}
 
 	// Output first half with overlap-add
 	result := make([]float64, n)
@@ -194,5 +211,5 @@ func (m *MDCT) InverseOverlap(coeffs []float64, overlap []float64) []float64 {
 	// Save second half for next overlap
 	copy(overlap, output[n:])
 
-	return result
+	return result, nil
 }

@@ -254,27 +254,13 @@ Contributions are welcome! Please ensure:
 
 ## License
 
-BSD 3-Clause License - see [LICENSE](LICENSE) file for details.
+BSD 2-Clause License - see [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 
 - **libopus**: Reference implementation by Xiph.Org Foundation
 - **RFC 6716**: Definition of the Opus Audio Codec
 - **Go team**: For excellent language and tooling
-
-## Project Status
-
-**Status**: ✅ **Production Ready** (v1.0.0)
-
-All phases complete:
-- ✅ Phase 1: Architectural Design (100%)
-- ✅ Phase 2: Core DSP Library (100%)
-- ✅ Phase 3: CELT Implementation (100%)
-- ✅ Phase 4: SILK Implementation (100%)
-- ✅ Phase 5: Validation (100%)
-- ✅ Phase 6: Optimization (100%)
-
-**Timeline**: Delivered in 4 weeks (original estimate: 5-6 months)
 
 ## Support
 

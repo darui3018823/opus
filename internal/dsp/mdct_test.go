@@ -8,7 +8,10 @@ import (
 func TestMDCTInverseProperty(t *testing.T) {
 	// Test that Forward and Inverse are inverses (with overlap-add)
 	size := 64
-	mdct := NewMDCT(size)
+	mdct, err := NewMDCT(size)
+	if err != nil {
+		t.Fatalf("NewMDCT failed: %v", err)
+	}
 
 	// Create test signal (2N samples)
 	input := make([]float64, 2*size)
@@ -17,13 +20,19 @@ func TestMDCTInverseProperty(t *testing.T) {
 	}
 
 	// Forward transform
-	coeffs := mdct.Forward(input)
+	coeffs, err := mdct.Forward(input)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
 	if len(coeffs) != size {
 		t.Errorf("MDCT output size = %d, want %d", len(coeffs), size)
 	}
 
 	// Inverse transform
-	reconstructed := mdct.Inverse(coeffs)
+	reconstructed, err := mdct.Inverse(coeffs)
+	if err != nil {
+		t.Fatalf("Inverse failed: %v", err)
+	}
 	if len(reconstructed) != 2*size {
 		t.Errorf("IMDCT output size = %d, want %d", len(reconstructed), 2*size)
 	}
@@ -40,7 +49,10 @@ func TestMDCTInverseProperty(t *testing.T) {
 func TestMDCTOverlapAdd(t *testing.T) {
 	// Test proper overlap-add reconstruction
 	size := 32
-	mdct := NewMDCT(size)
+	mdct, err := NewMDCT(size)
+	if err != nil {
+		t.Fatalf("NewMDCT failed: %v", err)
+	}
 
 	// Create a longer signal
 	signal := make([]float64, 4*size)
@@ -56,10 +68,16 @@ func TestMDCTOverlapAdd(t *testing.T) {
 		frame := signal[offset : offset+size]
 
 		// Forward MDCT with overlap
-		coeffs := mdct.ForwardOverlap(frame, overlap)
+		coeffs, err := mdct.ForwardOverlap(frame, overlap)
+		if err != nil {
+			t.Fatalf("ForwardOverlap failed: %v", err)
+		}
 
 		// Inverse MDCT with overlap-add
-		decoded := mdct.InverseOverlap(coeffs, overlap)
+		decoded, err := mdct.InverseOverlap(coeffs, overlap)
+		if err != nil {
+			t.Fatalf("InverseOverlap failed: %v", err)
+		}
 		reconstructed = append(reconstructed, decoded...)
 	}
 
@@ -81,14 +99,20 @@ func TestMDCTOverlapAdd(t *testing.T) {
 
 func TestMDCTImpulseResponse(t *testing.T) {
 	size := 32
-	mdct := NewMDCT(size)
+	mdct, err := NewMDCT(size)
+	if err != nil {
+		t.Fatalf("NewMDCT failed: %v", err)
+	}
 
 	// Impulse at center
 	input := make([]float64, 2*size)
 	input[size] = 1.0
 
 	// Forward transform
-	coeffs := mdct.Forward(input)
+	coeffs, err := mdct.Forward(input)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
 
 	// Check that we get some non-zero coefficients
 	hasNonZero := false
@@ -103,7 +127,10 @@ func TestMDCTImpulseResponse(t *testing.T) {
 	}
 
 	// Inverse transform
-	reconstructed := mdct.Inverse(coeffs)
+	reconstructed, err := mdct.Inverse(coeffs)
+	if err != nil {
+		t.Fatalf("Inverse failed: %v", err)
+	}
 
 	// Check reconstruction
 	for i, v := range reconstructed {
@@ -115,7 +142,10 @@ func TestMDCTImpulseResponse(t *testing.T) {
 
 func TestMDCTDCComponent(t *testing.T) {
 	size := 32
-	mdct := NewMDCT(size)
+	mdct, err := NewMDCT(size)
+	if err != nil {
+		t.Fatalf("NewMDCT failed: %v", err)
+	}
 
 	// Constant signal (DC)
 	input := make([]float64, 2*size)
@@ -124,7 +154,10 @@ func TestMDCTDCComponent(t *testing.T) {
 	}
 
 	// Forward transform
-	coeffs := mdct.Forward(input)
+	coeffs, err := mdct.Forward(input)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
 
 	// For a constant signal after windowing, we expect most energy
 	// in low-frequency coefficients
@@ -147,7 +180,10 @@ func TestMDCTDCComponent(t *testing.T) {
 
 func TestMDCTSineWave(t *testing.T) {
 	size := 64
-	mdct := NewMDCT(size)
+	mdct, err := NewMDCT(size)
+	if err != nil {
+		t.Fatalf("NewMDCT failed: %v", err)
+	}
 
 	// Pure sine wave
 	freq := 4.0 // 4 cycles over 2*size samples
@@ -157,10 +193,16 @@ func TestMDCTSineWave(t *testing.T) {
 	}
 
 	// Forward transform
-	coeffs := mdct.Forward(input)
+	coeffs, err := mdct.Forward(input)
+	if err != nil {
+		t.Fatalf("Forward failed: %v", err)
+	}
 
 	// Inverse transform
-	reconstructed := mdct.Inverse(coeffs)
+	reconstructed, err := mdct.Inverse(coeffs)
+	if err != nil {
+		t.Fatalf("Inverse failed: %v", err)
+	}
 
 	// Check that values are valid
 	for i, v := range reconstructed {
@@ -171,7 +213,7 @@ func TestMDCTSineWave(t *testing.T) {
 }
 
 func BenchmarkMDCTForward128(b *testing.B) {
-	mdct := NewMDCT(128)
+	mdct, _ := NewMDCT(128)
 	input := make([]float64, 256)
 	for i := range input {
 		input[i] = math.Sin(2.0 * math.Pi * float64(i) / float64(len(input)))
@@ -179,12 +221,12 @@ func BenchmarkMDCTForward128(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		mdct.Forward(input)
+		_, _ = mdct.Forward(input)
 	}
 }
 
 func BenchmarkMDCTInverse128(b *testing.B) {
-	mdct := NewMDCT(128)
+	mdct, _ := NewMDCT(128)
 	coeffs := make([]float64, 128)
 	for i := range coeffs {
 		coeffs[i] = float64(i)
@@ -192,12 +234,12 @@ func BenchmarkMDCTInverse128(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		mdct.Inverse(coeffs)
+		_, _ = mdct.Inverse(coeffs)
 	}
 }
 
 func BenchmarkMDCTForward512(b *testing.B) {
-	mdct := NewMDCT(512)
+	mdct, _ := NewMDCT(512)
 	input := make([]float64, 1024)
 	for i := range input {
 		input[i] = math.Sin(2.0 * math.Pi * float64(i) / float64(len(input)))
@@ -205,6 +247,6 @@ func BenchmarkMDCTForward512(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		mdct.Forward(input)
+		_, _ = mdct.Forward(input)
 	}
 }

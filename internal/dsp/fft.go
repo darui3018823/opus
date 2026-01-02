@@ -1,20 +1,21 @@
 package dsp
 
 import (
+	"errors"
 	"math"
 )
 
 // FFT performs a Cooley-Tukey FFT on the input data.
 // The input size must be a power of 2.
 // This implementation is based on the classic radix-2 decimation-in-time algorithm.
-func FFT(input []Complex) []Complex {
+func FFT(input []Complex) ([]Complex, error) {
 	n := len(input)
 	if n <= 1 {
-		return input
+		return input, nil
 	}
 
 	if !IsPowerOf2(n) {
-		panic("dsp: FFT size must be a power of 2")
+		return nil, errors.New("dsp: FFT size must be a power of 2")
 	}
 
 	// Create output array
@@ -53,14 +54,14 @@ func FFT(input []Complex) []Complex {
 		}
 	}
 
-	return output
+	return output, nil
 }
 
 // IFFT performs an inverse FFT.
-func IFFT(input []Complex) []Complex {
+func IFFT(input []Complex) ([]Complex, error) {
 	n := len(input)
 	if n <= 1 {
-		return input
+		return input, nil
 	}
 
 	// Conjugate the input
@@ -70,7 +71,10 @@ func IFFT(input []Complex) []Complex {
 	}
 
 	// Perform FFT on conjugated input
-	output := FFT(conjugated)
+	output, err := FFT(conjugated)
+	if err != nil {
+		return nil, err
+	}
 
 	// Conjugate and scale the output
 	scale := 1.0 / float64(n)
@@ -78,15 +82,15 @@ func IFFT(input []Complex) []Complex {
 		output[i] = output[i].Conj().MulScalar(scale)
 	}
 
-	return output
+	return output, nil
 }
 
 // RealFFT performs FFT on real-valued input, exploiting symmetry.
 // Returns only the first n/2+1 complex values (the rest are conjugate symmetric).
-func RealFFT(input []float64) []Complex {
+func RealFFT(input []float64) ([]Complex, error) {
 	n := len(input)
 	if !IsPowerOf2(n) {
-		panic("dsp: FFT size must be a power of 2")
+		return nil, errors.New("dsp: FFT size must be a power of 2")
 	}
 
 	// Convert to complex
@@ -96,16 +100,19 @@ func RealFFT(input []float64) []Complex {
 	}
 
 	// Perform full FFT
-	fullFFT := FFT(complexInput)
+	fullFFT, err := FFT(complexInput)
+	if err != nil {
+		return nil, err
+	}
 
 	// Return first half + DC
-	return fullFFT[:n/2+1]
+	return fullFFT[:n/2+1], nil
 }
 
 // RealIFFT performs inverse FFT to produce real-valued output.
-func RealIFFT(input []Complex, outputSize int) []float64 {
+func RealIFFT(input []Complex, outputSize int) ([]float64, error) {
 	if !IsPowerOf2(outputSize) {
-		panic("dsp: IFFT size must be a power of 2")
+		return nil, errors.New("dsp: IFFT size must be a power of 2")
 	}
 
 	// Reconstruct full spectrum using symmetry
@@ -118,7 +125,10 @@ func RealIFFT(input []Complex, outputSize int) []float64 {
 	}
 
 	// Perform IFFT
-	complexOutput := IFFT(fullSpectrum)
+	complexOutput, err := IFFT(fullSpectrum)
+	if err != nil {
+		return nil, err
+	}
 
 	// Extract real part
 	output := make([]float64, outputSize)
@@ -126,7 +136,7 @@ func RealIFFT(input []Complex, outputSize int) []float64 {
 		output[i] = c.Real
 	}
 
-	return output
+	return output, nil
 }
 
 // FFTConfig holds precomputed twiddle factors for efficient repeated FFT operations.
@@ -137,9 +147,9 @@ type FFTConfig struct {
 }
 
 // NewFFTConfig creates a new FFT configuration with precomputed twiddle factors.
-func NewFFTConfig(size int) *FFTConfig {
+func NewFFTConfig(size int) (*FFTConfig, error) {
 	if !IsPowerOf2(size) {
-		panic("dsp: FFT size must be a power of 2")
+		return nil, errors.New("dsp: FFT size must be a power of 2")
 	}
 
 	cfg := &FFTConfig{
@@ -157,14 +167,14 @@ func NewFFTConfig(size int) *FFTConfig {
 		}
 	}
 
-	return cfg
+	return cfg, nil
 }
 
 // Execute performs FFT using precomputed twiddle factors.
-func (cfg *FFTConfig) Execute(input []Complex) []Complex {
+func (cfg *FFTConfig) Execute(input []Complex) ([]Complex, error) {
 	n := cfg.size
 	if len(input) != n {
-		panic("dsp: input size does not match FFT config size")
+		return nil, errors.New("dsp: input size does not match FFT config size")
 	}
 
 	// Create output array
@@ -197,11 +207,11 @@ func (cfg *FFTConfig) Execute(input []Complex) []Complex {
 		}
 	}
 
-	return output
+	return output, nil
 }
 
 // ExecuteInverse performs inverse FFT using precomputed twiddle factors.
-func (cfg *FFTConfig) ExecuteInverse(input []Complex) []Complex {
+func (cfg *FFTConfig) ExecuteInverse(input []Complex) ([]Complex, error) {
 	n := cfg.size
 
 	// Conjugate the input
@@ -211,7 +221,10 @@ func (cfg *FFTConfig) ExecuteInverse(input []Complex) []Complex {
 	}
 
 	// Perform FFT
-	output := cfg.Execute(conjugated)
+	output, err := cfg.Execute(conjugated)
+	if err != nil {
+		return nil, err
+	}
 
 	// Conjugate and scale the output
 	scale := 1.0 / float64(n)
@@ -219,5 +232,5 @@ func (cfg *FFTConfig) ExecuteInverse(input []Complex) []Complex {
 		output[i] = output[i].Conj().MulScalar(scale)
 	}
 
-	return output
+	return output, nil
 }

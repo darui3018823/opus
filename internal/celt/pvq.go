@@ -21,7 +21,7 @@ func binomial(n, k int) uint32 {
 	if k > n-k {
 		k = n - k
 	}
-	
+
 	result := uint32(1)
 	for i := 0; i < k; i++ {
 		result = result * uint32(n-i) / uint32(i+1)
@@ -50,13 +50,13 @@ func PVQDecode(n, k int, index uint32) []float64 {
 	if n <= 0 || k < 0 {
 		return make([]float64, n)
 	}
-	
+
 	// Allocate output vector
 	y := make([]int, n)
-	
+
 	// Decode index to pulse positions and signs
-	decode_pvq_index(n, k, index, y)
-	
+	decodePVQIndex(n, k, index, y)
+
 	// Convert integer pulse positions to normalized floats
 	output := make([]float64, n)
 	norm := 0.0
@@ -64,7 +64,7 @@ func PVQDecode(n, k int, index uint32) []float64 {
 		output[i] = float64(y[i])
 		norm += output[i] * output[i]
 	}
-	
+
 	// Normalize to unit vector
 	if norm > 0 {
 		scale := 1.0 / math.Sqrt(norm)
@@ -72,7 +72,7 @@ func PVQDecode(n, k int, index uint32) []float64 {
 			output[i] *= scale
 		}
 	}
-	
+
 	return output
 }
 
@@ -85,7 +85,7 @@ func decodePVQIndex(n, k int, index uint32, y []int) {
 		}
 		return
 	}
-	
+
 	if n == 1 {
 		// Single dimension - all pulses go here
 		y[0] = k
@@ -95,7 +95,7 @@ func decodePVQIndex(n, k int, index uint32, y []int) {
 		}
 		return
 	}
-	
+
 	// Decode recursively
 	// Find how many pulses in first n-1 dimensions
 	var krest int
@@ -106,13 +106,13 @@ func decodePVQIndex(n, k int, index uint32, y []int) {
 		}
 		index -= size
 	}
-	
+
 	// Decode first n-1 dimensions with krest pulses
-	decode_pvq_index(n-1, krest, index, y)
-	
+	decodePVQIndex(n-1, krest, index, y)
+
 	// Last dimension gets remaining pulses
 	y[n-1] = k - krest
-	
+
 	// Sign handling (simplified)
 	if y[n-1] != 0 {
 		// In full implementation, sign would be encoded in index
@@ -123,10 +123,13 @@ func decodePVQIndex(n, k int, index uint32, y []int) {
 // PVQEncode encodes a vector into a PVQ index (for encoder)
 // This is a stub for future encoder implementation
 func PVQEncode(vector []float64, k int) uint32 {
-	// Simplified encoding - just return 0 for now
-	// Full implementation would:
-	// 1. Find pulse positions from vector
-	// 2. Encode positions and signs into index
+	// TODO: Implement full PVQ encoding
+	// Current implementation is a stub and returns 0.
+	// This results in invalid Opus streams.
+
+	// Keep helper function reachable for future implementation
+	_ = extractPulses(vector, k)
+
 	return 0
 }
 
@@ -134,7 +137,7 @@ func PVQEncode(vector []float64, k int) uint32 {
 func extractPulses(vector []float64, k int) []int {
 	n := len(vector)
 	pulses := make([]int, n)
-	
+
 	// Copy and scale vector
 	scaled := make([]float64, n)
 	maxVal := 0.0
@@ -145,7 +148,7 @@ func extractPulses(vector []float64, k int) []int {
 		}
 		scaled[i] = v
 	}
-	
+
 	// Scale to have magnitude approximately k
 	if maxVal > 0 {
 		scale := float64(k) / (maxVal * math.Sqrt(float64(n)))
@@ -153,7 +156,7 @@ func extractPulses(vector []float64, k int) []int {
 			scaled[i] *= scale
 		}
 	}
-	
+
 	// Round to nearest integer pulses
 	remaining := k
 	for i := 0; i < n && remaining > 0; i++ {
@@ -167,7 +170,7 @@ func extractPulses(vector []float64, k int) []int {
 				maxIdx = j
 			}
 		}
-		
+
 		// Assign pulse
 		if scaled[maxIdx] > 0 {
 			pulses[maxIdx]++
@@ -177,6 +180,6 @@ func extractPulses(vector []float64, k int) []int {
 		scaled[maxIdx] = 0
 		remaining--
 	}
-	
+
 	return pulses
 }

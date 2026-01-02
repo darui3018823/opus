@@ -121,16 +121,46 @@ func decodePVQIndex(n, k int, index uint32, y []int) {
 }
 
 // PVQEncode encodes a vector into a PVQ index (for encoder)
-// This is a stub for future encoder implementation
 func PVQEncode(vector []float64, k int) uint32 {
-	// TODO: Implement full PVQ encoding
-	// Current implementation is a stub and returns 0.
-	// This results in invalid Opus streams.
+	// Extract pulses from the vector
+	y := extractPulses(vector, k)
 
-	// Keep helper function reachable for future implementation
-	_ = extractPulses(vector, k)
+	// Encode pulses to index
+	return encodePVQIndex(len(vector), k, y)
+}
 
-	return 0
+// encodePVQIndex encodes pulse positions into a PVQ index
+func encodePVQIndex(n, k int, y []int) uint32 {
+	if k == 0 {
+		return 0
+	}
+
+	if n == 1 {
+		// Single dimension
+		return 0
+	}
+
+	// Calculate pulses in first n-1 dimensions
+	krest := 0
+	for i := 0; i < n-1; i++ {
+		val := y[i]
+		if val < 0 {
+			krest -= val
+		} else {
+			krest += val
+		}
+	}
+
+	// Add offsets for smaller krest values
+	index := uint32(0)
+	for i := 0; i < krest; i++ {
+		index += icwrs(n-1, i)
+	}
+
+	// Recursive encoding
+	index += encodePVQIndex(n-1, krest, y)
+
+	return index
 }
 
 // extractPulses extracts pulse positions from a normalized vector
@@ -140,33 +170,31 @@ func extractPulses(vector []float64, k int) []int {
 
 	// Copy and scale vector
 	scaled := make([]float64, n)
-	maxVal := 0.0
+	sumAbs := 0.0
 	for i, v := range vector {
-		abs := math.Abs(v)
-		if abs > maxVal {
-			maxVal = abs
-		}
 		scaled[i] = v
+		sumAbs += math.Abs(v)
 	}
 
-	// Scale to have magnitude approximately k
-	if maxVal > 0 {
-		scale := float64(k) / (maxVal * math.Sqrt(float64(n)))
-		for i := range scaled {
-			scaled[i] *= scale
-		}
+	if sumAbs < 1e-10 {
+		return pulses
 	}
 
-	// Round to nearest integer pulses
-	remaining := k
-	for i := 0; i < n && remaining > 0; i++ {
-		// Find position with largest magnitude
+	// Scale so L1 norm is k
+	gain := float64(k) / sumAbs
+	for i := range scaled {
+		scaled[i] *= gain
+	}
+
+	// Greedy pulse allocation
+	for i := 0; i < k; i++ {
+		// Find position with largest weighted error/magnitude
 		maxIdx := 0
-		maxMag := 0.0
-		for j := 0; j < n; j++ {
-			mag := math.Abs(scaled[j])
-			if mag > maxMag {
-				maxMag = mag
+		maxMag := -1.0
+		for j, v := range scaled {
+			abs := math.Abs(v)
+			if abs > maxMag {
+				maxMag = abs
 				maxIdx = j
 			}
 		}
@@ -174,11 +202,11 @@ func extractPulses(vector []float64, k int) []int {
 		// Assign pulse
 		if scaled[maxIdx] > 0 {
 			pulses[maxIdx]++
+			scaled[maxIdx] -= 1.0
 		} else {
 			pulses[maxIdx]--
+			scaled[maxIdx] += 1.0
 		}
-		scaled[maxIdx] = 0
-		remaining--
 	}
 
 	return pulses

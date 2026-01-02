@@ -71,8 +71,8 @@ const (
 const (
 	SetBitrateRequest           = 4002
 	GetBitrateRequest           = 4003
-	SetForceChannelsRequest     = 4020
-	GetForceChannelsRequest     = 4021
+SetForceChannelsRequest     = 4022
+	GetForceChannelsRequest     = 4023
 	SetMaxBandwidthRequest      = 4004
 	GetMaxBandwidthRequest      = 4005
 	SetBandwidthRequest         = 4008

@@ -205,6 +205,11 @@ func (d *Decoder) decodeLoss() []float64 {
 	return output
 }
 
+// DecodePLC performs packet loss concealment (public API)
+func (d *Decoder) DecodePLC() ([]float64, error) {
+	return d.decodeLoss(), nil
+}
+
 // Reset resets the decoder state
 func (d *Decoder) Reset() {
 	// Clear overlap buffers

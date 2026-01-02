@@ -25,26 +25,26 @@ const (
 
 // Resampler performs high-quality sample rate conversion using polyphase FIR filtering.
 type Resampler struct {
-	inRate     int       // Input sample rate
-	outRate    int       // Output sample rate
-	numChannels int      // Number of channels
-	quality    int       // Quality level (0-10)
-	
+	inRate      int // Input sample rate
+	outRate     int // Output sample rate
+	numChannels int // Number of channels
+	quality     int // Quality level (0-10)
+
 	// Filter parameters
-	filterLen  int       // Length of each polyphase filter
-	oversample int       // Oversampling factor
-	cutoff     float64   // Cutoff frequency
-	
+	filterLen  int     // Length of each polyphase filter
+	oversample int     // Oversampling factor
+	cutoff     float64 // Cutoff frequency
+
 	// Filter coefficients (polyphase structure)
-	coeffs     []float64
-	
+	coeffs []float64
+
 	// State buffers for each channel
-	mem        [][]float64 // [channel][filter_len]
-	
+	mem [][]float64 // [channel][filter_len]
+
 	// Fractional position tracking
-	lastSample []int     // Last input sample used per channel
+	lastSample  []int    // Last input sample used per channel
 	sampFracNum []uint32 // Fractional numerator
-	sampFracDen uint32    // Fractional denominator
+	sampFracDen uint32   // Fractional denominator
 }
 
 // NewResampler creates a new resampler for converting between sample rates.
@@ -61,33 +61,33 @@ func NewResampler(inRate, outRate, numChannels, quality int) (*Resampler, error)
 	if quality < QualityMin || quality > QualityMax {
 		return nil, errors.New("resampler: invalid quality level")
 	}
-	
+
 	r := &Resampler{
 		inRate:      inRate,
 		outRate:     outRate,
 		numChannels: numChannels,
 		quality:     quality,
 	}
-	
+
 	// Calculate GCD for rational resampling
 	gcd := gcd(inRate, outRate)
-	r.sampFracDen = uint32(inRate / gcd)
-	
+	r.sampFracDen = uint32(outRate / gcd)
+
 	// Determine filter parameters based on quality
 	r.setFilterParams()
-	
+
 	// Generate filter coefficients
 	r.generateCoeffs()
-	
+
 	// Initialize state buffers
 	r.mem = make([][]float64, numChannels)
 	for i := range r.mem {
 		r.mem[i] = make([]float64, r.filterLen)
 	}
-	
+
 	r.lastSample = make([]int, numChannels)
 	r.sampFracNum = make([]uint32, numChannels)
-	
+
 	return r, nil
 }
 
@@ -124,7 +124,7 @@ func (r *Resampler) generateCoeffs() {
 	// Total number of coefficients
 	totalLen := r.filterLen * r.oversample
 	r.coeffs = make([]float64, totalLen)
-	
+
 	// Determine cutoff as fraction of Nyquist of the lower rate
 	// Use the minimum of input/output rates
 	cutoff := r.cutoff
@@ -132,13 +132,13 @@ func (r *Resampler) generateCoeffs() {
 		// Downsampling: cutoff relative to output Nyquist
 		cutoff = r.cutoff * float64(r.outRate) / float64(r.inRate)
 	}
-	
+
 	// Generate windowed sinc filter
 	center := float64(totalLen-1) / 2.0
 	for i := 0; i < totalLen; i++ {
 		// Distance from center (in units of input samples)
 		x := (float64(i) - center) / float64(r.oversample)
-		
+
 		// Sinc function: sin(pi*cutoff*x) / (pi*x)
 		var sinc float64
 		if math.Abs(x) < 1e-10 {
@@ -147,20 +147,20 @@ func (r *Resampler) generateCoeffs() {
 			pix := math.Pi * x * cutoff
 			sinc = math.Sin(pix) / (math.Pi * x)
 		}
-		
+
 		// Kaiser window
 		kaiser := kaiserWindow(float64(i)/float64(totalLen-1), computeBeta(r.quality))
-		
+
 		r.coeffs[i] = sinc * kaiser
 	}
-	
+
 	// Normalize to unit gain at DC
 	sum := 0.0
 	for i := 0; i < r.filterLen; i++ {
 		// Sum one complete polyphase filter (phase 0)
 		sum += r.coeffs[i*r.oversample]
 	}
-	
+
 	if math.Abs(sum) > 1e-10 {
 		scale := 1.0 / sum
 		for i := range r.coeffs {
@@ -187,7 +187,7 @@ func besselI0(x float64) float64 {
 	sum := 1.0
 	term := 1.0
 	x2 := x * x / 4.0
-	
+
 	for k := 1; k < 50; k++ {
 		term *= x2 / float64(k*k)
 		sum += term
@@ -195,7 +195,7 @@ func besselI0(x float64) float64 {
 			break
 		}
 	}
-	
+
 	return sum
 }
 
@@ -211,13 +211,13 @@ func (r *Resampler) Process(input []float64) []float64 {
 	if len(input) == 0 {
 		return nil
 	}
-	
+
 	inputLen := len(input) / r.numChannels
-	
+
 	// Estimate output length
 	outputLen := int(uint64(inputLen) * uint64(r.outRate) / uint64(r.inRate))
 	output := make([]float64, 0, outputLen*r.numChannels+r.numChannels*2)
-	
+
 	// Process each channel
 	for ch := 0; ch < r.numChannels; ch++ {
 		// Extract channel samples
@@ -225,10 +225,10 @@ func (r *Resampler) Process(input []float64) []float64 {
 		for i := 0; i < inputLen; i++ {
 			chInput[i] = input[i*r.numChannels+ch]
 		}
-		
+
 		// Resample this channel
 		chOutput := r.processChannel(ch, chInput)
-		
+
 		// Interleave output
 		for i := 0; i < len(chOutput); i++ {
 			if i*r.numChannels+ch >= len(output) {
@@ -240,7 +240,7 @@ func (r *Resampler) Process(input []float64) []float64 {
 			output[i*r.numChannels+ch] = chOutput[i]
 		}
 	}
-	
+
 	return output
 }
 
@@ -250,42 +250,37 @@ func (r *Resampler) processChannel(ch int, input []float64) []float64 {
 	if inputLen == 0 {
 		return nil
 	}
-	
+
 	// Calculate expected output length
 	outputLen := (inputLen * r.outRate) / r.inRate
 	output := make([]float64, 0, outputLen+10)
-	
-	// Time step for each output sample (in units of input sample period)
-	timeStep := float64(r.inRate) / float64(r.outRate)
-	
-	// Current time position in input
-	time := 0.0
-	
-	for {
-		// Integer and fractional parts
-		intPos := int(time)
-		frac := time - float64(intPos)
-		
-		// Check bounds
-		if intPos >= inputLen {
-			break
-		}
-		
+
+	// Steps for rational resampling tracking
+	// step = inRate / outRate = stepNum / stepDen
+	stepNum := int(uint64(r.inRate) * uint64(r.sampFracDen) / uint64(r.outRate))
+	stepDen := int(r.sampFracDen)
+
+	// Restore state
+	intPos := r.lastSample[ch]
+	frac := int(r.sampFracNum[ch])
+
+	for intPos < inputLen {
 		// Select polyphase filter based on fractional position
-		phaseIdx := int(frac * float64(r.oversample))
+		// phaseIdx = floor(frac * oversample / stepDen)
+		phaseIdx := int((uint64(frac) * uint64(r.oversample)) / uint64(stepDen))
 		if phaseIdx >= r.oversample {
 			phaseIdx = r.oversample - 1
 		}
-		
+
 		// Compute output using FIR filter
 		outSample := 0.0
 		halfLen := r.filterLen / 2
-		
+
 		for j := 0; j < r.filterLen; j++ {
 			// Tap position (centered around intPos)
 			tapPos := intPos - halfLen + j
 			var tapVal float64
-			
+
 			if tapPos >= 0 && tapPos < inputLen {
 				tapVal = input[tapPos]
 			} else if tapPos < 0 {
@@ -295,20 +290,26 @@ func (r *Resampler) processChannel(ch int, input []float64) []float64 {
 					tapVal = r.mem[ch][memIdx]
 				}
 			}
-			
+
 			// Get coefficient
 			coeffIdx := j*r.oversample + phaseIdx
 			if coeffIdx < len(r.coeffs) {
 				outSample += tapVal * r.coeffs[coeffIdx]
 			}
 		}
-		
+
 		output = append(output, outSample)
-		
+
 		// Advance time
-		time += timeStep
+		frac += stepNum
+		intPos += frac / stepDen
+		frac %= stepDen
 	}
-	
+
+	// Save state
+	r.lastSample[ch] = intPos - inputLen
+	r.sampFracNum[ch] = uint32(frac)
+
 	// Update memory with last samples
 	memLen := len(r.mem[ch])
 	if inputLen >= memLen {
@@ -318,7 +319,7 @@ func (r *Resampler) processChannel(ch int, input []float64) []float64 {
 		copy(r.mem[ch], r.mem[ch][inputLen:])
 		copy(r.mem[ch][memLen-inputLen:], input)
 	}
-	
+
 	return output
 }
 
@@ -349,18 +350,4 @@ func gcd(a, b int) int {
 		a, b = b, a%b
 	}
 	return a
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

@@ -73,7 +73,7 @@ import "github.com/darui3018823/opus/internal/celt"
 // Create decoder
 decoder, err := celt.NewDecoder(celt.FrameSize20ms, 48000, 2) // 20ms, 48kHz, stereo
 if err != nil {
-    panic(err)
+    log.Fatal(err)
 }
 
 // Decode frame

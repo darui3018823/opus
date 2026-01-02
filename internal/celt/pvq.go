@@ -77,7 +77,7 @@ func PVQDecode(n, k int, index uint32) []float64 {
 }
 
 // decode_pvq_index decodes a PVQ index into pulse positions
-func decode_pvq_index(n, k int, index uint32, y []int) {
+func decodePVQIndex(n, k int, index uint32, y []int) {
 	if k == 0 {
 		// No pulses - zero vector
 		for i := 0; i < n; i++ {

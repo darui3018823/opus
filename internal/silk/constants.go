@@ -20,10 +20,12 @@ const (
 
 // LPC (Linear Predictive Coding) orders
 const (
-	LPCOrderNB = 10 // Narrowband (8 kHz)
-	LPCOrderMB = 12 // Mediumband (12 kHz)
-	LPCOrderWB = 16 // Wideband (16 kHz)
+	LPCOrderNB  = 10 // Narrowband (8 kHz)
+	LPCOrderMB  = 12 // Mediumband (12 kHz)
+	LPCOrderWB  = 16 // Wideband (16 kHz)
 	LPCOrderSWB = 18 // Super-wideband (24 kHz)
+	MinLPCOrder = 10 // Minimum LPC order
+	MaxLPCOrder = 18 // Maximum LPC order
 )
 
 // Pitch analysis parameters
@@ -35,17 +37,21 @@ const (
 
 // NLSF (Normalized Line Spectral Frequencies) parameters
 const (
-	NLSFOrderNB  = 10  // Narrowband NLSF order
-	NLSFOrderMB  = 12  // Mediumband NLSF order
-	NLSFOrderWB  = 16  // Wideband NLSF order
-	NLSFOrderSWB = 18  // Super-wideband NLSF order
-	NLSFStages   = 2   // Number of NLSF quantization stages
+	NLSFOrderNB     = 10    // Narrowband NLSF order
+	NLSFOrderMB     = 12    // Mediumband NLSF order
+	NLSFOrderWB     = 16    // Wideband NLSF order
+	NLSFOrderSWB    = 18    // Super-wideband NLSF order
+	NLSFStages      = 2     // Number of NLSF quantization stages
+	NLSFMinSpacing  = 0.01  // Minimum spacing between NLSF coefficients (radians)
 )
 
 // Gain quantization
 const (
-	GainLevels     = 32  // Number of gain quantization levels
-	MaxDeltaGainQ  = 64  // Maximum delta gain quantization
+	GainLevels     = 32    // Number of gain quantization levels
+	MaxDeltaGainQ  = 64    // Maximum delta gain quantization
+	GainMinDB      = -60.0 // Minimum gain in dB
+	GainMaxDB      = 40.0  // Maximum gain in dB
+	GainQuantStep  = 0.5   // Gain quantization step in dB
 )
 
 // Bandwidth types
@@ -60,7 +66,13 @@ const (
 
 // Voice activity detection
 const (
-	VADThreshold = 0.5 // Voice activity threshold
+	VADThreshold                 = 0.5   // Voice activity threshold
+	VADHistorySize               = 5     // Number of frames to keep in history
+	VADHangoverFrames            = 3     // Number of frames to keep active after speech
+	VADEnergyThresholdDefault    = 0.01  // Default energy threshold
+	VADEnergyThresholdMin        = 0.001 // Minimum energy threshold
+	VADSpectralFlatnessThreshold = 0.6   // Spectral flatness threshold
+	VADZeroCrossingThreshold     = 0.5   // Zero crossing rate threshold
 )
 
 // Subframe parameters

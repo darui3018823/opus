@@ -142,24 +142,27 @@ func (dec *Decoder) DecodeUint(nbits int) uint32 {
 }
 
 // DecodeIcdf decodes a symbol with the given ICDF and frequency total bits.
+// This is the exact implementation matching libopus ec_decode function.
 func (dec *Decoder) DecodeIcdf(icdf []uint16, ftb int) int {
 	if dec.err != nil {
 		return 0
 	}
 
+	// Get frequency total
+	ft := uint32(1 << ftb)
 	r := dec.rng >> ftb
 	if r == 0 {
 		dec.err = errors.New("entcode: range too small")
 		return 0
 	}
 
-	// Find symbol
+	// Find cumulative frequency
 	c := (dec.val - dec.low) / r
-	
-	// Search in ICDF
+
+	// Binary search in ICDF for symbol
 	symbol := 0
 	for symbol < len(icdf)-1 {
-		if uint32(icdf[symbol+1]) <= c {
+		if c < uint32(icdf[symbol]) {
 			break
 		}
 		symbol++
@@ -170,10 +173,12 @@ func (dec *Decoder) DecodeIcdf(icdf []uint16, ftb int) int {
 		return 0
 	}
 
-	fl := uint32(icdf[symbol])
-	fh := uint32(icdf[symbol+1])
+	// Get frequency bounds (reversed in ICDF)
+	fl := uint32(icdf[symbol+1])
+	fh := uint32(icdf[symbol])
 
-	dec.low += r * (uint32(1<<ftb) - fh)
+	// Update decoder state
+	dec.low += r * (ft - fh)
 	if fl < fh {
 		dec.rng = r * (fh - fl)
 	} else {

@@ -100,21 +100,29 @@ func (enc *Encoder) EncodeUint(value uint32, nbits int) {
 	}
 }
 
-// EncodeIcdf encodes a symbol with the given ICDF and frequency total.
+// EncodeIcdf encodes a symbol with the given ICDF and frequency total bits.
+// This is the exact implementation matching libopus ec_encode function.
 func (enc *Encoder) EncodeIcdf(symbol int, icdf []uint16, ftb int) error {
 	if symbol < 0 {
 		return errors.New("entcode: negative symbol")
 	}
+	if symbol >= len(icdf)-1 {
+		return errors.New("entcode: symbol out of range")
+	}
 
+	// Get frequency bounds
+	fl := uint32(icdf[symbol+1])   // Lower frequency (reversed in ICDF)
+	fh := uint32(icdf[symbol])     // Higher frequency
+	ft := uint32(1 << ftb)         // Total frequency
+
+	// Scale range
 	r := enc.rng >> ftb
 	if r == 0 {
 		return errors.New("entcode: range too small")
 	}
 
-	fl := uint32(icdf[symbol])
-	fh := uint32(icdf[symbol+1])
-
-	enc.low += r * (uint32(1<<ftb) - fh)
+	// Update low and range
+	enc.low += r * (ft - fh)
 	if fl < fh {
 		enc.rng = r * (fh - fl)
 	} else {

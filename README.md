@@ -39,7 +39,7 @@ func main() {
     // Create encoder for 48kHz stereo audio
     enc, err := opus.NewEncoder(48000, 2, opus.ApplicationAudio)
     if err != nil {
-        panic(err)
+        log.Fatalf("Failed to create encoder: %v", err)
     }
     
     // Configure encoder

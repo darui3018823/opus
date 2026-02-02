@@ -165,13 +165,8 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 		pulses := bitAlloc.GetPulseCount(i)
 
 		// Encode using PVQ
-		pvqIndex := PVQEncode(bandCoeffs, pulses)
-
-		// Write PVQ index (simplified - should use range coder)
-		// TODO: This is a simplified demo. Real Opus uses a range coder here.
-		if pulses > 0 {
-			enc.EncodeUint(uint32(pvqIndex), pulses+1)
-		}
+		// This now uses recursive split encoding directly to the entropy coder
+		PVQEncode(enc, bandCoeffs, pulses)
 
 		// Encode fine energy
 		fineEnergy := bitAlloc.GetFineEnergy(i)

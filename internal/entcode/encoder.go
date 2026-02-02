@@ -4,13 +4,13 @@ import "errors"
 
 // Encoder is a range encoder for entropy coding.
 type Encoder struct {
-	buffer   []byte  // Output buffer
-	pos      int     // Current position in buffer
-	low      uint32  // Low end of current range
-	rng      uint32  // Size of current range
-	rem      int     // Carry propagation remainder
-	ext      uint32  // Number of outstanding bytes
-	nbits    int     // Number of bits buffered
+	buffer    []byte // Output buffer
+	pos       int    // Current position in buffer
+	low       uint32 // Low end of current range
+	rng       uint32 // Size of current range
+	rem       int    // Carry propagation remainder
+	ext       uint32 // Number of outstanding bytes
+	nbits     int    // Number of bits buffered
 	endWindow uint32 // Final bits
 }
 
@@ -111,9 +111,9 @@ func (enc *Encoder) EncodeIcdf(symbol int, icdf []uint16, ftb int) error {
 	}
 
 	// Get frequency bounds
-	fl := uint32(icdf[symbol+1])   // Lower frequency (reversed in ICDF)
-	fh := uint32(icdf[symbol])     // Higher frequency
-	ft := uint32(1 << ftb)         // Total frequency
+	fl := uint32(icdf[symbol+1]) // Lower frequency (reversed in ICDF)
+	fh := uint32(icdf[symbol])   // Higher frequency
+	ft := uint32(1 << ftb)       // Total frequency
 
 	// Scale range
 	r := enc.rng >> ftb
@@ -133,11 +133,23 @@ func (enc *Encoder) EncodeIcdf(symbol int, icdf []uint16, ftb int) error {
 	return nil
 }
 
+// EncodeExact encodes a symbol given its cumulative frequency range and total frequency.
+// fl: cumulative frequency of symbols < symbol
+// fh: cumulative frequency of symbols <= symbol
+// ft: total frequency
+// This allows encoding with non-power-of-2 totals, as used in PVQ splitting.
+func (enc *Encoder) EncodeExact(fl, fh, ft uint32) {
+	r := enc.rng / ft
+	enc.low += r * fl
+	enc.rng = r * (fh - fl)
+	enc.normalize()
+}
+
 // Flush finalizes the encoding and outputs remaining bits.
 func (enc *Encoder) Flush() {
 	// Normalize one final time
 	enc.normalize()
-	
+
 	// Output remaining bytes
 	for i := 0; i < 4; i++ {
 		enc.buffer = append(enc.buffer, byte(enc.low>>24))

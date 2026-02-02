@@ -11,11 +11,11 @@ A complete, production-ready implementation of the Opus audio codec in Pure Go. 
 ## Features
 
 - ✅ **Pure Go**: No CGO dependencies, works on any platform Go supports
-- ✅ **Complete Implementation**: Full CELT and SILK codecs with hybrid mode
-- ✅ **RFC 6716 Compliant**: 100% specification compliance, all 30 official test vectors passing
+- ✅ **Complete Implementation (in progress)**: CELT and SILK with hybrid mode; Opus 1.3.1 parity tracked in IMPLEMENTATION_STATUS.md
+- ✅ **RFC 6716 / Opus 1.3.1**: Compliance work tracked with official test-vector harness (see IMPLEMENTATION_STATUS.md)
 - ✅ **High Performance**: 85% of libopus speed with 60% fewer allocations
 - ✅ **Production Ready**: 100M+ fuzz inputs tested, zero crashes
-- ✅ **Well Tested**: 99% test coverage (142/144 tests passing)
+- ✅ **Well Tested**: Growing coverage with official vectors and fuzzing harnesses
 - ✅ **Comprehensive API**: Compatible with layeh.com/gopus interface
 
 ## Quick Start
@@ -189,7 +189,7 @@ github.com/darui3018823/opus/
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**: Detailed design decisions and libopus analysis
 - **[ROADMAP.md](docs/ROADMAP.md)**: Development phases and milestones
 - **[DEVELOPER.md](docs/DEVELOPER.md)**: Code style, porting guidance, profiling tips
-- **[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)**: Progress tracking and benchmarks
+- **[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)**: Spec gap list, priorities, compliance/test plan
 
 ## API Reference
 

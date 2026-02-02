@@ -4,7 +4,7 @@
 
 This document tracks the implementation progress of the Pure Go Opus library and provides guidance for each development phase.
 
-## Current Status: Phase 2 Foundation ✅
+## Current Status: Phase 2 Foundation ✅ (updated for Opus 1.3.1 parity)
 
 ### Completed Components
 
@@ -59,22 +59,24 @@ This document tracks the implementation progress of the Pure Go Opus library and
 - Test coverage: bit coding, roundtrip
 - ⚠️ Note: Symbol and uint encoding need refinement for full libopus compatibility
 
-### Remaining Phase 2 Tasks
+### Remaining Phase 2 Tasks (Opus 1.3.1 focus)
 
-**Polyphase Resampler** 🔄 (Next Priority)
-- Design polyphase FIR filter bank
-- Implement upsampling path
-- Implement downsampling path
-- Support all Opus sample rates (8, 12, 16, 24, 48 kHz)
-- Validate frequency response and aliasing
-- Benchmark performance
+**Range Coder Parity** 🔄 (Highest Priority)
+- Make symbol/uint ICDF paths bit-exact with libopus 1.3.1.
+- Add regression vectors comparing encoded bitstreams to reference.
 
-**Range Coder Refinement** 🔄
-- Fix symbol encoding to match libopus exactly
-- Fix uint encoding for arbitrary bit widths
-- Implement ICDF-based encoding fully
-- Add more comprehensive tests
-- Validate against libopus range coder
+**Polyphase Resampler** 🔄
+- Complete up/down paths for all Opus sample rates (8/12/16/24/48 kHz).
+- Validate aliasing/response; add table-driven tests.
+
+**Test Vectors & Compliance Harness** 🔄
+- Integrate official 1.3.1 test vectors (CELT/SILK/hybrid) across frame sizes (2.5–60 ms, then 120 ms).
+- Automate matrix for sample rate × channels × application × frame size; include TOC edge cases.
+- Add corrupted-frame and padding tests; fuzz decoder/parser.
+
+**Compatibility Table & API Shims** 🔄
+- Document/publicize API/behavior deltas vs libopus/opusfile/layeh.com/gopus.
+- Add automated assertions for a selected subset.
 
 ## Phase 3: CELT Implementation (Next)
 

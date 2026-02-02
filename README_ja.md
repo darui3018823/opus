@@ -39,7 +39,7 @@ func main() {
     // 48kHzステレオ用のエンコーダーを作成
     enc, err := opus.NewEncoder(48000, 2, opus.ApplicationAudio)
     if err != nil {
-        panic(err)
+        log.Fatalf("エンコーダーの作成に失敗しました: %v", err)
     }
     
     // エンコーダーの設定

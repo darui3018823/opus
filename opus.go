@@ -1,35 +1,9 @@
-// Package opus provides a Pure Go implementation of the Opus audio codec.
-//
-// This implementation provides CELT encoding and decoding without CGO dependencies,
-// targeting compatibility with libopus while maintaining Go's safety and portability.
-//
-// Basic usage:
-//
-//	// Create encoder
-//	enc, err := opus.NewEncoder(48000, 2, opus.ApplicationAudio)
-//	if err != nil {
-//		log.Fatal(err)
-//	}
-//	enc.SetBitrate(64000)
-//
-//	// Encode PCM samples
-//	pcm := make([]int16, 960*2) // 20ms stereo at 48kHz
-//	compressed, err := enc.Encode(pcm, 960)
-//
-//	// Create decoder
-//	dec, err := opus.NewDecoder(48000, 2)
-//	if err != nil {
-//		log.Fatal(err)
-//	}
-//
-//	// Decode
-//	decoded := make([]int16, 960*2)
-//	n, err := dec.Decode(compressed, decoded)
 package opus
 
 import (
 	"fmt"
 
+	framing "github.com/darui3018823/opus/internal"
 	"github.com/darui3018823/opus/internal/celt"
 )
 
@@ -54,14 +28,13 @@ type Encoder struct {
 
 // NewEncoder creates a new Opus encoder
 //
-// sampleRate must be one of 8000, 12000, 16000, 24000, or 48000 Hz
+// sampleRate must be 48000 Hz. (Other rates are technically valid in Opus but require SILK/Resampling support which is not yet fully implemented for strict compliance).
 // channels must be 1 (mono) or 2 (stereo)
 // application specifies the encoding mode
 func NewEncoder(sampleRate, channels int, application Application) (*Encoder, error) {
 	// Validate parameters
-	validRates := map[int]bool{8000: true, 12000: true, 16000: true, 24000: true, 48000: true}
-	if !validRates[sampleRate] {
-		return nil, fmt.Errorf("invalid sample rate: %d (must be 8000, 12000, 16000, 24000, or 48000)", sampleRate)
+	if sampleRate != 48000 {
+		return nil, fmt.Errorf("sample rate %d is not yet supported in this strict-compliance build (only 48000 Hz is supported)", sampleRate)
 	}
 
 	if channels != 1 && channels != 2 {
@@ -72,20 +45,13 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 	frameSize := (sampleRate * 20) / 1000
 
 	// Create CELT encoder
+	// Note: We force 20ms frame size for now as per correct TOC generation support.
 	celtFrameSize := celt.FrameSize20ms
 	switch frameSize {
-	case 120:
-		celtFrameSize = celt.FrameSize2_5ms
-	case 240:
-		celtFrameSize = celt.FrameSize5ms
-	case 480:
-		celtFrameSize = celt.FrameSize10ms
 	case 960:
 		celtFrameSize = celt.FrameSize20ms
-	case 1920:
-		celtFrameSize = celt.FrameSize40ms
-	case 2880:
-		celtFrameSize = celt.FrameSize60ms
+	default:
+		return nil, fmt.Errorf("frame size other than 20ms (960 samples) is not yet supported")
 	}
 
 	celtEnc, err := celt.NewEncoder(celtFrameSize, sampleRate, channels, celt.DefaultEncoderConfig())
@@ -122,6 +88,12 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("insufficient PCM data: got %d, need %d", len(pcm), expectedSize)
 	}
 
+	// Generate TOC byte first to ensure we can strictly comply
+	toc, err := framing.GenerateTOC(e.channels, frameSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate TOC: %w", err)
+	}
+
 	// Convert int16 to float64
 	floatPCM := make([]float64, expectedSize)
 	for i := 0; i < expectedSize; i++ {
@@ -134,7 +106,10 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("CELT encoding failed: %w", err)
 	}
 
-	return compressed, nil
+	// Prepend TOC byte
+	packet := append([]byte{toc}, compressed...)
+
+	return packet, nil
 }
 
 // EncodeFloat encodes floating-point PCM samples
@@ -147,13 +122,22 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("insufficient PCM data: got %d, need %d", len(pcm), expectedSize)
 	}
 
+	// Generate TOC byte
+	toc, err := framing.GenerateTOC(e.channels, frameSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate TOC: %w", err)
+	}
+
 	// Encode using CELT
 	compressed, err := e.celtEncoder.Encode(pcm[:expectedSize])
 	if err != nil {
 		return nil, fmt.Errorf("CELT encoding failed: %w", err)
 	}
 
-	return compressed, nil
+	// Prepend TOC byte
+	packet := append([]byte{toc}, compressed...)
+
+	return packet, nil
 }
 
 // SetBitrate sets the target bitrate in bits per second
@@ -192,11 +176,6 @@ func (e *Encoder) SetApplication(application Application) {
 // Reset resets the encoder state
 func (e *Encoder) Reset() error {
 	// Reset CELT encoder state
-	// Note: We're assuming the internal encoder handles resetting efficiently
-	// If frame size changed significantly, we might need to reconfigure,
-	// but Reset() usually implies keeping configuration.
-
-	// Reset internal CELT encoder
 	e.celtEncoder.Reset()
 
 	// Re-apply settings just in case
@@ -218,13 +197,12 @@ type Decoder struct {
 
 // NewDecoder creates a new Opus decoder
 //
-// sampleRate must be one of 8000, 12000, 16000, 24000, or 48000 Hz
+// sampleRate must be 48000 Hz.
 // channels must be 1 (mono) or 2 (stereo)
 func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 	// Validate parameters
-	validRates := map[int]bool{8000: true, 12000: true, 16000: true, 24000: true, 48000: true}
-	if !validRates[sampleRate] {
-		return nil, fmt.Errorf("invalid sample rate: %d (must be 8000, 12000, 16000, 24000, or 48000)", sampleRate)
+	if sampleRate != 48000 {
+		return nil, fmt.Errorf("sample rate %d is not yet supported in this strict-compliance build (only 48000 Hz is supported)", sampleRate)
 	}
 
 	if channels != 1 && channels != 2 {
@@ -235,21 +213,8 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 	frameSize := (sampleRate * 20) / 1000
 
 	// Create CELT decoder
+	// Assume 20ms for now
 	celtFrameSize := celt.FrameSize20ms
-	switch frameSize {
-	case 120:
-		celtFrameSize = celt.FrameSize2_5ms
-	case 240:
-		celtFrameSize = celt.FrameSize5ms
-	case 480:
-		celtFrameSize = celt.FrameSize10ms
-	case 960:
-		celtFrameSize = celt.FrameSize20ms
-	case 1920:
-		celtFrameSize = celt.FrameSize40ms
-	case 2880:
-		celtFrameSize = celt.FrameSize60ms
-	}
 
 	celtDec, err := celt.NewDecoder(celtFrameSize, sampleRate, channels)
 	if err != nil {
@@ -272,8 +237,41 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 // pcm is the output buffer for 16-bit PCM samples (will be resized if needed)
 // Returns the number of samples per channel decoded
 func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
+	if len(data) < 1 {
+		// Empty packet might be treated as packet loss (PLC) in higher layers,
+		// but here we expect at least a TOC byte unless it's strictly empty.
+		if len(data) == 0 {
+			return 0, fmt.Errorf("empty packet")
+		}
+	}
+
+	// Parse TOC
+	toc := data[0]
+	config, _, _ := framing.ParseTOC(toc)
+
+	// Check compatibility
+	// Configs 20-31 are CELT-only.
+	// We only strictly support CELT currently.
+	// Configs 0-11: SILK-only
+	// Configs 12-15: SILK-only (SWB)
+	// Configs 16-19: Hybrid
+	if config < 20 {
+		return 0, fmt.Errorf("unsupported Opus mode (config %d): SILK/Hybrid layers are not yet implemented", config)
+	}
+
+	// Payload is everything after TOC
+	payload := data[1:]
+
 	// Decode using CELT
-	floatPCM, err := d.celtDecoder.Decode(data)
+	// Note: Standard Opus might have multiple frames in one packet (Code 1, 2, 3).
+	// ParseTOC returns countCode. If != 0, we have multi-frame packet.
+	_, _, countCode := framing.ParseTOC(toc)
+	if countCode != 0 {
+		// For Phase 1, we don't handle multi-frame packets yet (requires length delimiting parsing)
+		return 0, fmt.Errorf("multi-frame packets (code %d) are not yet supported", countCode)
+	}
+
+	floatPCM, err := d.celtDecoder.Decode(payload)
 	if err != nil {
 		return 0, fmt.Errorf("CELT decoding failed: %w", err)
 	}
@@ -303,8 +301,27 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 // data is the compressed Opus packet
 // Returns float64 samples in range [-1.0, 1.0]
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
+	if len(data) < 1 {
+		if len(data) == 0 {
+			return nil, fmt.Errorf("empty packet")
+		}
+	}
+
+	toc := data[0]
+	config, _, countCode := framing.ParseTOC(toc)
+
+	if config < 20 {
+		return nil, fmt.Errorf("unsupported Opus mode (config %d): SILK/Hybrid layers are not yet implemented", config)
+	}
+
+	if countCode != 0 {
+		return nil, fmt.Errorf("multi-frame packets (code %d) are not yet supported", countCode)
+	}
+
+	payload := data[1:]
+
 	// Decode using CELT
-	pcm, err := d.celtDecoder.Decode(data)
+	pcm, err := d.celtDecoder.Decode(payload)
 	if err != nil {
 		return nil, fmt.Errorf("CELT decoding failed: %w", err)
 	}
@@ -315,6 +332,12 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 // DecodeFEC decodes forward error correction data
 // This is used for packet loss concealment
 func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
+	// PLC/FEC currently delegates to CELT PLC.
+	// If data is nil/empty, it's pure PLC.
+	// If data is provided, it's FEC.
+
+	// For Phase 1, we delegate to CELT PLC, but warn about missing SILK/FEC logic if applicable.
+
 	// FEC decoding (currently uses PLC)
 	floatPCM, err := d.celtDecoder.DecodePLC()
 	if err != nil {

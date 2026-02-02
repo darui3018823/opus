@@ -14,7 +14,7 @@ func TestNewEncoder(t *testing.T) {
 	}{
 		{"Valid 48kHz stereo", 48000, 2, ApplicationAudio, false},
 		{"Valid 48kHz mono", 48000, 1, ApplicationAudio, false},
-		{"Valid 16kHz stereo", 16000, 2, ApplicationVOIP, false},
+		{"Valid 16kHz stereo", 16000, 2, ApplicationVOIP, true},
 		{"Invalid sample rate", 44100, 2, ApplicationAudio, true},
 		{"Invalid channels", 48000, 5, ApplicationAudio, true},
 	}
@@ -42,7 +42,7 @@ func TestNewDecoder(t *testing.T) {
 	}{
 		{"Valid 48kHz stereo", 48000, 2, false},
 		{"Valid 48kHz mono", 48000, 1, false},
-		{"Valid 16kHz stereo", 16000, 2, false},
+		{"Valid 16kHz stereo", 16000, 2, true},
 		{"Invalid sample rate", 44100, 2, true},
 		{"Invalid channels", 48000, 3, true},
 	}

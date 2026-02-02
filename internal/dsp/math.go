@@ -145,7 +145,7 @@ func BitReverse(n, bits int) int {
 // Dot computes the dot product of two float64 slices
 func Dot(a, b []float64) float64 {
 	if len(a) != len(b) {
-		panic("dsp: dot product requires equal length slices")
+return 0, errors.New("dsp: dot product requires equal length slices")
 	}
 	sum := 0.0
 	for i := range a {

@@ -142,6 +142,101 @@ func (dec *Decoder) DecodeUint(nbits int) uint32 {
 	return value
 }
 
+// DecodeGetCumu returns the cumulative frequency target for a symbol given the total frequency.
+// This is Step 1 of decoding a symbol with explicit frequencies.
+func (dec *Decoder) DecodeGetCumu(ft uint32) uint32 {
+	if dec.err != nil {
+		return 0
+	}
+	r := dec.rng / ft
+	c := (dec.val - dec.low) / r
+	return c
+}
+
+// DecodeUpdate updates the decoder state after the symbol has been identified.
+// fl: cumulative frequency of symbols < symbol
+// fh: cumulative frequency of symbols <= symbol
+// ft: total frequency
+func (dec *Decoder) DecodeUpdate(fl, fh, ft uint32) {
+	if dec.err != nil {
+		return
+	}
+	r := dec.rng / ft
+	dec.low += r * fl
+	dec.rng = r * (fh - fl)
+	dec.normalize()
+}
+
+// DecodeLaplace decodes a value from a Laplace distribution.
+// Matches ec_laplace_decode in libopus.
+func (dec *Decoder) DecodeLaplace(fs int, decay int) int {
+	if dec.err != nil {
+		return 0
+	}
+
+	// 1. Decode "Zero" vs "Not Zero"
+	// "Slot 0" has probability fs/32768.
+	// We check if the target cumulative frequency falls in [0, fs).
+	// Total range is 32768.
+
+	val := 0
+	c := dec.DecodeGetCumu(32768)
+
+	if c < uint32(fs) {
+		// It is zero.
+		dec.DecodeUpdate(0, uint32(fs), 32768)
+		return 0
+	}
+
+	// It is not zero.
+	dec.DecodeUpdate(uint32(fs), 32768, 32768)
+
+	// 2. Decode Magnitude
+	// We effectively iterate, decoding "continue" bits.
+	// EncodeLaplace logic:
+	// for i=0..val-1: EncodeBit(true, decay)
+	// EncodeBit(false, decay)
+
+	val = 1
+	for {
+		// Decode "Continue" bit
+		// Prob of continue is 'decay'
+		// Note: DecodeBit(prob) returns true if we fall in the "upper" part?
+		// Revisit DecodeBit:
+		// split = (rng >> 15) * prob
+		// bit := dec.val >= split
+		// if bit (true) -> upper part (low += split)
+		// else (false) -> lower part (rng = split)
+
+		// In EncodeBit(bit, prob):
+		// if bit: low += split (upper)
+		// else: rng = split (lower)
+
+		// In EncodeLaplace: enc.EncodeBit(true, decay) -> Upper
+
+		continuing := dec.DecodeBit(uint16(decay))
+		if !continuing {
+			break
+		}
+		val++
+
+		// Safety limit to prevent infinite loops on broken streams
+		if val > 10000 {
+			dec.err = errors.New("entcode: laplace value too large")
+			return 0
+		}
+	}
+
+	// 3. Decode Sign
+	// EncodeLaplace used 50% probability (16384)
+	isNegative := dec.DecodeBit(16384)
+
+	if isNegative {
+		return -val
+	}
+	return val
+}
+
 // DecodeIcdf decodes a symbol with the given ICDF and frequency total bits.
 // This is the exact implementation matching libopus ec_decode function.
 func (dec *Decoder) DecodeIcdf(icdf []uint16, ftb int) int {

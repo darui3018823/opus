@@ -164,26 +164,98 @@ func extractPulses(vector []float64, k int) []int {
 	return pulses
 }
 
-// PVQDecode decodes a PVQ index into a unit vector
-// NOTE: This function needs to be updated to match the recursive structure if used.
-// Currently it is broken because of the API change.
-// Since we are validating the Encoder only for Phase 2 Step 2, we leave this as broken or remove it?
-// Let's modify it to be a recursive decoder to keep symmetry, OR remove it if unused by Encoder tests.
-// Decoder uses it. So we MUST update Decoder too.
-//
-// For this step, I will mark PVQDecode as "TODO: Implement Recursive Decode" and return empty,
-// or try to implement it symmetrically. Symmetry is best.
-//
-// However, implementing decode adds risk.
-// Let's comment out or stub PVQDecode for now and fix compile errors in Decoder?
-// Or better, implement `PVQDecode(dec *entcode.Decoder, n, k)`?
-// `entcode` does not have a Decoder struct yet (only Encoder)!
-// The current library is Encoder-focused for "practicality" (generating works).
-// Using the "Simplified" decoder won't work with "Standard" encoder anyway.
-// So breaking the decoder is expected.
-// I will keep the old PVQDecode signature but make it fail or panic,
-// to signal it needs rewrite.
-func PVQDecode(n, k int, index uint32) []float64 {
-	// Placeholder stub
-	return make([]float64, n)
+// PVQDecode decodes a vector using recursive PVQ splitting
+// dec: entropy decoder
+// n: dimension
+// k: number of pulses
+// Returns: normalized vector
+func PVQDecode(dec *entcode.Decoder, n, k int) []float64 {
+	y := make([]int, n)
+	decodePVQRecursively(dec, n, k, y)
+
+	// Convert integer pulse positions to normalized floats
+	output := make([]float64, n)
+	norm := 0.0
+	for i := 0; i < n; i++ {
+		output[i] = float64(y[i])
+		norm += output[i] * output[i]
+	}
+
+	// Normalize to unit vector
+	if norm > 0 {
+		scale := 1.0 / math.Sqrt(norm)
+		for i := 0; i < n; i++ {
+			output[i] *= scale
+		}
+	}
+
+	return output
+}
+
+// decodePVQRecursively decodes pulse vector y of dimension n with k total pulses
+func decodePVQRecursively(dec *entcode.Decoder, n, k int, y []int) {
+	if k == 0 {
+		return
+	}
+
+	if n == 1 {
+		// Single dimension: simply decode the sign
+		// Magnitude is definitely k.
+		// "The sign is encoded using one bit with 0.5 probability"
+		isNegative := dec.DecodeBit(16384)
+		if isNegative {
+			y[0] = -k
+		} else {
+			y[0] = k
+		}
+		return
+	}
+
+	// Split dimension
+	m := n / 2
+
+	// We need to determine kLeft (q)
+	// PDF[q] = icwrs(m, q) * icwrs(n-m, k-q)
+	// Total = icwrs(n, k)
+
+	total := icwrs(n, k)
+
+	// Get target cumulative frequency
+	c := dec.DecodeGetCumu(total)
+
+	// Find q such that range of q covers c
+
+	fl := uint32(0)
+	fh := uint32(0)
+	kLeft := -1
+
+	currentFl := uint32(0)
+
+	for q := 0; q <= k; q++ {
+		count := icwrs(m, q) * icwrs(n-m, k-q)
+		fh = currentFl + count
+
+		if c < fh {
+			// Found it
+			kLeft = q
+			fl = currentFl
+			break
+		}
+		currentFl = fh
+	}
+
+	if kLeft == -1 {
+		// Should not happen if logic is correct and total matches sum of counts
+		// Fallback/Error?
+		kLeft = k
+		fl = total - 1 // Hack?
+		fh = total
+	}
+
+	// Update decoder state
+	dec.DecodeUpdate(fl, fh, total)
+
+	// Recursively decode left and right
+	decodePVQRecursively(dec, m, kLeft, y[:m])
+	decodePVQRecursively(dec, n-m, k-kLeft, y[m:])
 }

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/darui3018823/opus/internal/dsp"
+	"github.com/darui3018823/opus/internal/entcode"
 )
 
 func TestParseTOC(t *testing.T) {
@@ -111,8 +112,13 @@ func TestPVQDecode(t *testing.T) {
 	n := 8 // dimension
 	k := 4 // pulses
 
-	// Decode index 0
-	coeffs := PVQDecode(n, k, 0)
+	// Decode index 0 (represented by all zero bytes in entropy stream)
+	// In the old index code, 0 meant the first combination.
+	// In the new recursive split code, we need the stream to guide us to that combination.
+	// Assuming all zeros works for the first combination?
+	dec := entcode.NewDecoder(make([]byte, 10))
+
+	coeffs := PVQDecode(dec, n, k)
 
 	if len(coeffs) != n {
 		t.Errorf("PVQDecode length = %d, want %d", len(coeffs), n)

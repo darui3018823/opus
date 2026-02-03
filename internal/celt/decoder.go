@@ -2,6 +2,7 @@ package celt
 
 import (
 	"errors"
+	"math"
 
 	"github.com/darui3018823/opus/internal/dsp"
 	"github.com/darui3018823/opus/internal/entcode"
@@ -120,33 +121,55 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 }
 
 // decodeBandEnergies decodes the band energies from bitstream
+// decodeBandEnergies decodes the band energies from bitstream
 func (d *Decoder) decodeBandEnergies(dec *entcode.Decoder) error {
-	// Simplified energy decoding
-	// TODO: This is a placeholder and does not correctly implement the Opus CELT decoding process.
-	// It uses a fixed prediction model not compatible with the standard.
-	// In full CELT, this uses:
-	// - Coarse energy (quantized in log domain)
-	// - Fine energy (refinement bits)
-	// - Temporal prediction from previous frame
+	// Uses Laplace distribution for coarse energy
+	// Matches Encoder's encodeBandEnergies
 
 	energyBits := make([]int, d.mode.Bands.NumBands)
 
 	for i := 0; i < d.mode.Bands.NumBands; i++ {
-		// Decode coarse energy (simplified - just read a few bits)
-		// In reality, this uses a more complex entropy coding scheme
-		bits := int(dec.DecodeUint(4)) // 4 bits per band for demo
+		// Temporal prediction
+		predicted := d.prevEnergies[i]
+		// In strictly compliant CELT, prediction depends on transient flag, etc.
+		// Matching encoder: predicted *= 0.9 if !transient (assuming persistent for now)
+		predicted *= 0.9
 
-		// Apply temporal prediction
-		// predicted = previous * decay
-		predicted := d.prevEnergies[i] * 0.9
+		predictedLog := 0.0
+		if predicted > 1e-10 {
+			predictedLog = math.Log(predicted)
+		}
 
-		// Quantized energy relative to prediction
-		energyBits[i] = bits - 8 // Center around 0
+		// Decode quantized difference
+		// Using placeholder stats fs=6000, decay=6000 used in encoder
+		quantized := dec.DecodeLaplace(6000, 6000)
 
-		// Update previous energy
-		logEnergy := float64(energyBits[i]) * 0.5
-		d.prevEnergies[i] = predicted * dsp.MaxFloat(0.1, dsp.MinFloat(10.0,
-			(1.0+logEnergy*0.1)))
+		// Reconstruct log energy
+		diff := float64(quantized) / 2.0
+		logEnergy := predictedLog + diff
+
+		d.prevEnergies[i] = math.Exp(logEnergy)
+
+		// For bandProc (which expects int "energyBits" in old format), we might need to adjust.
+		// But wait, bandProc.DecodeBandEnergies expects "energyBits".
+		// Actually, let's look at bandProc.DecodeBandEnergies.
+		// It takes `energyBits []int` and does `logEnergy := float64(energyBits[i]) * 0.5`.
+		// So `energyBits[i]` SHOULD BE `quantized`?
+		// No, `energyBits` in the old code represented the ABSOLUTE log energy in 0.5dB steps.
+		// Here `quantized` is the DIFFERENCE.
+
+		// We need to pass the ABSOLUTE quantized value to bandProc?
+		// Or update bandProc to take float energies directly?
+		// Let's look at bandProc.DecodeBandEnergies:
+		// "logEnergy := float64(energyBits[i]) * 0.5"
+		// "bp.bands[i].Energy = math.Exp(logEnergy)"
+
+		// So if we have `logEnergy` (float), we can reverse map it to `energyBits` for compatibility,
+		// OR calculate `bp.bands[i].Energy` directly here.
+
+		// Let's set it in energyBits for compatibility with the existing bandProc method.
+		// logEnergy = val * 0.5 => val = logEnergy * 2.0
+		energyBits[i] = int(math.Round(logEnergy * 2.0))
 	}
 
 	d.bandProc.DecodeBandEnergies(energyBits)
@@ -159,31 +182,25 @@ func (d *Decoder) decodeBandEnergies(dec *entcode.Decoder) error {
 func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder) error {
 	// Decode each band
 	for i := 0; i < d.mode.Bands.NumBands; i++ {
-		band := d.bandProc.bands[i]
-
 		// Determine number of pulses for this band
 		// In full CELT, this comes from bit allocation
-		// For now, use a simple heuristic based on band size
-		pulses := band.Size / 2
-		if pulses < 1 {
-			pulses = 1
-		}
-		if pulses > 20 {
-			pulses = 20
-		}
+		// For now, use a safe heuristic to avoid uint32 overflow in standard PVQ
+		// Large N and K causes C(N+K-1, K) to exceed 2^32
 
-		// Calculate PVQ codebook size
-		codebookSize := icwrs(band.Size, pulses)
-		if codebookSize == 0 {
+		band := d.bandProc.bands[i]
+
+		pulses := 1
+		// Previously we used Size/2, which is too aggressive for large bands without splitting.
+
+		// Check if codebook size fits in uint32
+		// If 0, it means overflow or invalid, skip this band
+		if icwrs(band.Size, pulses) == 0 {
 			continue
 		}
 
-		// Decode PVQ index (simplified - in reality uses range coder)
-		// For demo, just use a simple pattern
-		pvqIndex := uint32(i) % codebookSize
-
-		// Decode band coefficients
-		d.bandProc.DecodeBandCoeffs(i, pvqIndex, pulses)
+		// Decode using recursive PVQ
+		// We don't check codebookSize anymore.
+		d.bandProc.DecodeBandCoeffs(dec, i, pulses)
 
 		// Apply fine energy
 		fineEnergy := int(dec.DecodeUint(2)) // 2 bits fine energy

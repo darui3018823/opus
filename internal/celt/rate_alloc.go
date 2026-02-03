@@ -109,45 +109,42 @@ func (ra *RateAllocator) ComputeAllocation(
 func (ra *RateAllocator) initAllocVectors(bits1, bits2, thresh, cap []int32) {
 	numBands := ra.mode.Bands.NumBands
 	c := int32(ra.channels)
-	logM := int32(ra.lm << BITRES)
 
 	for i := 0; i < numBands; i++ {
-		// Get band size
+		// Get band size (scaled by LM)
 		bandSize := int32(ra.mode.Bands.BandSizes[i]) << ra.lm
 
-		// Base allocation from BandAllocation table
-		// Use middle rate index (5) for base
-		baseAlloc := int32(BandAllocation[i][5])
-
-		// Minimum bits for this band
+		// Minimum bits for this band (in Q8)
 		allocFloor := c << BITRES
 
 		// Threshold to code this band
-		thresh[i] = allocFloor + 1<<BITRES
+		thresh[i] = allocFloor + (1 << BITRES)
 
-		// bits1 is base allocation, bits2 is scaling
-		bits1[i] = baseAlloc * c * bandSize >> 3
-		bits2[i] = baseAlloc * c * bandSize >> 3
+		// Base allocation from BandAllocation table
+		// Index 0 is minimum, index 10 is maximum
+		// bits1 = minimum allocation, bits2 = delta to maximum
+		minAlloc := int32(BandAllocation[i][0])
+		maxAlloc := int32(BandAllocation[i][10])
 
-		// Cap from CacheCaps
-		// Index into caps: LM * 21 + band
-		capsIdx := ra.lm*NumBands48000 + i
-		if capsIdx < len(CacheCaps50) {
-			cap[i] = int32(CacheCaps50[capsIdx]) << BITRES
-		} else {
-			// Fallback
-			cap[i] = 255 << BITRES
-		}
+		// Scale by band size and channels, convert to Q8
+		// The allocation values are per-coefficient, so multiply by bandSize
+		bits1[i] = minAlloc * c * bandSize
+		bits2[i] = (maxAlloc - minAlloc) * c * bandSize
 
 		// Apply logN adjustment
 		if i < len(LogN400) {
-			bits1[i] += int32(LogN400[i]) * c
-			bits2[i] += int32(LogN400[i]) * c
+			logN := int32(LogN400[i])
+			bits1[i] += logN * c * bandSize >> 2
+			bits2[i] += logN * c * bandSize >> 2
 		}
 
-		// Apply LM adjustment
-		bits1[i] += logM * c
-		bits2[i] += logM * c
+		// Cap from CacheCaps (index: LM * 21 + band)
+		capsIdx := ra.lm*NumBands48000 + i
+		if capsIdx < len(CacheCaps50) {
+			cap[i] = int32(CacheCaps50[capsIdx]) * c * bandSize
+		} else {
+			cap[i] = 255 * c * bandSize
+		}
 	}
 }
 

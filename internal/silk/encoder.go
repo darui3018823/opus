@@ -3,6 +3,8 @@ package silk
 import (
 	"fmt"
 	"math"
+
+	"github.com/darui3018823/opus/internal/entcode"
 )
 
 // Encoder represents a SILK encoder instance
@@ -16,7 +18,9 @@ type Encoder struct {
 	vad          *VAD      // Voice activity detector
 	prevEnergy   float64   // Previous frame energy for smoothing
 	prevLPC      []float64 // Previous LPC coefficients
+	prevNLSF     []float64 // Previous NLSF
 	prevPitchLag int       // Previous pitch lag
+	prevGains    []float64 // Previous subframe gains
 }
 
 // NewEncoder creates a new SILK encoder
@@ -28,29 +32,34 @@ func NewEncoder(sampleRate, channels int) (*Encoder, error) {
 		return nil, fmt.Errorf("invalid channels: %d (must be 1 or 2)", channels)
 	}
 
-	// Determine LPC order based on bandwidth
-	lpcOrder := 10 // Default for narrowband
+	lpcOrder := 10
 	if sampleRate >= 12000 {
-		lpcOrder = 12 // Medium band
+		lpcOrder = 12
 	}
 	if sampleRate >= 16000 {
-		lpcOrder = 16 // Wideband
+		lpcOrder = 16
 	}
 
-	// Default frame size: 20ms
 	frameSize := sampleRate / 50 // 20ms
+
+	prevNLSF := make([]float64, lpcOrder)
+	for i := range prevNLSF {
+		prevNLSF[i] = math.Pi * float64(i+1) / float64(lpcOrder+1)
+	}
 
 	return &Encoder{
 		sampleRate:   sampleRate,
 		frameSize:    frameSize,
 		channels:     channels,
 		lpcOrder:     lpcOrder,
-		complexity:   5, // Default complexity
-		bitrate:      sampleRate * channels * 16 / 8, // Default bitrate
+		complexity:   5,
+		bitrate:      sampleRate * channels * 16 / 8,
 		vad:          NewVAD(),
 		prevEnergy:   1.0,
 		prevLPC:      make([]float64, lpcOrder),
+		prevNLSF:     prevNLSF,
 		prevPitchLag: 100,
+		prevGains:    []float64{1.0, 1.0, 1.0, 1.0},
 	}, nil
 }
 
@@ -65,7 +74,6 @@ func (e *Encoder) SetComplexity(complexity int) error {
 
 // SetBitrate sets the target bitrate in bps
 func (e *Encoder) SetBitrate(bitrate int) error {
-	// SILK typical range: 6-40 kbps
 	if bitrate < 6000 || bitrate > 40000 {
 		return fmt.Errorf("bitrate must be between 6000 and 40000 bps, got %d", bitrate)
 	}
@@ -73,16 +81,15 @@ func (e *Encoder) SetBitrate(bitrate int) error {
 	return nil
 }
 
-// Encode encodes a frame of audio samples
+// Encode encodes a frame of audio samples using the range encoder.
 func (e *Encoder) Encode(pcm []float64) ([]byte, error) {
 	if len(pcm) != e.frameSize*e.channels {
 		return nil, fmt.Errorf("invalid PCM length: got %d, expected %d", len(pcm), e.frameSize*e.channels)
 	}
 
-	// For stereo, process only the first channel (or mix)
+	// For stereo, extract left channel
 	signal := pcm
 	if e.channels == 2 {
-		// Extract left channel for simplicity
 		signal = make([]float64, e.frameSize)
 		for i := 0; i < e.frameSize; i++ {
 			signal[i] = pcm[i*2]
@@ -92,7 +99,6 @@ func (e *Encoder) Encode(pcm []float64) ([]byte, error) {
 	// Voice activity detection
 	isSpeech := e.vad.Detect(signal)
 	if !isSpeech {
-		// Return minimal packet for silence
 		return e.encodeSilence()
 	}
 
@@ -119,59 +125,178 @@ func (e *Encoder) Encode(pcm []float64) ([]byte, error) {
 
 	// Pitch analysis on residual
 	pitchLag, pitchGain := DetectPitch(residual, MinPitchLag, MaxPitchLag)
-	
+
+	// Determine signal type
+	signalType := SignalTypeUnvoiced
+	if pitchGain > 0.3 {
+		signalType = SignalTypeVoiced
+	}
+
 	// Apply pitch prediction
 	pitchResidual := ApplyPitchPrediction(residual, pitchLag, pitchGain)
 
 	// Compute subframe gains
 	subframeGains := ComputeSubframeGains(pitchResidual, 4)
-	
+
 	// Quantize gains
-	quantizedGains, gainIndices := QuantizeSubframeGains(subframeGains)
+	_, gainIndices := QuantizeSubframeGains(subframeGains)
 
-	// Pack encoded data
-	packet := e.packFrame(isSpeech, nlsfIndices, pitchLag, gainIndices, quantizedGains)
+	// Compute excitation pulse counts per subframe
+	pulseCounts := computePulseCounts(pitchResidual, 4)
 
-	// Update state for next frame
+	// Pack frame using range encoder
+	packet := e.encodeFrame(nlsfIndices, signalType, pitchLag, gainIndices, pulseCounts)
+
+	// Update state
 	e.prevLPC = lpcCoeffs
+	e.prevNLSF = quantizedNLSF
 	e.prevPitchLag = pitchLag
+	e.prevGains = subframeGains
 	e.prevEnergy = computeEnergy(signal)
 
 	return packet, nil
 }
 
+// encodeFrame encodes a SILK frame using the range encoder.
+func (e *Encoder) encodeFrame(nlsfIndices []int, signalType int, pitchLag int, gainIndices []int, pulseCounts []int) []byte {
+	enc := entcode.NewEncoder(64)
+
+	// 1. Encode VAD flag (1 = speech present)
+	enc.EncodeIcdf(1, icdfVAD[:], 8)
+
+	// 2. Encode LBRR flag (0 = no LBRR)
+	enc.EncodeIcdf(0, icdfLBRR[:], 8)
+
+	// 3. Encode signal type and quantization offset type
+	sigQOffIdx := signalType*2 + 0
+	if sigQOffIdx >= len(icdfSignalTypeQOffset) {
+		sigQOffIdx = len(icdfSignalTypeQOffset) - 1
+	}
+	enc.EncodeIcdf(sigQOffIdx, icdfSignalTypeQOffset[:], 8)
+
+	// 4. Encode NLSF indices
+	idx0 := nlsfIndices[0]
+	if idx0 < 0 {
+		idx0 = 0
+	}
+	if idx0 >= 32 {
+		idx0 = 31
+	}
+	enc.EncodeIcdf(idx0, icdfNLSFStage1[:], 8)
+
+	idx1 := nlsfIndices[1]
+	if idx1 < 0 {
+		idx1 = 0
+	}
+	if idx1 >= 8 {
+		idx1 = 7
+	}
+	enc.EncodeIcdf(idx1, icdfNLSFStage2[:], 8)
+
+	// 5. Encode pitch lag (if voiced)
+	if signalType == SignalTypeVoiced {
+		pl := pitchLag - MinPitchLag
+		if pl < 0 {
+			pl = 0
+		}
+		pitchHigh := pl / 64
+		pitchLow := pl % 64
+
+		if pitchHigh >= 8 {
+			pitchHigh = 7
+			pitchLow = 63
+		}
+
+		enc.EncodeIcdf(pitchHigh, icdfPitchHighBits[:], 8)
+		enc.EncodeBits(uint32(pitchLow), uint(6))
+
+		// Encode LTP filter index
+		enc.EncodeIcdf(1, icdfLTPFilter[:], 8) // default filter
+	}
+
+	// 6. Encode gains
+	// First subframe: absolute gain index
+	g0 := gainIndices[0]
+	absGainIdx := g0 + 20
+	if absGainIdx < 0 {
+		absGainIdx = 0
+	}
+	if absGainIdx >= 32 {
+		absGainIdx = 31
+	}
+	enc.EncodeIcdf(absGainIdx, icdfGainFirst[:], 8)
+
+	// Subsequent subframes: delta gain
+	for sf := 1; sf < 4; sf++ {
+		var deltaIdx int
+		if sf < len(gainIndices) {
+			delta := gainIndices[sf] - gainIndices[sf-1]
+			deltaIdx = delta + 20
+		} else {
+			deltaIdx = 20
+		}
+		if deltaIdx < 0 {
+			deltaIdx = 0
+		}
+		if deltaIdx >= 41 {
+			deltaIdx = 40
+		}
+		enc.EncodeIcdf(deltaIdx, icdfGainDelta[:], 8)
+	}
+
+	// 7. Encode excitation pulse counts
+	for sf := 0; sf < 4; sf++ {
+		pc := 0
+		if sf < len(pulseCounts) {
+			pc = pulseCounts[sf]
+		}
+		if pc < 0 {
+			pc = 0
+		}
+		if pc >= 19 {
+			pc = 18
+		}
+		enc.EncodeIcdf(pc, icdfExcPulseCount[:], 8)
+	}
+
+	enc.Flush()
+	return enc.Bytes()
+}
+
 // encodeSilence creates a minimal packet for silence
 func (e *Encoder) encodeSilence() ([]byte, error) {
-	// Minimal silence packet: 1 byte indicating silence
 	return []byte{0x00}, nil
 }
 
-// packFrame packs encoded parameters into a bitstream
-func (e *Encoder) packFrame(isSpeech bool, nlsfIndices []int, pitchLag int, gainIndices []int, gains []float64) []byte {
-	// Simplified packing (actual implementation would use range coder)
-	packet := make([]byte, 0, 32)
-	
-	// Header: voice activity (1 bit = 1 byte for simplicity)
-	if isSpeech {
-		packet = append(packet, 0x01)
-	} else {
-		packet = append(packet, 0x00)
+// computePulseCounts estimates excitation pulse counts per subframe
+func computePulseCounts(residual []float64, numSubframes int) []int {
+	counts := make([]int, numSubframes)
+	if len(residual) == 0 {
+		return counts
 	}
-	
-	// NLSF indices (2 bytes per stage)
-	for _, idx := range nlsfIndices {
-		packet = append(packet, byte(idx>>8), byte(idx))
+	subframeLen := len(residual) / numSubframes
+
+	for sf := 0; sf < numSubframes; sf++ {
+		start := sf * subframeLen
+		end := start + subframeLen
+		if end > len(residual) {
+			end = len(residual)
+		}
+
+		energy := 0.0
+		for i := start; i < end; i++ {
+			energy += residual[i] * residual[i]
+		}
+		rms := math.Sqrt(energy / float64(end-start))
+
+		count := int(rms * 10)
+		if count > 18 {
+			count = 18
+		}
+		counts[sf] = count
 	}
-	
-	// Pitch lag (2 bytes)
-	packet = append(packet, byte(pitchLag>>8), byte(pitchLag))
-	
-	// Gain indices (1 byte per subframe)
-	for _, idx := range gainIndices {
-		packet = append(packet, byte(idx))
-	}
-	
-	return packet
+
+	return counts
 }
 
 // Reset resets the encoder state
@@ -181,7 +306,11 @@ func (e *Encoder) Reset() {
 	for i := range e.prevLPC {
 		e.prevLPC[i] = 0
 	}
+	for i := range e.prevNLSF {
+		e.prevNLSF[i] = math.Pi * float64(i+1) / float64(e.lpcOrder+1)
+	}
 	e.prevPitchLag = 100
+	e.prevGains = []float64{1.0, 1.0, 1.0, 1.0}
 }
 
 // computeEnergy computes signal energy
@@ -200,26 +329,23 @@ func computeEnergy(signal []float64) float64 {
 func QuantizeSubframeGains(gains []float64) ([]float64, []int) {
 	quantized := make([]float64, len(gains))
 	indices := make([]int, len(gains))
-	
+
 	for i, g := range gains {
-		// Convert to dB
 		gainDB := LinearToDB(g)
-		
-		// Quantize to nearest 3 dB step
+
 		step := 3.0
 		index := int(math.Round(gainDB / step))
-		
-		// Clamp to valid range
+
 		if index < -20 {
 			index = -20
 		}
 		if index > 13 {
 			index = 13
 		}
-		
+
 		indices[i] = index
 		quantized[i] = DBToLinear(float64(index) * step)
 	}
-	
+
 	return quantized, indices
 }

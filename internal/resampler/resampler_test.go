@@ -1,6 +1,7 @@
 package resampler
 
 import (
+	"fmt"
 	"math"
 	"testing"
 )
@@ -280,6 +281,132 @@ func TestGCD(t *testing.T) {
 		got := gcd(tt.a, tt.b)
 		if got != tt.want {
 			t.Errorf("gcd(%d, %d) = %d, want %d", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
+// TestResamplerRoundtrip8k tests 8kHz -> 48kHz -> 8kHz roundtrip preserves signal.
+func TestResamplerRoundtrip8k(t *testing.T) {
+	testResamplerRoundtrip(t, Rate8kHz, 1000.0)
+}
+
+// TestResamplerRoundtrip16k tests 16kHz -> 48kHz -> 16kHz roundtrip preserves signal.
+func TestResamplerRoundtrip16k(t *testing.T) {
+	testResamplerRoundtrip(t, Rate16kHz, 1000.0)
+}
+
+// TestResamplerRoundtrip12k tests 12kHz -> 48kHz -> 12kHz roundtrip preserves signal.
+func TestResamplerRoundtrip12k(t *testing.T) {
+	testResamplerRoundtrip(t, Rate12kHz, 1000.0)
+}
+
+// TestResamplerRoundtrip24k tests 24kHz -> 48kHz -> 24kHz roundtrip preserves signal.
+func TestResamplerRoundtrip24k(t *testing.T) {
+	testResamplerRoundtrip(t, Rate24kHz, 1000.0)
+}
+
+// testResamplerRoundtrip verifies a tone survives up/down resampling.
+func testResamplerRoundtrip(t *testing.T, rate int, freq float64) {
+	t.Helper()
+
+	// Upsample: rate -> 48kHz
+	up, err := NewResampler(rate, Rate48kHz, 1, QualityMax)
+	if err != nil {
+		t.Fatalf("NewResampler(%d->48k): %v", rate, err)
+	}
+
+	// Downsample: 48kHz -> rate
+	down, err := NewResampler(Rate48kHz, rate, 1, QualityMax)
+	if err != nil {
+		t.Fatalf("NewResampler(48k->%d): %v", rate, err)
+	}
+
+	// Generate 20ms of a sine at the given rate
+	numSamples := rate * 20 / 1000
+	input := make([]float64, numSamples)
+	for i := range input {
+		input[i] = math.Sin(2 * math.Pi * freq * float64(i) / float64(rate))
+	}
+
+	// Upsample
+	upsampled := up.Process(input)
+	if len(upsampled) == 0 {
+		t.Fatal("upsampled output is empty")
+	}
+
+	// Downsample
+	roundtripped := down.Process(upsampled)
+	if len(roundtripped) == 0 {
+		t.Fatal("roundtripped output is empty")
+	}
+
+	// Compare: skip edges (filter transient region) and check that the tone is preserved
+	// Use cross-correlation or simple energy check
+	margin := numSamples / 4
+	if margin < 5 {
+		margin = 5
+	}
+
+	// Check signal energy in the middle
+	hasSignal := false
+	for i := margin; i < len(roundtripped)-margin && i < numSamples-margin; i++ {
+		if math.Abs(roundtripped[i]) > 0.3 {
+			hasSignal = true
+			break
+		}
+	}
+	if !hasSignal {
+		t.Errorf("rate=%d: roundtripped signal appears attenuated (no sample > 0.3)", rate)
+	}
+
+	t.Logf("rate=%d: input=%d samples, upsampled=%d, roundtripped=%d",
+		rate, len(input), len(upsampled), len(roundtripped))
+}
+
+// TestResamplerAllRatePairs tests resampling between all valid rate pairs.
+func TestResamplerAllRatePairs(t *testing.T) {
+	rates := []int{Rate8kHz, Rate12kHz, Rate16kHz, Rate24kHz, Rate48kHz}
+
+	for _, inRate := range rates {
+		for _, outRate := range rates {
+			if inRate == outRate {
+				continue
+			}
+			name := fmt.Sprintf("%d_to_%d", inRate, outRate)
+			t.Run(name, func(t *testing.T) {
+				r, err := NewResampler(inRate, outRate, 1, QualityDefault)
+				if err != nil {
+					t.Fatalf("NewResampler: %v", err)
+				}
+
+				// Generate 20ms of 500Hz tone at input rate
+				numSamples := inRate * 20 / 1000
+				input := make([]float64, numSamples)
+				for i := range input {
+					input[i] = math.Sin(2 * math.Pi * 500 * float64(i) / float64(inRate))
+				}
+
+				output := r.Process(input)
+
+				// Check output length is approximately correct
+				expectedLen := outRate * 20 / 1000
+				tolerance := expectedLen / 5
+				if tolerance < 5 {
+					tolerance = 5
+				}
+				if len(output) < expectedLen-tolerance || len(output) > expectedLen+tolerance {
+					t.Errorf("output len=%d, expected ~%d (tolerance %d)", len(output), expectedLen, tolerance)
+				}
+
+				// Check non-zero energy
+				energy := 0.0
+				for _, s := range output {
+					energy += s * s
+				}
+				if energy == 0 {
+					t.Error("output has zero energy")
+				}
+			})
 		}
 	}
 }

@@ -2,6 +2,7 @@ package celt
 
 import (
 	"errors"
+	"math"
 
 	"github.com/darui3018823/opus/internal/dsp"
 	"github.com/darui3018823/opus/internal/entcode"
@@ -119,75 +120,140 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	return output, nil
 }
 
-// decodeBandEnergies decodes the band energies from bitstream
-func (d *Decoder) decodeBandEnergies(dec *entcode.Decoder) error {
-	// Simplified energy decoding
-	// TODO: This is a placeholder and does not correctly implement the Opus CELT decoding process.
-	// It uses a fixed prediction model not compatible with the standard.
-	// In full CELT, this uses:
-	// - Coarse energy (quantized in log domain)
-	// - Fine energy (refinement bits)
-	// - Temporal prediction from previous frame
+// laplaceICDF tables for coarse energy decoding.
+// These approximate the Laplace distribution at different decay rates.
+// Lower bands use a narrower distribution (smaller spread), higher bands wider.
+// Each table is a descending ICDF with total probability 1<<7 = 128.
+// The DecodeIcdf function in entcode expects []uint8.
+var (
+	// Narrow Laplace for low-frequency bands (bands 0-5)
+	laplaceNarrowICDF = []uint8{
+		127, 124, 118, 106, 88, 68, 48, 32, 20, 12, 6, 3, 1, 0,
+	}
+	// Medium Laplace for mid-frequency bands (bands 6-13)
+	laplaceMediumICDF = []uint8{
+		127, 122, 112, 96, 76, 58, 42, 30, 20, 13, 8, 5, 3, 1, 0,
+	}
+	// Wide Laplace for high-frequency bands (bands 14+)
+	laplaceWideICDF = []uint8{
+		127, 120, 106, 88, 68, 50, 36, 25, 17, 11, 7, 4, 2, 1, 0,
+	}
+)
 
-	energyBits := make([]int, d.mode.Bands.NumBands)
-
-	for i := 0; i < d.mode.Bands.NumBands; i++ {
-		// Decode coarse energy (simplified - just read a few bits)
-		// In reality, this uses a more complex entropy coding scheme
-		bits := int(dec.DecodeUint(4)) // 4 bits per band for demo
-
-		// Apply temporal prediction
-		// predicted = previous * decay
-		predicted := d.prevEnergies[i] * 0.9
-
-		// Quantized energy relative to prediction
-		energyBits[i] = bits - 8 // Center around 0
-
-		// Update previous energy
-		logEnergy := float64(energyBits[i]) * 0.5
-		d.prevEnergies[i] = predicted * dsp.MaxFloat(0.1, dsp.MinFloat(10.0,
-			(1.0+logEnergy*0.1)))
+// decodeLaplace decodes a Laplace-coded signed integer using the range decoder.
+// bandIdx selects the Laplace distribution width.
+func decodeLaplace(dec *entcode.Decoder, bandIdx int) int {
+	// Select ICDF table based on band index
+	var icdf []uint8
+	switch {
+	case bandIdx < 6:
+		icdf = laplaceNarrowICDF
+	case bandIdx < 14:
+		icdf = laplaceMediumICDF
+	default:
+		icdf = laplaceWideICDF
 	}
 
-	d.bandProc.DecodeBandEnergies(energyBits)
+	// Decode unsigned magnitude using the ICDF table (ftb=7 means ft=128)
+	sym := dec.DecodeIcdf(icdf, 7)
+
+	// Convert symbol index to signed value.
+	// Symbol 0 → 0, symbols 1,2 → +1,-1, symbols 3,4 → +2,-2, etc.
+	if sym == 0 {
+		return 0
+	}
+	magnitude := (sym + 1) / 2
+	if sym&1 == 0 {
+		return -magnitude
+	}
+	return magnitude
+}
+
+// decodeBandEnergies decodes band energies from the bitstream.
+// Uses log-domain coarse energy with inter-frame prediction,
+// per RFC 6716 §5.4.1.
+func (d *Decoder) decodeBandEnergies(dec *entcode.Decoder) error {
+	// Inter-frame prediction coefficient (~0.906, matching RFC 6716)
+	const alpha = 29.0 / 32.0
+	// Mean log-energy per band (used as base prediction; simplified to a
+	// gentle spectral tilt).
+	const tiltPerBand = -0.03
+
+	for i := 0; i < d.mode.Bands.NumBands; i++ {
+		// Decode Laplace-coded residual
+		residual := decodeLaplace(dec, i)
+
+		// Predicted energy in log2 domain
+		predicted := alpha*d.prevEnergies[i] + tiltPerBand*float64(i)
+
+		// Reconstruct log2 energy: residual is in half-steps (~3 dB each)
+		logEnergy := predicted + float64(residual)*0.5
+
+		// Update state
+		d.prevEnergies[i] = logEnergy
+
+		// Convert from log2 domain to linear energy and apply to band
+		d.bandProc.bands[i].Energy = math.Exp2(logEnergy)
+	}
+
+	// Interpolate any bands that ended up with negligible energy
 	d.bandProc.InterpolateBandEnergies()
 
 	return nil
 }
 
-// decodeBandCoeffs decodes PVQ-quantized band coefficients
+// decodeBandCoeffs decodes PVQ-quantized band coefficients using bit allocation
 func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder) error {
-	// Decode each band
+	// Compute bit budget from remaining bytes in the range decoder
+	totalBits := dec.BytesLeft() * 8
+	if totalBits < 0 {
+		totalBits = 0
+	}
+
+	// Collect band energies for allocation
+	bandEnergies := make([]float64, d.mode.Bands.NumBands)
+	for i, band := range d.bandProc.bands {
+		bandEnergies[i] = band.Energy
+	}
+
+	// Run bit allocation
+	ba := NewBitAllocation(d.mode, totalBits)
+	if err := ba.Allocate(bandEnergies); err != nil {
+		return err
+	}
+
 	for i := 0; i < d.mode.Bands.NumBands; i++ {
 		band := d.bandProc.bands[i]
+		pulses := ba.GetPulseCount(i)
 
-		// Determine number of pulses for this band
-		// In full CELT, this comes from bit allocation
-		// For now, use a simple heuristic based on band size
-		pulses := band.Size / 2
-		if pulses < 1 {
-			pulses = 1
-		}
-		if pulses > 20 {
-			pulses = 20
-		}
-
-		// Calculate PVQ codebook size
-		codebookSize := icwrs(band.Size, pulses)
-		if codebookSize == 0 {
+		if pulses <= 0 || band.Size <= 0 {
+			// No bits for this band — leave coefficients as zero
 			continue
 		}
 
-		// Decode PVQ index (simplified - in reality uses range coder)
-		// For demo, just use a simple pattern
-		pvqIndex := uint32(i) % codebookSize
+		codebookSize := icwrs(band.Size, pulses)
+		if codebookSize <= 1 {
+			// Only the zero vector — nothing to decode
+			continue
+		}
 
-		// Decode band coefficients
+		// Read PVQ index from range decoder
+		pvqIndex := dec.DecodeUint(codebookSize)
+		if dec.Error() != nil {
+			// Ran out of bits — use zero for remaining bands
+			break
+		}
+
 		d.bandProc.DecodeBandCoeffs(i, pvqIndex, pulses)
 
-		// Apply fine energy
-		fineEnergy := int(dec.DecodeUint(2)) // 2 bits fine energy
-		d.bandProc.ApplyFineEnergy(i, fineEnergy-2)
+		// Fine energy refinement
+		fineBits := ba.GetFineEnergy(i)
+		if fineBits > 0 {
+			fineRange := uint32(1) << uint(fineBits)
+			fineVal := int(dec.DecodeUint(fineRange))
+			// Center around zero
+			d.bandProc.ApplyFineEnergy(i, fineVal-int(fineRange/2))
+		}
 	}
 
 	return nil

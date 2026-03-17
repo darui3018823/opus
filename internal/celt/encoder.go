@@ -170,7 +170,7 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 		// Write PVQ index (simplified - should use range coder)
 		// TODO: This is a simplified demo. Real Opus uses a range coder here.
 		if pulses > 0 {
-			enc.EncodeUint(uint32(pvqIndex), pulses+1)
+			enc.EncodeUint(uint32(pvqIndex), uint32(pulses+1))
 		}
 
 		// Encode fine energy

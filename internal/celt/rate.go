@@ -98,29 +98,31 @@ func (ba *BitAllocation) Allocate(bandEnergies []float64) error {
 	return nil
 }
 
-// computePulseCount converts bit budget to pulse count for PVQ
+// computePulseCount converts a bit budget to the largest pulse count k
+// such that the PVQ codebook V(bandSize, k) can be indexed with at most
+// the given number of bits.  Uses the correct CWRS codebook size.
 func computePulseCount(bits, bandSize int) int {
-	if bits <= 0 {
+	if bits <= 0 || bandSize <= 0 {
 		return 0
 	}
 
-	// Rough heuristic: more bits allow more pulses
-	// The actual relationship depends on the PVQ codebook size
-	// codebook_size = C(N+K-1, K) where N=bandSize, K=pulses
+	maxIndex := uint32(1) << uint(bits)
 
-	// Start with a guess
-	pulses := bits / 2
-	if pulses < 1 {
-		pulses = 1
+	// Find the largest k where V(bandSize, k) <= maxIndex
+	k := 0
+	for {
+		next := cwrsV(bandSize, k+1)
+		if next == 0 || next > maxIndex {
+			break
+		}
+		k++
+		// Safety cap to avoid runaway iteration on very large bit budgets
+		if k >= bandSize*4 {
+			break
+		}
 	}
 
-	// Limit pulses based on band size
-	maxPulses := bandSize * 2
-	if pulses > maxPulses {
-		pulses = maxPulses
-	}
-
-	return pulses
+	return k
 }
 
 // GetBandBits returns bits allocated to a specific band

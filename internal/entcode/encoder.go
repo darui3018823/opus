@@ -1,146 +1,205 @@
 package entcode
 
-import "errors"
-
-// Encoder is a range encoder for entropy coding.
+// Encoder is a range encoder bit-exact with libopus ec_enc (celt/entenc.c).
+//
+// State uses the carry-propagation scheme from libopus:
+//   - val (uint32): 31-bit accumulator (values in [0, CodeTop))
+//   - rng (uint32): current range, always in (CodeBot, CodeTop] after normalize
+//   - rem (int):    pending output byte (-1 = empty)
+//   - ext (uint32): count of pending 0xFF bytes (carry chain)
+//   - buf ([]byte): output buffer
 type Encoder struct {
-	buffer   []byte  // Output buffer
-	pos      int     // Current position in buffer
-	low      uint32  // Low end of current range
-	rng      uint32  // Size of current range
-	rem      int     // Carry propagation remainder
-	ext      uint32  // Number of outstanding bytes
-	nbits    int     // Number of bits buffered
-	endWindow uint32 // Final bits
+	buf []byte
+	val uint32
+	rng uint32
+	rem int    // -1 means empty (no pending byte)
+	ext uint32 // number of pending 0xFF carry-chain bytes
 }
 
 // NewEncoder creates a new range encoder.
 func NewEncoder(capacity int) *Encoder {
 	return &Encoder{
-		buffer: make([]byte, 0, capacity),
-		low:    0,
-		rng:    0xFFFFFFFF,
-		rem:    -1,
-		ext:    0,
-		nbits:  0,
+		buf: make([]byte, 0, capacity),
+		val: 0,
+		rng: CodeTop, // 0x80000000
+		rem: -1,
+		ext: 0,
 	}
 }
 
-// Bytes returns the encoded bytes.
+// Bytes returns the encoded bytes. Call Flush first.
 func (enc *Encoder) Bytes() []byte {
-	return enc.buffer
+	return enc.buf
 }
 
-// Tell returns the number of bits written so far.
+// Debug accessors for testing
+func (enc *Encoder) GetVal() uint32 { return enc.val }
+func (enc *Encoder) GetRng() uint32 { return enc.rng }
+func (enc *Encoder) GetRem() int    { return enc.rem }
+func (enc *Encoder) GetExt() uint32 { return enc.ext }
+
+// Tell returns the number of range-coded bits used so far.
 func (enc *Encoder) Tell() int {
-	return (len(enc.buffer)+int(enc.ext))*8 + enc.nbits
+	nbytes := len(enc.buf)
+	if enc.rem >= 0 {
+		nbytes++
+	}
+	nbytes += int(enc.ext)
+	return nbytes*8 + (32 - ILog(enc.rng))
 }
 
-// normalize performs range normalization and outputs bytes when needed.
-func (enc *Encoder) normalize() {
-	for enc.rng < (1 << 24) {
-		// Output top byte
-		enc.buffer = append(enc.buffer, byte(enc.low>>24))
-		enc.low = (enc.low << 8) & 0xFFFFFFFF
-		enc.rng <<= 8
-		enc.nbits += 8
+// carryOut handles carry propagation - matches ec_enc_carry_out in libopus.
+func (enc *Encoder) carryOut(c uint32) {
+	if c != SymMax {
+		carry := c >> SymBits // 0 or 1
+		if enc.rem >= 0 {
+			enc.buf = append(enc.buf, byte(uint32(enc.rem)+carry))
+		}
+		for enc.ext > 0 {
+			enc.buf = append(enc.buf, byte(SymMax+carry))
+			enc.ext--
+		}
+		enc.rem = int(c & SymMax)
+	} else {
+		enc.ext++
 	}
 }
 
-// EncodeBit encodes a single bit with a given probability.
-// prob is on a scale of 0-32768, where 16384 = 50% probability.
-func (enc *Encoder) EncodeBit(bit bool, prob uint16) {
-	// Scale range by probability
-	split := (enc.rng >> 15) * uint32(prob)
+// normalize outputs bytes while range is below threshold.
+// Matches ec_enc_normalize in libopus.
+func (enc *Encoder) normalize() {
+	for enc.rng <= CodeBot {
+		enc.carryOut(enc.val >> CodeShift)
+		enc.val = (enc.val << SymBits) & (CodeTop - 1)
+		enc.rng <<= SymBits
+	}
+}
 
+// EncodeIcdf encodes a symbol using a descending ICDF table with ft = 1<<ftb.
+// icdf[s] = ft - CDF(s+1), last entry must be 0.
+// Bit-exact with ec_enc_icdf in libopus.
+func (enc *Encoder) EncodeIcdf(symbol int, icdf []uint8, ftb int) {
+	r := enc.rng >> uint(ftb)
+	if symbol > 0 {
+		enc.val += enc.rng - r*uint32(icdf[symbol-1])
+		enc.rng = r * (uint32(icdf[symbol-1]) - uint32(icdf[symbol]))
+	} else {
+		enc.rng -= r * uint32(icdf[symbol])
+	}
+	enc.normalize()
+}
+
+// EncodeBitLogp encodes a single bit with probability 1/(1<<logp) of being 1.
+// Matches ec_enc_bit_logp in libopus.
+func (enc *Encoder) EncodeBitLogp(bit bool, logp uint) {
+	r := enc.rng >> logp
 	if bit {
-		enc.low += split
+		enc.val += enc.rng - r
+		enc.rng = r
+	} else {
+		enc.rng -= r
+	}
+	enc.normalize()
+}
+
+// Encode encodes a symbol in [fl, fh) out of [0, ft).
+// Uses the same CDF-mapping convention as DecodeIcdf/Decode:
+// symbol at CDF [fl, fh) maps to sub-range [r*fl, r*fh) with
+// remainder going to the fl=0 (bottom) symbol.
+func (enc *Encoder) Encode(fl, fh, ft uint32) {
+	r := enc.rng / ft
+	if fl > 0 {
+		enc.val += enc.rng - r*(ft-fl)
+		enc.rng = r * (fh - fl)
+	} else {
+		enc.rng -= r * (ft - fh)
+	}
+	enc.normalize()
+}
+
+// EncodeUint encodes val in [0, ft) using the ec_enc_uint scheme from libopus.
+func (enc *Encoder) EncodeUint(val, ft uint32) {
+	if ft <= 1 {
+		return
+	}
+	ft1 := ft - 1
+	ftb := ILog(ft1)
+	if ftb > UintBits {
+		ftb -= UintBits
+		fl := val >> uint(ftb)
+		ft1 >>= uint(ftb)
+		enc.Encode(fl, fl+1, ft1+1)
+		enc.EncodeBits(val&((1<<uint(ftb))-1), uint(ftb))
+	} else {
+		enc.Encode(val, val+1, ft)
+	}
+}
+
+// EncodeBits writes raw bits through the range coder as uniform bits.
+// In a full libopus implementation these go to the end of the packet,
+// but for range-coder-only usage we encode them uniformly.
+func (enc *Encoder) EncodeBits(val uint32, nbits uint) {
+	for i := int(nbits) - 1; i >= 0; i-- {
+		enc.EncodeBitLogp((val>>uint(i))&1 == 1, 1)
+	}
+}
+
+// EncodeBit encodes a single bit. prob is probability of false on a 0-32768 scale.
+func (enc *Encoder) EncodeBit(bit bool, prob uint16) {
+	r := enc.rng >> 15
+	split := r * uint32(prob)
+	if bit {
+		enc.val += split
 		enc.rng -= split
 	} else {
 		enc.rng = split
 	}
-
 	enc.normalize()
 }
 
-// EncodeSymbol encodes a symbol using an inverse CDF.
-func (enc *Encoder) EncodeSymbol(symbol int, icdf ICdf) error {
-	if symbol < 0 || symbol >= len(icdf)-1 {
-		return errors.New("entcode: symbol out of range")
-	}
-
-	r := enc.rng
-	fl := uint32(icdf[symbol])
-	fh := uint32(icdf[symbol+1])
-	ft := uint32(16384) // Total frequency (2^14)
-
-	// Update range
-	enc.low += (r * (ft - fh)) / ft
-	if fl < fh {
-		enc.rng = (r * (fh - fl)) / ft
-	} else {
-		enc.rng = r / ft
-	}
-
-	enc.normalize()
-	return nil
-}
-
-// EncodeUint encodes an unsigned integer using n bits.
-func (enc *Encoder) EncodeUint(value uint32, nbits int) {
-	if nbits == 0 {
+// Flush finalizes encoding. Must be called before Bytes().
+//
+// The libopus ec_enc_done operates on a fixed-size pre-allocated buffer.
+// Our encoder uses a dynamic buffer, so we directly compute the byte
+// sequence that the decoder's init + normalize will reconstruct as a
+// value within the final [val, val+rng) interval.
+func (enc *Encoder) Flush() {
+	// If nothing was encoded, nothing to output
+	if enc.rem < 0 && enc.ext == 0 && enc.val == 0 && enc.rng == CodeTop {
 		return
 	}
 
-	for nbits > 0 {
-		// Encode bit by bit (can be optimized)
-		bit := (value >> uint(nbits-1)) & 1
-		enc.EncodeBit(bit == 1, 16384) // 50% probability for uniform distribution
-		nbits--
-	}
-}
+	// Compute the minimum number of bits needed so that the symbols encoded
+	// thus far will be decoded correctly regardless of trailing bits.
+	// l = EC_CODE_BITS - EC_ILOG(rng)
+	l := CodeBits - ILog(enc.rng)
 
-// EncodeIcdf encodes a symbol with the given ICDF and frequency total bits.
-// This is the exact implementation matching libopus ec_encode function.
-func (enc *Encoder) EncodeIcdf(symbol int, icdf []uint16, ftb int) error {
-	if symbol < 0 {
-		return errors.New("entcode: negative symbol")
-	}
-	if symbol >= len(icdf)-1 {
-		return errors.New("entcode: symbol out of range")
+	msk := (CodeTop - 1) >> uint(l)
+	end := (enc.val + msk) &^ msk
+
+	// Check if (end | msk) >= val + rng; if so, we need one more bit
+	if (end | msk) >= enc.val+enc.rng {
+		l++
+		msk >>= 1
+		end = (enc.val + msk) &^ msk
 	}
 
-	// Get frequency bounds
-	fl := uint32(icdf[symbol+1])   // Lower frequency (reversed in ICDF)
-	fh := uint32(icdf[symbol])     // Higher frequency
-	ft := uint32(1 << ftb)         // Total frequency
-
-	// Scale range
-	r := enc.rng >> ftb
-	if r == 0 {
-		return errors.New("entcode: range too small")
+	// Output the needed bytes through the carry chain
+	for l > 0 {
+		enc.carryOut(end >> CodeShift)
+		end = (end << SymBits) & (CodeTop - 1)
+		l -= SymBits
 	}
 
-	// Update low and range
-	enc.low += r * (ft - fh)
-	if fl < fh {
-		enc.rng = r * (fh - fl)
-	} else {
-		enc.rng = r
-	}
-
-	enc.normalize()
-	return nil
-}
-
-// Flush finalizes the encoding and outputs remaining bits.
-func (enc *Encoder) Flush() {
-	// Normalize one final time
-	enc.normalize()
-	
-	// Output remaining bytes
-	for i := 0; i < 4; i++ {
-		enc.buffer = append(enc.buffer, byte(enc.low>>24))
-		enc.low <<= 8
+	// Flush the buffered rem byte and any ext bytes
+	if enc.rem >= 0 || enc.ext > 0 {
+		if enc.rem >= 0 {
+			enc.buf = append(enc.buf, byte(enc.rem))
+		}
+		for enc.ext > 0 {
+			enc.buf = append(enc.buf, 0x00)
+			enc.ext--
+		}
+		enc.rem = -1
 	}
 }

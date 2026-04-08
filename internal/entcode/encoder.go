@@ -203,3 +203,11 @@ func (enc *Encoder) Flush() {
 		enc.rem = -1
 	}
 }
+
+// EncodeExact encodes a symbol given its exact cumulative frequency range.
+// fl: cumulative frequency of symbols < symbol
+// fh: cumulative frequency of symbols <= symbol
+// ft: total frequency (may be non-power-of-2)
+func (enc *Encoder) EncodeExact(fl, fh, ft uint32) {
+	enc.Encode(fl, fh, ft)
+}

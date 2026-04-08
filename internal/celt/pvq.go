@@ -2,6 +2,8 @@ package celt
 
 import (
 	"math"
+
+	"github.com/darui3018823/opus/internal/entcode"
 )
 
 // PVQ (Pyramid Vector Quantization) implementation
@@ -172,44 +174,79 @@ func icwrsi(n int, y []int) uint32 {
 	return index
 }
 
-// PVQDecode decodes a PVQ index into a unit vector
-// n: vector dimension
-// k: number of pulses (L1 norm)
-// index: PVQ codebook index
-func PVQDecode(n, k int, index uint32) []float64 {
-	if n <= 0 || k < 0 {
-		return make([]float64, n)
-	}
-
-	// Decode CWRS index to integer pulse vector
-	y := cwrsi(n, k, index)
-
-	// Convert integer pulse positions to normalized floats
-	output := make([]float64, n)
-	norm := 0.0
-	for i := 0; i < n; i++ {
-		output[i] = float64(y[i])
-		norm += output[i] * output[i]
-	}
-
-	// Normalize to unit vector
-	if norm > 0 {
-		scale := 1.0 / math.Sqrt(norm)
-		for i := 0; i < n; i++ {
-			output[i] *= scale
-		}
-	}
-
-	return output
-}
-
-// PVQEncode encodes a vector into a PVQ index (for encoder)
-func PVQEncode(vector []float64, k int) uint32 {
+// PVQEncode encodes a vector using recursive PVQ splitting
+// This matches RFC 6716 Section 4.3.4 mechanism.
+func PVQEncode(enc *entcode.Encoder, vector []float64, k int) {
 	// Extract pulses from the vector
 	y := extractPulses(vector, k)
 
-	// Encode pulses to index using proper CWRS encoding
-	return icwrsi(len(vector), y)
+	// Encode pulse vector
+	encodePVQRecursively(enc, len(vector), k, y)
+}
+
+// encodePVQRecursively encodes pulse vector y of dimension n with k total pulses
+func encodePVQRecursively(enc *entcode.Encoder, n, k int, y []int) {
+	if k == 0 {
+		return
+	}
+
+	if n == 1 {
+		// Single dimension: encode the sign bit only (magnitude must be k).
+		// "The sign is encoded using one bit with 0.5 probability"
+		if y[0] == 0 {
+			return // should not happen when k > 0
+		}
+		enc.EncodeBit(y[0] < 0, 16384)
+		return
+	}
+
+	// Split dimension
+	m := n / 2
+
+	// Count pulses in left half
+	kLeft := 0
+	for i := 0; i < m; i++ {
+		kLeft += int(math.Abs(float64(y[i])))
+	}
+
+	// PDF[q] = icwrs(m, q) * icwrs(n-m, k-q), total = icwrs(n, k)
+	total := icwrs(n, k)
+	fl := uint32(0)
+	fh := uint32(0)
+	for q := 0; q <= k; q++ {
+		count := icwrs(m, q) * icwrs(n-m, k-q)
+		if q < kLeft {
+			fl += count
+		}
+		if q <= kLeft {
+			fh += count
+		}
+	}
+
+	// Encode split point using exact counts
+	enc.EncodeExact(fl, fh, total)
+
+	// Recursively encode left and right halves
+	encodePVQRecursively(enc, m, kLeft, y[:m])
+	encodePVQRecursively(enc, n-m, k-kLeft, y[m:])
+}
+
+// binomial computes binomial coefficient C(n, k).
+func binomial(n, k int) uint32 {
+	if k > n || k < 0 {
+		return 0
+	}
+	if k == 0 || k == n {
+		return 1
+	}
+	if k > n-k {
+		k = n - k
+	}
+	result := uint32(1)
+	for i := 0; i < k; i++ {
+		result = result * uint32(n-i) / uint32(i+1)
+	}
+	return result
 }
 
 // extractPulses extracts pulse positions from a normalized vector
@@ -261,21 +298,70 @@ func extractPulses(vector []float64, k int) []int {
 	return pulses
 }
 
-// binomial computes binomial coefficient C(n, k)
-func binomial(n, k int) uint32 {
-	if k > n || k < 0 {
-		return 0
-	}
-	if k == 0 || k == n {
-		return 1
-	}
-	if k > n-k {
-		k = n - k
+// PVQDecode decodes a vector using recursive PVQ splitting.
+// dec: entropy decoder, n: dimension, k: number of pulses.
+// Returns a normalized unit vector.
+func PVQDecode(dec *entcode.Decoder, n, k int) []float64 {
+	y := make([]int, n)
+	decodePVQRecursively(dec, n, k, y)
+
+	output := make([]float64, n)
+	norm := 0.0
+	for i := 0; i < n; i++ {
+		output[i] = float64(y[i])
+		norm += output[i] * output[i]
 	}
 
-	result := uint32(1)
-	for i := 0; i < k; i++ {
-		result = result * uint32(n-i) / uint32(i+1)
+	if norm > 0 {
+		scale := 1.0 / math.Sqrt(norm)
+		for i := 0; i < n; i++ {
+			output[i] *= scale
+		}
 	}
-	return result
+
+	return output
+}
+
+// decodePVQRecursively decodes pulse vector y of dimension n with k total pulses.
+func decodePVQRecursively(dec *entcode.Decoder, n, k int, y []int) {
+	if k == 0 {
+		return
+	}
+
+	if n == 1 {
+		// Single dimension: only a sign bit (magnitude is k).
+		if dec.DecodeBit(16384) {
+			y[0] = -k
+		} else {
+			y[0] = k
+		}
+		return
+	}
+
+	m := n / 2
+	total := icwrs(n, k)
+
+	// Peek at the current cumulative position, then find which q it falls in.
+	c := dec.DecodeGetCumu(total)
+
+	fl := uint32(0)
+	fh := uint32(0)
+	kLeft := k // fallback
+	currentFl := uint32(0)
+
+	for q := 0; q <= k; q++ {
+		count := icwrs(m, q) * icwrs(n-m, k-q)
+		fh = currentFl + count
+		if c < fh {
+			kLeft = q
+			fl = currentFl
+			break
+		}
+		currentFl = fh
+	}
+
+	dec.DecodeUpdate(fl, fh, total)
+
+	decodePVQRecursively(dec, m, kLeft, y[:m])
+	decodePVQRecursively(dec, n-m, k-kLeft, y[m:])
 }

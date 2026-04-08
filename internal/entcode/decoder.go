@@ -238,6 +238,13 @@ func (dec *Decoder) DecodeBit(prob uint16) bool {
 	return bit
 }
 
+// DecodeGetCumu returns the cumulative frequency position of the current symbol
+// in [0, ft). This is equivalent to Decode but named for use with
+// explicit-frequency protocols such as recursive PVQ splitting.
+func (dec *Decoder) DecodeGetCumu(ft uint32) uint32 {
+	return dec.Decode(ft)
+}
+
 // BytesLeft returns remaining unread bytes.
 func (dec *Decoder) BytesLeft() int {
 	return len(dec.buf) - dec.pos

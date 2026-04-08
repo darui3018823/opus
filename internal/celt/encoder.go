@@ -164,14 +164,8 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 		// Get pulse count from bit allocation
 		pulses := bitAlloc.GetPulseCount(i)
 
-		// Encode using PVQ
-		pvqIndex := PVQEncode(bandCoeffs, pulses)
-
-		// Write PVQ index (simplified - should use range coder)
-		// TODO: This is a simplified demo. Real Opus uses a range coder here.
-		if pulses > 0 {
-			enc.EncodeUint(uint32(pvqIndex), uint32(pulses+1))
-		}
+		// Encode using recursive PVQ splitting (RFC 6716 §4.3.4)
+		PVQEncode(enc, bandCoeffs, pulses)
 
 		// Encode fine energy
 		fineEnergy := bitAlloc.GetFineEnergy(i)
@@ -260,19 +254,17 @@ func (e *Encoder) encodeBandEnergies(enc *entcode.Encoder, energies []float64, i
 		}
 
 		// Quantize difference
+		// Opus uses log2 domain and db-like steps.
+		// Detailed quantization logic is complex, but here we produce an integer symbol.
+		// Symbol = (logEnergy - predicted) scaled.
+
 		diff := logEnergy - predictedLog
-		quantized := int(diff*2.0 + 8.0) // Scale and offset
+		quantized := int(math.Round(diff * 2.0)) // simplified scaling
 
-		// Clamp to valid range
-		if quantized < 0 {
-			quantized = 0
-		}
-		if quantized > 15 {
-			quantized = 15
-		}
-
-		// Encode
-		enc.EncodeUint(uint32(quantized), 16)
+		// Encode using Laplace distribution
+		// fs=6000, decay=6000 are placeholder "reasonable" values for energy residuals
+		// In a full implementation, these depend on the band index and prediction mode.
+		enc.EncodeLaplace(quantized, 6000, 6000)
 	}
 }
 

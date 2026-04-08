@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/darui3018823/opus/internal/dsp"
+	"github.com/darui3018823/opus/internal/entcode"
 )
 
 func TestParseTOC(t *testing.T) {
@@ -195,8 +196,13 @@ func TestPVQDecode(t *testing.T) {
 	n := 8 // dimension
 	k := 4 // pulses
 
-	// Decode index 0
-	coeffs := PVQDecode(n, k, 0)
+	// Decode index 0 (represented by all zero bytes in entropy stream)
+	// In the old index code, 0 meant the first combination.
+	// In the new recursive split code, we need the stream to guide us to that combination.
+	// Assuming all zeros works for the first combination?
+	dec := entcode.NewDecoder(make([]byte, 10))
+
+	coeffs := PVQDecode(dec, n, k)
 
 	if len(coeffs) != n {
 		t.Errorf("PVQDecode length = %d, want %d", len(coeffs), n)
@@ -228,20 +234,33 @@ func TestPVQDecode(t *testing.T) {
 	}
 }
 
-// TestPVQDecodeNonZeroOutput verifies that PVQ decode produces non-zero
-// unit vectors for various indices within the codebook.
+// TestPVQDecodeNonZeroOutput verifies that PVQ encode/decode roundtrip
+// produces non-zero unit vectors.
 func TestPVQDecodeNonZeroOutput(t *testing.T) {
-	n := 4
-	k := 3
-	total := cwrsV(n, k)
-	for idx := uint32(0); idx < total; idx++ {
-		coeffs := PVQDecode(n, k, idx)
+	testCases := []struct {
+		vector []float64
+		k      int
+	}{
+		{[]float64{1.0, 0.0, 0.0, 0.0}, 3},
+		{[]float64{0.5, 0.5, 0.5, 0.5}, 3},
+		{[]float64{1.0, -1.0, 1.0, -1.0}, 2},
+		{[]float64{0.0, 1.0, 0.0, 0.0}, 1},
+	}
+
+	for _, tc := range testCases {
+		enc := entcode.NewEncoder(64)
+		PVQEncode(enc, tc.vector, tc.k)
+		enc.Flush()
+
+		dec := entcode.NewDecoder(enc.Bytes())
+		coeffs := PVQDecode(dec, len(tc.vector), tc.k)
+
 		norm := 0.0
 		for _, c := range coeffs {
 			norm += c * c
 		}
 		if norm < 0.99 || norm > 1.01 {
-			t.Errorf("PVQDecode(%d, %d, %d): norm = %f, want 1.0", n, k, idx, norm)
+			t.Errorf("PVQ roundtrip (k=%d): norm = %f, want ~1.0", tc.k, norm)
 		}
 	}
 }

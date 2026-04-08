@@ -227,24 +227,15 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder) error {
 		pulses := ba.GetPulseCount(i)
 
 		if pulses <= 0 || band.Size <= 0 {
-			// No bits for this band — leave coefficients as zero
 			continue
 		}
 
-		codebookSize := icwrs(band.Size, pulses)
-		if codebookSize <= 1 {
-			// Only the zero vector — nothing to decode
+		if icwrs(band.Size, pulses) == 0 {
 			continue
 		}
 
-		// Read PVQ index from range decoder
-		pvqIndex := dec.DecodeUint(codebookSize)
-		if dec.Error() != nil {
-			// Ran out of bits — use zero for remaining bands
-			break
-		}
-
-		d.bandProc.DecodeBandCoeffs(i, pvqIndex, pulses)
+		// Decode using recursive PVQ splitting
+		d.bandProc.DecodeBandCoeffs(dec, i, pulses)
 
 		// Fine energy refinement
 		fineBits := ba.GetFineEnergy(i)

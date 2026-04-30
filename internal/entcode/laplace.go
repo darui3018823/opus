@@ -102,3 +102,31 @@ func (enc *Encoder) EncodeLaplace(value int, fs int, decay int) error {
 // Note: The above is a Simplified iterative implementation.
 // A fully optimized one creates the ranges explicitly.
 // But this is valid "arithmetic coding" of the same distribution.
+
+// DecodeLaplace decodes a value that was encoded with EncodeLaplace.
+// This is the exact symmetric counterpart: it decodes using the same
+// symbol distributions in the same order.
+// fs: probability of zero in Q15 (0..32768)
+// decay: decay factor in Q15 (0..32768)
+func (dec *Decoder) DecodeLaplace(fs int, decay int) int {
+	// EncodeLaplace(0) ≡ EncodeBit(false, fs), so DecodeBit returns false for 0.
+	isNonZero := dec.DecodeBit(uint16(fs))
+	if !isNonZero {
+		return 0
+	}
+
+	// Magnitude: encoder wrote (|value|-1) Continue (true) bits, then one Stop (false).
+	magnitude := 1
+	for dec.DecodeBit(uint16(decay)) {
+		magnitude++
+		if magnitude > 256 { // safety cap against corrupt streams
+			break
+		}
+	}
+
+	// Sign: encoder wrote EncodeBit(value<0, 16384). true → negative.
+	if dec.DecodeBit(16384) {
+		return -magnitude
+	}
+	return magnitude
+}

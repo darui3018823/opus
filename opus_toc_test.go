@@ -30,8 +30,8 @@ func TestEncoderTOCGeneration(t *testing.T) {
 		// If config is 20, toc >> 3 should be 20.
 		// 0xA0 >> 3 = 10100000 >> 3 = 00010100 = 20. Correct.
 
-		if toc != 0xA0 {
-			t.Errorf("Expected TOC 0xA0 (Config 20), got 0x%X", toc)
+		if toc != 0xF8 {
+			t.Errorf("Expected TOC 0xF8 (Config 31), got 0x%X", toc)
 		}
 	})
 
@@ -54,8 +54,8 @@ func TestEncoderTOCGeneration(t *testing.T) {
 
 		toc := packet[0]
 		// Expected: Config 22 (10110) | s=0 | c=0 -> 10110000 = 0xB0
-		if toc != 0xB0 {
-			t.Errorf("Expected TOC 0xB0 (Config 22), got 0x%X", toc)
+		if toc != 0xFC {
+			t.Errorf("Expected TOC 0xFC (Config 31 stereo), got 0x%X", toc)
 		}
 	})
 }

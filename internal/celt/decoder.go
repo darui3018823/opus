@@ -66,6 +66,10 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 		return d.decodeLoss(), nil
 	}
 
+	// Capture total packet bits BEFORE any decoding so that the bit
+	// allocation in decodeBandCoeffs uses the same budget as the encoder.
+	totalBits := len(frameData) * 8
+
 	// Initialize range decoder
 	dec := entcode.NewDecoder(frameData)
 
@@ -75,7 +79,7 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	}
 
 	// Decode band coefficients using PVQ
-	if err := d.decodeBandCoeffs(dec); err != nil {
+	if err := d.decodeBandCoeffs(dec, totalBits); err != nil {
 		return nil, err
 	}
 
@@ -120,92 +124,44 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	return output, nil
 }
 
-// laplaceICDF tables for coarse energy decoding.
-// These approximate the Laplace distribution at different decay rates.
-// Lower bands use a narrower distribution (smaller spread), higher bands wider.
-// Each table is a descending ICDF with total probability 1<<7 = 128.
-// The DecodeIcdf function in entcode expects []uint8.
-var (
-	// Narrow Laplace for low-frequency bands (bands 0-5)
-	laplaceNarrowICDF = []uint8{
-		127, 124, 118, 106, 88, 68, 48, 32, 20, 12, 6, 3, 1, 0,
-	}
-	// Medium Laplace for mid-frequency bands (bands 6-13)
-	laplaceMediumICDF = []uint8{
-		127, 122, 112, 96, 76, 58, 42, 30, 20, 13, 8, 5, 3, 1, 0,
-	}
-	// Wide Laplace for high-frequency bands (bands 14+)
-	laplaceWideICDF = []uint8{
-		127, 120, 106, 88, 68, 50, 36, 25, 17, 11, 7, 4, 2, 1, 0,
-	}
-)
-
-// decodeLaplace decodes a Laplace-coded signed integer using the range decoder.
-// bandIdx selects the Laplace distribution width.
-func decodeLaplace(dec *entcode.Decoder, bandIdx int) int {
-	// Select ICDF table based on band index
-	var icdf []uint8
-	switch {
-	case bandIdx < 6:
-		icdf = laplaceNarrowICDF
-	case bandIdx < 14:
-		icdf = laplaceMediumICDF
-	default:
-		icdf = laplaceWideICDF
-	}
-
-	// Decode unsigned magnitude using the ICDF table (ftb=7 means ft=128)
-	sym := dec.DecodeIcdf(icdf, 7)
-
-	// Convert symbol index to signed value.
-	// Symbol 0 → 0, symbols 1,2 → +1,-1, symbols 3,4 → +2,-2, etc.
-	if sym == 0 {
-		return 0
-	}
-	magnitude := (sym + 1) / 2
-	if sym&1 == 0 {
-		return -magnitude
-	}
-	return magnitude
-}
-
 // decodeBandEnergies decodes band energies from the bitstream.
-// Uses log-domain coarse energy with inter-frame prediction,
-// per RFC 6716 §5.4.1.
+// Mirrors encodeBandEnergies in encoder.go exactly: same Laplace parameters,
+// same natural-log prediction model, same quantization step.
 func (d *Decoder) decodeBandEnergies(dec *entcode.Decoder) error {
-	// Inter-frame prediction coefficient (~0.906, matching RFC 6716)
-	const alpha = 29.0 / 32.0
-	// Mean log-energy per band (used as base prediction; simplified to a
-	// gentle spectral tilt).
-	const tiltPerBand = -0.03
-
 	for i := 0; i < d.mode.Bands.NumBands; i++ {
-		// Decode Laplace-coded residual
-		residual := decodeLaplace(dec, i)
+		// Decode residual using same Laplace params as encoder (fs=6000, decay=6000)
+		residual := dec.DecodeLaplace(6000, 6000)
 
-		// Predicted energy in log2 domain
-		predicted := alpha*d.prevEnergies[i] + tiltPerBand*float64(i)
+		// Temporal prediction mirrors encoder: prevEnergies in linear domain.
+		predicted := d.prevEnergies[i] * 0.9
+		predictedLog := 0.0
+		if predicted > 1e-10 {
+			predictedLog = math.Log(predicted)
+		}
 
-		// Reconstruct log2 energy: residual is in half-steps (~3 dB each)
-		logEnergy := predicted + float64(residual)*0.5
+		// Reconstruct log energy from quantized residual.
+		// Encoder: quantized = round(diff * 2.0)  →  diff = residual * 0.5
+		diff := float64(residual) * 0.5
+		logEnergy := predictedLog + diff
 
-		// Update state
-		d.prevEnergies[i] = logEnergy
+		// Convert to linear; clamp to avoid zero/denormals.
+		energy := math.Exp(logEnergy)
+		if energy < 1e-10 {
+			energy = 1e-10
+		}
 
-		// Convert from log2 domain to linear energy and apply to band
-		d.bandProc.bands[i].Energy = math.Exp2(logEnergy)
+		// Update state in linear domain (same as encoder's prevBandEnergies).
+		d.prevEnergies[i] = energy
+		d.bandProc.bands[i].Energy = energy
 	}
 
-	// Interpolate any bands that ended up with negligible energy
 	d.bandProc.InterpolateBandEnergies()
-
 	return nil
 }
 
-// decodeBandCoeffs decodes PVQ-quantized band coefficients using bit allocation
-func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder) error {
-	// Compute bit budget from remaining bytes in the range decoder
-	totalBits := dec.BytesLeft() * 8
+// decodeBandCoeffs decodes PVQ-quantized band coefficients using bit allocation.
+// totalBits is the full packet bit count captured before any decoding.
+func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, totalBits int) error {
 	if totalBits < 0 {
 		totalBits = 0
 	}
@@ -216,7 +172,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder) error {
 		bandEnergies[i] = band.Energy
 	}
 
-	// Run bit allocation
+	// Run bit allocation with full packet budget (mirrors encoder)
 	ba := NewBitAllocation(d.mode, totalBits)
 	if err := ba.Allocate(bandEnergies); err != nil {
 		return err

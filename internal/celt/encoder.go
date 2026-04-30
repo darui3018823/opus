@@ -180,7 +180,20 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	// Update state
 	copy(e.prevBandEnergies, bandEnergies)
 
-	return enc.Bytes(), nil
+	// Pad output to exactly targetBits/8 bytes so that the decoder can use
+	// len(packet)*8 as its bit budget and compute the same bit allocation.
+	encoded := enc.Bytes()
+	targetBytes := targetBits / 8
+	if targetBytes < 1 {
+		targetBytes = 1
+	}
+	if len(encoded) < targetBytes {
+		padded := make([]byte, targetBytes)
+		copy(padded, encoded)
+		encoded = padded
+	}
+
+	return encoded, nil
 }
 
 // convertToMono converts interleaved stereo to mono for analysis

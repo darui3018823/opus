@@ -1,6 +1,7 @@
 package celt
 
 import (
+	"math"
 	"testing"
 
 	"github.com/darui3018823/opus/internal/dsp"
@@ -389,15 +390,18 @@ func TestBandEnergyDecodeReasonableValues(t *testing.T) {
 		}
 	}
 
-	// prevEnergies should have been updated
-	allZero := true
+	// prevEnergies should have been updated from their initial values.
+	// Initial value is math.Log(1e-8) ≈ -18.42; after one decode frame they
+	// should differ (either higher or lower depending on decoded energy).
+	initLogE := math.Log(1e-8)
+	allInitial := true
 	for _, e := range dec.prevEnergies {
-		if e != 1.0 { // initial value
-			allZero = false
+		if e != initLogE {
+			allInitial = false
 			break
 		}
 	}
-	if allZero {
+	if allInitial {
 		t.Error("prevEnergies were not updated during decode")
 	}
 }

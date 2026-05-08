@@ -21,8 +21,10 @@ type Encoder struct {
 	complexity int  // Encoding complexity (0-10)
 	vbr        bool // Variable bitrate mode
 
-	// State
-	prevBandEnergies []float64 // Previous frame energies
+	// State — two-tap log-energy history for RFC 6716 §5.1.2
+	prevBandEnergies  []float64 // Previous frame log-energies (ln domain)
+	prevBandEnergies2 []float64 // Two-frames-ago log-energies (ln domain)
+	frameCount        int       // Counts frames for intra/inter mode decision
 }
 
 // EncoderConfig holds encoder configuration
@@ -80,10 +82,13 @@ func NewEncoder(frameSize, sampleRate, channels int, config *EncoderConfig) (*En
 		e.overlap[i] = make([]float64, mdctSize)
 	}
 
-	// Initialize previous band energies
+	// Initialize energy history in log (ln) domain, same as decoder.
+	initLogE := math.Log(1e-8)
 	e.prevBandEnergies = make([]float64, mode.Bands.NumBands)
+	e.prevBandEnergies2 = make([]float64, mode.Bands.NumBands)
 	for i := range e.prevBandEnergies {
-		e.prevBandEnergies[i] = 1.0
+		e.prevBandEnergies[i] = initLogE
+		e.prevBandEnergies2[i] = initLogE
 	}
 
 	return e, nil
@@ -96,9 +101,9 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 		return nil, errors.New("celt: invalid input size")
 	}
 
-	// Detect transients
+	// Detect transients (result used for future extensions)
 	monoSamples := e.convertToMono(samples)
-	isTransient, _ := e.transientDet.Detect(monoSamples)
+	_, _ = e.transientDet.Detect(monoSamples)
 
 	// Encode each channel
 	allCoeffs := make([][]float64, e.mode.Channels)
@@ -142,8 +147,29 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	// Encode frame
 	enc := entcode.NewEncoder(targetBits / 8)
 
-	// Encode band energies
-	e.encodeBandEnergies(enc, bandEnergies, isTransient)
+	// Encode band energies using RFC 6716 §5.1.2 coarse energy coding.
+	intra := e.frameCount == 0
+	logBandEnergies := make([]float64, e.mode.Bands.NumBands)
+	for i, en := range bandEnergies {
+		if en > 1e-30 {
+			logBandEnergies[i] = math.Log(en)
+		} else {
+			logBandEnergies[i] = math.Log(1e-30)
+		}
+	}
+	quantLogE := QuantizeCoarseEnergy(
+		enc,
+		logBandEnergies,
+		e.prevBandEnergies,
+		e.prevBandEnergies2,
+		intra,
+		e.mode.Bands.NumBands,
+		3, // lm=3 for 20ms frames
+		e.mode.Channels,
+	)
+	// Update two-tap energy state
+	copy(e.prevBandEnergies2, e.prevBandEnergies)
+	copy(e.prevBandEnergies, quantLogE)
 
 	// Quantize and encode band coefficients
 	for i := 0; i < e.mode.Bands.NumBands; i++ {
@@ -177,8 +203,7 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	// Flush encoder
 	enc.Flush()
 
-	// Update state
-	copy(e.prevBandEnergies, bandEnergies)
+	e.frameCount++
 
 	// Pad output to exactly targetBits/8 bytes so that the decoder can use
 	// len(packet)*8 as its bit budget and compute the same bit allocation.
@@ -246,41 +271,6 @@ func (e *Encoder) computeBandEnergies(coeffs []float64) []float64 {
 	return energies
 }
 
-// encodeBandEnergies encodes band energies with temporal prediction
-func (e *Encoder) encodeBandEnergies(enc *entcode.Encoder, energies []float64, isTransient bool) {
-	for i := 0; i < len(energies); i++ {
-		// Compute log energy
-		logEnergy := 0.0
-		if energies[i] > 1e-10 {
-			logEnergy = math.Log(energies[i])
-		}
-
-		// Temporal prediction
-		predicted := e.prevBandEnergies[i]
-		if !isTransient {
-			predicted *= 0.9 // Decay for continuous signals
-		}
-
-		predictedLog := 0.0
-		if predicted > 1e-10 {
-			predictedLog = math.Log(predicted)
-		}
-
-		// Quantize difference
-		// Opus uses log2 domain and db-like steps.
-		// Detailed quantization logic is complex, but here we produce an integer symbol.
-		// Symbol = (logEnergy - predicted) scaled.
-
-		diff := logEnergy - predictedLog
-		quantized := int(math.Round(diff * 2.0)) // simplified scaling
-
-		// Encode using Laplace distribution
-		// fs=6000, decay=6000 are placeholder "reasonable" values for energy residuals
-		// In a full implementation, these depend on the band index and prediction mode.
-		enc.EncodeLaplace(quantized, 6000, 6000)
-	}
-}
-
 // Reset resets the encoder state
 func (e *Encoder) Reset() {
 	// Clear overlap buffers
@@ -290,10 +280,14 @@ func (e *Encoder) Reset() {
 		}
 	}
 
-	// Reset energies
+	// Reset energy history
+	initLogE := math.Log(1e-8)
 	for i := range e.prevBandEnergies {
-		e.prevBandEnergies[i] = 1.0
+		e.prevBandEnergies[i] = initLogE
+		e.prevBandEnergies2[i] = initLogE
 	}
+
+	e.frameCount = 0
 
 	// Reset transient detector
 	e.transientDet.Reset()

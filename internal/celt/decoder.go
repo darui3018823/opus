@@ -15,8 +15,13 @@ type Decoder struct {
 	bandProc *BandProcessor
 	overlap  [][]float64 // Overlap buffer per channel
 
-	// Decoder state
-	prevEnergies []float64 // Previous frame energies for interpolation
+	// Decoder state — two-tap energy history required by RFC 6716 §5.1.2
+	prevEnergies  []float64 // Previous frame log-energies (ln domain)
+	prevEnergies2 []float64 // Two-frames-ago log-energies (ln domain)
+	frameCount    int       // Counts frames to decide intra/inter mode
+
+	// Post-filter (one per channel)
+	postFilter []*PostFilter
 }
 
 // NewDecoder creates a new CELT decoder
@@ -51,10 +56,20 @@ func NewDecoder(frameSize, sampleRate, channels int) (*Decoder, error) {
 		d.overlap[i] = make([]float64, mdctSize)
 	}
 
-	// Initialize previous energies
+	// Initialize energy history in log (ln) domain.
+	// libopus initialises prevLogE to -28 dB_log2 ≈ -19.4 nats.
+	initLogE := math.Log(1e-8) // very small initial energy
 	d.prevEnergies = make([]float64, mode.Bands.NumBands)
+	d.prevEnergies2 = make([]float64, mode.Bands.NumBands)
 	for i := range d.prevEnergies {
-		d.prevEnergies[i] = 1.0 // Start with unit energy
+		d.prevEnergies[i] = initLogE
+		d.prevEnergies2[i] = initLogE
+	}
+
+	// Initialize post-filters (one per channel)
+	d.postFilter = make([]*PostFilter, channels)
+	for i := range d.postFilter {
+		d.postFilter[i] = NewPostFilter()
 	}
 
 	return d, nil
@@ -73,15 +88,46 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	// Initialize range decoder
 	dec := entcode.NewDecoder(frameData)
 
-	// Decode band energies
-	if err := d.decodeBandEnergies(dec); err != nil {
-		return nil, err
+	// Decide intra vs inter mode: first frame is always intra.
+	intra := d.frameCount == 0
+
+	// RFC 6716 §5.1.2 — decode coarse band log-energies
+	numBands := d.mode.Bands.NumBands
+	lm := 3 // 20 ms → lm=3
+	quantLogE := UnquantizeCoarseEnergy(
+		dec,
+		d.prevEnergies,
+		d.prevEnergies2,
+		intra,
+		numBands,
+		lm,
+		d.mode.Channels,
+	)
+
+	// Convert log-energies (ln domain) to linear and store in bandProc
+	for i := 0; i < numBands; i++ {
+		e := math.Exp(quantLogE[i])
+		if e < 1e-10 {
+			e = 1e-10
+		}
+		d.bandProc.bands[i].Energy = e
 	}
+
+	// Update energy history
+	copy(d.prevEnergies2, d.prevEnergies)
+	copy(d.prevEnergies, quantLogE)
+
+	d.bandProc.InterpolateBandEnergies()
 
 	// Decode band coefficients using PVQ
 	if err := d.decodeBandCoeffs(dec, totalBits); err != nil {
 		return nil, err
 	}
+
+	// Decode post-filter parameters (RFC 6716 §5.4.1)
+	// Post-filter params appear in the bitstream after energy, before PVQ
+	// in libopus — but our simplified pipeline reads them here.
+	pfPeriod, pfTaps, pfEnabled := DecodePostFilterParams(dec, d.mode.FrameSize)
 
 	// Apply energy denormalization
 	d.bandProc.DenormalizeBands()
@@ -115,47 +161,26 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 			samplesOut = samples[:d.mode.FrameSize]
 		}
 
+		// Apply post-filter (RFC 6716 §5.4.1) if enabled
+		if pfEnabled {
+			samplesOut = d.postFilter[ch].Apply(samplesOut, pfPeriod, pfTaps)
+		} else {
+			d.postFilter[ch].updateHistory(samplesOut)
+		}
+
 		// Interleave into output
 		for i := 0; i < len(samplesOut) && i < d.mode.FrameSize; i++ {
 			output[i*d.mode.Channels+ch] = samplesOut[i]
 		}
 	}
 
+	d.frameCount++
 	return output, nil
 }
 
-// decodeBandEnergies decodes band energies from the bitstream.
-// Mirrors encodeBandEnergies in encoder.go exactly: same Laplace parameters,
-// same natural-log prediction model, same quantization step.
-func (d *Decoder) decodeBandEnergies(dec *entcode.Decoder) error {
-	for i := 0; i < d.mode.Bands.NumBands; i++ {
-		// Decode residual using same Laplace params as encoder (fs=6000, decay=6000)
-		residual := dec.DecodeLaplace(6000, 6000)
-
-		// Temporal prediction mirrors encoder: prevEnergies in linear domain.
-		predicted := d.prevEnergies[i] * 0.9
-		predictedLog := 0.0
-		if predicted > 1e-10 {
-			predictedLog = math.Log(predicted)
-		}
-
-		// Reconstruct log energy from quantized residual.
-		// Encoder: quantized = round(diff * 2.0)  →  diff = residual * 0.5
-		diff := float64(residual) * 0.5
-		logEnergy := predictedLog + diff
-
-		// Convert to linear; clamp to avoid zero/denormals.
-		energy := math.Exp(logEnergy)
-		if energy < 1e-10 {
-			energy = 1e-10
-		}
-
-		// Update state in linear domain (same as encoder's prevBandEnergies).
-		d.prevEnergies[i] = energy
-		d.bandProc.bands[i].Energy = energy
-	}
-
-	d.bandProc.InterpolateBandEnergies()
+// decodeBandEnergies is superseded by UnquantizeCoarseEnergy (RFC 6716 §5.1.2).
+// Kept as an unexported no-op to avoid compilation errors if referenced elsewhere.
+func (d *Decoder) decodeBandEnergies(_ *entcode.Decoder) error {
 	return nil
 }
 
@@ -219,9 +244,11 @@ func (d *Decoder) decodeLoss() []float64 {
 		}
 	}
 
-	// Decay previous energies
+	// Decay previous energies (in log domain: subtract ln(1/0.8) ≈ 0.223)
+	const logDecay = 0.22314 // ln(0.8) magnitude
 	for i := range d.prevEnergies {
-		d.prevEnergies[i] *= 0.8
+		d.prevEnergies[i] -= logDecay
+		d.prevEnergies2[i] -= logDecay
 	}
 
 	return output
@@ -241,8 +268,17 @@ func (d *Decoder) Reset() {
 		}
 	}
 
-	// Reset energies
+	// Reset energy history
+	initLogE := math.Log(1e-8)
 	for i := range d.prevEnergies {
-		d.prevEnergies[i] = 1.0
+		d.prevEnergies[i] = initLogE
+		d.prevEnergies2[i] = initLogE
 	}
+
+	// Reset post-filters
+	for _, pf := range d.postFilter {
+		pf.Reset()
+	}
+
+	d.frameCount = 0
 }

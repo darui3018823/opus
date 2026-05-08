@@ -70,7 +70,7 @@ func (dec *Decoder) readByte() byte {
 // normalize reads bytes while range is below threshold.
 // Matches ec_dec_normalize in libopus.
 func (dec *Decoder) normalize() {
-	for dec.rng <= CodeBot {
+	for dec.rng != 0 && dec.rng <= CodeBot {
 		dec.rng <<= SymBits
 
 		// libopus: sym=rem; rem=readByte(); sym=(sym<<8|rem)>>1;
@@ -151,10 +151,15 @@ func (dec *Decoder) DecodeBitLogp(logp uint) bool {
 //
 // In top-down convention, dif/r gives position from top.
 func (dec *Decoder) Decode(ft uint32) uint32 {
-	if dec.err != nil {
+	if dec.err != nil || ft == 0 {
 		return 0
 	}
 	r := dec.rng / ft
+	if r == 0 {
+		// Range is smaller than the alphabet; return the last symbol as a
+		// safe fallback (DecodeUpdate will correct the state).
+		return ft - 1
+	}
 	s := dec.dif / r
 	if s >= ft {
 		return 0

@@ -68,7 +68,7 @@ func (enc *Encoder) carryOut(c uint32) {
 // normalize outputs bytes while range is below threshold.
 // Matches ec_enc_normalize in libopus.
 func (enc *Encoder) normalize() {
-	for enc.rng <= CodeBot {
+	for enc.rng != 0 && enc.rng <= CodeBot {
 		enc.carryOut(enc.val >> CodeShift)
 		enc.val = (enc.val << SymBits) & (CodeTop - 1)
 		enc.rng <<= SymBits
@@ -107,7 +107,15 @@ func (enc *Encoder) EncodeBitLogp(bit bool, logp uint) {
 // symbol at CDF [fl, fh) maps to sub-range [r*fl, r*fh) with
 // remainder going to the fl=0 (bottom) symbol.
 func (enc *Encoder) Encode(fl, fh, ft uint32) {
+	if ft == 0 {
+		return
+	}
 	r := enc.rng / ft
+	if r == 0 {
+		// ft exceeds current range; skip to avoid rng → 0 and infinite normalize.
+		enc.normalize()
+		return
+	}
 	if fl > 0 {
 		enc.val += enc.rng - r*(ft-fl)
 		enc.rng = r * (fh - fl)

@@ -111,7 +111,7 @@ func TestBinomial(t *testing.T) {
 func TestCWRSV(t *testing.T) {
 	tests := []struct {
 		n, k int
-		want uint32
+		want uint64
 	}{
 		{1, 0, 1},
 		{1, 1, 2},
@@ -146,7 +146,7 @@ func TestCWRSIRoundtrip(t *testing.T) {
 	for _, c := range cases {
 		n, k := c[0], c[1]
 		total := cwrsV(n, k)
-		for idx := uint32(0); idx < total; idx++ {
+		for idx := uint32(0); uint64(idx) < total; idx++ {
 			y := cwrsi(n, k, idx)
 			// Check L1 norm
 			l1 := 0

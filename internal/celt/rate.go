@@ -92,17 +92,27 @@ func computePulseCount(bits, bandSize int) int {
 		return 0
 	}
 
-	maxIndex := uint32(1) << uint(bits)
+	// Use uint64 for maxIndex so bits >= 32 is handled correctly.
+	// For bits < 32: keep the original formula (1 << bits) so V(n,k) == maxIndex
+	// is still accepted (same semantics as before).
+	// For bits >= 32: cap at cwrsMax-1 so that a saturated cwrsV (== cwrsMax)
+	// is always detected as "too large" and terminates the search.
+	var maxIndex uint64
+	if bits >= 32 {
+		maxIndex = cwrsMax - 1
+	} else {
+		maxIndex = uint64(1) << uint(bits)
+	}
 
-	// Find the largest k where V(bandSize, k) <= maxIndex
 	k := 0
 	for {
 		next := cwrsV(bandSize, k+1)
-		if next == 0 || next > maxIndex {
+		// next == 0: degenerate; next >= cwrsMax: saturated (overflow).
+		// Both mean we cannot index the codebook in uint32, so stop.
+		if next == 0 || next >= cwrsMax || next > maxIndex {
 			break
 		}
 		k++
-		// Safety cap to avoid runaway iteration on very large bit budgets
 		if k >= bandSize*4 {
 			break
 		}

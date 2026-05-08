@@ -1,9 +1,11 @@
 package celt
 
 import (
+	"math"
 	"testing"
 
 	"github.com/darui3018823/opus/internal/dsp"
+	"github.com/darui3018823/opus/internal/entcode"
 )
 
 func TestParseTOC(t *testing.T) {
@@ -106,13 +108,102 @@ func TestBinomial(t *testing.T) {
 	}
 }
 
+// TestCWRSV verifies the V(n,k) codebook size recurrence from RFC 6716 §5.4.3.3.
+func TestCWRSV(t *testing.T) {
+	tests := []struct {
+		n, k int
+		want uint64
+	}{
+		{1, 0, 1},
+		{1, 1, 2},
+		{2, 0, 1},
+		{2, 1, 4},
+		{2, 2, 8},
+		{3, 1, 6},
+		{3, 2, 18},
+		{4, 1, 8},
+		{0, 0, 1},
+		{0, 1, 0},
+	}
+
+	for _, tt := range tests {
+		got := cwrsV(tt.n, tt.k)
+		if got != tt.want {
+			t.Errorf("cwrsV(%d, %d) = %d, want %d", tt.n, tt.k, got, tt.want)
+		}
+	}
+}
+
+// TestCWRSIRoundtrip verifies that cwrsi (decode) and icwrsi (encode)
+// are perfect inverses for small (n, k) combinations.
+func TestCWRSIRoundtrip(t *testing.T) {
+	cases := [][2]int{
+		{1, 1}, {1, 2}, {1, 3},
+		{2, 1}, {2, 2}, {2, 3},
+		{3, 1}, {3, 2}, {3, 3},
+		{4, 2}, {4, 3},
+		{5, 2},
+	}
+	for _, c := range cases {
+		n, k := c[0], c[1]
+		total := cwrsV(n, k)
+		for idx := uint32(0); uint64(idx) < total; idx++ {
+			y := cwrsi(n, k, idx)
+			// Check L1 norm
+			l1 := 0
+			for _, v := range y {
+				if v < 0 {
+					l1 -= v
+				} else {
+					l1 += v
+				}
+			}
+			if l1 != k {
+				t.Errorf("cwrsi(%d, %d, %d): L1 norm = %d, want %d; y = %v",
+					n, k, idx, l1, k, y)
+				continue
+			}
+			// Roundtrip: encode back and check
+			got := icwrsi(n, y)
+			if got != idx {
+				t.Errorf("icwrsi(%d, %v) = %d, want %d", n, y, got, idx)
+			}
+		}
+	}
+}
+
+// TestCWRSIKnownVectors checks specific known decode results.
+func TestCWRSIKnownVectors(t *testing.T) {
+	// n=2, k=1: V=4, vectors: [1,0], [-1,0], [0,1], [0,-1]
+	expected := [][]int{
+		{1, 0},
+		{-1, 0},
+		{0, 1},
+		{0, -1},
+	}
+	for idx, want := range expected {
+		got := cwrsi(2, 1, uint32(idx))
+		for j := range want {
+			if got[j] != want[j] {
+				t.Errorf("cwrsi(2, 1, %d) = %v, want %v", idx, got, want)
+				break
+			}
+		}
+	}
+}
+
 func TestPVQDecode(t *testing.T) {
 	// Test basic PVQ decoding
 	n := 8 // dimension
 	k := 4 // pulses
 
-	// Decode index 0
-	coeffs := PVQDecode(n, k, 0)
+	// Decode index 0 (represented by all zero bytes in entropy stream)
+	// In the old index code, 0 meant the first combination.
+	// In the new recursive split code, we need the stream to guide us to that combination.
+	// Assuming all zeros works for the first combination?
+	dec := entcode.NewDecoder(make([]byte, 10))
+
+	coeffs := PVQDecode(dec, n, k)
 
 	if len(coeffs) != n {
 		t.Errorf("PVQDecode length = %d, want %d", len(coeffs), n)
@@ -141,6 +232,37 @@ func TestPVQDecode(t *testing.T) {
 	// Should have magnitude related to k
 	if pulseSum < 0.5 {
 		t.Errorf("PVQDecode pulse sum = %f, too small", pulseSum)
+	}
+}
+
+// TestPVQDecodeNonZeroOutput verifies that PVQ encode/decode roundtrip
+// produces non-zero unit vectors.
+func TestPVQDecodeNonZeroOutput(t *testing.T) {
+	testCases := []struct {
+		vector []float64
+		k      int
+	}{
+		{[]float64{1.0, 0.0, 0.0, 0.0}, 3},
+		{[]float64{0.5, 0.5, 0.5, 0.5}, 3},
+		{[]float64{1.0, -1.0, 1.0, -1.0}, 2},
+		{[]float64{0.0, 1.0, 0.0, 0.0}, 1},
+	}
+
+	for _, tc := range testCases {
+		enc := entcode.NewEncoder(64)
+		PVQEncode(enc, tc.vector, tc.k)
+		enc.Flush()
+
+		dec := entcode.NewDecoder(enc.Bytes())
+		coeffs := PVQDecode(dec, len(tc.vector), tc.k)
+
+		norm := 0.0
+		for _, c := range coeffs {
+			norm += c * c
+		}
+		if norm < 0.99 || norm > 1.01 {
+			t.Errorf("PVQ roundtrip (k=%d): norm = %f, want ~1.0", tc.k, norm)
+		}
 	}
 }
 
@@ -199,6 +321,110 @@ func TestDecoder(t *testing.T) {
 		if s != s { // NaN check
 			t.Errorf("Sample %d is NaN", i)
 		}
+	}
+}
+
+// TestDecoderProducesNonZeroOutput verifies the full decode pipeline
+// produces non-zero samples from a non-trivial input packet.
+func TestDecoderProducesNonZeroOutput(t *testing.T) {
+	dec, err := NewDecoder(FrameSize20ms, 48000, 1)
+	if err != nil {
+		t.Fatalf("NewDecoder() error = %v", err)
+	}
+
+	// Create a packet with varied byte content so the range decoder
+	// produces meaningful symbols.
+	frameData := make([]byte, 120)
+	for i := range frameData {
+		frameData[i] = byte((i*73 + 37) & 0xFF)
+	}
+
+	samples, err := dec.Decode(frameData)
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+
+	if len(samples) != FrameSize20ms {
+		t.Errorf("output length = %d, want %d", len(samples), FrameSize20ms)
+	}
+
+	// At least some samples should be non-zero
+	nonZero := 0
+	for _, s := range samples {
+		if s != 0 && s == s { // also check not NaN
+			nonZero++
+		}
+	}
+	if nonZero == 0 {
+		t.Error("All output samples are zero; expected non-zero output from decode pipeline")
+	}
+	t.Logf("Non-zero samples: %d / %d", nonZero, len(samples))
+}
+
+// TestBandEnergyDecodeReasonableValues verifies that decoded band energies
+// are positive and finite for a synthetic bitstream.
+func TestBandEnergyDecodeReasonableValues(t *testing.T) {
+	dec, err := NewDecoder(FrameSize20ms, 48000, 1)
+	if err != nil {
+		t.Fatalf("NewDecoder() error = %v", err)
+	}
+
+	// Feed some data through the decoder to exercise energy decoding
+	frameData := make([]byte, 80)
+	for i := range frameData {
+		frameData[i] = byte(i * 3)
+	}
+
+	_, err = dec.Decode(frameData)
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+
+	// Check band energies are positive and finite
+	for i, band := range dec.bandProc.bands {
+		if band.Energy < 0 {
+			t.Errorf("Band %d energy = %f, should be >= 0", i, band.Energy)
+		}
+		if band.Energy != band.Energy { // NaN
+			t.Errorf("Band %d energy is NaN", i)
+		}
+	}
+
+	// prevEnergies should have been updated from their initial values.
+	// Initial value is math.Log(1e-8) ≈ -18.42; after one decode frame they
+	// should differ (either higher or lower depending on decoded energy).
+	initLogE := math.Log(1e-8)
+	allInitial := true
+	for _, e := range dec.prevEnergies {
+		if e != initLogE {
+			allInitial = false
+			break
+		}
+	}
+	if allInitial {
+		t.Error("prevEnergies were not updated during decode")
+	}
+}
+
+// TestBitAllocationPulseCount verifies that pulse counts are derived from
+// the CWRS codebook size rather than a simple heuristic.
+func TestBitAllocationPulseCount(t *testing.T) {
+	// With 10 bits the max index is 2^10 = 1024.
+	// V(4,7) = 952 <= 1024, V(4,8) = 1408 > 1024, so k should be 7.
+	k := computePulseCount(10, 4)
+	t.Logf("V(4,7)=%d, V(4,8)=%d", cwrsV(4, 7), cwrsV(4, 8))
+	if k != 7 {
+		t.Errorf("computePulseCount(10, 4) = %d, want 7", k)
+	}
+
+	// With 0 bits, should get 0 pulses
+	if got := computePulseCount(0, 4); got != 0 {
+		t.Errorf("computePulseCount(0, 4) = %d, want 0", got)
+	}
+
+	// With 2 bits (max index 4), V(2,1) = 4, V(2,2) = 8 > 4, so k=1
+	if got := computePulseCount(2, 2); got != 1 {
+		t.Errorf("computePulseCount(2, 2) = %d, want 1", got)
 	}
 }
 

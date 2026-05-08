@@ -1,36 +1,11 @@
-// Package opus provides a Pure Go implementation of the Opus audio codec.
-//
-// This implementation provides CELT encoding and decoding without CGO dependencies,
-// targeting compatibility with libopus while maintaining Go's safety and portability.
-//
-// Basic usage:
-//
-//	// Create encoder
-//	enc, err := opus.NewEncoder(48000, 2, opus.ApplicationAudio)
-//	if err != nil {
-//		log.Fatal(err)
-//	}
-//	enc.SetBitrate(64000)
-//
-//	// Encode PCM samples
-//	pcm := make([]int16, 960*2) // 20ms stereo at 48kHz
-//	compressed, err := enc.Encode(pcm, 960)
-//
-//	// Create decoder
-//	dec, err := opus.NewDecoder(48000, 2)
-//	if err != nil {
-//		log.Fatal(err)
-//	}
-//
-//	// Decode
-//	decoded := make([]int16, 960*2)
-//	n, err := dec.Decode(compressed, decoded)
 package opus
 
 import (
 	"fmt"
 
+	framing "github.com/darui3018823/opus/internal"
 	"github.com/darui3018823/opus/internal/celt"
+	"github.com/darui3018823/opus/internal/resampler"
 )
 
 // Application specifies the encoding mode (use constants from package)
@@ -42,66 +17,77 @@ type Encoder struct {
 	channels    int
 	application Application
 
-	// CELT encoder
+	// CELT encoder (always operates at 48kHz internally)
 	celtEncoder *celt.Encoder
+
+	// Resampler for non-48kHz input rates
+	inputResampler *resampler.Resampler // inRate -> 48kHz
 
 	// Configuration
 	bitrate    int
 	complexity int
 	vbr        bool
-	frameSize  int
+	frameSize  int // frame size in samples at sampleRate
+
+	// Internal 48kHz frame size (always 960 for 20ms)
+	internalFrameSize int
+}
+
+// isValidOpusRate returns true if the sample rate is one of the five valid Opus rates.
+func isValidOpusRate(rate int) bool {
+	switch rate {
+	case 8000, 12000, 16000, 24000, 48000:
+		return true
+	}
+	return false
 }
 
 // NewEncoder creates a new Opus encoder
 //
-// sampleRate must be one of 8000, 12000, 16000, 24000, or 48000 Hz
+// sampleRate must be one of: 8000, 12000, 16000, 24000, 48000 Hz
 // channels must be 1 (mono) or 2 (stereo)
 // application specifies the encoding mode
 func NewEncoder(sampleRate, channels int, application Application) (*Encoder, error) {
 	// Validate parameters
-	validRates := map[int]bool{8000: true, 12000: true, 16000: true, 24000: true, 48000: true}
-	if !validRates[sampleRate] {
-		return nil, fmt.Errorf("invalid sample rate: %d (must be 8000, 12000, 16000, 24000, or 48000)", sampleRate)
+	if !isValidOpusRate(sampleRate) {
+		return nil, fmt.Errorf("invalid sample rate %d: must be 8000, 12000, 16000, 24000, or 48000", sampleRate)
 	}
 
 	if channels != 1 && channels != 2 {
 		return nil, fmt.Errorf("invalid channel count: %d (must be 1 or 2)", channels)
 	}
 
-	// Default frame size: 20ms
+	// Frame size at the caller's sample rate (20ms)
 	frameSize := (sampleRate * 20) / 1000
 
-	// Create CELT encoder
-	celtFrameSize := celt.FrameSize20ms
-	switch frameSize {
-	case 120:
-		celtFrameSize = celt.FrameSize2_5ms
-	case 240:
-		celtFrameSize = celt.FrameSize5ms
-	case 480:
-		celtFrameSize = celt.FrameSize10ms
-	case 960:
-		celtFrameSize = celt.FrameSize20ms
-	case 1920:
-		celtFrameSize = celt.FrameSize40ms
-	case 2880:
-		celtFrameSize = celt.FrameSize60ms
-	}
+	// Internal CELT frame size is always 960 samples (20ms at 48kHz)
+	internalFrameSize := 960
 
-	celtEnc, err := celt.NewEncoder(celtFrameSize, sampleRate, channels, celt.DefaultEncoderConfig())
+	// Create CELT encoder at 48kHz
+	celtEnc, err := celt.NewEncoder(celt.FrameSize20ms, 48000, channels, celt.DefaultEncoderConfig())
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CELT encoder: %w", err)
 	}
 
 	enc := &Encoder{
-		sampleRate:  sampleRate,
-		channels:    channels,
-		application: application,
-		celtEncoder: celtEnc,
-		bitrate:     64000, // Default bitrate
-		complexity:  5,     // Default complexity
-		vbr:         true,  // Default VBR on
-		frameSize:   frameSize,
+		sampleRate:        sampleRate,
+		channels:          channels,
+		application:       application,
+		celtEncoder:       celtEnc,
+		bitrate:           64000, // Default bitrate
+		complexity:        5,     // Default complexity
+		vbr:               true,  // Default VBR on
+		frameSize:         frameSize,
+		internalFrameSize: internalFrameSize,
+	}
+
+	// Create resampler if needed (non-48kHz rates)
+	if sampleRate != 48000 {
+		r, err := resampler.NewResampler(sampleRate, 48000, channels, resampler.QualityDefault)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create input resampler: %w", err)
+		}
+		enc.inputResampler = r
 	}
 
 	// Apply default settings
@@ -114,7 +100,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 // Encode encodes PCM audio samples
 //
 // pcm contains interleaved 16-bit PCM samples (left, right, left, right, ...)
-// frameSize is the number of samples per channel
+// frameSize is the number of samples per channel (at the encoder's sample rate)
 // Returns compressed Opus packet
 func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	expectedSize := frameSize * e.channels
@@ -128,32 +114,64 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 		floatPCM[i] = float64(pcm[i]) / 32768.0
 	}
 
-	// Encode using CELT
-	compressed, err := e.celtEncoder.Encode(floatPCM)
-	if err != nil {
-		return nil, fmt.Errorf("CELT encoding failed: %w", err)
-	}
-
-	return compressed, nil
+	return e.encodeFloat(floatPCM, frameSize)
 }
 
 // EncodeFloat encodes floating-point PCM samples
 //
 // pcm contains interleaved float64 samples in range [-1.0, 1.0]
-// frameSize is the number of samples per channel
+// frameSize is the number of samples per channel (at the encoder's sample rate)
 func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	expectedSize := frameSize * e.channels
 	if len(pcm) < expectedSize {
 		return nil, fmt.Errorf("insufficient PCM data: got %d, need %d", len(pcm), expectedSize)
 	}
 
-	// Encode using CELT
-	compressed, err := e.celtEncoder.Encode(pcm[:expectedSize])
+	return e.encodeFloat(pcm[:expectedSize], frameSize)
+}
+
+// encodeFloat is the internal encoding path shared by Encode and EncodeFloat.
+func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
+	var celtInput []float64
+
+	if e.inputResampler != nil {
+		// Resample from sampleRate to 48kHz
+		resampled := e.inputResampler.Process(pcm)
+		// The resampled output should be approximately internalFrameSize * channels samples.
+		// Pad or trim to exact size for CELT.
+		targetLen := e.internalFrameSize * e.channels
+		celtInput = padOrTrim(resampled, targetLen)
+	} else {
+		celtInput = pcm
+	}
+
+	// Generate TOC byte using CELT-only fullband config for all rates
+	// (we always encode internally at 48kHz with CELT)
+	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, framing.BandwidthFullband, e.channels, framing.FrameSize20ms)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate TOC: %w", err)
+	}
+
+	// Encode using CELT at 48kHz
+	compressed, err := e.celtEncoder.Encode(celtInput)
 	if err != nil {
 		return nil, fmt.Errorf("CELT encoding failed: %w", err)
 	}
 
-	return compressed, nil
+	// Prepend TOC byte
+	packet := append([]byte{toc}, compressed...)
+
+	return packet, nil
+}
+
+// padOrTrim adjusts a slice to exactly targetLen, padding with zeros or trimming.
+func padOrTrim(data []float64, targetLen int) []float64 {
+	if len(data) == targetLen {
+		return data
+	}
+	result := make([]float64, targetLen)
+	copy(result, data)
+	return result
 }
 
 // SetBitrate sets the target bitrate in bits per second
@@ -180,26 +198,19 @@ func (e *Encoder) SetComplexity(complexity int) error {
 // SetVBR enables or disables variable bitrate mode
 func (e *Encoder) SetVBR(vbr bool) {
 	e.vbr = vbr
-	// VBR implementation would be applied here
 }
 
 // SetApplication changes the application mode
 func (e *Encoder) SetApplication(application Application) {
 	e.application = application
-	// Application-specific optimizations would be applied here
 }
 
 // Reset resets the encoder state
 func (e *Encoder) Reset() error {
-	// Reset CELT encoder state
-	// Note: We're assuming the internal encoder handles resetting efficiently
-	// If frame size changed significantly, we might need to reconfigure,
-	// but Reset() usually implies keeping configuration.
-
-	// Reset internal CELT encoder
 	e.celtEncoder.Reset()
-
-	// Re-apply settings just in case
+	if e.inputResampler != nil {
+		e.inputResampler.Reset()
+	}
 	e.celtEncoder.SetBitrate(e.bitrate)
 	e.celtEncoder.SetComplexity(e.complexity)
 	return nil
@@ -210,57 +221,57 @@ type Decoder struct {
 	sampleRate int
 	channels   int
 
-	// CELT decoder
+	// CELT decoder (always operates at 48kHz internally)
 	celtDecoder *celt.Decoder
 
-	frameSize int
+	// Resampler for non-48kHz output rates
+	outputResampler *resampler.Resampler // 48kHz -> outRate
+
+	frameSize         int // frame size in samples at sampleRate
+	internalFrameSize int // always 960 (20ms at 48kHz)
 }
 
 // NewDecoder creates a new Opus decoder
 //
-// sampleRate must be one of 8000, 12000, 16000, 24000, or 48000 Hz
+// sampleRate must be one of: 8000, 12000, 16000, 24000, 48000 Hz
 // channels must be 1 (mono) or 2 (stereo)
 func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 	// Validate parameters
-	validRates := map[int]bool{8000: true, 12000: true, 16000: true, 24000: true, 48000: true}
-	if !validRates[sampleRate] {
-		return nil, fmt.Errorf("invalid sample rate: %d (must be 8000, 12000, 16000, 24000, or 48000)", sampleRate)
+	if !isValidOpusRate(sampleRate) {
+		return nil, fmt.Errorf("invalid sample rate %d: must be 8000, 12000, 16000, 24000, or 48000", sampleRate)
 	}
 
 	if channels != 1 && channels != 2 {
 		return nil, fmt.Errorf("invalid channel count: %d (must be 1 or 2)", channels)
 	}
 
-	// Default frame size: 20ms
+	// Frame size at the caller's sample rate (20ms)
 	frameSize := (sampleRate * 20) / 1000
 
-	// Create CELT decoder
-	celtFrameSize := celt.FrameSize20ms
-	switch frameSize {
-	case 120:
-		celtFrameSize = celt.FrameSize2_5ms
-	case 240:
-		celtFrameSize = celt.FrameSize5ms
-	case 480:
-		celtFrameSize = celt.FrameSize10ms
-	case 960:
-		celtFrameSize = celt.FrameSize20ms
-	case 1920:
-		celtFrameSize = celt.FrameSize40ms
-	case 2880:
-		celtFrameSize = celt.FrameSize60ms
-	}
+	// Internal CELT frame size
+	internalFrameSize := 960
 
-	celtDec, err := celt.NewDecoder(celtFrameSize, sampleRate, channels)
+	// Create CELT decoder at 48kHz
+	celtDec, err := celt.NewDecoder(celt.FrameSize20ms, 48000, channels)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CELT decoder: %w", err)
 	}
 
 	dec := &Decoder{
-		sampleRate:  sampleRate,
-		channels:    channels,
-		celtDecoder: celtDec,
-		frameSize:   frameSize,
+		sampleRate:        sampleRate,
+		channels:          channels,
+		celtDecoder:       celtDec,
+		frameSize:         frameSize,
+		internalFrameSize: internalFrameSize,
+	}
+
+	// Create resampler if needed (non-48kHz rates)
+	if sampleRate != 48000 {
+		r, err := resampler.NewResampler(48000, sampleRate, channels, resampler.QualityDefault)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create output resampler: %w", err)
+		}
+		dec.outputResampler = r
 	}
 
 	return dec, nil
@@ -272,10 +283,38 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 // pcm is the output buffer for 16-bit PCM samples (will be resized if needed)
 // Returns the number of samples per channel decoded
 func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
-	// Decode using CELT
-	floatPCM, err := d.celtDecoder.Decode(data)
+	if len(data) == 0 {
+		return 0, fmt.Errorf("empty packet")
+	}
+
+	// Parse TOC
+	toc := data[0]
+	config, _, countCode := framing.ParseTOC(toc)
+
+	// Check compatibility: we only support CELT-only configs (16-31)
+	if config < 16 {
+		return 0, fmt.Errorf("unsupported Opus mode (config %d): SILK/Hybrid layers are not yet implemented", config)
+	}
+
+	if countCode != 0 {
+		return 0, fmt.Errorf("multi-frame packets (code %d) are not yet supported", countCode)
+	}
+
+	// Payload is everything after TOC
+	payload := data[1:]
+
+	// Decode using CELT at 48kHz
+	floatPCM, err := d.celtDecoder.Decode(payload)
 	if err != nil {
 		return 0, fmt.Errorf("CELT decoding failed: %w", err)
+	}
+
+	// Resample from 48kHz to output sample rate if needed
+	if d.outputResampler != nil {
+		floatPCM = d.outputResampler.Process(floatPCM)
+		// Ensure we have exactly frameSize * channels samples
+		targetLen := d.frameSize * d.channels
+		floatPCM = padOrTrim(floatPCM, targetLen)
 	}
 
 	// Convert float64 to int16
@@ -303,10 +342,34 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 // data is the compressed Opus packet
 // Returns float64 samples in range [-1.0, 1.0]
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
-	// Decode using CELT
-	pcm, err := d.celtDecoder.Decode(data)
+	if len(data) == 0 {
+		return nil, fmt.Errorf("empty packet")
+	}
+
+	toc := data[0]
+	config, _, countCode := framing.ParseTOC(toc)
+
+	if config < 16 {
+		return nil, fmt.Errorf("unsupported Opus mode (config %d): SILK/Hybrid layers are not yet implemented", config)
+	}
+
+	if countCode != 0 {
+		return nil, fmt.Errorf("multi-frame packets (code %d) are not yet supported", countCode)
+	}
+
+	payload := data[1:]
+
+	// Decode using CELT at 48kHz
+	pcm, err := d.celtDecoder.Decode(payload)
 	if err != nil {
 		return nil, fmt.Errorf("CELT decoding failed: %w", err)
+	}
+
+	// Resample from 48kHz to output sample rate if needed
+	if d.outputResampler != nil {
+		pcm = d.outputResampler.Process(pcm)
+		targetLen := d.frameSize * d.channels
+		pcm = padOrTrim(pcm, targetLen)
 	}
 
 	return pcm, nil
@@ -319,6 +382,13 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 	floatPCM, err := d.celtDecoder.DecodePLC()
 	if err != nil {
 		return 0, fmt.Errorf("PLC decoding failed: %w", err)
+	}
+
+	// Resample if needed
+	if d.outputResampler != nil {
+		floatPCM = d.outputResampler.Process(floatPCM)
+		targetLen := d.frameSize * d.channels
+		floatPCM = padOrTrim(floatPCM, targetLen)
 	}
 
 	// Convert to int16
@@ -343,8 +413,10 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 
 // Reset resets the decoder state
 func (d *Decoder) Reset() error {
-	// Reset CELT decoder state
 	d.celtDecoder.Reset()
+	if d.outputResampler != nil {
+		d.outputResampler.Reset()
+	}
 	return nil
 }
 

@@ -145,7 +145,7 @@ func BitReverse(n, bits int) int {
 // Dot computes the dot product of two float64 slices
 func Dot(a, b []float64) float64 {
 	if len(a) != len(b) {
-return 0, errors.New("dsp: dot product requires equal length slices")
+		return 0
 	}
 	sum := 0.0
 	for i := range a {
@@ -205,4 +205,3 @@ func Cos(x float64) float64 {
 
 // Pi is the mathematical constant π
 const Pi = math.Pi
-

@@ -2,6 +2,8 @@ package celt
 
 import (
 	"math"
+
+	"github.com/darui3018823/opus/internal/entcode"
 )
 
 // Band represents a frequency band in CELT
@@ -91,7 +93,7 @@ func (bp *BandProcessor) AssembleMDCT() []float64 {
 }
 
 // DecodeBandCoeffs decodes PVQ-quantized coefficients for a band
-func (bp *BandProcessor) DecodeBandCoeffs(bandIdx int, pvqIndex uint32, pulses int) {
+func (bp *BandProcessor) DecodeBandCoeffs(dec *entcode.Decoder, bandIdx int, pulses int) {
 	if bandIdx < 0 || bandIdx >= len(bp.bands) {
 		return
 	}
@@ -99,7 +101,7 @@ func (bp *BandProcessor) DecodeBandCoeffs(bandIdx int, pvqIndex uint32, pulses i
 	band := bp.bands[bandIdx]
 
 	// Decode PVQ index to unit vector
-	coeffs := PVQDecode(band.Size, pulses, pvqIndex)
+	coeffs := PVQDecode(dec, band.Size, pulses)
 
 	// Copy to band
 	copy(band.Coeffs, coeffs)

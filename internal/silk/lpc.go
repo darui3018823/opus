@@ -159,20 +159,93 @@ func (lpc *LPCAnalysis) ToLSF() []float64 {
 	return lsf
 }
 
-// FromLSF converts Line Spectral Frequencies back to LPC coefficients.
+// FromLSF converts Line Spectral Frequencies back to LPC coefficients
+// using the standard P(z)/Q(z) Chebyshev polynomial reconstruction.
 func (lpc *LPCAnalysis) FromLSF(lsf []float64) error {
 	if len(lsf) != lpc.order {
 		return fmt.Errorf("LSF length %d doesn't match LPC order %d", len(lsf), lpc.order)
 	}
+	order := lpc.order
+	halfOrder := order / 2
 
-	// Reconstruct LPC coefficients from LSF
-	// (Simplified version)
-	for i := 0; i < lpc.order; i++ {
-		// Placeholder: proper implementation would reconstruct from polynomial roots
-		lpc.coeffs[i] = lsf[i] / math.Pi
+	// Build P'(z) from even-indexed LSFs (w_0, w_2, ...)
+	pp := []float64{1.0}
+	for k := 0; k < halfOrder; k++ {
+		c := -2.0 * math.Cos(lsf[2*k])
+		newPP := make([]float64, len(pp)+2)
+		for i, v := range pp {
+			newPP[i] += v
+			newPP[i+1] += c * v
+			newPP[i+2] += v
+		}
+		pp = newPP
 	}
 
+	// Build Q'(z) from odd-indexed LSFs (w_1, w_3, ...)
+	qp := []float64{1.0}
+	for k := 0; k < halfOrder; k++ {
+		c := -2.0 * math.Cos(lsf[2*k+1])
+		newQP := make([]float64, len(qp)+2)
+		for i, v := range qp {
+			newQP[i] += v
+			newQP[i+1] += c * v
+			newQP[i+2] += v
+		}
+		qp = newQP
+	}
+
+	// P(z) = P'(z) * (1 + z^{-1})
+	p := make([]float64, len(pp)+1)
+	for i, v := range pp {
+		p[i] += v
+		p[i+1] += v
+	}
+
+	// Q(z) = Q'(z) * (1 - z^{-1})
+	q := make([]float64, len(qp)+1)
+	for i, v := range qp {
+		q[i] += v
+		q[i+1] -= v
+	}
+
+	// A(z) = 0.5*(P(z)+Q(z)), take coefficients a[1..order]
+	maxLen := len(p)
+	if len(q) > maxLen {
+		maxLen = len(q)
+	}
+	a := make([]float64, maxLen)
+	for i := range p {
+		a[i] += p[i]
+	}
+	for i := range q {
+		a[i] += q[i]
+	}
+	for i := 0; i < order && i+1 < len(a); i++ {
+		lpc.coeffs[i] = 0.5 * a[i+1]
+	}
 	return nil
+}
+
+// SynthesizeWithHistory reconstructs signal using previous frame's output as history.
+func (lpc *LPCAnalysis) SynthesizeWithHistory(residual, history []float64) []float64 {
+	n := len(residual)
+	signal := make([]float64, n)
+	order := len(lpc.coeffs)
+	for i := 0; i < n; i++ {
+		pred := 0.0
+		for j := 0; j < order; j++ {
+			idx := i - j - 1
+			var past float64
+			if idx >= 0 {
+				past = signal[idx]
+			} else if hi := len(history) + idx; hi >= 0 && hi < len(history) {
+				past = history[hi]
+			}
+			pred += lpc.coeffs[j] * past
+		}
+		signal[i] = residual[i] + pred
+	}
+	return signal
 }
 
 // GetCoefficients returns the LPC coefficients.

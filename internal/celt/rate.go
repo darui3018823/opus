@@ -24,57 +24,43 @@ func NewBitAllocation(mode *Mode, targetBits int) *BitAllocation {
 	}
 }
 
-// Allocate performs bit allocation across all bands
-// This implements a simplified version of CELT's rate allocation
+// Allocate performs bit allocation across all bands.
+// Allocation is proportional to sqrt(bandSize) so that both encoder and
+// decoder compute identical pulse counts given the same total-bit budget.
+// Energy is still encoded separately; it is not used for allocation here
+// to ensure bit-exact agreement between encoder and decoder.
 func (ba *BitAllocation) Allocate(bandEnergies []float64) error {
 	numBands := ba.mode.Bands.NumBands
 
-	// Reserve bits for header and overhead
-	overheadBits := 20 // Simplified overhead estimate
+	// Reserve bits for header overhead
+	const overheadBits = 20
 	availableBits := ba.targetBits - overheadBits
 	if availableBits < 0 {
 		availableBits = 0
 	}
 
-	// Compute band importance based on energy
-	importance := make([]float64, numBands)
-	totalImportance := 0.0
-
-	for i := 0; i < numBands; i++ {
-		// Log energy with floor to avoid log(0)
-		energy := bandEnergies[i]
-		if energy < 1e-10 {
-			energy = 1e-10
-		}
-
-		// Importance is roughly proportional to log energy
-		// Weighted by band size (larger bands get more weight)
-		bandSize := float64(ba.mode.Bands.BandSizes[i])
-		importance[i] = math.Log(energy) * math.Sqrt(bandSize)
-
-		// Add a small bias to ensure all bands get at least some bits
-		importance[i] += 1.0
-
-		totalImportance += importance[i]
-	}
-
-	// Allocate coarse energy bits (fixed allocation)
-	coarseEnergyBits := numBands * 4 // 4 bits per band for coarse energy
+	// Reserve fixed bits for coarse energy coding
+	coarseEnergyBits := numBands * 4
 	remainingBits := availableBits - coarseEnergyBits
 	if remainingBits < 0 {
 		remainingBits = 0
 	}
 
-	// Distribute remaining bits proportionally to importance
+	// Allocate proportionally to sqrt(bandSize) — energy-independent so that
+	// encoder and decoder always compute the same result from the same budget.
+	totalWeight := 0.0
+	weights := make([]float64, numBands)
 	for i := 0; i < numBands; i++ {
-		if totalImportance > 0 {
-			proportion := importance[i] / totalImportance
-			ba.bandBits[i] = int(float64(remainingBits) * proportion)
+		weights[i] = math.Sqrt(float64(ba.mode.Bands.BandSizes[i]))
+		totalWeight += weights[i]
+	}
+
+	for i := 0; i < numBands; i++ {
+		if totalWeight > 0 {
+			ba.bandBits[i] = int(float64(remainingBits) * weights[i] / totalWeight)
 		} else {
 			ba.bandBits[i] = remainingBits / numBands
 		}
-
-		// Ensure minimum allocation
 		if ba.bandBits[i] < 0 {
 			ba.bandBits[i] = 0
 		}
@@ -98,29 +84,41 @@ func (ba *BitAllocation) Allocate(bandEnergies []float64) error {
 	return nil
 }
 
-// computePulseCount converts bit budget to pulse count for PVQ
+// computePulseCount converts a bit budget to the largest pulse count k
+// such that the PVQ codebook V(bandSize, k) can be indexed with at most
+// the given number of bits.  Uses the correct CWRS codebook size.
 func computePulseCount(bits, bandSize int) int {
-	if bits <= 0 {
+	if bits <= 0 || bandSize <= 0 {
 		return 0
 	}
 
-	// Rough heuristic: more bits allow more pulses
-	// The actual relationship depends on the PVQ codebook size
-	// codebook_size = C(N+K-1, K) where N=bandSize, K=pulses
-
-	// Start with a guess
-	pulses := bits / 2
-	if pulses < 1 {
-		pulses = 1
+	// Use uint64 for maxIndex so bits >= 32 is handled correctly.
+	// For bits < 32: keep the original formula (1 << bits) so V(n,k) == maxIndex
+	// is still accepted (same semantics as before).
+	// For bits >= 32: cap at cwrsMax-1 so that a saturated cwrsV (== cwrsMax)
+	// is always detected as "too large" and terminates the search.
+	var maxIndex uint64
+	if bits >= 32 {
+		maxIndex = cwrsMax - 1
+	} else {
+		maxIndex = uint64(1) << uint(bits)
 	}
 
-	// Limit pulses based on band size
-	maxPulses := bandSize * 2
-	if pulses > maxPulses {
-		pulses = maxPulses
+	k := 0
+	for {
+		next := cwrsV(bandSize, k+1)
+		// next == 0: degenerate; next >= cwrsMax: saturated (overflow).
+		// Both mean we cannot index the codebook in uint32, so stop.
+		if next == 0 || next >= cwrsMax || next > maxIndex {
+			break
+		}
+		k++
+		if k >= bandSize*4 {
+			break
+		}
 	}
 
-	return pulses
+	return k
 }
 
 // GetBandBits returns bits allocated to a specific band

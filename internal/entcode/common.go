@@ -1,48 +1,38 @@
-// Package entcode provides entropy coding (range coding) for Opus.
-// This implementation is based on the range coder used in libopus.
+// Package entcode provides entropy coding (range coding) for Opus,
+// bit-exact with the range coder in libopus 1.3.1 (celt/entcode.c,
+// celt/entenc.c, celt/entdec.c).
 package entcode
 
-// Range coding constants
+// Range coding constants matching libopus.
 const (
-	// WindowSize is the number of bits in the range coder window
-	WindowSize = 32
+	// EC_SYM_BITS: number of bits per symbol output.
+	SymBits = 8
 
-	// CodeBits is the number of bits used for range coding
+	// EC_CODE_BITS: total bits in the code register.
 	CodeBits = 32
 
-	// CodeShift shifts bits for range coding
-	CodeShift = CodeBits - WindowSize
+	// EC_SYM_MAX: (1<<EC_SYM_BITS)-1 = 255.
+	SymMax = (1 << SymBits) - 1
 
-	// CodeTop is the top of the range coder range
+	// EC_CODE_SHIFT: EC_CODE_BITS - EC_SYM_BITS - 1 = 23.
+	CodeShift = CodeBits - SymBits - 1
+
+	// EC_CODE_TOP: 1<<(EC_CODE_BITS-1) = 0x80000000.
 	CodeTop = uint32(1 << (CodeBits - 1))
 
-	// CodeBottom is the minimum range size
-	CodeBottom = CodeTop >> 8
+	// EC_CODE_BOT: EC_CODE_TOP >> EC_SYM_BITS = 0x00800000.
+	CodeBot = CodeTop >> SymBits
+
+	// EC_CODE_EXTRA: (EC_CODE_BITS-2)%EC_SYM_BITS+1 = 7.
+	CodeExtra = (CodeBits-2)%SymBits + 1
+
+	// EC_UINT_BITS: number of bits for the high part of ec_enc_uint.
+	UintBits = 8
 )
 
-// Common range coder utilities
-
-// ICdf represents an inverse cumulative distribution function.
-// Used for entropy coding with known probability distributions.
-type ICdf []uint16
-
-// NewUniformICdf creates a uniform distribution ICDF with n symbols.
-func NewUniformICdf(n int) ICdf {
-	icdf := make(ICdf, n+1)
-	step := uint32(65536) / uint32(n)
-	for i := 0; i < n; i++ {
-		icdf[i] = uint16(uint32(i) * step)
-	}
-	icdf[n] = 0 // Sentinel
-	return icdf
-}
-
-// BitProb represents a probability for binary symbols (0-32768 scale).
-type BitProb uint16
-
-// Log2Ceiling computes the ceiling of log2(n).
+// Log2Ceiling computes ceil(log2(n)).
 func Log2Ceiling(n int) int {
-	if n <= 0 {
+	if n <= 1 {
 		return 0
 	}
 	log := 0
@@ -54,15 +44,13 @@ func Log2Ceiling(n int) int {
 	return log
 }
 
-// ILog computes integer log base 2 (floor).
+// ILog returns the number of bits needed to represent val (floor(log2(val))+1).
+// Returns 0 for val == 0. Matches libopus EC_ILOG.
 func ILog(val uint32) int {
-	if val == 0 {
-		return 0
-	}
 	log := 0
 	for val > 0 {
 		val >>= 1
 		log++
 	}
-	return log - 1
+	return log
 }

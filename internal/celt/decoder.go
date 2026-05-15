@@ -56,14 +56,12 @@ func NewDecoder(frameSize, sampleRate, channels int) (*Decoder, error) {
 		d.overlap[i] = make([]float64, mdctSize)
 	}
 
-	// Initialize energy history in log (ln) domain.
-	// libopus initialises prevLogE to -28 dB_log2 ≈ -19.4 nats.
-	initLogE := math.Log(1e-8) // very small initial energy
+	// Initialize energy history in log2-amplitude domain (matches libopus -28.0f).
 	d.prevEnergies = make([]float64, mode.Bands.NumBands)
 	d.prevEnergies2 = make([]float64, mode.Bands.NumBands)
 	for i := range d.prevEnergies {
-		d.prevEnergies[i] = initLogE
-		d.prevEnergies2[i] = initLogE
+		d.prevEnergies[i] = -28.0
+		d.prevEnergies2[i] = -28.0
 	}
 
 	// Initialize post-filters (one per channel)
@@ -88,8 +86,15 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	// Initialize range decoder
 	dec := entcode.NewDecoder(frameData)
 
-	// Decide intra vs inter mode: first frame is always intra.
-	intra := d.frameCount == 0
+	// Read intra/inter bit from bitstream (RFC 6716 §5.1.2 / libopus celt_decode_with_ec).
+	// Mirrors the encoder: ec_dec_bit_logp(dec, 3) if budget allows.
+	var intra bool
+	tell := dec.Tell()
+	if tell+3 <= totalBits {
+		intra = dec.DecodeBitLogp(3)
+	} else {
+		intra = false
+	}
 
 	// RFC 6716 §5.1.2 — decode coarse band log-energies
 	numBands := d.mode.Bands.NumBands
@@ -102,13 +107,17 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 		numBands,
 		lm,
 		d.mode.Channels,
+		totalBits,
 	)
 
-	// Convert log-energies (ln domain) to linear and store in bandProc
+	// Convert mean-subtracted log2-amplitude to linear energy.
+	// actual_log2_amp = quantLogE[i] + eMeans[i]; linear energy = 2^(2*actual_log2_amp).
 	for i := 0; i < numBands; i++ {
-		e := math.Exp(quantLogE[i])
-		if e < 1e-10 {
-			e = 1e-10
+		actualLog2Amp := quantLogE[i] + EMean(i)
+		amp := math.Exp2(actualLog2Amp)
+		e := amp * amp
+		if e < 1e-20 {
+			e = 1e-20
 		}
 		d.bandProc.bands[i].Energy = e
 	}
@@ -244,8 +253,8 @@ func (d *Decoder) decodeLoss() []float64 {
 		}
 	}
 
-	// Decay previous energies (in log domain: subtract ln(1/0.8) ≈ 0.223)
-	const logDecay = 0.22314 // ln(0.8) magnitude
+	// Decay previous energies in log2-amplitude domain: subtract log2(1/0.8)
+	const logDecay = 0.32193 // log2(1.25) ≈ 0.322
 	for i := range d.prevEnergies {
 		d.prevEnergies[i] -= logDecay
 		d.prevEnergies2[i] -= logDecay
@@ -269,10 +278,9 @@ func (d *Decoder) Reset() {
 	}
 
 	// Reset energy history
-	initLogE := math.Log(1e-8)
 	for i := range d.prevEnergies {
-		d.prevEnergies[i] = initLogE
-		d.prevEnergies2[i] = initLogE
+		d.prevEnergies[i] = -28.0
+		d.prevEnergies2[i] = -28.0
 	}
 
 	// Reset post-filters

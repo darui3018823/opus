@@ -82,13 +82,12 @@ func NewEncoder(frameSize, sampleRate, channels int, config *EncoderConfig) (*En
 		e.overlap[i] = make([]float64, mdctSize)
 	}
 
-	// Initialize energy history in log (ln) domain, same as decoder.
-	initLogE := math.Log(1e-8)
+	// Initialize energy history in log2-amplitude domain (matches libopus -28.0f).
 	e.prevBandEnergies = make([]float64, mode.Bands.NumBands)
 	e.prevBandEnergies2 = make([]float64, mode.Bands.NumBands)
 	for i := range e.prevBandEnergies {
-		e.prevBandEnergies[i] = initLogE
-		e.prevBandEnergies2[i] = initLogE
+		e.prevBandEnergies[i] = -28.0
+		e.prevBandEnergies2[i] = -28.0
 	}
 
 	return e, nil
@@ -148,13 +147,21 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	enc := entcode.NewEncoder(targetBits / 8)
 
 	// Encode band energies using RFC 6716 §5.1.2 coarse energy coding.
+	// libopus stores energies as (log2(amplitude) - eMeans[band]) — mean-subtracted.
 	intra := e.frameCount == 0
+
+	// Write intra/inter bit to bitstream (RFC 6716 §5.1.2 / libopus quant_coarse_energy_impl).
+	// ec_enc_bit_logp(enc, intra, 3) — only if budget allows.
+	tell := enc.Tell()
+	if tell+3 <= targetBits {
+		enc.EncodeBitLogp(intra, 3)
+	}
 	logBandEnergies := make([]float64, e.mode.Bands.NumBands)
 	for i, en := range bandEnergies {
-		if en > 1e-30 {
-			logBandEnergies[i] = math.Log(en)
+		if en > 1e-60 {
+			logBandEnergies[i] = 0.5*math.Log2(en) - EMean(i)
 		} else {
-			logBandEnergies[i] = math.Log(1e-30)
+			logBandEnergies[i] = -28.0
 		}
 	}
 	quantLogE := QuantizeCoarseEnergy(
@@ -166,6 +173,7 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 		e.mode.Bands.NumBands,
 		3, // lm=3 for 20ms frames
 		e.mode.Channels,
+		targetBits,
 	)
 	// Update two-tap energy state
 	copy(e.prevBandEnergies2, e.prevBandEnergies)
@@ -281,10 +289,9 @@ func (e *Encoder) Reset() {
 	}
 
 	// Reset energy history
-	initLogE := math.Log(1e-8)
 	for i := range e.prevBandEnergies {
-		e.prevBandEnergies[i] = initLogE
-		e.prevBandEnergies2[i] = initLogE
+		e.prevBandEnergies[i] = -28.0
+		e.prevBandEnergies2[i] = -28.0
 	}
 
 	e.frameCount = 0

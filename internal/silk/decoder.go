@@ -201,6 +201,7 @@ type Decoder struct {
 	// Decoder state (persists across frames)
 	prevNLSFQ15    []int16 // previous NLSF in Q15
 	lagPrev        int     // previous pitch lag
+	prevLagIndex   int     // previous entropy-coded pitch lag index
 	prevGainQ16    int32   // previous gain (Q16) for delta coding
 	prevGainIndex  int8    // previous gain index for conditional coding
 	prevSignalType int     // previous signal type
@@ -265,6 +266,7 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 		subfrmLen:      subfrmLen,
 		prevNLSFQ15:    make([]int16, lpcOrder),
 		lagPrev:        100,
+		prevLagIndex:   0,
 		prevGainQ16:    65536,
 		prevGainIndex:  0,
 		prevSignalType: SignalTypeUnvoiced,
@@ -424,7 +426,7 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 
 	// ── 4. Decode NLSF indices ───────────────────────────────────────────────
 	cb := getNLSFCB(d.lpcOrder)
-	nlsfQ15, err := d.decodeNLSF(dec, cb)
+	nlsfQ15, err := d.decodeNLSF(dec, cb, signalType)
 	if err != nil {
 		return nil, err
 	}
@@ -469,12 +471,23 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 	ltpScaleQ14 := int16(15565) // ~0.95 in Q14
 
 	if signalType == SignalTypeVoiced {
-		// Absolute pitch lag
-		lagIndex := dec.DecodeIcdf(silkPitchLagICDF[:], 8)
-		// Low bits: uniform over fsKHz/2
-		nLowBits := silkPitchLagLowBits(d.fsKHz)
-		lagLowBits := int(dec.DecodeBits(uint(nLowBits)))
-		lag := lagIndex*(d.fsKHz/2) + lagLowBits
+		decodeAbsoluteLagIndex := true
+		lag := 0
+		if conditionalGain && d.prevSignalType == SignalTypeVoiced {
+			deltaLagIndex := dec.DecodeIcdf(silkPitchDeltaICDF[:], 8)
+			if deltaLagIndex > 0 {
+				deltaLagIndex -= 9
+				lag = d.prevLagIndex + deltaLagIndex
+				decodeAbsoluteLagIndex = false
+			}
+		}
+		if decodeAbsoluteLagIndex {
+			lagIndex := dec.DecodeIcdf(silkPitchLagICDF[:], 8)
+			nLowBits := silkPitchLagLowBits(d.fsKHz)
+			lagLowBits := int(dec.DecodeBits(uint(nLowBits)))
+			lag = lagIndex*(d.fsKHz/2) + lagLowBits
+		}
+		d.prevLagIndex = lag
 		minLag := PitchEstMinLagMs * d.fsKHz
 		maxLag := PitchEstMaxLagMs * d.fsKHz
 		if lag < minLag {
@@ -526,9 +539,12 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 			}
 		}
 
-		// LTP scale
-		ltpScaleIdx := dec.DecodeIcdf(silkUniform3ICDF[:], 8)
-		ltpScaleQ14 = silkLTPScalesTable[ltpScaleIdx]
+		if !conditionalGain {
+			ltpScaleIdx := dec.DecodeIcdf(silkUniform3ICDF[:], 8)
+			ltpScaleQ14 = silkLTPScalesTable[ltpScaleIdx]
+		} else {
+			ltpScaleQ14 = silkLTPScalesTable[0]
+		}
 	}
 
 	// ── 6. Decode seed ───────────────────────────────────────────────────────
@@ -639,7 +655,7 @@ func silkGainDequantQ16(prevInd int) int32 {
 // decodeNLSF decodes NLSF values from the range coder.
 // Implements silk_NLSF_decode + silk_decode_indices NLSF portion from libopus.
 // Returns NLSF in Q15.
-func (d *Decoder) decodeNLSF(dec *entcode.Decoder, cb *nlsfCBParams) ([]int16, error) {
+func (d *Decoder) decodeNLSF(dec *entcode.Decoder, cb *nlsfCBParams, signalType int) ([]int16, error) {
 	order := cb.order
 	// NLSF_QUANT_MAX_AMPLITUDE = 4
 	const nlsfQuantMaxAmp = 4
@@ -647,7 +663,7 @@ func (d *Decoder) decodeNLSF(dec *entcode.Decoder, cb *nlsfCBParams) ([]int16, e
 	// Step 1: Decode stage-1 codebook index (NLSFIndices[0])
 	// The iCDF has 2*32 entries: first 32 for unvoiced/inactive, second 32 for voiced.
 	// Select based on prevSignalType>>1
-	cb1ICDFOffset := (d.prevSignalType >> 1) * cb.nEntries
+	cb1ICDFOffset := (signalType >> 1) * cb.nEntries
 	if cb1ICDFOffset+cb.nEntries > len(cb.cb1ICDF) {
 		cb1ICDFOffset = 0
 	}
@@ -1382,6 +1398,7 @@ func (d *Decoder) Reset() {
 		d.prevNLSFQ15[i] = int16((float64(i+1) / float64(d.lpcOrder+1)) * 32768.0)
 	}
 	d.lagPrev = 100
+	d.prevLagIndex = 0
 	d.prevGainQ16 = 65536
 	d.prevGainIndex = 0
 	d.prevSignalType = SignalTypeUnvoiced

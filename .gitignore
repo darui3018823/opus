@@ -34,3 +34,8 @@ go.work.sum
 
 # Testdata
 testdata/
+
+# temp files
+diff.txt
+diff_1.txt
+req.py

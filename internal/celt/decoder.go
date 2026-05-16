@@ -11,9 +11,9 @@ import (
 // Decoder is a CELT decoder instance
 type Decoder struct {
 	mode     *Mode
-	mdct     *dsp.MDCT
+	celtMode *dsp.CELTMode
 	bandProc *BandProcessor
-	overlap  [][]float64 // Overlap buffer per channel
+	overlap  [][]float64 // Overlap buffer per channel (120 samples each)
 
 	// Decoder state — two-tap energy history required by RFC 6716 §5.1.2
 	prevEnergies  []float64 // Previous frame log-energies (ln domain)
@@ -32,28 +32,17 @@ func NewDecoder(frameSize, sampleRate, channels int) (*Decoder, error) {
 
 	mode := NewMode(frameSize, sampleRate, channels)
 
-	// MDCT size must be power of 2
-	// For CELT, we use the next power of 2 >= frameSize/2
-	mdctSize := 1
-	for mdctSize < frameSize {
-		mdctSize *= 2
-	}
-
-	mdct, err := dsp.NewMDCT(mdctSize)
-	if err != nil {
-		return nil, err
-	}
+	celtMode := dsp.NewCELTMode(frameSize, MaxOverlap, Window120[:])
 
 	d := &Decoder{
 		mode:     mode,
-		mdct:     mdct,
+		celtMode: celtMode,
 		bandProc: NewBandProcessor(mode),
 		overlap:  make([][]float64, channels),
 	}
 
-	// Initialize overlap buffers (size N, where MDCT outputs 2*N samples)
 	for i := 0; i < channels; i++ {
-		d.overlap[i] = make([]float64, mdctSize)
+		d.overlap[i] = make([]float64, MaxOverlap)
 	}
 
 	// Initialize energy history in log2-amplitude domain (matches libopus -28.0f).
@@ -128,15 +117,33 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 
 	d.bandProc.InterpolateBandEnergies()
 
-	// Decode band coefficients using PVQ
-	if err := d.decodeBandCoeffs(dec, totalBits); err != nil {
-		return nil, err
+	// Decode post-filter parameters (RFC 6716 §5.4.1) — BEFORE band coefficients.
+	// logp=3 per libopus; two sets for LM>1 (10ms/20ms frames).
+	pfPeriod, pfTaps, pfEnabled := DecodePostFilterParams(dec, totalBits, lm)
+
+	// Read allocation trim (7-bit ICDF, 11 symbols 0-10; default 5 = neutral).
+	allocTrim := 5
+	if dec.Tell()+6 <= totalBits {
+		allocTrim = dec.DecodeIcdf(TrimICDF[:], 7)
 	}
 
-	// Decode post-filter parameters (RFC 6716 §5.4.1)
-	// Post-filter params appear in the bitstream after energy, before PVQ
-	// in libopus — but our simplified pipeline reads them here.
-	pfPeriod, pfTaps, pfEnabled := DecodePostFilterParams(dec, d.mode.FrameSize)
+	// For stereo: read dual-stereo flag and intensity-stereo boundary.
+	// These bits must be consumed even if we don't fully use them.
+	intensity := 0
+	if d.mode.Channels == 2 {
+		if dec.Tell()+1 <= totalBits {
+			_ = dec.DecodeBitLogp(1) // dual_stereo flag
+		}
+		if dec.Tell()+1 <= totalBits {
+			intensity = int(dec.DecodeUint(uint32(numBands + 1)))
+		}
+	}
+	_ = intensity
+
+	// Decode band coefficients using PVQ
+	if err := d.decodeBandCoeffs(dec, totalBits, allocTrim); err != nil {
+		return nil, err
+	}
 
 	// Apply energy denormalization
 	d.bandProc.DenormalizeBands()
@@ -144,31 +151,24 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	// Assemble full MDCT spectrum
 	mdctCoeffs := d.bandProc.AssembleMDCT()
 
-	// Ensure we have enough coefficients for MDCT
-	mdctSize := d.mdct.Size()
-	if len(mdctCoeffs) < mdctSize {
-		extended := make([]float64, mdctSize)
-		copy(extended, mdctCoeffs)
-		mdctCoeffs = extended
-	} else if len(mdctCoeffs) > mdctSize {
-		mdctCoeffs = mdctCoeffs[:mdctSize]
+	// Trim/pad MDCT spectrum to exactly frameSize coefficients.
+	frameSize := d.mode.FrameSize
+	if len(mdctCoeffs) > frameSize {
+		mdctCoeffs = mdctCoeffs[:frameSize]
+	} else if len(mdctCoeffs) < frameSize {
+		ext := make([]float64, frameSize)
+		copy(ext, mdctCoeffs)
+		mdctCoeffs = ext
 	}
 
 	// Perform IMDCT for each channel
 	output := make([]float64, d.mode.FrameSize*d.mode.Channels)
 
 	for ch := 0; ch < d.mode.Channels; ch++ {
-		// IMDCT with overlap-add
-		samples, err := d.mdct.InverseOverlap(mdctCoeffs, d.overlap[ch])
-		if err != nil {
-			return nil, err
-		}
-
-		// Truncate or pad to frame size
-		samplesOut := samples
-		if len(samples) > d.mode.FrameSize {
-			samplesOut = samples[:d.mode.FrameSize]
-		}
+		// IMDCT (N=960, 2N-point DFT, small-overlap window)
+		y := d.celtMode.IMDCT(mdctCoeffs)
+		// Overlap-add with 120-sample tail
+		samplesOut := d.celtMode.InverseOverlapAdd(y, d.overlap[ch])
 
 		// Apply post-filter (RFC 6716 §5.4.1) if enabled
 		if pfEnabled {
@@ -194,47 +194,50 @@ func (d *Decoder) decodeBandEnergies(_ *entcode.Decoder) error {
 }
 
 // decodeBandCoeffs decodes PVQ-quantized band coefficients using bit allocation.
-// totalBits is the full packet bit count captured before any decoding.
-func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, totalBits int) error {
+// totalBits is the full packet bit count; allocTrim is the decoded alloc trim (0-10, default 5).
+func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, totalBits, allocTrim int) error {
 	if totalBits < 0 {
 		totalBits = 0
 	}
 
-	// Collect band energies for allocation
-	bandEnergies := make([]float64, d.mode.Bands.NumBands)
-	for i, band := range d.bandProc.bands {
-		bandEnergies[i] = band.Energy
+	numBands := d.mode.Bands.NumBands
+	lm := 3 // 20ms
+	ch := d.mode.Channels
+
+	// Compute bits remaining for PVQ after what's been consumed so far.
+	consumed := dec.Tell()
+	remaining := totalBits - consumed
+	if remaining < 0 {
+		remaining = 0
 	}
 
-	// Run bit allocation with full packet budget (mirrors encoder)
-	ba := NewBitAllocation(d.mode, totalBits)
-	if err := ba.Allocate(bandEnergies); err != nil {
-		return err
-	}
+	// Run libopus-style compute_allocation.
+	pulses, eBits := computeAllocation(numBands, lm, ch, allocTrim, remaining)
 
-	for i := 0; i < d.mode.Bands.NumBands; i++ {
+	// Decode PVQ per band.
+	for i := 0; i < numBands; i++ {
 		band := d.bandProc.bands[i]
-		pulses := ba.GetPulseCount(i)
+		k := pulses[i]
 
-		if pulses <= 0 || band.Size <= 0 {
+		if k <= 0 || band.Size <= 0 {
 			continue
 		}
-
-		if icwrs(band.Size, pulses) == 0 {
+		if icwrs(band.Size, k) == 0 {
 			continue
 		}
+		d.bandProc.DecodeBandCoeffs(dec, i, k)
+	}
 
-		// Decode using recursive PVQ splitting
-		d.bandProc.DecodeBandCoeffs(dec, i, pulses)
-
-		// Fine energy refinement
-		fineBits := ba.GetFineEnergy(i)
-		if fineBits > 0 {
-			fineRange := uint32(1) << uint(fineBits)
-			fineVal := int(dec.DecodeUint(fineRange))
-			// Center around zero
-			d.bandProc.ApplyFineEnergy(i, fineVal-int(fineRange/2))
+	// Fine energy refinement — raw bits from END of packet.
+	for i := numBands - 1; i >= 0; i-- {
+		fb := eBits[i]
+		if fb <= 0 {
+			continue
 		}
+		raw := dec.DecodeBits(uint(fb))
+		// Center: [0, 2^fb) → [-2^(fb-1), 2^(fb-1))
+		half := int(uint(1) << uint(fb-1))
+		d.bandProc.ApplyFineEnergy(i, int(raw)-half)
 	}
 
 	return nil

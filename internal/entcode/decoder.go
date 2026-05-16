@@ -10,12 +10,15 @@ package entcode
 // The decoder reads bytes and combines them using the EC_CODE_EXTRA
 // (7-bit) overlap scheme from libopus.
 type Decoder struct {
-	buf []byte
-	pos int    // read position in buf
-	rng uint32 // current range
-	dif uint32 // coded value complement (top-down)
-	rem int    // remainder bits from previous byte read
-	err error
+	buf       []byte
+	pos       int    // forward range-coded read position in buf
+	endOffs   int    // raw-bit bytes consumed from the end of buf
+	endWindow uint32 // raw-bit window, least-significant bits first
+	nendBits  uint   // number of valid bits in endWindow
+	rng       uint32 // current range
+	dif       uint32 // coded value complement (top-down)
+	rem       int    // remainder bits from previous byte read
+	err       error
 }
 
 // NewDecoder creates a new range decoder from encoded data.
@@ -42,8 +45,9 @@ func NewDecoder(data []byte) *Decoder {
 }
 
 // Tell returns the number of bits consumed so far.
+// Matches ec_tell: bits from start (range coder) + bits consumed from end (raw).
 func (dec *Decoder) Tell() int {
-	return dec.pos*8 - ILog(dec.rng)
+	return dec.pos*8 - ILog(dec.rng) + dec.endOffs*SymBits - int(dec.nendBits)
 }
 
 // Error returns any decoding error.
@@ -59,10 +63,18 @@ func (dec *Decoder) GetPos() int    { return dec.pos }
 
 // readByte reads one byte from the buffer, returning 0 past the end.
 func (dec *Decoder) readByte() byte {
-	if dec.pos < len(dec.buf) {
+	if dec.pos+dec.endOffs < len(dec.buf) {
 		b := dec.buf[dec.pos]
 		dec.pos++
 		return b
+	}
+	return 0
+}
+
+func (dec *Decoder) readByteFromEnd() byte {
+	if dec.pos+dec.endOffs < len(dec.buf) {
+		dec.endOffs++
+		return dec.buf[len(dec.buf)-dec.endOffs]
 	}
 	return 0
 }
@@ -201,15 +213,29 @@ func (dec *Decoder) DecodeUint(ft uint32) uint32 {
 	return s
 }
 
-// DecodeBits decodes raw bits through the range coder.
+// DecodeBits decodes raw bits from the end of the packet, matching ec_dec_bits.
 func (dec *Decoder) DecodeBits(nbits uint) uint32 {
-	val := uint32(0)
-	for i := int(nbits) - 1; i >= 0; i-- {
-		if dec.DecodeBitLogp(1) {
-			val |= 1 << uint(i)
-		}
+	if nbits == 0 {
+		return 0
 	}
-	return val
+	for dec.nendBits < nbits {
+		dec.endWindow |= uint32(dec.readByteFromEnd()) << dec.nendBits
+		dec.nendBits += SymBits
+	}
+	var mask uint32
+	if nbits >= 32 {
+		mask = ^uint32(0)
+	} else {
+		mask = (uint32(1) << nbits) - 1
+	}
+	ret := dec.endWindow & mask
+	if nbits >= 32 {
+		dec.endWindow = 0
+	} else {
+		dec.endWindow >>= nbits
+	}
+	dec.nendBits -= nbits
+	return ret
 }
 
 // DecodeBit decodes a single bit. prob is probability of false on 0-32768 scale.
@@ -252,5 +278,5 @@ func (dec *Decoder) DecodeGetCumu(ft uint32) uint32 {
 
 // BytesLeft returns remaining unread bytes.
 func (dec *Decoder) BytesLeft() int {
-	return len(dec.buf) - dec.pos
+	return len(dec.buf) - dec.pos - dec.endOffs
 }

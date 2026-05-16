@@ -27,12 +27,20 @@ func NewBandProcessor(mode *Mode) *BandProcessor {
 		bands: make([]*Band, mode.Bands.NumBands),
 	}
 
-	// Initialize bands
+	// BandStart/BandSizes are stored at LM=0 (120-sample) scale.
+	// For a frameSize-sample frame, M = frameSize/120 scales each bin count.
+	M := mode.FrameSize / 120
+	if M < 1 {
+		M = 1
+	}
+
 	for i := 0; i < mode.Bands.NumBands; i++ {
+		start := mode.Bands.BandStart[i] * M
+		size := mode.Bands.BandSizes[i] * M
 		bp.bands[i] = &Band{
-			Start:  mode.Bands.BandStart[i],
-			Size:   mode.Bands.BandSizes[i],
-			Coeffs: make([]float64, mode.Bands.BandSizes[i]),
+			Start:  start,
+			Size:   size,
+			Coeffs: make([]float64, size),
 		}
 	}
 

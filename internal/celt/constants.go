@@ -70,10 +70,14 @@ var (
 	}
 	
 	// Bands for 960-sample frames (20ms at 48kHz) - Most common
+	// Band boundaries from libopus eNBands48000[] = {0,1,2,...,100} (21 bands).
+	// BandSizes and BandStart are at LM=0 (2.5ms / 120-sample scale).
+	// At LM=3 (20ms), multiply by 8 to get actual MDCT bin counts.
+	// Total at LM=0: 100 bins; at LM=3: 800 coded bins out of 960.
 	Bands960 = &BandConfig{
 		NumBands:  21,
-		BandSizes: []int{1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 8, 8, 8, 16, 16, 32, 32},
-		BandStart: []int{0, 1, 2, 3, 4, 5, 6, 7, 9, 11, 13, 15, 19, 23, 27, 35, 43, 51, 67, 83, 115},
+		BandSizes: []int{1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 4, 4, 4, 6, 6, 8, 12, 18, 22},
+		BandStart: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 34, 40, 48, 60, 78},
 	}
 )
 

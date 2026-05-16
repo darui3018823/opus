@@ -56,7 +56,7 @@ var silkSignICDF = [6][7]uint8{
 }
 
 // silkLSBICDFDec — LSB coding iCDF (2 symbols: 0 or 1).
-var silkLSBICDFDec = [2]uint8{128, 0}
+var silkLSBICDFDec = [2]uint8{120, 0}
 
 // silkNLSFExtICDF — NLSF extension iCDF (7 values).
 // From silk_NLSF_EXT_iCDF in libopus tables_other.c
@@ -205,12 +205,13 @@ type Decoder struct {
 	prevGainQ16    int32   // previous gain (Q16) for delta coding
 	prevGainIndex  int8    // previous gain index for conditional coding
 	prevSignalType int     // previous signal type
+	firstFrame     bool    // true until the first decoded frame after reset
 
 	// LPC synthesis state: last lpcOrder samples
 	lpcState []int32 // Q14
 
-	// LTP (long-term prediction) state: circular buffer
-	ltpState []int32 // Q14, length maxLag + frameSize
+	// LTP (long-term prediction) state: decoded PCM history, one sample per entry.
+	ltpState []int32 // Q0, length maxLag + frameSize
 
 	// Random seed for excitation
 	randSeed int32
@@ -219,6 +220,13 @@ type Decoder struct {
 	plcCount   int
 	prevLPCQ12 []int16
 	prevOutput []int32 // Q14
+
+	// Stereo packets code mid and side as separate SILK channel states.
+	side                 *Decoder
+	stereoPredPrevQ13    [2]int32
+	stereoMid            [2]int16
+	stereoSide           [2]int16
+	prevDecodeOnlyMiddle bool
 }
 
 // NewDecoder creates a new SILK decoder with 20ms frame size.
@@ -270,6 +278,7 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 		prevGainQ16:    65536,
 		prevGainIndex:  0,
 		prevSignalType: SignalTypeUnvoiced,
+		firstFrame:     true,
 		lpcState:       make([]int32, lpcOrder),
 		ltpState:       make([]int32, maxLag+frameSize),
 		randSeed:       7818,
@@ -280,6 +289,14 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 	// Initialize prevNLSFQ15 to evenly spaced values
 	for i := 0; i < lpcOrder; i++ {
 		d.prevNLSFQ15[i] = int16((float64(i+1) / float64(lpcOrder+1)) * 32768.0)
+	}
+
+	if channels == 2 {
+		side, err := NewDecoderWithFrameMs(sampleRate, 1, frameMs)
+		if err != nil {
+			return nil, err
+		}
+		d.side = side
 	}
 
 	return d, nil
@@ -306,6 +323,10 @@ func (d *Decoder) DecodeMulti(packet []byte, nFrames int) ([]float64, error) {
 		nFrames = 1
 	}
 
+	if d.channels == 2 {
+		return d.decodeMultiStereo(packet, nFrames)
+	}
+
 	// Single-byte silence packet
 	if len(packet) == 1 && packet[0] == 0x00 {
 		result := make([]float64, d.frameSize*d.channels*nFrames)
@@ -325,10 +346,12 @@ func (d *Decoder) DecodeMulti(packet []byte, nFrames int) ([]float64, error) {
 	// Per libopus dec_API.c: decode VAD flags for all frames first, then LBRR flag
 	vadFlags := make([]uint32, nFrames)
 	for i := 0; i < nFrames; i++ {
-		vadFlags[i] = dec.DecodeBits(1)
+		if dec.DecodeBitLogp(1) {
+			vadFlags[i] = 1
+		}
 	}
 	// LBRR flag (1 bit for mono channel)
-	lbrrFlag := dec.DecodeBits(1)
+	lbrrFlag := dec.DecodeBitLogp(1)
 	_ = lbrrFlag
 
 	// Decode each frame sequentially
@@ -342,6 +365,205 @@ func (d *Decoder) DecodeMulti(packet []byte, nFrames int) ([]float64, error) {
 		allPCM = append(allPCM, pcm...)
 	}
 	return allPCM, nil
+}
+
+func (d *Decoder) decodeMultiStereo(packet []byte, nFrames int) ([]float64, error) {
+	if d.side == nil {
+		return nil, fmt.Errorf("missing SILK side-channel decoder")
+	}
+
+	if len(packet) == 1 && packet[0] == 0x00 {
+		return make([]float64, d.frameSize*d.channels*nFrames), nil
+	}
+	if len(packet) < 2 {
+		return d.concealPacketLoss()
+	}
+
+	dec := entcode.NewDecoder(packet)
+	if dec.Error() != nil {
+		return d.concealPacketLoss()
+	}
+
+	vadFlags := [2][]uint32{
+		make([]uint32, nFrames),
+		make([]uint32, nFrames),
+	}
+	lbrrFlags := [2]uint32{}
+	for ch := 0; ch < 2; ch++ {
+		for i := 0; i < nFrames; i++ {
+			if dec.DecodeBitLogp(1) {
+				vadFlags[ch][i] = 1
+			}
+		}
+		if dec.DecodeBitLogp(1) {
+			lbrrFlags[ch] = 1
+		}
+	}
+
+	// LBRR side data precedes regular frame data when present. The official
+	// vectors used here rarely exercise it, but consuming the per-channel flag
+	// symbols keeps the normal payload aligned for multi-frame stereo packets.
+	for ch := 0; ch < 2; ch++ {
+		if lbrrFlags[ch] == 0 || nFrames == 1 {
+			continue
+		}
+		if nFrames == 2 {
+			_ = dec.DecodeIcdf(silkLBRRFlags2ICDF[:], 8)
+		} else {
+			_ = dec.DecodeIcdf(silkLBRRFlags3ICDF[:], 8)
+		}
+	}
+
+	var allPCM []float64
+	for i := 0; i < nFrames; i++ {
+		predQ13 := decodeStereoPredQ13(dec)
+		decodeOnlyMiddle := false
+		if vadFlags[1][i] == 0 {
+			decodeOnlyMiddle = dec.DecodeIcdf(silkStereoOnlyCodeMidICDF[:], 8) != 0
+		}
+
+		mid, err := d.decodeFrameMono(dec, vadFlags[0][i], i > 0)
+		if err != nil {
+			mid, _ = d.concealPacketLoss()
+			if len(mid) == d.frameSize*2 {
+				tmp := make([]float64, d.frameSize)
+				for j := range tmp {
+					tmp[j] = mid[j*2]
+				}
+				mid = tmp
+			}
+		}
+
+		side := make([]float64, d.frameSize)
+		if !decodeOnlyMiddle {
+			sideConditional := i > 0 && !d.prevDecodeOnlyMiddle
+			pcm, err := d.side.decodeFrame(dec, vadFlags[1][i], sideConditional)
+			if err == nil {
+				copy(side, pcm)
+			}
+		}
+
+		allPCM = append(allPCM, d.stereoMSToLR(mid, side, predQ13)...)
+		d.prevDecodeOnlyMiddle = decodeOnlyMiddle
+	}
+	return allPCM, nil
+}
+
+func (d *Decoder) decodeFrameMono(dec *entcode.Decoder, vadFlag uint32, conditionalGain bool) ([]float64, error) {
+	channels := d.channels
+	d.channels = 1
+	pcm, err := d.decodeFrame(dec, vadFlag, conditionalGain)
+	d.channels = channels
+	return pcm, err
+}
+
+func decodeStereoPredQ13(dec *entcode.Decoder) [2]int32 {
+	var pred [2]int32
+	var ix [2][3]int
+
+	n := dec.DecodeIcdf(silkStereoPredJointICDF[:], 8)
+	ix[0][2] = n / 5
+	ix[1][2] = n - 5*ix[0][2]
+	for i := 0; i < 2; i++ {
+		ix[i][0] = dec.DecodeIcdf(silkUniform3ICDF[:], 8)
+		ix[i][1] = dec.DecodeIcdf(silkUniform5ICDF[:], 8)
+	}
+
+	for i := 0; i < 2; i++ {
+		idx := ix[i][0] + 3*ix[i][2]
+		if idx < 0 {
+			idx = 0
+		}
+		if idx >= len(silkStereoPredQuantQ13)-1 {
+			idx = len(silkStereoPredQuantQ13) - 2
+		}
+		lowQ13 := int32(silkStereoPredQuantQ13[idx])
+		stepQ13 := int32((int64(int32(silkStereoPredQuantQ13[idx+1])-lowQ13) * 6554) >> 16)
+		pred[i] = lowQ13 + stepQ13*int32(2*ix[i][1]+1)
+	}
+	pred[0] -= pred[1]
+	return pred
+}
+
+func floatToInt16Sample(v float64) int16 {
+	q := int32(math.Round(v * 32768.0))
+	if q > 32767 {
+		q = 32767
+	} else if q < -32768 {
+		q = -32768
+	}
+	return int16(q)
+}
+
+func clamp16(v int32) int16 {
+	if v > 32767 {
+		return 32767
+	}
+	if v < -32768 {
+		return -32768
+	}
+	return int16(v)
+}
+
+func rshiftRound(v int64, shift uint) int32 {
+	if shift == 0 {
+		return int32(v)
+	}
+	return int32((v + (int64(1) << (shift - 1))) >> shift)
+}
+
+func (d *Decoder) stereoMSToLR(mid, side []float64, predQ13 [2]int32) []float64 {
+	n := d.frameSize
+	x1 := make([]int16, n+2)
+	x2 := make([]int16, n+2)
+	copy(x1[:2], d.stereoMid[:])
+	copy(x2[:2], d.stereoSide[:])
+	for i := 0; i < n; i++ {
+		if i < len(mid) {
+			x1[i+2] = floatToInt16Sample(mid[i])
+		}
+		if i < len(side) {
+			x2[i+2] = floatToInt16Sample(side[i])
+		}
+	}
+	d.stereoMid[0], d.stereoMid[1] = x1[n], x1[n+1]
+	d.stereoSide[0], d.stereoSide[1] = x2[n], x2[n+1]
+
+	pred0Q13 := d.stereoPredPrevQ13[0]
+	pred1Q13 := d.stereoPredPrevQ13[1]
+	interpLen := 8 * d.fsKHz
+	if interpLen > n {
+		interpLen = n
+	}
+	denomQ16 := int32((1 << 16) / (8 * d.fsKHz))
+	delta0Q13 := rshiftRound(int64(predQ13[0]-d.stereoPredPrevQ13[0])*int64(denomQ16), 16)
+	delta1Q13 := rshiftRound(int64(predQ13[1]-d.stereoPredPrevQ13[1])*int64(denomQ16), 16)
+
+	for i := 0; i < n; i++ {
+		if i < interpLen {
+			pred0Q13 += delta0Q13
+			pred1Q13 += delta1Q13
+		} else {
+			pred0Q13 = predQ13[0]
+			pred1Q13 = predQ13[1]
+		}
+
+		sumQ11 := int64(int32(x1[i])+int32(x1[i+2])+(int32(x1[i+1])<<1)) << 9
+		sideQ8 := int64(int32(x2[i+1])) << 8
+		sumQ8 := sideQ8 + ((sumQ11 * int64(pred0Q13)) >> 16)
+		sumQ8 += ((int64(int32(x1[i+1])) << 11) * int64(pred1Q13)) >> 16
+		x2[i+1] = clamp16(rshiftRound(sumQ8, 8))
+	}
+	d.stereoPredPrevQ13 = predQ13
+
+	out := make([]float64, n*2)
+	for i := 0; i < n; i++ {
+		l := clamp16(int32(x1[i+1]) + int32(x2[i+1]))
+		r := clamp16(int32(x1[i+1]) - int32(x2[i+1]))
+		out[i*2] = float64(l) / 32768.0
+		out[i*2+1] = float64(r) / 32768.0
+	}
+	return out
 }
 
 // decodeFrame performs the full SILK frame decode per RFC 6716 §4.2 / libopus dec_API.c.
@@ -367,15 +589,18 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 	// silk_gains_dequant from libopus silk/gain_quant.c
 	// First subframe: 3 MSBs from gain_iCDF[signalType], 3 LSBs from uniform8.
 	gainsQ16 := make([]int32, d.nSubframes)
-	stIdx := signalType
-	if stIdx > 2 {
-		stIdx = 2
+	// libopus uses signalType>>1 to index silk_gain_iCDF: 0=inactive,1=voiced
+	stIdx := signalType >> 1
+	if stIdx >= len(silkGainICDF) {
+		stIdx = len(silkGainICDF) - 1
 	}
 
 	prevInd := int(d.prevGainIndex)
 	if conditionalGain {
+		// Conditional: delta-coded using silk_delta_gain_iCDF.
+		// ind[0] = icdf_result, then apply double-step formula.
 		deltaIdx := dec.DecodeIcdf(silkDeltaGainICDF[:], 8)
-		indTmp := deltaIdx + MinDeltaGainQuant
+		indTmp := deltaIdx + MinDeltaGainQuant // signed delta in [-6..8]
 		dblStepThresh := 2*MaxDeltaGainQuant - NLevelsQGain + prevInd
 		if indTmp > dblStepThresh {
 			prevInd += 2*indTmp - dblStepThresh
@@ -383,15 +608,11 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 			prevInd += indTmp
 		}
 	} else {
-		// Independent first gain: 3 MSBs from the signal-type table, 3 LSBs uniform.
-		gainIndex0MSB := dec.DecodeIcdf(silkGainICDF[stIdx][:], 8)
-		gainIndex0LSB := dec.DecodeIcdf(silkUniform8ICDF[:], 8)
-		gainIndex0 := gainIndex0MSB*8 + gainIndex0LSB
-		if gainIndex0 > prevInd-16 {
-			prevInd = gainIndex0
-		} else {
-			prevInd = prevInd - 16
-		}
+		// Independent: gain_iCDF gives lower 3 bits, uniform8 gives upper 3 bits.
+		// From libopus: ind[0] = gain_iCDF + LSHIFT(uniform8, 3)
+		gainLow := dec.DecodeIcdf(silkGainICDF[stIdx][:], 8)  // lower 3 bits (0..7)
+		gainHigh := dec.DecodeIcdf(silkUniform8ICDF[:], 8)    // upper 3 bits (0..7)
+		prevInd = gainLow + gainHigh*8
 	}
 	// Clamp to [0, N_LEVELS_QGAIN-1]
 	if prevInd < 0 {
@@ -435,6 +656,9 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 	interpFactor := 4 // default: no interpolation (use current frame NLSF)
 	if d.nSubframes == 4 {
 		interpFactor = dec.DecodeIcdf(silkNLSFInterpFactorICDF[:], 8)
+	}
+	if d.firstFrame {
+		interpFactor = 4
 	}
 
 	// Build LPC coefficients using libopus's 2-set approach from decode_parameters.c:
@@ -483,9 +707,13 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 		}
 		if decodeAbsoluteLagIndex {
 			lagIndex := dec.DecodeIcdf(silkPitchLagICDF[:], 8)
-			nLowBits := silkPitchLagLowBits(d.fsKHz)
-			lagLowBits := int(dec.DecodeBits(uint(nLowBits)))
-			lag = lagIndex*(d.fsKHz/2) + lagLowBits
+			lagLowBits := decodePitchLagLowBits(dec, d.fsKHz)
+			// libopus SILK_PITCH_LAG_LOW_BITS: 4 for 8kHz, 8 for others.
+			step := 8
+			if d.fsKHz == 8 {
+				step = 4
+			}
+			lag = lagIndex*step + lagLowBits
 		}
 		d.prevLagIndex = lag
 		minLag := PitchEstMinLagMs * d.fsKHz
@@ -540,7 +768,7 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 		}
 
 		if !conditionalGain {
-			ltpScaleIdx := dec.DecodeIcdf(silkUniform3ICDF[:], 8)
+			ltpScaleIdx := dec.DecodeIcdf(silkLTPScaleICDF[:], 8)
 			ltpScaleQ14 = silkLTPScalesTable[ltpScaleIdx]
 		} else {
 			ltpScaleQ14 = silkLTPScalesTable[0]
@@ -562,6 +790,7 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 	// ── 9. Update state ───────────────────────────────────────────────────────
 	copy(d.prevNLSFQ15, nlsfQ15)
 	d.prevSignalType = signalType
+	d.firstFrame = false
 	d.plcCount = 0
 
 	// Convert int16 PCM → float64 normalized to [-1, 1]
@@ -581,18 +810,13 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 	return result, nil
 }
 
-// silkPitchLagLowBits returns the number of low bits for the pitch lag.
-func silkPitchLagLowBits(fsKHz int) int {
-	switch fsKHz {
-	case 8:
-		return 1
-	case 12:
-		return 1
-	case 16:
-		return 2
-	default:
-		return 2
+// decodePitchLagLowBits decodes the pitch lag low bits, matching libopus
+// silk/decode_indices.c which uses uniform4 for 8 kHz and uniform8 for others.
+func decodePitchLagLowBits(dec *entcode.Decoder, fsKHz int) int {
+	if fsKHz == 8 {
+		return dec.DecodeIcdf(silkUniform4ICDF[:], 8) // 4 values, step=4
 	}
+	return dec.DecodeIcdf(silkUniform8ICDF[:], 8) // 8 values, step=8
 }
 
 // silkLog2Lin converts a log2-scale input (Q7) to a linear scale output.
@@ -641,7 +865,7 @@ func silkLog2Lin(inLogQ7 int32) int32 {
 func silkGainDequantQ16(prevInd int) int32 {
 	const (
 		offset      = int32(2090)     // (2*128/6) + 16*128
-		invScaleQ16 = int32(0x1D1C71) // (65536 * ((88-2)*128/6)) / (64-1)
+		invScaleQ16 = int32(0x1D1C71) // (65536 * (((88-2)*128)/6)) / (64-1)
 	)
 	// silk_SMULWB(INV_SCALE_Q16, prev_ind): inv_scale * prev_ind >> 16
 	logQ7 := (invScaleQ16 * int32(prevInd)) >> 16
@@ -650,6 +874,36 @@ func silkGainDequantQ16(prevInd int) int32 {
 		logQ7 = 3967
 	}
 	return silkLog2Lin(logQ7)
+}
+
+func inverseGainQ31(gainQ16 int32) int32 {
+	if gainQ16 <= 0 {
+		return math.MaxInt32
+	}
+	v := (int64(1) << 47) / int64(gainQ16)
+	if v > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int32(v)
+}
+
+func lpcAnalysisResidualQ0(samples []int32, idx int, aQ12 []int16, order int) int32 {
+	pred := int64(0)
+	for j := 0; j < order; j++ {
+		past := idx - j - 1
+		if past < 0 {
+			break
+		}
+		pred += int64(samples[past]) * int64(aQ12[j])
+	}
+	res := samples[idx] - int32(pred>>12)
+	if res > 32767 {
+		return 32767
+	}
+	if res < -32768 {
+		return -32768
+	}
+	return res
 }
 
 // decodeNLSF decodes NLSF values from the range coder.
@@ -913,32 +1167,34 @@ func nlsfToLPCLibopus(nlsfQ15 []int16, order int) []int16 {
 	nlsf2APolyFindPoly(P, cLSF, halfOrder)
 	nlsf2APolyFindPoly(Q, cLSF[1:], halfOrder)
 
-	// Combine: a[k] = P[k] + P[k-1] + Q[k] - Q[k-1] for k=1..order
-	// Convert from QA to Q12 (shift right by QA-12=4, with rounding)
+	// Combine P and Q into LPC coefficients, matching libopus silk/NLSF2A.c:
+	//   for k = 0..halfOrder-1:
+	//     Ptmp = P[k+1] + P[k]
+	//     Qtmp = Q[k+1] - Q[k]
+	//     a[k]         = -RSHIFT_ROUND(Ptmp + Qtmp, shift)  (shift = 2*QA+1-12 = 21)
+	//     a[order-1-k] = -RSHIFT_ROUND(Ptmp - Qtmp, shift)
+	const shift = 2*QA + 1 - 12 // = 21
+	round := int64(1) << (shift - 1)
 	coeffsQ12 := make([]int16, order)
-	for k := 1; k <= order; k++ {
-		pK := int64(0)
-		pKm1 := int64(0)
-		qK := int64(0)
-		qKm1 := int64(0)
-		if k <= halfOrder {
-			pK = int64(P[k])
-			qK = int64(Q[k])
+	for k := 0; k < halfOrder; k++ {
+		Ptmp := int64(P[k+1]) + int64(P[k])
+		Qtmp := int64(Q[k+1]) - int64(Q[k])
+
+		a0 := -((Ptmp + Qtmp + round) >> shift)
+		a1 := -((Ptmp - Qtmp + round) >> shift)
+
+		if a0 > 32767 {
+			a0 = 32767
+		} else if a0 < -32768 {
+			a0 = -32768
 		}
-		if k-1 >= 0 && k-1 <= halfOrder {
-			pKm1 = int64(P[k-1])
-			qKm1 = int64(Q[k-1])
+		if a1 > 32767 {
+			a1 = 32767
+		} else if a1 < -32768 {
+			a1 = -32768
 		}
-		sumQA := pK + pKm1 + qK - qKm1
-		// Convert QA → Q12: shift right by (QA-12)=4, round
-		val := (sumQA + (1 << 3)) >> 4
-		if val > 32767 {
-			val = 32767
-		}
-		if val < -32768 {
-			val = -32768
-		}
-		coeffsQ12[k-1] = int16(val)
+		coeffsQ12[k] = int16(a0)
+		coeffsQ12[order-1-k] = int16(a1) // libopus: a[order-k-1]
 	}
 	return coeffsQ12
 }
@@ -1217,15 +1473,15 @@ func (d *Decoder) synthesize(
 	// applies gain adjustment there, then fills [LPC_order..LPC_order+subfr_length-1].
 	maxLag := PitchEstMaxLagMs * d.fsKHz
 
-	// sLTP_Q15 buffer for LTP prediction (voiced frames).
-	ltpBufLen := maxLag + 5 + d.frameSize
-	sLTPQ15 := make([]int32, ltpBufLen)
-	// Pre-fill history from saved LTP state (Q14 << 1 ≈ Q15).
+	// sLTP_Q15 buffer for LTP prediction (voiced frames). The persistent LTP
+	// history stores decoded PCM; voiced subframes re-whiten it with the active
+	// LPC coefficients before prediction, matching silk_decode_core.
 	ltpStateLen := len(d.ltpState)
-	for i := 0; i < ltpStateLen && 5+i < ltpBufLen; i++ {
-		sLTPQ15[5+i] = d.ltpState[i] << 1
-	}
-	sLTPBufIdx := ltpBufLen - d.frameSize // first write position for current frame
+	ltpBufLen := ltpStateLen + d.frameSize
+	sLTPQ15 := make([]int32, ltpBufLen)
+	outBufQ0 := make([]int32, ltpBufLen)
+	copy(outBufQ0, d.ltpState)
+	sLTPBufIdx := ltpStateLen // first write position for current frame
 
 	prevGainQ16 := d.prevGainQ16
 	if prevGainQ16 == 0 {
@@ -1267,6 +1523,33 @@ func (d *Decoder) synthesize(
 			lag = maxLag
 		}
 
+		if signalType == SignalTypeVoiced {
+			// invGain = (1<<31)/gainQ16 — silk_INVERSE32_varQ(gain,31) gives Q31.
+			// SMULWB(invGain_Q31, pcm) = (invGain*pcm)>>16 gives Q15 residual.
+			invGain := int32(math.MaxInt32)
+			if gainsQ16[sf] > 0 {
+				v64 := (int64(1) << 31) / int64(gainsQ16[sf])
+				if v64 <= math.MaxInt32 {
+					invGain = int32(v64)
+				}
+			}
+			if sf == 0 {
+				// First subframe: RSHIFT(SMULWB(invGain_Q31, ltpScale_Q14), 1) → Q31×Q14>>17.
+				invGain = int32((int64(invGain) * int64(ltpScaleQ14)) >> 17)
+			}
+			rewhiteLen := lag + 2
+			if rewhiteLen > sLTPBufIdx {
+				rewhiteLen = sLTPBufIdx
+			}
+			// Re-whiten: approximate excitation = pcm * invGain (not LPC residual).
+			// Matches libopus: sLTP_Q15[i] = silk_SMULWB(invGainQ16, xq[i]).
+			for i := 0; i < rewhiteLen; i++ {
+				idx := sLTPBufIdx - i - 1
+				pcm := outBufQ0[idx]
+				sLTPQ15[idx] = int32((int64(invGain) * int64(pcm)) >> 16)
+			}
+		}
+
 		for i := 0; i < d.subfrmLen; i++ {
 			presQ14 := excQ14[start+i]
 
@@ -1282,11 +1565,12 @@ func (d *Decoder) synthesize(
 					}
 				}
 				presQ14 += ltpPredQ13 << 1
+				sLTPQ15[sLTPBufIdx] = presQ14 << 1
+				sLTPBufIdx++
 			}
 
-			// LPC synthesis: LPC_pred_Q10 = sum(SMULWB(sLPC_Q14, A_Q12)) → Q10
+			// LPC synthesis: LPC_pred_Q10 = sum(SMULWB(sLPC_Q14, A_Q12)) -> Q10.
 			// Then sLPC_Q14 = pres_Q14 + (LPC_pred_Q10 << 4).
-			// No initial bias — matches libopus decode_core.c exactly.
 			lpcPredQ10 := int32(0)
 			for j := 0; j < d.lpcOrder; j++ {
 				lpcPredQ10 += int32((int64(subfrmBuf[d.lpcOrder+i-j-1]) * int64(lpc[j])) >> 16)
@@ -1300,23 +1584,17 @@ func (d *Decoder) synthesize(
 			subfrmBuf[d.lpcOrder+i] = v
 			synthQ14[start+i] = v
 
-			// LTP state update for voiced frames.
-			if signalType == SignalTypeVoiced {
-				if sLTPBufIdx < ltpBufLen {
-					sLTPQ15[sLTPBufIdx] = v << 1
-				}
-				sLTPBufIdx++
-			}
-
-			// Output: silk_SMULWW(v, gainQ10) >> 16 = Q8; silk_RSHIFT_ROUND(Q8, 8) = Q0.
-			q8 := int32((int64(v) * int64(gainQ10)) >> 16)
-			pxq := (q8 + 128) >> 8
+			// Output: libopus silk_RSHIFT_ROUND(silk_SMULWW(sLPC_Q14, gainQ10), 12)
+			// SMULWW(a,b) = (a*b)>>16; RSHIFT_ROUND(x,12) = (x+2048)>>12.
+			smulww := int32((int64(v) * int64(gainQ10)) >> 16)
+			pxq := (smulww + 2048) >> 12
 			if pxq > 32767 {
 				pxq = 32767
 			} else if pxq < -32768 {
 				pxq = -32768
 			}
 			output[start+i] = int16(pxq)
+			outBufQ0[ltpStateLen+start+i] = pxq
 		}
 
 		// Roll the buffer: copy last lpcOrder synthesized samples to the history window.
@@ -1326,10 +1604,9 @@ func (d *Decoder) synthesize(
 	// Save LPC state (the historical window of the last subframe).
 	copy(d.lpcState, subfrmBuf[:d.lpcOrder])
 
-	// Update LTP state ring buffer with synthesized Q14 values.
+	// Update LTP state ring buffer with decoded PCM samples.
 	if d.frameSize <= ltpStateLen {
-		copy(d.ltpState, d.ltpState[d.frameSize:])
-		copy(d.ltpState[ltpStateLen-d.frameSize:], synthQ14)
+		copy(d.ltpState, outBufQ0[d.frameSize:])
 	}
 
 	d.prevGainQ16 = prevGainQ16
@@ -1402,6 +1679,7 @@ func (d *Decoder) Reset() {
 	d.prevGainQ16 = 65536
 	d.prevGainIndex = 0
 	d.prevSignalType = SignalTypeUnvoiced
+	d.firstFrame = true
 	for i := range d.lpcState {
 		d.lpcState[i] = 0
 	}
@@ -1410,6 +1688,34 @@ func (d *Decoder) Reset() {
 	}
 	d.randSeed = 7818
 	d.plcCount = 0
+	d.stereoPredPrevQ13 = [2]int32{}
+	d.stereoMid = [2]int16{}
+	d.stereoSide = [2]int16{}
+	d.prevDecodeOnlyMiddle = false
+	if d.side != nil {
+		d.side.Reset()
+	}
+}
+
+// CopyPrimaryStateFrom copies the mono/mid-channel decoder state from src.
+// Stereo side-channel and M/S predictor state are intentionally left intact.
+func (d *Decoder) CopyPrimaryStateFrom(src *Decoder) {
+	if src == nil {
+		return
+	}
+	copy(d.prevNLSFQ15, src.prevNLSFQ15)
+	d.lagPrev = src.lagPrev
+	d.prevLagIndex = src.prevLagIndex
+	d.prevGainQ16 = src.prevGainQ16
+	d.prevGainIndex = src.prevGainIndex
+	d.prevSignalType = src.prevSignalType
+	d.firstFrame = src.firstFrame
+	copy(d.lpcState, src.lpcState)
+	copy(d.ltpState, src.ltpState)
+	d.randSeed = src.randSeed
+	d.plcCount = src.plcCount
+	copy(d.prevLPCQ12, src.prevLPCQ12)
+	copy(d.prevOutput, src.prevOutput)
 }
 
 // DequantizeSubframeGains dequantizes subframe gain indices (API compatibility).

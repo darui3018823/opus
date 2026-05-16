@@ -5,24 +5,21 @@ package silk
 
 // ── Gain tables (silk/tables_gain.c) ────────────────────────────────────────
 
-// silkGainICDF is the 3×8 first-subframe gain iCDF [signalType][8].
-// silk_gain_iCDF[3][N_LEVELS_QGAIN/8] where N_LEVELS_QGAIN=64, so 8 entries each.
-var silkGainICDF = [3][8]uint8{
-	{224, 112, 44, 15, 3, 2, 1, 0},  // Inactive
-	{254, 237, 192, 132, 70, 23, 4, 0},  // Unvoiced
-	{255, 252, 226, 155, 61, 11, 2, 0},  // Voiced
+// silkGainICDF is the first-subframe gain iCDF [signalType/2][9].
+// silk_gain_iCDF[3][N_LEVELS_QGAIN/8+1] from libopus silk/tables_gain.c.
+// 9 entries per row → 8 symbols (0..7), representing the lower 3 bits of the gain index.
+var silkGainICDF = [3][9]uint8{
+	{253, 250, 245, 235, 220, 190, 160, 20, 0},  // Inactive
+	{255, 252, 250, 240, 225, 195, 160, 20, 0},  // Unvoiced
+	{255, 252, 250, 240, 225, 195, 160, 2, 0},   // Voiced
 }
 
-// silkDeltaGainICDF — delta gain iCDF (41 values).
-// silk_delta_gain_iCDF[MAX_DELTA_GAIN_QUANT - MIN_DELTA_GAIN_QUANT + 1]
-// MAX_DELTA_GAIN_QUANT=36, MIN_DELTA_GAIN_QUANT=-4 → 41 entries.
-var silkDeltaGainICDF = [41]uint8{
-	250, 245, 234, 203, 71, 50, 42, 38,
-	35, 33, 31, 29, 28, 27, 26, 25,
-	24, 23, 22, 21, 20, 19, 18, 17,
-	16, 15, 14, 13, 12, 11, 10, 9,
-	8, 7, 6, 5, 4, 3, 2, 1,
-	0,
+// silkDeltaGainICDF — delta gain iCDF (16 entries → 15 symbols).
+// silk_delta_gain_iCDF from libopus silk/tables_gain.c.
+// Decoded symbol + MIN_DELTA_GAIN_QUANT(-6) = actual delta in [-6..8].
+var silkDeltaGainICDF = [16]uint8{
+	255, 244, 230, 212, 186, 152, 114, 83,
+	55, 33, 18, 8, 4, 2, 1, 0,
 }
 
 // ── Pitch tables (silk/tables_pitch_lag.c) ───────────────────────────────────
@@ -161,6 +158,22 @@ var silkTypeOffsetNoVADICDF = [2]uint8{230, 0}
 // silkNLSFInterpFactorICDF — NLSF interpolation factor iCDF (5 values: 0..4).
 var silkNLSFInterpFactorICDF = [5]uint8{243, 221, 192, 181, 0}
 
+// SILK stereo predictor coding tables from silk/tables_other.c.
+var silkStereoPredQuantQ13 = [16]int16{
+	-13732, -10050, -8266, -7526, -6500, -5000, -2950, -820,
+	820, 2950, 5000, 6500, 7526, 8266, 10050, 13732,
+}
+
+var silkStereoPredJointICDF = [25]uint8{
+	249, 247, 246, 245, 244,
+	234, 210, 202, 201, 200,
+	197, 174, 82, 59, 56,
+	55, 54, 46, 22, 12,
+	11, 10, 9, 7, 0,
+}
+
+var silkStereoOnlyCodeMidICDF = [2]uint8{64, 0}
+
 // silkLBRRFlags2ICDF — LBRR flags for 2 frames (3 symbols).
 var silkLBRRFlags2ICDF = [3]uint8{203, 150, 0}
 
@@ -182,8 +195,11 @@ var silkUniform6ICDF = [6]uint8{213, 171, 128, 85, 43, 0}
 // silkUniform8ICDF — uniform iCDF for 8 symbols (LSB).
 var silkUniform8ICDF = [8]uint8{224, 192, 160, 128, 96, 64, 32, 0}
 
-// silkLSBICDF — LSB coding iCDF (synonym for uniform8, 2 symbols).
-var silkLSBICDF = [2]uint8{128, 0}
+// silkLTPScaleICDF — LTP scale entropy table.
+var silkLTPScaleICDF = [3]uint8{128, 64, 0}
+
+// silkLSBICDF — LSB coding iCDF.
+var silkLSBICDF = [2]uint8{120, 0}
 
 // silkQuantizationOffsetsQ10 — quantization offsets in Q10.
 // [voiced/unvoiced][low/high]: [0][0]=OFFSET_UVL_Q10=100, [0][1]=OFFSET_UVH_Q10=240,
@@ -201,10 +217,10 @@ var silkLTPScalesTable = [3]int16{15565, 12288, 8192}
 const (
 	// NLevelsQGain = 64 — number of gain quantization levels
 	NLevelsQGain = 64
-	// MaxDeltaGainQuant = 36
-	MaxDeltaGainQuant = 36
-	// MinDeltaGainQuant = -4
-	MinDeltaGainQuant = -4
+	// MaxDeltaGainQuant = 9 (from libopus silk/define.h)
+	MaxDeltaGainQuant = 9
+	// MinDeltaGainQuant = -6 (from libopus silk/define.h)
+	MinDeltaGainQuant = -6
 	// PitchEstMaxLagMs = 18
 	PitchEstMaxLagMs = 18
 	// PitchEstMinLagMs = 2

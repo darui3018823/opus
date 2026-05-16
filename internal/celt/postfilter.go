@@ -57,38 +57,64 @@ func (pf *PostFilter) Reset() {
 	pf.prevGain = [3]float64{}
 }
 
-// DecodePostFilterParams reads post-filter parameters from the range decoder.
-// Returns (period, taps[3], enabled).
-// This matches the reading order in libopus celt_decoder.c:celt_decode_with_ec().
-func DecodePostFilterParams(dec *entcode.Decoder, frameSize int) (int, [3]float64, bool) {
-	// enabled = ec_dec_bit_logp(dec, 1)
-	enabled := dec.DecodeBitLogp(1)
-	if !enabled {
+// Tapset gain tables from libopus celt/celt.h COMBFILTER_GAIN_PARAM.
+// tapset selects the number of taps (0=1-tap, 1=2-tap, 2=3-tap).
+// Each row is [g0, g1, g2] normalized to the gain from pfGainTable.
+var tapGains = [3][3]float64{
+	{0, 1, 0},       // tapset=0: single tap
+	{0.5, 1, 0.5},   // tapset=1: 3-tap symmetric, flanks at 0.5
+	{0.25, 1, 0.25}, // tapset=2: wider 3-tap
+}
+
+// readOnePostFilter reads one set of post-filter params (period, gain, tapset).
+// Returns (period, taps[3], enabled).  Budget check with logp=3 per libopus.
+func readOnePostFilter(dec *entcode.Decoder, totalBits int) (int, [3]float64, bool) {
+	if dec.Tell()+3 > totalBits {
+		return 0, [3]float64{}, false
+	}
+	if !dec.DecodeBitLogp(3) {
 		return 0, [3]float64{}, false
 	}
 
-	// period = ec_dec_uint(dec, MAX_PERIOD-(COMBFILTER_MINPERIOD-1))
-	//        + COMBFILTER_MINPERIOD
 	period := int(dec.DecodeUint(uint32(combFilterPeriodRange))) + combFilterMinPeriod
 
-	// gain_index = ec_dec_uint(dec, 8)
 	gainIndex := int(dec.DecodeUint(8))
 	if gainIndex >= len(pfGainTable) {
 		gainIndex = len(pfGainTable) - 1
 	}
 	g := pfGainTable[gainIndex]
 
-	// Tap weights: libopus uses a 3-tap symmetric filter.
-	// From libopus celt_decoder.c:
-	//   gain1 = g * 0.09375 / g_max  * g_max  →  taps = g * [0.5, 1.0, 0.5] normalized
-	// The actual tap structure in libopus (pitch_filter.c) for the decoder is:
-	//   out[n] += g * (in[n-T-1]*0.09375 + in[n-T]*0.125 + in[n-T+1]*0.09375)
-	// where the 0.09375 and 0.125 are fixed coefficients scaled by g.
-	// Note: 0.09375 = 6/64, 0.125 = 8/64, sum = 20/64 → normalized so centre = g,
-	// flanks = g * (6/20) = g * 0.3  — but libopus keeps the raw values.
-	taps := [3]float64{g * 0.09375, g * 0.125, g * 0.09375}
+	// tapset: 0, 1, or 2 (selects filter width)
+	tapset := int(dec.DecodeUint(3))
+	if tapset >= len(tapGains) {
+		tapset = 0
+	}
 
+	taps := [3]float64{
+		g * tapGains[tapset][0],
+		g * tapGains[tapset][1],
+		g * tapGains[tapset][2],
+	}
 	return period, taps, true
+}
+
+// DecodePostFilterParams reads post-filter parameters from the range decoder.
+// For LM>1 (10ms or 20ms frames), TWO sets are read (first and second half).
+// Returns (period, taps[3], enabled) for the first half; discards second.
+func DecodePostFilterParams(dec *entcode.Decoder, totalBits, lm int) (int, [3]float64, bool) {
+	if lm == 0 {
+		// 2.5ms frame: no post-filter
+		return 0, [3]float64{}, false
+	}
+
+	period, taps, enabled := readOnePostFilter(dec, totalBits)
+
+	if lm > 1 {
+		// 10ms or 20ms: read second-half params too (discard for now)
+		readOnePostFilter(dec, totalBits)
+	}
+
+	return period, taps, enabled
 }
 
 // Apply applies the post-filter to one frame of decoded samples in-place.

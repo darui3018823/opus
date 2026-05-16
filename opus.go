@@ -228,8 +228,11 @@ type Decoder struct {
 	sampleRate int
 	channels   int
 
-	// CELT decoder (always operates at 48kHz internally)
-	celtDecoder *celt.Decoder
+	// CELT decoders (always operate at 48kHz internally).
+	// celtDecoder handles stereo (or mono when output is mono).
+	// celtDecoderMono is non-nil only when d.channels==2; used for mono CELT packets.
+	celtDecoder     *celt.Decoder
+	celtDecoderMono *celt.Decoder
 
 	// SILK decoders indexed by [rateIdx 0-2][frameIdx 0=10ms,1=20ms][chIdx 0=mono,1=stereo].
 	// rateIdx: 0=8kHz, 1=12kHz, 2=16kHz
@@ -286,6 +289,15 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 		celtDecoder:       celtDec,
 		frameSize:         frameSize,
 		internalFrameSize: internalFrameSize,
+	}
+
+	// When output is stereo, also keep a mono CELT decoder for mono packets.
+	if channels == 2 {
+		celtDecMono, err := celt.NewDecoder(celt.FrameSize20ms, 48000, 1)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create mono CELT decoder: %w", err)
+		}
+		dec.celtDecoderMono = celtDecMono
 	}
 
 	// Pre-create SILK decoders for all 3 rates × 2 frame durations × 2 channel configs
@@ -565,9 +577,20 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 		return nil, fmt.Errorf("failed to split frames: %w", err)
 	}
 
+	pktChannels := 1
+	if stereo {
+		pktChannels = 2
+	}
+
+	// Select the CELT decoder that matches the packet's channel count.
+	activeCeltDec := d.celtDecoder
+	if pktChannels == 1 && d.celtDecoderMono != nil {
+		activeCeltDec = d.celtDecoderMono
+	}
+
 	var allPCM []float64
 	for _, frame := range frames {
-		pcm, err := d.celtDecoder.Decode(frame)
+		pcm, err := activeCeltDec.Decode(frame)
 		if err != nil {
 			return nil, fmt.Errorf("CELT decoding failed: %w", err)
 		}
@@ -576,8 +599,8 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 		if d.celtResampler != nil {
 			pcm = d.celtResampler.Process(pcm)
 		}
-		// Adjust channels from CELT output to target
-		pcm = adjustChannels(pcm, d.channels, d.channels)
+		// Convert packet channels → output channels
+		pcm = adjustChannels(pcm, pktChannels, d.channels)
 		// Compute expected frame size at output rate
 		targetLen := celtFrameSamples(config, d.sampleRate) * d.channels
 		pcm = padOrTrim(pcm, targetLen)
@@ -667,120 +690,16 @@ func splitSILKOpusFrames(payload []byte, countCode int) ([][]byte, error) {
 		// encoding both frames sequentially (VAD bits for both frames precede both).
 		return [][]byte{payload}, nil
 	case 2:
-		// Two Opus frames with length prefix for first frame (RFC 6716 §3.2.3)
-		if len(payload) < 1 {
-			return makeEmpty(2), nil
-		}
-		n1 := int(payload[0])
-		payload = payload[1:]
-		if n1 >= 252 {
-			if len(payload) < 1 {
-				return [][]byte{payload, {}}, nil
-			}
-			n1 = int(payload[0])*4 + n1
-			payload = payload[1:]
-		}
-		if n1 > len(payload) {
-			n1 = len(payload)
-		}
-		return [][]byte{payload[:n1], payload[n1:]}, nil
+		// Two SILK Opus frames share one range-coded stream after the
+		// self-delimiting length header.
+		stream, _ := silkCode2Stream(payload)
+		return [][]byte{stream}, nil
 	case 3:
-		// N Opus frames: use standard code-3 parsing (RFC 6716 §3.2.5)
-		if len(payload) < 1 {
-			return makeEmpty(1), nil
+		stream, _, err := silkCode3Stream(payload)
+		if err != nil {
+			return makeEmpty(1), err
 		}
-		frameCount := int(payload[0] & 0x3F)
-		vbr := (payload[0] & 0x80) != 0
-		padding := (payload[0] & 0x40) != 0
-		payload = payload[1:]
-
-		if frameCount < 1 {
-			frameCount = 1
-		}
-		// Note: RFC 6716 specifies max 48 frames, but we accept up to 63 for robustness.
-
-		// Skip padding bytes (at the end of the packet payload)
-		if padding {
-			if len(payload) < 1 {
-				return makeEmpty(frameCount), nil
-			}
-			padLen := int(payload[0])
-			payload = payload[1:]
-			if padLen == 255 {
-				if len(payload) < 1 {
-					return makeEmpty(frameCount), nil
-				}
-				padLen += int(payload[0]) - 1
-				payload = payload[1:]
-			}
-			if padLen >= len(payload) {
-				// All data is padding: N empty streams
-				return makeEmpty(frameCount), nil
-			}
-			payload = payload[:len(payload)-padLen]
-		}
-
-		if vbr {
-			// VBR: first N-1 frame sizes are encoded as self-delimiting lengths (RFC 6716 §3.2.5)
-			frames := make([][]byte, frameCount)
-			for i := 0; i < frameCount-1; i++ {
-				if len(payload) < 1 {
-					// No more data: fill remaining with empty streams
-					for j := i; j < frameCount; j++ {
-						frames[j] = []byte{}
-					}
-					return frames, nil
-				}
-				n := int(payload[0])
-				payload = payload[1:]
-				if n >= 252 {
-					if len(payload) < 1 {
-						frames[i] = []byte{}
-						for j := i + 1; j < frameCount; j++ {
-							frames[j] = []byte{}
-						}
-						return frames, nil
-					}
-					n = int(payload[0])*4 + n
-					payload = payload[1:]
-				}
-				if n > len(payload) {
-					n = len(payload)
-				}
-				frames[i] = payload[:n]
-				payload = payload[n:]
-			}
-			// Last frame gets the remaining payload
-			frames[frameCount-1] = payload
-			return frames, nil
-		}
-
-		// CBR: frames are split as evenly as possible (RFC 6716 §3.2.5)
-		// First R frames get (frameSize+1) bytes, remaining frames get frameSize bytes,
-		// where frameSize = len(payload)/frameCount and R = len(payload)%frameCount.
-		if len(payload) == 0 {
-			return makeEmpty(frameCount), nil
-		}
-		frameSize := len(payload) / frameCount
-		remainder := len(payload) % frameCount
-		frames := make([][]byte, frameCount)
-		offset := 0
-		for i := 0; i < frameCount; i++ {
-			size := frameSize
-			if i < remainder {
-				size++
-			}
-			if offset+size > len(payload) {
-				size = len(payload) - offset
-			}
-			if offset >= len(payload) {
-				frames[i] = []byte{}
-			} else {
-				frames[i] = payload[offset : offset+size]
-			}
-			offset += size
-		}
-		return frames, nil
+		return [][]byte{stream}, nil
 	default:
 		return [][]byte{payload}, nil
 	}
@@ -874,6 +793,13 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		return nil, fmt.Errorf("SILK decoder not initialized for rate=%dkHz frameMs=%d ch=%d", rateKHz, frameDurationMs, pktChannels)
 	}
 	info := d.silkDecoders[ri][fi][ci]
+	var monoPeer *silkRateInfo
+	var stereoPeer *silkRateInfo
+	monoPeer = d.silkDecoders[ri][fi][0]
+	stereoPeer = d.silkDecoders[ri][fi][1]
+	if pktChannels == 2 && monoPeer != nil && monoPeer.dec != nil {
+		info.dec.CopyPrimaryStateFrom(monoPeer.dec)
+	}
 
 	// For code-0 and code-1: entire payload is ONE SILK stream with all Opus frames.
 	// For code-3: strip only the Opus code-3 header/padding; the remaining
@@ -947,6 +873,12 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		allPCM = append(allPCM, pcm...)
 	}
 
+	if pktChannels == 1 && stereoPeer != nil && stereoPeer.dec != nil {
+		stereoPeer.dec.CopyPrimaryStateFrom(info.dec)
+	} else if pktChannels == 2 && monoPeer != nil && monoPeer.dec != nil {
+		monoPeer.dec.CopyPrimaryStateFrom(info.dec)
+	}
+
 	return allPCM, nil
 }
 
@@ -989,6 +921,9 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 // Reset resets the decoder state
 func (d *Decoder) Reset() error {
 	d.celtDecoder.Reset()
+	if d.celtDecoderMono != nil {
+		d.celtDecoderMono.Reset()
+	}
 	for ri := range d.silkDecoders {
 		for fi := range d.silkDecoders[ri] {
 			for ci := range d.silkDecoders[ri][fi] {

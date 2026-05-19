@@ -103,7 +103,8 @@ func (dec *Decoder) DecodeLaplace(fs uint32, decay int) int {
 		for fs > laplaceMinp && fm >= fl+2*fs {
 			fs *= 2
 			fl += fs
-			fs = uint32(int64(fs-2*laplaceMinp)*int64(decay))>>15 + laplaceMinp
+			fs = uint32(int64(fs-2*laplaceMinp)*int64(decay)) >> 15
+			fs += laplaceMinp
 			val++
 		}
 

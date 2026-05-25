@@ -381,7 +381,7 @@ func TestBandEnergyDecodeReasonableValues(t *testing.T) {
 	}
 
 	// Check band energies are positive and finite
-	for i, band := range dec.bandProc.bands {
+	for i, band := range dec.bandProcs[0].bands {
 		if band.Energy < 0 {
 			t.Errorf("Band %d energy = %f, should be >= 0", i, band.Energy)
 		}

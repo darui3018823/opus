@@ -228,11 +228,12 @@ type Decoder struct {
 	sampleRate int
 	channels   int
 
-	// CELT decoders (always operate at 48kHz internally).
-	// celtDecoder handles stereo (or mono when output is mono).
-	// celtDecoderMono is non-nil only when d.channels==2; used for mono CELT packets.
-	celtDecoder     *celt.Decoder
-	celtDecoderMono *celt.Decoder
+	// CELT decoders indexed by [bwIdx 0-3][lmIdx 0-3][chIdx 0-1].
+	// bwIdx: 0=NB(13bands), 1=WB(17bands), 2=SWB(19bands), 3=FB(21bands)
+	// lmIdx: 0=2.5ms, 1=5ms, 2=10ms, 3=20ms
+	// chIdx: 0=mono, 1=stereo
+	// CELT always runs at 48kHz internally; bandwidth only limits numBands.
+	celtDecoders [4][4][2]*celt.Decoder
 
 	// SILK decoders indexed by [rateIdx 0-2][frameIdx 0=10ms,1=20ms][chIdx 0=mono,1=stereo].
 	// rateIdx: 0=8kHz, 1=12kHz, 2=16kHz
@@ -257,6 +258,22 @@ func silkRateIdx(rateKHz int) int {
 	}
 }
 
+// celtBWNumBands maps bandwidth index (0=NB,1=WB,2=SWB,3=FB) to numBands.
+var celtBWNumBands = [4]int{13, 17, 19, 21}
+
+// celtLMFrameSize maps LM (0-3) to CELT frame size at 48kHz.
+var celtLMFrameSize = [4]int{120, 240, 480, 960}
+
+// celtConfigBWIdx returns the bandwidth index (0=NB,1=WB,2=SWB,3=FB) for a CELT config (16-31).
+func celtConfigBWIdx(config int) int {
+	return (config - 16) / 4
+}
+
+// celtConfigLMIdx returns the LM index (0=2.5ms,1=5ms,2=10ms,3=20ms) for a CELT config (16-31).
+func celtConfigLMIdx(config int) int {
+	return config & 3
+}
+
 // NewDecoder creates a new Opus decoder
 //
 // sampleRate must be one of: 8000, 12000, 16000, 24000, 48000 Hz
@@ -277,27 +294,30 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 	// Internal CELT frame size
 	internalFrameSize := 960
 
-	// Create CELT decoder at 48kHz
-	celtDec, err := celt.NewDecoder(celt.FrameSize20ms, 48000, channels)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create CELT decoder: %w", err)
-	}
-
 	dec := &Decoder{
 		sampleRate:        sampleRate,
 		channels:          channels,
-		celtDecoder:       celtDec,
 		frameSize:         frameSize,
 		internalFrameSize: internalFrameSize,
 	}
 
-	// When output is stereo, also keep a mono CELT decoder for mono packets.
-	if channels == 2 {
-		celtDecMono, err := celt.NewDecoder(celt.FrameSize20ms, 48000, 1)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create mono CELT decoder: %w", err)
+	// Create CELT decoders for all 4 bandwidths × 4 frame sizes × 2 channel counts.
+	// CELT always runs at 48kHz internally; bandwidth only controls numBands.
+	for bw := 0; bw < 4; bw++ {
+		numBands := celtBWNumBands[bw]
+		for lm := 0; lm < 4; lm++ {
+			fs := celtLMFrameSize[lm]
+			for ch := 1; ch <= 2; ch++ {
+				if ch > channels && channels != 2 {
+					continue // only create stereo decoder when output is stereo
+				}
+				d, err := celt.NewDecoderEx(fs, 48000, numBands, ch)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create CELT decoder (bw=%d lm=%d ch=%d): %w", bw, lm, ch, err)
+				}
+				dec.celtDecoders[bw][lm][ch-1] = d
+			}
 		}
-		dec.celtDecoderMono = celtDecMono
 	}
 
 	// Pre-create SILK decoders for all 3 rates × 2 frame durations × 2 channel configs
@@ -582,10 +602,23 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 		pktChannels = 2
 	}
 
-	// Select the CELT decoder that matches the packet's channel count.
-	activeCeltDec := d.celtDecoder
-	if pktChannels == 1 && d.celtDecoderMono != nil {
-		activeCeltDec = d.celtDecoderMono
+	// Select the CELT decoder matching this packet's bandwidth and frame size.
+	bwIdx := celtConfigBWIdx(config)
+	lmIdx := celtConfigLMIdx(config)
+	chIdx := pktChannels - 1
+	if chIdx < 0 {
+		chIdx = 0
+	}
+	if chIdx > 1 {
+		chIdx = 1
+	}
+	activeCeltDec := d.celtDecoders[bwIdx][lmIdx][chIdx]
+	if activeCeltDec == nil {
+		// Fallback: mono decoder
+		activeCeltDec = d.celtDecoders[bwIdx][lmIdx][0]
+	}
+	if activeCeltDec == nil {
+		return nil, fmt.Errorf("no CELT decoder for config=%d (bw=%d lm=%d ch=%d)", config, bwIdx, lmIdx, pktChannels)
 	}
 
 	var allPCM []float64
@@ -885,8 +918,12 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 // DecodeFEC decodes forward error correction data
 // This is used for packet loss concealment
 func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
-	// FEC decoding (currently uses PLC)
-	floatPCM, err := d.celtDecoder.DecodePLC()
+	// FEC decoding (currently uses PLC from FB 20ms decoder)
+	fbDec := d.celtDecoders[3][3][d.channels-1]
+	if fbDec == nil {
+		fbDec = d.celtDecoders[3][3][0]
+	}
+	floatPCM, err := fbDec.DecodePLC()
 	if err != nil {
 		return 0, fmt.Errorf("PLC decoding failed: %w", err)
 	}
@@ -920,9 +957,14 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 
 // Reset resets the decoder state
 func (d *Decoder) Reset() error {
-	d.celtDecoder.Reset()
-	if d.celtDecoderMono != nil {
-		d.celtDecoderMono.Reset()
+	for bw := range d.celtDecoders {
+		for lm := range d.celtDecoders[bw] {
+			for ch := range d.celtDecoders[bw][lm] {
+				if d.celtDecoders[bw][lm][ch] != nil {
+					d.celtDecoders[bw][lm][ch].Reset()
+				}
+			}
+		}
 	}
 	for ri := range d.silkDecoders {
 		for fi := range d.silkDecoders[ri] {

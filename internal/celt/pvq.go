@@ -332,12 +332,24 @@ func extractPulses(vector []float64, k int) []int {
 	return pulses
 }
 
-// PVQDecode decodes a vector using recursive PVQ splitting.
+// PVQDecode decodes a PVQ vector using the CWRS approach matching libopus.
+// libopus encodes the CWRS index via ec_enc_uint(V(N,K)) and decodes with cwrsi.
 // dec: entropy decoder, n: dimension, k: number of pulses.
 // Returns a normalized unit vector.
 func PVQDecode(dec *entcode.Decoder, n, k int) []float64 {
-	y := make([]int, n)
-	decodePVQRecursively(dec, n, k, y)
+	if k == 0 {
+		return make([]float64, n)
+	}
+	v := cwrsV(n, k)
+	var vClamped uint32
+	if v >= cwrsMax {
+		vClamped = math.MaxUint32
+	} else {
+		vClamped = uint32(v)
+	}
+
+	idx := dec.DecodeUint(vClamped)
+	y := cwrsiLibopus(n, k, idx)
 
 	output := make([]float64, n)
 	norm := 0.0
@@ -356,13 +368,56 @@ func PVQDecode(dec *entcode.Decoder, n, k int) []float64 {
 	return output
 }
 
+// cwrsiLibopus decodes a CWRS index into a pulse vector matching libopus ordering.
+// Processes dimensions from N-1 down to 0 (last dimension is most significant).
+// This matches libopus celt/cwrs.c cwrsi().
+func cwrsiLibopus(n, k int, index uint32) []int {
+	y := make([]int, n)
+	for j := n - 1; j > 0; j-- {
+		p := k
+		// Skip groups with |y[j]| = p, p = k down to 1 (each group = 2*V(j, k-p) codewords).
+		for p > 0 {
+			groupSize := uint32(min64(2*cwrsV(j, k-p), cwrsMax))
+			if index < groupSize {
+				break
+			}
+			index -= groupSize
+			p--
+		}
+		// p is the absolute value at position j.
+		if p > 0 {
+			halfGroup := uint32(min64(cwrsV(j, k-p), cwrsMax))
+			if index < halfGroup {
+				y[j] = p
+			} else {
+				index -= halfGroup
+				y[j] = -p
+			}
+			k -= p
+		}
+		// p == 0: y[j] stays 0, k unchanged, remaining pulses go to dims 0..j-1.
+	}
+	// Dimension 0 gets the remaining k pulses; sign from remaining index.
+	if k > 0 {
+		y[0] = k
+		if index > 0 {
+			y[0] = -k
+		}
+	}
+	return y
+}
+
 // decodePVQRecursively decodes pulse vector y of dimension n with k total pulses.
+// Matches libopus alg_unquant recursive splitting: split at m=n/2, decode kLeft
+// pulses in left half and k-kLeft in right half, using V(m,q)*V(n-m,k-q)/V(n,k)
+// as the PDF over q. For large V(n,k), the CDF is scaled to fit in uint32.
 func decodePVQRecursively(dec *entcode.Decoder, n, k int, y []int) {
 	if k == 0 {
 		return
 	}
 
 	if n == 1 {
+		// 1D: only sign to decode.
 		if dec.DecodeBit(16384) {
 			y[0] = -k
 		} else {
@@ -373,18 +428,19 @@ func decodePVQRecursively(dec *entcode.Decoder, n, k int, y []int) {
 
 	m := n / 2
 	total64 := cwrsV(n, k)
-	// 0 means degenerate; cwrsMax means overflow — neither can be decoded safely.
-	if total64 == 0 || total64 >= cwrsMax {
+	if total64 == 0 {
 		return
 	}
 
-	clamp32 := func(v uint64) uint32 {
-		if v > cwrsMax {
-			return math.MaxUint32
-		}
-		return uint32(v)
+	// Scale total64 to fit in uint32.
+	shift := uint(0)
+	for (total64 >> shift) > uint64(math.MaxUint32) {
+		shift++
 	}
-	total := clamp32(total64)
+	total := uint32(total64 >> shift)
+	if total == 0 {
+		total = 1
+	}
 
 	c := dec.DecodeGetCumu(total)
 
@@ -393,8 +449,16 @@ func decodePVQRecursively(dec *entcode.Decoder, n, k int, y []int) {
 	currentFl := uint32(0)
 
 	for q := 0; q <= k; q++ {
-		count := clamp32(cwrsV(m, q) * cwrsV(n-m, k-q))
-		// Guard against uint32 overflow in the running sum.
+		// Product V(m,q)*V(n-m,k-q), scaled by shift.
+		lv := cwrsV(m, q)
+		rv := cwrsV(n-m, k-q)
+		var count64 uint64
+		if lv >= cwrsMax || rv >= cwrsMax {
+			count64 = cwrsMax
+		} else {
+			count64 = lv * rv
+		}
+		count := uint32(count64 >> shift)
 		next := currentFl + count
 		if next < currentFl {
 			next = math.MaxUint32
@@ -406,6 +470,12 @@ func decodePVQRecursively(dec *entcode.Decoder, n, k int, y []int) {
 			break
 		}
 		currentFl = fh
+		if q == k {
+			// Ensure we always set kLeft even when loop exhausts.
+			kLeft = k
+			fl = currentFl - count
+			fh = currentFl
+		}
 	}
 
 	dec.DecodeUpdate(fl, fh, total)

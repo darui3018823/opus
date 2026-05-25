@@ -27,9 +27,9 @@ func NewBandProcessor(mode *Mode) *BandProcessor {
 		bands: make([]*Band, mode.Bands.NumBands),
 	}
 
-	// BandStart/BandSizes are stored at LM=0 (120-sample) scale.
-	// For a frameSize-sample frame, M = frameSize/120 scales each bin count.
-	M := mode.FrameSize / 120
+	// BandStart/BandSizes are stored at LM=0 (NBase-sample) scale.
+	// For a frameSize-sample frame, M = frameSize/NBase = 2^LM scales each bin count.
+	M := mode.FrameSize / mode.NBase
 	if M < 1 {
 		M = 1
 	}
@@ -100,33 +100,57 @@ func (bp *BandProcessor) AssembleMDCT() []float64 {
 	return mdct
 }
 
-// DecodeBandCoeffs decodes PVQ-quantized coefficients for a band
+// DecodeBandCoeffs decodes PVQ-quantized coefficients for a band.
+// Uses CWRS direct decoding matching libopus decode_pulses → ec_dec_uint(V(N,K)) → cwrsi.
 func (bp *BandProcessor) DecodeBandCoeffs(dec *entcode.Decoder, bandIdx int, pulses int) {
 	if bandIdx < 0 || bandIdx >= len(bp.bands) {
 		return
 	}
 
 	band := bp.bands[bandIdx]
-
-	// Decode PVQ index to unit vector
-	coeffs := PVQDecode(dec, band.Size, pulses)
-
-	// Copy to band
-	copy(band.Coeffs, coeffs)
-}
-
-// ApplyFineEnergy applies fine energy adjustments
-func (bp *BandProcessor) ApplyFineEnergy(bandIdx int, fineEnergy int) {
-	if bandIdx < 0 || bandIdx >= len(bp.bands) {
+	if pulses <= 0 || band.Size <= 0 {
 		return
 	}
 
-	band := bp.bands[bandIdx]
+	// Read CWRS index from range coder, then decode pulse vector via cwrsiLibopus.
+	// libopus cwrsi processes dimensions from N-1 down to 0 (RFC 6716 §5.4.3.3).
+	n := band.Size
+	v := cwrsV(n, pulses)
+	var vClamped uint32
+	if v >= uint64(math.MaxUint32) {
+		vClamped = math.MaxUint32
+	} else {
+		vClamped = uint32(v)
+	}
+	idx := dec.DecodeUint(vClamped)
+	y := cwrsiLibopus(n, pulses, idx)
 
-	// Fine energy is typically a small adjustment in dB
-	// Each step is approximately 0.5 dB
-	adjustment := math.Pow(10.0, float64(fineEnergy)*0.05)
-	band.Energy *= adjustment
+	// Normalize pulse vector to unit energy.
+	output := make([]float64, n)
+	norm := 0.0
+	for i, v := range y {
+		output[i] = float64(v)
+		norm += output[i] * output[i]
+	}
+	if norm > 0 {
+		scale := 1.0 / math.Sqrt(norm)
+		for i := range output {
+			output[i] *= scale
+		}
+	}
+	copy(band.Coeffs, output)
+}
+
+// ApplyFineEnergy applies fine energy refinement from the end of the packet.
+// q2 is the raw decoded value in [0, 2^fb); fb is the number of fine bits.
+// Offset = (q2+0.5)/2^fb - 0.5 in log2-amplitude; applied as band.Energy *= 4^offset.
+func (bp *BandProcessor) ApplyFineEnergy(bandIdx, q2, fb int) {
+	if bandIdx < 0 || bandIdx >= len(bp.bands) || fb <= 0 {
+		return
+	}
+	band := bp.bands[bandIdx]
+	offset := (float64(q2)+0.5)/float64(int(1)<<fb) - 0.5
+	band.Energy *= math.Exp2(2.0 * offset)
 }
 
 // ComputeBandEnergy computes the energy of a band from coefficients

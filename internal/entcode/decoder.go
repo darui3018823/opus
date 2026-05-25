@@ -1,5 +1,7 @@
 package entcode
 
+import "fmt"
+
 // Decoder is a range decoder bit-exact with libopus ec_dec (celt/entdec.c).
 //
 // libopus uses a TOP-DOWN convention:
@@ -56,10 +58,12 @@ func (dec *Decoder) Error() error {
 }
 
 // Debug accessors for testing
-func (dec *Decoder) GetDif() uint32 { return dec.dif }
-func (dec *Decoder) GetRng() uint32 { return dec.rng }
-func (dec *Decoder) GetRem() int    { return dec.rem }
-func (dec *Decoder) GetPos() int    { return dec.pos }
+func (dec *Decoder) GetDif() uint32     { return dec.dif }
+func (dec *Decoder) GetRng() uint32     { return dec.rng }
+func (dec *Decoder) GetRem() int        { return dec.rem }
+func (dec *Decoder) GetPos() int        { return dec.pos }
+func (dec *Decoder) GetEndOffs() int    { return dec.endOffs }
+func (dec *Decoder) GetNendBits() uint  { return dec.nendBits }
 
 // readByte reads one byte from the buffer, returning 0 past the end.
 func (dec *Decoder) readByte() byte {
@@ -236,6 +240,34 @@ func (dec *Decoder) DecodeBits(nbits uint) uint32 {
 	}
 	dec.nendBits -= nbits
 	return ret
+}
+
+// DecodeUintTrace is a debug version of DecodeUint that prints intermediate steps.
+func (dec *Decoder) DecodeUintTrace(ft uint32) uint32 {
+	if ft <= 1 {
+		return 0
+	}
+	ft1 := ft - 1
+	ftb := ILog(ft1)
+	fmt.Printf("      [trace] DecodeUint ft=%d ft1=%d ftb=%d UintBits=%d\n", ft, ft1, ftb, UintBits)
+	if ftb > UintBits {
+		ftb -= UintBits
+		ft1 >>= uint(ftb)
+		fmt.Printf("      [trace] large: ftb=%d ft1>>ftb=%d Decode(%d)\n", ftb, ft1, ft1+1)
+		fmt.Printf("      [trace] pre-Decode: rng=0x%08x dif=0x%08x pos=%d endOffs=%d nendBits=%d\n",
+			dec.rng, dec.dif, dec.pos, dec.endOffs, dec.nendBits)
+		s := dec.Decode(ft1 + 1)
+		fmt.Printf("      [trace] Decode returned s=%d\n", s)
+		fmt.Printf("      [trace] pre-DecodeUpdate: rng=0x%08x\n", dec.rng)
+		dec.DecodeUpdate(s, s+1, ft1+1)
+		fmt.Printf("      [trace] post-DecodeUpdate: rng=0x%08x pos=%d\n", dec.rng, dec.pos)
+		low := dec.DecodeBits(uint(ftb))
+		fmt.Printf("      [trace] DecodeBits(%d) returned low=%d, post-rng=0x%08x\n", ftb, low, dec.rng)
+		return s<<uint(ftb) | low
+	}
+	s := dec.Decode(ft)
+	dec.DecodeUpdate(s, s+1, ft)
+	return s
 }
 
 // DecodeBit decodes a single bit. prob is probability of false on 0-32768 scale.

@@ -179,12 +179,14 @@ func QuantizeCoarseEnergy(
 		fs := uint32(probModel[pi]) << 7
 		decay := int(probModel[pi+1]) << 6
 
-		// Inter-frame prediction (in mean-subtracted log2-amplitude space)
+		// Inter-frame prediction — matches libopus quant_coarse_energy_impl:
+		//   tmp = coef * MAX(-9, oldEBands[i]) + eMeans[i] + prev
+		// logE[i] and oldEBands are in actual log2-amplitude (not mean-subtracted).
 		oldE := prevLogE[i]
 		if oldE < -9.0 {
 			oldE = -9.0
 		}
-		predicted := coef*oldE + prev
+		predicted := coef*oldE + eMeans[i] + prev
 
 		// Quantise residual (nearest integer) — same rounding as libopus floor(.5+f)
 		diff := logE[i] - predicted
@@ -227,8 +229,8 @@ func QuantizeCoarseEnergy(
 			qi = -1
 		}
 
-		// Reconstruct quantised log energy (mean-subtracted log2-amplitude)
-		quantLogE[i] = coef*oldE + prev + float64(qi)
+		// Reconstruct actual log2-amplitude (includes eMeans[i], same as libopus).
+		quantLogE[i] = coef*oldE + eMeans[i] + prev + float64(qi)
 		if quantLogE[i] < -28.0 {
 			quantLogE[i] = -28.0
 		}
@@ -250,7 +252,6 @@ func encodeSmallEnergySym(qi int) int {
 	}
 	return -2*qi - 1
 }
-
 
 // UnquantizeCoarseEnergy decodes band log2-amplitude energies using RFC 6716 §5.1.2.
 //
@@ -283,8 +284,10 @@ func UnquantizeCoarseEnergy(
 
 	budget := totalBits // whole bits, matches libopus: budget = dec->storage*8
 
-	quantLogE := make([]float64, numBands)
-	prev := 0.0
+	// quantLogE[i*channels + c] = actual log2-amplitude for band i, channel c.
+	// Matches libopus oldEBands[i*C + c] layout.
+	quantLogE := make([]float64, numBands*channels)
+	prev := make([]float64, channels) // per-channel inter-band predictor
 
 	for i := 0; i < numBands; i++ {
 		pi := 2 * i
@@ -294,41 +297,43 @@ func UnquantizeCoarseEnergy(
 		fs := uint32(probModel[pi]) << 7
 		decay := int(probModel[pi+1]) << 6
 
-		// Inter-frame prediction (must match encoder exactly)
-		oldE := prevLogE[i]
-		if oldE < -9.0 {
-			oldE = -9.0
-		}
-		predicted := coef*oldE + prev
-
-		// Coding path selection must mirror the encoder exactly.
-		tell := dec.Tell()
-		bitsNow := budget - tell
-
-		var qi int
-		if bitsNow >= 15 {
-			qi = dec.DecodeLaplace(fs, decay)
-		} else if bitsNow >= 2 {
-			sym := dec.DecodeIcdf(smallEnergyIcdf, 2)
-			qi = (sym >> 1) ^ -(sym & 1) // inverse of 2*qi^-(qi<0)
-		} else if bitsNow >= 1 {
-			if dec.DecodeBitLogp(1) {
-				qi = -1
-			} else {
-				qi = 0
+		for c := 0; c < channels; c++ {
+			// Inter-frame prediction — matches libopus unquant_coarse_energy:
+			//   tmp = coef * MAX(-9, oldEBands[i*C+c]) + eMeans[i] + prev[c]
+			oldE := prevLogE[i*channels+c]
+			if oldE < -9.0 {
+				oldE = -9.0
 			}
-		} else {
-			qi = -1
-		}
+			predicted := coef*oldE + eMeans[i] + prev[c]
 
-		// Reconstruct (mean-subtracted log2-amplitude)
-		quantLogE[i] = predicted + float64(qi)
-		if quantLogE[i] < -28.0 {
-			quantLogE[i] = -28.0
-		}
+			// Coding path selection must mirror the encoder exactly.
+			tell := dec.Tell()
+			bitsNow := budget - tell
 
-		// Update inter-band predictor accumulator
-		prev = prev + float64(qi) - beta*float64(qi)
+			var qi int
+			if bitsNow >= 15 {
+				qi = dec.DecodeLaplace(fs, decay)
+			} else if bitsNow >= 2 {
+				sym := dec.DecodeIcdf(smallEnergyIcdf, 2)
+				qi = (sym >> 1) ^ -(sym & 1)
+			} else if bitsNow >= 1 {
+				if dec.DecodeBitLogp(1) {
+					qi = -1
+				} else {
+					qi = 0
+				}
+			} else {
+				qi = -1
+			}
+
+			// Reconstruct actual log2-amplitude (includes eMeans contribution).
+			v := predicted + float64(qi)
+			if v < -28.0 {
+				v = -28.0
+			}
+			quantLogE[i*channels+c] = v
+			prev[c] += float64(qi) - beta*float64(qi)
+		}
 	}
 
 	return quantLogE

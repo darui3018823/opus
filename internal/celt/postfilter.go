@@ -57,9 +57,12 @@ func (pf *PostFilter) Reset() {
 	pf.prevGain = [3]float64{}
 }
 
-// Tapset gain tables from libopus celt/celt.h COMBFILTER_GAIN_PARAM.
-// tapset selects the number of taps (0=1-tap, 1=2-tap, 2=3-tap).
-// Each row is [g0, g1, g2] normalized to the gain from pfGainTable.
+// tapsetIcdf is the ICDF table for tapset, ft=4 (logp=2).
+// Matches libopus tapset_icdf = {2, 1, 0} in celt/celt.h.
+// P(tapset=0)=1/2, P(tapset=1)=1/4, P(tapset=2)=1/4.
+var tapsetIcdf = [3]uint8{2, 1, 0}
+
+// tapGains[tapset][tap] where taps are [g0, g1, g2] normalized to 1.0 gain.
 var tapGains = [3][3]float64{
 	{0, 1, 0},       // tapset=0: single tap
 	{0.5, 1, 0.5},   // tapset=1: 3-tap symmetric, flanks at 0.5
@@ -84,8 +87,12 @@ func readOnePostFilter(dec *entcode.Decoder, totalBits int) (int, [3]float64, bo
 	}
 	g := pfGainTable[gainIndex]
 
-	// tapset: 0, 1, or 2 (selects filter width)
-	tapset := int(dec.DecodeUint(3))
+	// tapset: decoded via ICDF with {2,1,0} (ft=4, logp=2) matching libopus tapset_icdf.
+	// Budget check: need 2 bits; if insufficient, default to tapset=0.
+	tapset := 0
+	if dec.Tell()+2 <= totalBits {
+		tapset = dec.DecodeIcdf(tapsetIcdf[:], 2)
+	}
 	if tapset >= len(tapGains) {
 		tapset = 0
 	}

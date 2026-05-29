@@ -434,7 +434,7 @@ var tfSelectTable = [4][8]int{
 	{0, -1, 0, -1, 0, -1, 0, -1}, // LM=0
 	{0, -1, 0, -2, 1, 0, 1, -1},  // LM=1
 	{0, -2, 0, -3, 2, 0, 1, -1},  // LM=2
-	{0, -2, 0, -3, 3, 0, 2, -1},  // LM=3
+	{0, -2, 0, -3, 3, 0, 1, -1},  // LM=3
 }
 
 // celtTFDecode reads the time-frequency allocation bits and returns tf_res[i]

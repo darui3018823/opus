@@ -139,12 +139,12 @@ n, err := dec.DecodeFloat32(compressed, decodedFloat)
 
 Performance comparison with libopus (on 20ms frames):
 
-| Component | libopus | opus-go | Performance Ratio |
-|-----------|---------|---------|-------------------|
-| CELT Encode (48kHz mono) | 230µs | 195µs | **85%** |
-| CELT Decode (48kHz mono) | 165µs | 140µs | **85%** |
-| SILK Encode (8kHz mono) | 195µs | 165µs | **85%** |
-| SILK Decode (8kHz mono) | 145µs | 125µs | **86%** |
+| Component                | libopus | opus-go | Performance Ratio |
+|--------------------------|---------|---------|-------------------|
+| CELT Encode (48kHz mono) | 230µs   | 195µs   | **85%**           |
+| CELT Decode (48kHz mono) | 165µs   | 140µs   | **85%**           |
+| SILK Encode (8kHz mono)  | 195µs   | 165µs   | **85%**           |
+| SILK Decode (8kHz mono)  | 145µs   | 125µs   | **86%**           |
 
 **Memory efficiency**: 60% fewer allocations through buffer pooling and optimization.
 

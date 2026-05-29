@@ -67,17 +67,17 @@ go test github.com/darui3018823/opus/internal/celt github.com/darui3018823/opus/
 
 ## 1. 今セッションで入れた変更（ファイル別）
 
-| ファイル | 変更 |
-|---|---|
-| `internal/entcode/decoder.go` | **最重要修正**: `nbitsTotal` フィールド追加。`Tell()`/`TellFrac()` を pos/endOffs 由来から `nbitsTotal` 由来に変更。`normalize()` で `+=SymBits`、`DecodeBits()` で `+=nbits`。`ECTell()`（=ec_tell=Tell()+1）と `TellFrac()`（=ec_tell_frac）追加。 |
-| `internal/celt/decoder.go` | デコード順を libopus 厳守に: silence(logp15)→postfilter→isTransient→intra→coarse→tf→spread→dynalloc→alloc_trim→alloc→fine→PVQ→anti-collapse。`celtTFDecode` が `tf_res[]` を返す。`decodeDynalloc` を frac-tell + cap[i] bound に修正。`decodeBandCoeffs` を `QuantAllBands` 呼び出しに置換。stereo M/S マージは quant_all_bands 内に移動（旧ブロック削除）。 |
-| `internal/celt/postfilter.go` | `DecodePostFilterParams` を libopus 準拠に全面書き換え（`ec_dec_bit_logp(1)`→octave(uint6)→pitch(ec_dec_bits(4+octave))→qg(ec_dec_bits(3))→tapset icdf、**1回だけ**読む）。 |
-| `internal/celt/rate_alloc.go` | `computeAllocation` の返り値を `(pulses[Q3予算], eBits, balance, intensity, codedBands, dualStereo)` に変更（Kへの変換phase9を削除）。`cap[]` を `(caps[nbEBands*(2*LM+C-1)+j]+64)*C*N>>2` に修正。budget は Q3 をそのまま使用。 |
-| `internal/celt/quant_pvq.go` | **新規**。quant_all_bands 一式の移植（後述）。 |
-| `internal/celt/diag_oracle_test.go` | **新規**。TV07 pkt0 をステージ毎にトレースしオラクルと比較（final range をアサート）。`qabDebug`/`qabLog`/`qabDP` で per-band/per-decode_pulses ダンプ。 |
-| `internal/celt/range_vectors_test.go` | **新規**。各ベクター全パケットの final range を .bit 期待値と比較（informational）。 |
-| 削除 | `internal/celt/diag_bisect_test.go`（旧手動bisect、オラクルに置換）。 |
-| `scripts/oracle/` | **新規**。計装済み libopus オラクル一式（後述）。 |
+| ファイル                                  | 変更                                                                                                                                                                                                                                                                                                             |
+|---------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `internal/entcode/decoder.go`         | **最重要修正**: `nbitsTotal` フィールド追加。`Tell()`/`TellFrac()` を pos/endOffs 由来から `nbitsTotal` 由来に変更。`normalize()` で `+=SymBits`、`DecodeBits()` で `+=nbits`。`ECTell()`（=ec_tell=Tell()+1）と `TellFrac()`（=ec_tell_frac）追加。                                                                                               |
+| `internal/celt/decoder.go`            | デコード順を libopus 厳守に: silence(logp15)→postfilter→isTransient→intra→coarse→tf→spread→dynalloc→alloc_trim→alloc→fine→PVQ→anti-collapse。`celtTFDecode` が `tf_res[]` を返す。`decodeDynalloc` を frac-tell + cap[i] bound に修正。`decodeBandCoeffs` を `QuantAllBands` 呼び出しに置換。stereo M/S マージは quant_all_bands 内に移動（旧ブロック削除）。 |
+| `internal/celt/postfilter.go`         | `DecodePostFilterParams` を libopus 準拠に全面書き換え（`ec_dec_bit_logp(1)`→octave(uint6)→pitch(ec_dec_bits(4+octave))→qg(ec_dec_bits(3))→tapset icdf、**1回だけ**読む）。                                                                                                                                                       |
+| `internal/celt/rate_alloc.go`         | `computeAllocation` の返り値を `(pulses[Q3予算], eBits, balance, intensity, codedBands, dualStereo)` に変更（Kへの変換phase9を削除）。`cap[]` を `(caps[nbEBands*(2*LM+C-1)+j]+64)*C*N>>2` に修正。budget は Q3 をそのまま使用。                                                                                                                 |
+| `internal/celt/quant_pvq.go`          | **新規**。quant_all_bands 一式の移植（後述）。                                                                                                                                                                                                                                                                              |
+| `internal/celt/diag_oracle_test.go`   | **新規**。TV07 pkt0 をステージ毎にトレースしオラクルと比較（final range をアサート）。`qabDebug`/`qabLog`/`qabDP` で per-band/per-decode_pulses ダンプ。                                                                                                                                                                                          |
+| `internal/celt/range_vectors_test.go` | **新規**。各ベクター全パケットの final range を .bit 期待値と比較（informational）。                                                                                                                                                                                                                                                   |
+| 削除                                    | `internal/celt/diag_bisect_test.go`（旧手動bisect、オラクルに置換）。                                                                                                                                                                                                                                                        |
+| `scripts/oracle/`                     | **新規**。計装済み libopus オラクル一式（後述）。                                                                                                                                                                                                                                                                                |
 
 ---
 

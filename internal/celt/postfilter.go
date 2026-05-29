@@ -69,59 +69,51 @@ var tapGains = [3][3]float64{
 	{0.25, 1, 0.25}, // tapset=2: wider 3-tap
 }
 
-// readOnePostFilter reads one set of post-filter params (period, gain, tapset).
-// Returns (period, taps[3], enabled).  Budget check with logp=3 per libopus.
-func readOnePostFilter(dec *entcode.Decoder, totalBits int) (int, [3]float64, bool) {
-	if dec.Tell()+3 > totalBits {
+// pfCombGains are the synthesis tap weights per tapset, from libopus comb_filter
+// (celt/celt.c gains[3][3]). Index [tapset][tap].
+var pfCombGains = [3][3]float64{
+	{0.3066406250, 0.2170410156, 0.1296386719},
+	{0.4638671875, 0.2680664062, 0.0},
+	{0.7998046875, 0.1000976562, 0.0},
+}
+
+// DecodePostFilterParams reads post-filter parameters from the range decoder,
+// matching libopus celt_decode_with_ec exactly (read ONCE, before isTransient):
+//
+//	if (ec_dec_bit_logp(dec,1)) {
+//	    octave = ec_dec_uint(dec,6);
+//	    pitch  = (16<<octave)+ec_dec_bits(dec,4+octave)-1;
+//	    qg     = ec_dec_bits(dec,3);
+//	    if (ec_tell(dec)+2<=total_bits) tapset = ec_dec_icdf(dec,tapset_icdf,2);
+//	    gain   = 0.09375*(qg+1);
+//	}
+//
+// The caller is responsible for the `start==0 && ec_tell+16<=total_bits` guard.
+// Returns (period, taps[3], enabled).
+func DecodePostFilterParams(dec *entcode.Decoder, totalBits, lm int) (int, [3]float64, bool) {
+	if !dec.DecodeBitLogp(1) {
 		return 0, [3]float64{}, false
 	}
-	if !dec.DecodeBitLogp(3) {
-		return 0, [3]float64{}, false
-	}
 
-	period := int(dec.DecodeUint(uint32(combFilterPeriodRange))) + combFilterMinPeriod
+	octave := int(dec.DecodeUint(6))
+	period := (16 << uint(octave)) + int(dec.DecodeBits(uint(4+octave))) - 1
+	qg := int(dec.DecodeBits(3))
 
-	gainIndex := int(dec.DecodeUint(8))
-	if gainIndex >= len(pfGainTable) {
-		gainIndex = len(pfGainTable) - 1
-	}
-	g := pfGainTable[gainIndex]
-
-	// tapset: decoded via ICDF with {2,1,0} (ft=4, logp=2) matching libopus tapset_icdf.
-	// Budget check: need 2 bits; if insufficient, default to tapset=0.
 	tapset := 0
-	if dec.Tell()+2 <= totalBits {
+	if dec.ECTell()+2 <= totalBits {
 		tapset = dec.DecodeIcdf(tapsetIcdf[:], 2)
 	}
-	if tapset >= len(tapGains) {
+	if tapset >= len(pfCombGains) {
 		tapset = 0
 	}
 
+	gain := 0.09375 * float64(qg+1)
 	taps := [3]float64{
-		g * tapGains[tapset][0],
-		g * tapGains[tapset][1],
-		g * tapGains[tapset][2],
+		gain * pfCombGains[tapset][0],
+		gain * pfCombGains[tapset][1],
+		gain * pfCombGains[tapset][2],
 	}
 	return period, taps, true
-}
-
-// DecodePostFilterParams reads post-filter parameters from the range decoder.
-// For LM>1 (10ms or 20ms frames), TWO sets are read (first and second half).
-// Returns (period, taps[3], enabled) for the first half; discards second.
-func DecodePostFilterParams(dec *entcode.Decoder, totalBits, lm int) (int, [3]float64, bool) {
-	if lm == 0 {
-		// 2.5ms frame: no post-filter
-		return 0, [3]float64{}, false
-	}
-
-	period, taps, enabled := readOnePostFilter(dec, totalBits)
-
-	if lm > 1 {
-		// 10ms or 20ms: read second-half params too (discard for now)
-		readOnePostFilter(dec, totalBits)
-	}
-
-	return period, taps, enabled
 }
 
 // Apply applies the post-filter to one frame of decoded samples in-place.

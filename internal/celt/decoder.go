@@ -98,33 +98,65 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	lm := d.mode.LM
 	ch := d.mode.Channels
 
-	// Read isTransient bit — written BEFORE intra by encoder when LM>0 (RFC 6716 §5.2.2).
+	// === libopus celt_decode_with_ec symbol order ===
+
+	// Silence flag (1 bit, logp 15) — first symbol in the stream.
+	silence := false
+	if dec.ECTell() >= totalBits {
+		silence = true
+	} else if dec.ECTell() == 1 {
+		silence = dec.DecodeBitLogp(15)
+	}
+
+	// Post-filter parameters — read BEFORE isTransient (start==0, ec_tell+16<=total_bits).
+	pfPeriod := 0
+	var pfTaps [3]float64
+	pfEnabled := false
+	if dec.ECTell()+16 <= totalBits {
+		pfPeriod, pfTaps, pfEnabled = DecodePostFilterParams(dec, totalBits, lm)
+	}
+
+	// isTransient (logp 3, only when LM>0).
 	isTransient := false
-	if lm > 0 && dec.Tell()+3 <= totalBits {
+	if lm > 0 && dec.ECTell()+3 <= totalBits {
 		isTransient = dec.DecodeBitLogp(3)
 	}
 
-	// Read intra/inter bit for coarse energy coding (RFC 6716 §5.1.2).
+	// intra/inter flag for coarse energy (logp 3).
 	var intra bool
-	if dec.Tell()+3 <= totalBits {
+	if dec.ECTell()+3 <= totalBits {
 		intra = dec.DecodeBitLogp(3)
 	}
 
-	// RFC 6716 §5.1.2 — decode coarse band log-energies
+	// Coarse band log-energies (Laplace, forward).
 	quantLogE := UnquantizeCoarseEnergy(
-		dec,
-		d.prevEnergies,
-		d.prevEnergies2,
-		intra,
-		numBands,
-		lm,
-		ch,
-		totalBits,
+		dec, d.prevEnergies, d.prevEnergies2, intra, numBands, lm, ch, totalBits,
 	)
 
-	// Read time-frequency allocation bits (RFC 6716 §5.2.2).
-	// These must be consumed even though we don't implement TF transforms.
-	celtTFDecode(dec, totalBits, isTransient, numBands, lm)
+	// Time-frequency allocation bits.
+	tfRes := celtTFDecode(dec, totalBits, isTransient, numBands, lm)
+
+	// Spread decision (default SPREAD_NORMAL).
+	spread := 2
+	if dec.ECTell()+4 <= totalBits {
+		spread = dec.DecodeIcdf(spreadIcdf[:], 5)
+	}
+
+	// Per-band dynamic allocation boosts (BEFORE alloc_trim, libopus order).
+	offsets := decodeDynalloc(dec, numBands, lm, ch, totalBits)
+
+	// Allocation trim (7-bit ICDF, default 5 = neutral).
+	allocTrim := 5
+	if dec.ECTell()+6 <= totalBits {
+		allocTrim = dec.DecodeIcdf(TrimICDF[:], 7)
+	}
+
+	// On silence, libopus forces band energies to the -28 dB floor.
+	if silence {
+		for i := range quantLogE {
+			quantLogE[i] = -28.0
+		}
+	}
 
 	// quantLogE[i*C+c] = actual log2-amplitude for band i, channel c.
 	for i := 0; i < numBands; i++ {
@@ -147,24 +179,10 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 		d.bandProcs[1].InterpolateBandEnergies()
 	}
 
-	// Decode post-filter parameters (RFC 6716 §5.4.1) — BEFORE band coefficients.
-	pfPeriod, pfTaps, pfEnabled := DecodePostFilterParams(dec, totalBits, lm)
-
-	// Read allocation trim (7-bit ICDF, 11 symbols 0-10; default 5 = neutral).
-	allocTrim := 5
-	if dec.Tell()+6 <= totalBits {
-		allocTrim = dec.DecodeIcdf(TrimICDF[:], 7)
-	}
-
-	// Compute bit budget for PVQ allocation (after alloc_trim, before stereo/skip bits).
-	// Stereo parameters and skip bits are read inside computeAllocation, matching libopus.
-	remaining := totalBits - dec.Tell()
-	if remaining < 0 {
-		remaining = 0
-	}
-
-	// Decode band coefficients using PVQ (stereo params decoded inside decodeBandCoeffs).
-	_, dualStereo, err := d.decodeBandCoeffs(dec, remaining, allocTrim, isTransient, totalBits)
+	// Decode band coefficients: allocation, fine energy, PVQ, anti-collapse.
+	// The Q3 bit budget is computed inside from len(frameData) and ec_tell_frac.
+	// quant_all_bands also performs stereo (M/S→L/R) merge internally.
+	_, _, err := d.decodeBandCoeffs(dec, len(frameData), allocTrim, isTransient, spread, tfRes, offsets)
 	if err != nil {
 		return nil, err
 	}
@@ -185,21 +203,7 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 		mdctCoeffsPerCh[c] = coeffs
 	}
 
-	// For M/S stereo: convert M→L, S→R via stereo_merge (L=(M+S)/√2, R=(M-S)/√2).
-	// bandProcs[0] holds M, bandProcs[1] holds S.
-	if ch == 2 && !dualStereo {
-		invSqrt2 := 1.0 / math.Sqrt(2.0)
-		M := mdctCoeffsPerCh[0]
-		S := mdctCoeffsPerCh[1]
-		L := make([]float64, frameSize)
-		R := make([]float64, frameSize)
-		for j := 0; j < frameSize; j++ {
-			L[j] = (M[j] + S[j]) * invSqrt2
-			R[j] = (M[j] - S[j]) * invSqrt2
-		}
-		mdctCoeffsPerCh[0] = L
-		mdctCoeffsPerCh[1] = R
-	}
+	// Note: stereo M/S→L/R merge is handled inside quant_all_bands (quant_band_stereo).
 
 	// Perform IMDCT per channel
 	output := make([]float64, frameSize*ch)
@@ -244,30 +248,31 @@ var spreadIcdf = [4]uint8{25, 23, 2, 0}
 // remaining is the PVQ budget (totalBits - tell, before stereo/skip bits).
 // Stereo parameters (intensity, dualStereo) are decoded inside computeAllocation.
 // Returns intensity and dualStereo for use by the caller's M/S conversion.
-func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, remaining, allocTrim int, isTransient bool, totalBits int) (intensity int, dualStereo bool, err error) {
-	if remaining < 0 {
-		remaining = 0
-	}
-
+func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int, isTransient bool, spread int, tfRes, offsets []int) (intensity int, dualStereo bool, err error) {
 	numBands := d.mode.Bands.NumBands
 	lm := d.mode.LM
 	ch := d.mode.Channels
 
-	// Anti-collapse reservation: libopus subtracts 1 raw-bit (= 8 Q3-bits) from allocation
-	// budget for transient frames with LM>=2. The actual bit is read from the range coder
-	// AFTER compute_allocation and fine energy, but BEFORE PVQ.
+	// libopus: bits = (len*8 << BITRES) - ec_tell_frac(dec) - 1   (Q3 / eighth-bits)
+	bitsQ3 := lenBytes*8<<3 - dec.TellFrac() - 1
+
+	// Anti-collapse reservation (Q3 = 1<<BITRES) for transient frames with LM>=2.
+	// The bit itself is a RAW bit read AFTER PVQ (see below).
 	antiCollapseRsv := 0
-	if isTransient && lm >= 2 && remaining >= lm+2 {
-		antiCollapseRsv = 1
-		remaining--
+	if isTransient && lm >= 2 && bitsQ3 >= (lm+2)<<3 {
+		antiCollapseRsv = 1 << 3
+	}
+	bitsQ3 -= antiCollapseRsv
+	if bitsQ3 < 0 {
+		bitsQ3 = 0
 	}
 
-	// Run libopus-faithful compute_allocation (reads skip bits and stereo params from dec).
-	var pulses, eBits []int
-	pulses, eBits, intensity, dualStereo = computeAllocation(dec, numBands, lm, ch, allocTrim, remaining)
+	// libopus-faithful compute_allocation: pulses[] are per-band Q3 PVQ budgets,
+	// balance is the leftover, codedBands the last coded band.
+	pulses, eBits, balance, intensityV, codedBands, dualStereoV := computeAllocation(dec, numBands, lm, ch, allocTrim, bitsQ3, offsets)
+	intensity, dualStereo = intensityV, dualStereoV
 
-	// Fine energy refinement — raw bits from END of packet (independent of range coder).
-	// libopus unquant_fine_energy iterates FORWARD (band 0 → numBands-1).
+	// Fine energy — raw bits from END (do NOT affect forward rng). FORWARD band order.
 	for i := 0; i < numBands; i++ {
 		fb := eBits[i]
 		if fb <= 0 {
@@ -279,36 +284,35 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, remaining, allocTrim in
 		}
 	}
 
-	// Anti-collapse bit — range coder, read BEFORE spread and PVQ.
-	if antiCollapseRsv > 0 && dec.Tell()+1 <= totalBits {
-		dec.DecodeBitLogp(1) // anti_collapse_on (not used for PLC in this implementation)
+	// quant_all_bands: decode all PVQ bands into the interleaved normalised MDCT X[].
+	M := 1 << uint(lm)
+	frameLen := M * int(EBands48000[numBands])
+	X := make([]float64, ch*frameLen)
+	var Y []float64
+	if ch == 2 {
+		Y = X[frameLen:]
 	}
+	collapse := make([]byte, numBands*ch)
+	totalBitsQ3 := lenBytes*8<<3 - antiCollapseRsv
+	QuantAllBands(dec, 0, numBands, X[:frameLen], Y, collapse, pulses, isTransient,
+		spread, dualStereo, intensity, tfRes, totalBitsQ3, balance, lm, codedBands,
+		dec.GetRng(), false)
 
-	// Spread decision — range coder, read BEFORE PVQ (libopus quant_all_bands, decode mode).
-	// libopus reads spread for ALL frames (mono and stereo); no C>1 guard in the source.
-	if dec.Tell()+4 <= totalBits {
-		_ = dec.DecodeIcdf(spreadIcdf[:], 5)
-	}
-
-	// Decode PVQ per band.
-	for i := 0; i < numBands; i++ {
-		k := pulses[i]
-		bandSize := d.bandProcs[0].bands[i].Size
-
-		if k <= 0 || bandSize <= 0 || icwrs(bandSize, k) == 0 {
-			continue
-		}
-
-		if ch == 1 || i >= intensity {
-			// Mono or intensity stereo: only the M/combined channel (ch0) is coded.
-			d.bandProcs[0].DecodeBandCoeffs(dec, i, k)
-		} else {
-			// M/S or dual-stereo: decode both channels using same pulse count.
-			d.bandProcs[0].DecodeBandCoeffs(dec, i, k)
-			if icwrs(d.bandProcs[1].bands[i].Size, k) != 0 {
-				d.bandProcs[1].DecodeBandCoeffs(dec, i, k)
+	// Copy decoded (unit-norm) band coefficients back into the band processors.
+	for c := 0; c < ch; c++ {
+		base := c * frameLen
+		for i := 0; i < numBands; i++ {
+			b := d.bandProcs[c].bands[i]
+			s := M * int(EBands48000[i])
+			if base+s+b.Size <= len(X) {
+				copy(b.Coeffs, X[base+s:base+s+b.Size])
 			}
 		}
+	}
+
+	// Anti-collapse bit — RAW bit (ec_dec_bits), read AFTER PVQ. Does not affect rng.
+	if antiCollapseRsv > 0 {
+		_ = dec.DecodeBits(1)
 	}
 
 	return intensity, dualStereo, nil
@@ -365,6 +369,61 @@ func (d *Decoder) Reset() {
 	d.frameCount = 0
 }
 
+// decodeDynalloc decodes per-band dynamic allocation boosts between alloc_trim and
+// compute_allocation. Matches libopus celt_decode_with_ec dynalloc loop.
+// Returns Q3 boost per band. Even when all boosts are 0, the range coder state advances.
+func decodeDynalloc(dec *entcode.Decoder, numBands, lm, ch, totalBits int) []int {
+	offsets := make([]int, numBands)
+	dynallocLogp := 6
+	// libopus: total_bits<<=BITRES (Q3), decreases as boosts are applied;
+	// tell tracked via ec_tell_frac (Q3).
+	totalQ3 := totalBits << 3
+	tell := dec.TellFrac()
+
+	for j := 0; j < numBands; j++ {
+		N0 := int(EBands48000[j+1] - EBands48000[j])
+		M := N0 << uint(lm)
+		width := ch * M
+		// quanta = IMIN(width<<BITRES, IMAX(6<<BITRES, width))
+		quanta := width << 3
+		hi := width
+		if hi < 48 {
+			hi = 48
+		}
+		if quanta > hi {
+			quanta = hi
+		}
+		// cap[j] = (caps[nbEBands*(2*LM+C-1)+j]+64)*C*N>>2  (boost upper bound)
+		capsIdx := NumBands48000*(2*lm+ch-1) + j
+		capVal := 255
+		if capsIdx >= 0 && capsIdx < len(CacheCaps50) {
+			capVal = int(CacheCaps50[capsIdx])
+		}
+		capj := (capVal + 64) * width >> 2
+
+		loopLogp := dynallocLogp
+		boost := 0
+		for tell+(loopLogp<<3) < totalQ3 && boost < capj {
+			flag := dec.DecodeBitLogp(uint(loopLogp))
+			tell = dec.TellFrac()
+			if !flag {
+				break
+			}
+			boost += quanta
+			totalQ3 -= quanta
+			loopLogp = 1
+		}
+		offsets[j] = boost
+		if boost > 0 {
+			dynallocLogp--
+			if dynallocLogp < 2 {
+				dynallocLogp = 2
+			}
+		}
+	}
+	return offsets
+}
+
 // tfSelectTable[lm][8] matches libopus tf_select_table in celt/bands.c.
 // Index layout: [4*isTransient + 2*tfSelect + tfChanged].
 var tfSelectTable = [4][8]int{
@@ -374,64 +433,59 @@ var tfSelectTable = [4][8]int{
 	{0, -2, 0, -3, 3, 0, 2, -1},  // LM=3
 }
 
-// celtTFDecode reads the time-frequency allocation bits from the range coder.
-// Matches libopus tf_decode() in celt/bands.c.
-// The TF transform is not implemented; this function only consumes the bits.
-func celtTFDecode(dec *entcode.Decoder, totalBits int, isTransient bool, numBands, lm int) {
-	if lm == 0 {
-		return
+// celtTFDecode reads the time-frequency allocation bits and returns tf_res[i]
+// per band. Faithful port of libopus tf_decode() (celt/bands.c).
+func celtTFDecode(dec *entcode.Decoder, totalBits int, isTransient bool, numBands, lm int) []int {
+	tfRes := make([]int, numBands)
+	isT := 0
+	if isTransient {
+		isT = 1
 	}
+	budget := totalBits // dec->storage*8
 	logp := 4
 	if isTransient {
 		logp = 2
 	}
-
-	budget := totalBits
-	tell := dec.Tell()
-
-	// Reserve one bit for tf_select if budget allows.
-	tfSelectRsv := lm > 0 && tell+logp+1 <= budget
-	if tfSelectRsv {
+	// tf_select_rsv = LM>0 && ec_tell+logp+1 <= budget
+	tfSelectRsv := 0
+	if lm > 0 && dec.ECTell()+logp+1 <= budget {
+		tfSelectRsv = 1
 		budget--
 	}
 
 	curr := 0
 	tfChanged := 0
 	for i := 0; i < numBands; i++ {
-		tell = dec.Tell()
-		if tell+logp <= budget {
+		if dec.ECTell()+logp <= budget {
 			if dec.DecodeBitLogp(uint(logp)) {
 				curr ^= 1
 			}
-			tell = dec.Tell()
+			tfChanged |= curr
 		}
-		if curr != 0 {
-			tfChanged = 1
-		}
+		tfRes[i] = curr
 		if isTransient {
 			logp = 4
 		} else {
 			logp = 5
 		}
-		_ = tell
 	}
 
-	// Read tf_select ONLY if it would produce a different result (libopus condition).
-	// For non-transient frames with tfChanged=0, table[lm][0]==table[lm][2]==0, so skip.
-	if tfSelectRsv {
-		lmC := lm
-		if lmC < 0 {
-			lmC = 0
-		}
-		if lmC > 3 {
-			lmC = 3
-		}
-		isT := 0
-		if isTransient {
-			isT = 1
-		}
-		if tfSelectTable[lmC][4*isT+0+tfChanged] != tfSelectTable[lmC][4*isT+2+tfChanged] {
-			dec.DecodeBitLogp(1)
+	lmC := lm
+	if lmC < 0 {
+		lmC = 0
+	}
+	if lmC > 3 {
+		lmC = 3
+	}
+	tfSelect := 0
+	if tfSelectRsv != 0 &&
+		tfSelectTable[lmC][4*isT+0+tfChanged] != tfSelectTable[lmC][4*isT+2+tfChanged] {
+		if dec.DecodeBitLogp(1) {
+			tfSelect = 1
 		}
 	}
+	for i := 0; i < numBands; i++ {
+		tfRes[i] = tfSelectTable[lmC][4*isT+2*tfSelect+tfRes[i]]
+	}
+	return tfRes
 }

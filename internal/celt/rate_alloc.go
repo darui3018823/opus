@@ -2,7 +2,13 @@
 // This implements the allocation logic from libopus rate.c (compute_allocation).
 package celt
 
-import "github.com/darui3018823/opus/internal/entcode"
+import (
+	"fmt"
+	"github.com/darui3018823/opus/internal/entcode"
+)
+
+// allocDebug enables allocation debug output when set to true.
+var allocDebug = false
 
 // RateAllocator performs RFC 6716 compliant bit allocation.
 type RateAllocator struct {
@@ -274,7 +280,7 @@ const numAllocLevels = 11
 // log2FracTable matches libopus LOG2_FRAC_TABLE (celt/mathops.h).
 // Gives Q3-cost (bits×8) to signal an integer in [0..n].
 var log2FracTable = [24]int{
-	0, 8, 13, 16, 19, 21, 22, 24, 25, 26, 27, 28, 29, 30, 30, 31, 32, 32, 33, 33, 34, 34, 35, 35,
+	0, 8, 13, 16, 19, 21, 23, 24, 26, 27, 28, 29, 30, 31, 32, 32, 33, 34, 34, 35, 36, 36, 37, 37,
 }
 
 // computeAllocation is a faithful Go port of libopus compute_allocation() + interp_bits2pulses()
@@ -288,24 +294,32 @@ var log2FracTable = [24]int{
 //	ch        – channel count (1 or 2)
 //	allocTrim – allocation tilt read from stream (0-10, default 5 = neutral)
 //	available – bits available (totalBits − bits already consumed by earlier fields)
+//	offsets   – per-band Q3 boost from dynalloc (nil = all zeros)
 //
 // Returns (pulses[numBands], eBits[numBands], intensity, dualStereo).
 // All internal accounting uses Q3 (bits × 8) matching libopus BITRES=3.
 func computeAllocation(
 	dec *entcode.Decoder,
 	numBands, lm, ch, allocTrim, available int,
-) (pulses []int, eBits []int, intensity int, dualStereo bool) {
+	offsets []int,
+) (pulses []int, eBits []int, balance, intensity, codedBands int, dualStereo bool) {
 	pulses = make([]int, numBands)
+	codedBands = numBands
 	eBits = make([]int, numBands)
 	intensity = numBands
 	dualStereo = false
+
+	if offsets == nil {
+		offsets = make([]int, numBands)
+	}
 
 	if available <= 0 {
 		return
 	}
 
-	// Convert to Q3 (BITRES=3, 1<<BITRES = 8).
-	total := available * 8
+	// `available` is already the Q3 (eighth-bit) budget computed by the caller as
+	// (len*8<<BITRES) - ec_tell_frac - 1 - anti_collapse_rsv, matching libopus.
+	total := available
 	if total <= 0 {
 		return
 	}
@@ -339,7 +353,7 @@ func computeAllocation(
 
 	// Per-band threshold, cap, and trim_offset (Q3).
 	// thresh  = max(C<<BITRES, (3*N0<<LM<<BITRES)>>4) = max(C*8, 3*M/2)
-	// cap     = CacheCaps50[(LM+1)*nbEBands+j] * (C<<BITRES) >> 2 = caps * C * 2
+	// cap     = CacheCaps50[LM*nbEBands+j] * C * N >> 2 = same scale as bitsj
 	// trimOff = C*N0*alloc_trim_term * (end-j-1) * (1<<(LM+BITRES)) >> 6
 	//         = C * M * (alloc_trim-5-LM) * (end-j-1) >> 3
 	//         [ minus C<<BITRES if M==1 (N==1 at this LM) ]
@@ -357,14 +371,15 @@ func computeAllocation(
 		} else {
 			thresh[j] = t1
 		}
-		// cap
-		capsIdx := (lm+1)*NumBands48000 + j
-		if capsIdx < len(CacheCaps50) {
-			cap[j] = int(CacheCaps50[capsIdx]) * (ch << 3) >> 2 // caps * C * 2
-		} else {
-			cap[j] = 255 * (ch << 3) >> 2
+		// cap[j] = (caps[nbEBands*(2*LM+C-1)+j] + 64) * C * N >> 2   (libopus init_caps)
+		capsIdx := NumBands48000*(2*lm+ch-1) + j
+		capVal := 255
+		if capsIdx >= 0 && capsIdx < len(CacheCaps50) {
+			capVal = int(CacheCaps50[capsIdx])
 		}
-		// trim_offset = C*M*(alloc_trim-5-LM)*(end-j-1)>>3
+		cap[j] = (capVal + 64) * ch * M >> 2
+		// trim_offset = C*N0*(alloc_trim-5-LM)*(end-j-1)*(1<<(LM+BITRES))>>6
+		//             = C*M*(alloc_trim-5-LM)*(end-j-1)>>3  (since M=N0<<LM, *8>>6 = >>3)
 		trimOff[j] = ch * M * (allocTrim - 5 - lm) * (numBands - 1 - j) >> 3
 		if M == 1 { // N0<<LM == 1: subtract C<<BITRES
 			trimOff[j] -= ch << 3
@@ -389,11 +404,11 @@ func computeAllocation(
 	}
 
 	// psumCoarse computes the total allocated Q3-bits at BandAllocation level k.
-	// Matches libopus coarse search: done branch = IMIN(bitsj,cap), no allocFloor minimum.
+	// Matches libopus coarse search: bitsj + offsets[j], done branch = IMIN(bitsj,cap).
 	psumCoarse := func(k int) int {
 		psum, done := 0, false
 		for j := numBands - 1; j >= 0; j-- {
-			bitsj := allocAtLevel(j, k)
+			bitsj := allocAtLevel(j, k) + offsets[j]
 			if bitsj >= thresh[j] || done {
 				done = true
 				v := bitsj
@@ -425,39 +440,54 @@ func computeAllocation(
 		lo = 0
 	}
 
+	// skipStart: the first band that must be coded (= last boosted band index, or 0).
+	// Updated in Phase 2 when offsets[j]>0, and used in Phase 5 skip loop.
+	skipStart := 0
+
 	// Phase 2: per-band bits1/bits2 from coarse levels lo and hi.
 	// bits2j = delta from lo to hi (trim cancels in delta).
 	// When hi >= numAllocLevels: bits2j = cap[j] (libopus: hi>=nbAllocVectors → cap).
+	// offsets are added: bits1j += offsets[j] (only if lo>0); bits2j += offsets[j] always.
+	// skip_start is advanced to last boosted band.
 	bits1 := make([]int, numBands)
 	bits2 := make([]int, numBands)
 	for j := 0; j < numBands; j++ {
 		b1 := allocAtLevel(j, lo)
+		if lo > 0 {
+			b1 += offsets[j]
+		}
 		var b2 int
 		if hi >= numAllocLevels {
 			b2 = cap[j]
 		} else {
 			b2 = allocAtLevel(j, hi)
 		}
+		b2 += offsets[j]
 		b2 -= b1
 		if b2 < 0 {
 			b2 = 0
 		}
 		bits1[j] = b1
 		bits2[j] = b2
+		if offsets[j] > 0 {
+			skipStart = j
+		}
 	}
 
 	// Phase 3: fine binary search in [0, 1<<AllocSteps=64].
-	// psum: done branch = IMIN(tmp,cap), no allocFloor; non-done: alloc_floor or 0.
+	// Matches libopus interp_bits2pulses fine search: iterates BACKWARD with done+threshold,
+	// same logic as psumCoarse. NOT a simple forward sum — libopus uses done flag here too.
 	psumFine := func(s int) int {
 		psum, done := 0, false
 		for j := numBands - 1; j >= 0; j-- {
 			tmp := bits1[j] + s*bits2[j]>>AllocSteps
 			if tmp >= thresh[j] || done {
 				done = true
-				if tmp > cap[j] {
-					tmp = cap[j]
+				v := tmp
+				if v > cap[j] {
+					v = cap[j]
 				}
-				psum += tmp
+				psum += v
 			} else if tmp >= allocFloor {
 				psum += allocFloor
 			}
@@ -476,7 +506,8 @@ func computeAllocation(
 	_ = hiF
 
 	// Phase 4: compute final bandBits[j] from loF.
-	// Scan from high band to low (done logic): below thresh and not done → floor or 0.
+	// Matches libopus interp_bits2pulses: iterates BACKWARD with done+threshold flag.
+	// Bands below threshold and below done get allocFloor or 0, not the full interpolated value.
 	bandBits := make([]int, numBands)
 	{
 		psum, done := 0, false
@@ -497,6 +528,16 @@ func computeAllocation(
 			bandBits[j] = tmp
 			psum += tmp
 		}
+		if allocDebug {
+			fmt.Printf("[alloc] phase4: lo=%d hi=%d loF=%d total=%d psum=%d\n", lo, hi, loF, total, psum)
+			fmt.Printf("[alloc] phase4: bandBits[0..5]=%v\n", bandBits[:6])
+			fmt.Printf("[alloc] phase4: bits1[0..5]=%v bits2[0..5]=%v\n", bits1[:6], bits2[:6])
+			fmt.Printf("[alloc] phase4: thresh[0..5]=%v cap[0..5]=%v trimOff[0..5]=%v\n", thresh[:6], cap[:6], trimOff[:6])
+			for j := 16; j <= 20; j++ {
+				fmt.Printf("[alloc] phase4 j=%d bits1=%d bits2=%d interp=%d bandBits=%d cap=%d\n",
+					j, bits1[j], bits2[j], bits1[j]+loF*bits2[j]>>AllocSteps, bandBits[j], cap[j])
+			}
+		}
 		_ = psum
 	}
 
@@ -505,14 +546,17 @@ func computeAllocation(
 	//   - If band_bits >= threshold: decode a 1-bit signal.
 	//     bit=1 → stop (this band is the last coded); bit=0 → skip this band.
 	//   - If band_bits < threshold: force-skip without bit.
-	// When j reaches skipStart (=0): restore skipRsv and stop.
-	skipStart := 0
+	// When j reaches skipStart: restore skipRsv and stop.
 	psum := 0
 	for _, b := range bandBits {
 		psum += b
 	}
-	codedBands := numBands
 	intensityRsvLocal := intensityRsv
+	// libopus uses the band `start` (always 0 here — no custom modes) for all
+	// band-range arithmetic in the skip loop, intensity/dual-stereo decode, and
+	// the final bit distribution. `skipStart` (last dynalloc-boosted band) gates
+	// ONLY the skip-loop break condition `j <= skip_start`.
+	const start = 0
 	for {
 		j := codedBands - 1
 		if j <= skipStart {
@@ -524,13 +568,13 @@ func computeAllocation(
 		if left < 0 {
 			left = 0
 		}
-		totalN0 := int(EBands48000[codedBands]) - int(EBands48000[skipStart])
+		totalN0 := int(EBands48000[codedBands]) - int(EBands48000[start])
 		percoeff := 0
 		if totalN0 > 0 && left > 0 {
 			percoeff = left / totalN0
 		}
 		leftRem := left - totalN0*percoeff
-		bandN0start := int(EBands48000[j]) - int(EBands48000[skipStart])
+		bandN0start := int(EBands48000[j]) - int(EBands48000[start])
 		rem := 0
 		if leftRem > bandN0start {
 			rem = leftRem - bandN0start
@@ -558,7 +602,7 @@ func computeAllocation(
 		// Remove this band from the coded set.
 		psum -= bandBits[j] + intensityRsvLocal
 		if intensityRsvLocal > 0 {
-			n := j - skipStart
+			n := j - start
 			if n < len(log2FracTable) {
 				intensityRsvLocal = log2FracTable[n]
 			} else {
@@ -575,16 +619,20 @@ func computeAllocation(
 		codedBands--
 	}
 
+	if allocDebug {
+		fmt.Printf("[alloc] phase5: codedBands=%d psum=%d total=%d\n", codedBands, psum, total)
+	}
+
 	// Phase 6: decode intensity stereo and dual-stereo (C==2 only).
 	// In libopus these are decoded inside interp_bits2pulses AFTER the skip loop.
 	if intensityRsv > 0 {
 		if dec != nil {
-			intensity = int(dec.DecodeUint(uint32(codedBands-skipStart+1))) + skipStart
+			intensity = int(dec.DecodeUint(uint32(codedBands-start+1))) + start
 		}
 	} else {
 		intensity = 0
 	}
-	if intensity <= skipStart {
+	if intensity <= start {
 		total += dualStereoRsv
 		dualStereoRsv = 0
 	}
@@ -602,18 +650,21 @@ func computeAllocation(
 		if left < 0 {
 			left = 0
 		}
-		totalN0 := int(EBands48000[codedBands]) - int(EBands48000[skipStart])
+		totalN0 := int(EBands48000[codedBands]) - int(EBands48000[start])
 		percoeff := 0
 		if totalN0 > 0 && left > 0 {
 			percoeff = left / totalN0
 		}
 		left -= totalN0 * percoeff
-		for j := skipStart; j < codedBands; j++ {
+		if allocDebug {
+			fmt.Printf("[alloc] ph7 total=%d psum=%d left0=%d totalN0=%d percoeff=%d leftRem=%d bb17=%d bb18=%d\n", total, psum, total-psum, totalN0, percoeff, left, bandBits[17], bandBits[18])
+		}
+		for j := start; j < codedBands; j++ {
 			N0 := int(EBands48000[j+1]) - int(EBands48000[j])
 			bandBits[j] += percoeff * N0
 		}
 		// Sequential remainder distribution (1 Q3-bit per coefficient from low to high band).
-		for j := skipStart; j < codedBands && left > 0; j++ {
+		for j := start; j < codedBands && left > 0; j++ {
 			N0 := int(EBands48000[j+1]) - int(EBands48000[j])
 			add := left
 			if N0 < add {
@@ -624,6 +675,10 @@ func computeAllocation(
 		}
 	}
 
+	if allocDebug {
+		fmt.Printf("[alloc] phase7: bandBits[0..5]=%v\n", bandBits[:6])
+	}
+
 	// Phase 8: compute eBits and pulses using libopus interp_bits2pulses logic.
 	// Includes: N==2 special case, offset threshold adjustments, excess/balance propagation.
 	logM := lm << 3 // LM<<BITRES
@@ -631,15 +686,16 @@ func computeAllocation(
 	if ch > 1 {
 		stereoFlag = 1
 	}
-	balance := 0
-	for j := skipStart; j < codedBands; j++ {
+	balance = 0
+	for j := start; j < codedBands; j++ {
 		N0 := int(EBands48000[j+1] - EBands48000[j])
 		M := N0 << uint(lm)
 		bit := bandBits[j] + balance
 
+		var excess int
 		if M > 1 {
 			// General case (N > 1)
-			excess := bit - cap[j]
+			excess = bit - cap[j]
 			if excess < 0 {
 				excess = 0
 			}
@@ -669,42 +725,43 @@ func computeAllocation(
 			} else {
 				fb = 0
 			}
-			// Don't bust the raw budget
-			rawBudget := bandBits[j] >> stereoFlag >> 3 // bits[j]>>stereo>>BITRES
-			if ch*fb > rawBudget {
-				fb = rawBudget / ch
+			// Don't bust the raw budget. libopus:
+			//   if (C*ebits[j] > (bits[j]>>BITRES)) ebits[j] = bits[j]>>stereo>>BITRES;
+			// Note the threshold is bits[j]>>BITRES (no stereo shift) and the clamp
+			// value is bits[j]>>stereo>>BITRES (no division by C).
+			if ch*fb > bandBits[j]>>3 {
+				fb = bandBits[j] >> stereoFlag >> 3
 			}
 			if fb > MaxFineBits {
 				fb = MaxFineBits
 			}
-			finePriority := 0
-			if fb*(den<<3) >= bandBits[j]+offset {
-				finePriority = 1
-			}
 			eBits[j] = fb
-			_ = finePriority
 			bandBits[j] -= ch * fb << 3 // remove fine energy bits
-
-			// Excess rebalancing
-			if excess > 0 {
-				extraFine := excess>>(stereoFlag+3) // excess>>(stereo+BITRES)
-				if extraFine > MaxFineBits-fb {
-					extraFine = MaxFineBits - fb
-				}
-				eBits[j] += extraFine
-				extraBits := extraFine * ch << 3 // extraFine*C<<BITRES
-				excess -= extraBits
-			}
-			balance = excess
 		} else {
 			// N==1: all bits for fine energy, no PVQ bits for sign
-			excess := bit - (ch << 3) // bit - C<<BITRES
+			excess = bit - (ch << 3) // bit - C<<BITRES
 			if excess < 0 {
 				excess = 0
 			}
 			bandBits[j] = bit - excess
 			eBits[j] = 0
-			balance = excess
+		}
+
+		// Fine energy can't take advantage of the re-balancing in
+		// quant_all_bands(); do the re-balancing here. Applies to BOTH N>1 and
+		// N==1 bands (libopus has this outside the if/else), and `balance=excess`
+		// is the carry to the next band.
+		if excess > 0 {
+			extraFine := excess >> (stereoFlag + 3) // excess>>(stereo+BITRES)
+			if extraFine > MaxFineBits-eBits[j] {
+				extraFine = MaxFineBits - eBits[j]
+			}
+			eBits[j] += extraFine
+			excess -= extraFine * ch << 3 // extraFine*C<<BITRES
+		}
+		balance = excess
+		if allocDebug {
+			fmt.Printf("[alloc] ph8 j=%d bit=%d cap=%d bandBits=%d eBits=%d balance=%d\n", j, bit, cap[j], bandBits[j], eBits[j], balance)
 		}
 	}
 
@@ -714,22 +771,27 @@ func computeAllocation(
 		bandBits[j] = 0
 	}
 
-	// Phase 9: convert PVQ bit budget to pulse counts.
-	for j := 0; j < codedBands; j++ {
-		pvqQ3 := bandBits[j]
-		if pvqQ3 <= 0 {
-			pulses[j] = 0
-			continue
-		}
-		pulses[j] = celtBits2PulsesQ3(j, lm, pvqQ3)
+	if allocDebug {
+		fmt.Printf("[alloc] phase8: eBits[0..5]=%v\n", eBits[:6])
+		fmt.Printf("[alloc] phase8: bandBits[0..5]=%v (after fine removal)\n", bandBits[:6])
+	}
+
+	// libopus `pulses[]` IS the per-band PVQ bit budget (Q3), NOT the pulse count K.
+	// K is derived per band inside quant_all_bands (with the running balance), so we
+	// return the Q3 budgets here and let QuantAllBands convert via bits2pulses.
+	for j := 0; j < numBands; j++ {
+		pulses[j] = bandBits[j]
 	}
 
 	return
 }
 
 // celtBits2PulsesQ3 converts a Q3 bit budget to a pulse count for band j at LM=lm.
-// Matches libopus bits2pulses exactly: LM+1 table indexing, bits-- adjustment,
-// and exactly BITRES=3 binary search iterations with cache[mid+1] access.
+// Matches libopus bits2pulses (rate.h) exactly:
+//   LM++; cache = CacheBits50+CacheIndex50[(LM)*nbEBands+band];
+//   lo=0; hi=cache[0]; bits--;
+//   for i in 0..LOG_MAX_PSEUDO-1: mid=(lo+hi+1)>>1; if cache[mid]>=bits: hi=mid else lo=mid
+//   if bits-cache[lo] <= cache[hi]-bits: return lo else return hi
 func celtBits2PulsesQ3(bandIdx, lm, bitsQ3 int) int {
 	if bitsQ3 <= 0 {
 		return 0
@@ -749,28 +811,28 @@ func celtBits2PulsesQ3(bandIdx, lm, bitsQ3 int) int {
 		return 0
 	}
 
-	// Match libopus bits2pulses exactly:
-	//   bits--; (BITRES=3 iterations) if cache[mid+1] >= bits → hi=mid else lo=mid
-	bitsQ3-- // libopus: bits--
+	// libopus bits--; then LOG_MAX_PSEUDO=6 iterations with (lo+hi+1)>>1 midpoint.
+	// cache[mid] = CacheBits50[start+mid] (0=nEntries, 1..nEntries=costs).
+	bitsQ3--
 	lo, hi := 0, nEntries
-	for i := 0; i < 3; i++ { // exactly BITRES=3 iterations
-		mid := (lo + hi) >> 1
-		if int(CacheBits50[start+mid+1]) >= bitsQ3 {
+	for i := 0; i < 6; i++ {
+		mid := (lo + hi + 1) >> 1
+		if int(CacheBits50[start+mid]) >= bitsQ3 {
 			hi = mid
 		} else {
 			lo = mid
 		}
 	}
-	// Final rounding: if (bits - cost(lo)) <= (cost(hi+1) - bits) → lo; else hi
+	// Rounding: bits-(lo==0?-1:cache[lo]) <= cache[hi]-bits → lo; else hi.
 	loCost := -1
 	if lo > 0 {
 		loCost = int(CacheBits50[start+lo])
 	}
-	hiPlusOneCost := 255
-	if start+hi+1 < len(CacheBits50) {
-		hiPlusOneCost = int(CacheBits50[start+hi+1])
+	hiCost := 255
+	if start+hi < len(CacheBits50) {
+		hiCost = int(CacheBits50[start+hi])
 	}
-	if bitsQ3-loCost <= hiPlusOneCost-bitsQ3 {
+	if bitsQ3-loCost <= hiCost-bitsQ3 {
 		return lo
 	}
 	return hi
@@ -798,5 +860,5 @@ func celtPulses2BitsQ3(bandIdx, lm, p int) int {
 	if p > nEntries {
 		p = nEntries
 	}
-	return int(CacheBits50[start+p])
+	return int(CacheBits50[start+p]) + 1 // libopus: cache[pulses]+1
 }

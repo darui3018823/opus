@@ -20,6 +20,7 @@ type Decoder struct {
 	rng       uint32 // current range
 	dif       uint32 // coded value complement (top-down)
 	rem       int    // remainder bits from previous byte read
+	nbitsTotal int   // bits consumed, tracked like libopus nbits_total (counts past buffer end)
 	err       error
 }
 
@@ -40,6 +41,9 @@ func NewDecoder(data []byte) *Decoder {
 	dec.rem = int(firstByte)
 	dec.dif = dec.rng - 1 - (firstByte >> (SymBits - CodeExtra))
 
+	// libopus: nbits_total = EC_CODE_BITS+1 - ((EC_CODE_BITS-EC_CODE_EXTRA)/EC_SYM_BITS)*EC_SYM_BITS = 9
+	dec.nbitsTotal = CodeBits + 1 - ((CodeBits-CodeExtra)/SymBits)*SymBits
+
 	// Normalize to fill the range
 	dec.normalize()
 
@@ -49,7 +53,29 @@ func NewDecoder(data []byte) *Decoder {
 // Tell returns the number of bits consumed so far.
 // Matches ec_tell: bits from start (range coder) + bits consumed from end (raw).
 func (dec *Decoder) Tell() int {
-	return dec.pos*8 - ILog(dec.rng) + dec.endOffs*SymBits - int(dec.nendBits)
+	// libopus ec_tell == nbits_total - ILOG(rng). Our historical convention is
+	// (ec_tell - 1); ECTell() restores the libopus value.
+	return dec.nbitsTotal - ILog(dec.rng) - 1
+}
+
+// ECTell returns bits consumed using the libopus ec_tell convention
+// (== 1 immediately after init). Our internal Tell() reports ec_tell-1,
+// so this is simply Tell()+1. Use this where porting libopus guards verbatim.
+func (dec *Decoder) ECTell() int { return dec.Tell() + 1 }
+
+// TellFrac returns bits consumed in 1/8-bit (Q3) resolution.
+// Bit-exact with ec_tell_frac in libopus (celt/entcode.c).
+func (dec *Decoder) TellFrac() int {
+	correction := [8]uint32{35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535}
+	nbits := dec.nbitsTotal << 3
+	l := ILog(dec.rng)
+	r := dec.rng >> uint(l-16)
+	b := (r >> 12) - 8
+	if r > correction[b] {
+		b++
+	}
+	l = (l << 3) + int(b)
+	return nbits - l
 }
 
 // Error returns any decoding error.
@@ -87,6 +113,7 @@ func (dec *Decoder) readByteFromEnd() byte {
 // Matches ec_dec_normalize in libopus.
 func (dec *Decoder) normalize() {
 	for dec.rng != 0 && dec.rng <= CodeBot {
+		dec.nbitsTotal += SymBits
 		dec.rng <<= SymBits
 
 		// libopus: sym=rem; rem=readByte(); sym=(sym<<8|rem)>>1;
@@ -239,6 +266,7 @@ func (dec *Decoder) DecodeBits(nbits uint) uint32 {
 		dec.endWindow >>= nbits
 	}
 	dec.nendBits -= nbits
+	dec.nbitsTotal += int(nbits) // libopus counts raw bits unconditionally (even past buffer end)
 	return ret
 }
 

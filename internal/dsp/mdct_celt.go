@@ -29,8 +29,8 @@ func NewCELTMode(N, overlap int, window []float32) *CELTMode {
 func (m *CELTMode) IMDCT(X []float64) []float64 {
 	N := m.N
 
-	// MDCT-IV: Y[n] = (2/N)*sum_k X[k]*cos(π*(2k+1)*(2n+1)/(4N))
-	// Pre-multiply X[k] by exp(iπk/(2N)) for the DFT formulation.
+	// Pre-multiply X[k] by exp(iπk/(2N)) so the half-bin term in
+	// (k+1/2)*(n+N/2+1/2) can be represented by an integer DFT bin.
 	a := make([]Complex, 2*N)
 	for k := 0; k < N; k++ {
 		ang := math.Pi * float64(k) / float64(2*N)
@@ -40,12 +40,15 @@ func (m *CELTMode) IMDCT(X []float64) []float64 {
 	// 2N-point DFT.
 	Z := AnyFFT(a)
 
-	// Post-multiply: Y[n] = Re(exp(iπ(2n+1)/(4N)) * Z[(2N-n) mod 2N]) * (2/N).
+	// Post-multiply:
+	// Y[n] = Re(exp(iπ(2j+1)/(4N)) * Z[(2N-j) mod 2N]) * (2/N),
+	// where j = n + N/2.
 	scale := 2.0 / float64(N)
 	y := make([]float64, N)
 	for n := 0; n < N; n++ {
-		ang := math.Pi * float64(2*n+1) / float64(4*N)
-		zn := Z[(2*N-n)%(2*N)]
+		j := n + N/2
+		ang := math.Pi * float64(2*j+1) / float64(4*N)
+		zn := Z[(2*N-j)%(2*N)]
 		y[n] = (math.Cos(ang)*zn.Real - math.Sin(ang)*zn.Imag) * scale
 	}
 

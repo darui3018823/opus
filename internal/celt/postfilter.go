@@ -57,6 +57,17 @@ func (pf *PostFilter) Reset() {
 	pf.prevGain = [3]float64{}
 }
 
+func (pf *PostFilter) copyFrom(src *PostFilter) {
+	if src == nil || src == pf {
+		return
+	}
+	pf.period = src.period
+	pf.gain = src.gain
+	pf.prevPeriod = src.prevPeriod
+	pf.prevGain = src.prevGain
+	copy(pf.buf, src.buf)
+}
+
 // tapsetIcdf is the ICDF table for tapset, ft=4 (logp=2).
 // Matches libopus tapset_icdf = {2, 1, 0} in celt/celt.h.
 // P(tapset=0)=1/2, P(tapset=1)=1/4, P(tapset=2)=1/4.

@@ -11,13 +11,13 @@ import (
 // Decoder is a CELT decoder instance
 type Decoder struct {
 	mode          *Mode
-	celtMode      *dsp.CELTMode // long-block (N-point) IMDCT mode
-	shortCeltMode *dsp.CELTMode // short-block (NBase-point) IMDCT mode for transient frames
+	celtMode      *dsp.CELTMode     // long-block (N-point) IMDCT mode
+	shortCeltMode *dsp.CELTMode     // short-block (NBase-point) IMDCT mode for transient frames
 	bandProcs     [2]*BandProcessor // band processors per channel (index 0 = L/M, index 1 = R/S)
 	overlap       [][]float64       // Overlap buffer per channel (NBase samples each)
 
-	// Decoder state — two-tap energy history required by RFC 6716 §5.1.2
-	// prevEnergies[i*C+c] = actual log2-amplitude for band i, channel c.
+	// Decoder state — oldBandE/oldLogE history in libopus' mean-subtracted
+	// log2-amplitude domain. Layout is channel-major: c*numBands+i.
 	prevEnergies  []float64
 	prevEnergies2 []float64
 	frameCount    int
@@ -55,7 +55,7 @@ func NewDecoderEx(frameSize, sampleRate, numBands, channels int) (*Decoder, erro
 		mode:          mode,
 		celtMode:      celtMode,
 		shortCeltMode: shortCeltMode,
-		overlap:  make([][]float64, channels),
+		overlap:       make([][]float64, channels),
 	}
 	d.bandProcs[0] = NewBandProcessor(mode)
 	if channels == 2 {
@@ -66,13 +66,11 @@ func NewDecoderEx(frameSize, sampleRate, numBands, channels int) (*Decoder, erro
 		d.overlap[i] = make([]float64, mode.Overlap)
 	}
 
-	// Initialize energy history in log2-amplitude domain (matches libopus -28.0f).
-	// Size = numBands * channels: stereo stores [band*C+ch] layout.
+	// oldBandE is zeroed by OPUS_RESET_STATE; oldLogE/oldLogE2 start at -28.
 	nEBands := mode.Bands.NumBands * channels
 	d.prevEnergies = make([]float64, nEBands)
 	d.prevEnergies2 = make([]float64, nEBands)
-	for i := range d.prevEnergies {
-		d.prevEnergies[i] = -28.0
+	for i := range d.prevEnergies2 {
 		d.prevEnergies2[i] = -28.0
 	}
 
@@ -166,10 +164,11 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 		}
 	}
 
-	// quantLogE[i*C+c] = actual log2-amplitude for band i, channel c.
+	// quantLogE[c*numBands+i] is mean-subtracted log2-amplitude. libopus
+	// denormalise_bands adds eMeans[i] when applying the final gain.
 	for i := 0; i < numBands; i++ {
 		for c := 0; c < ch; c++ {
-			amp := math.Exp2(quantLogE[i*ch+c])
+			amp := math.Exp2(quantLogE[c*numBands+i] + EMean(i))
 			e := amp * amp
 			if e < 1e-20 {
 				e = 1e-20
@@ -191,9 +190,7 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 		return nil, err
 	}
 
-	// Update energy history with fine-corrected values (band.Energy has been updated
-	// by ApplyFineEnergy inside decodeBandCoeffs). libopus updates oldBandE after both
-	// coarse and fine energy passes. Log2-amplitude = 0.5*log2(Energy).
+	// Update oldLogE history with fine-corrected mean-subtracted values.
 	copy(d.prevEnergies2, d.prevEnergies)
 	for i := 0; i < numBands; i++ {
 		for c := 0; c < ch; c++ {
@@ -201,11 +198,11 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 			if e < 1e-20 {
 				e = 1e-20
 			}
-			v := 0.5 * math.Log2(e)
+			v := 0.5*math.Log2(e) - EMean(i)
 			if v < -28.0 {
 				v = -28.0
 			}
-			d.prevEnergies[i*ch+c] = v
+			d.prevEnergies[c*numBands+i] = v
 		}
 	}
 
@@ -232,7 +229,7 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	// (libopus "shortMdct" path). Non-transient frames use a single N-point IMDCT.
 	output := make([]float64, frameSize*ch)
 	nBase := d.mode.NBase // = NBase (e.g. 120 for 48kHz)
-	M := 1 << uint(lm)   // number of sub-frames for transient
+	M := 1 << uint(lm)    // number of sub-frames for transient
 
 	for c := 0; c < ch; c++ {
 		coeffs := mdctCoeffsPerCh[c]
@@ -243,7 +240,7 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 			// Each sub-frame k uses coeffs[k*nBase:(k+1)*nBase].
 			// Sub-frames chain together using sequential OLA with a NBase-sized tail.
 			subTail := make([]float64, nBase) // temporary tail for sub-frame chaining
-			copy(subTail, d.overlap[c])        // first sub-frame uses previous frame's overlap
+			copy(subTail, d.overlap[c])       // first sub-frame uses previous frame's overlap
 
 			samplesOut = make([]float64, frameSize)
 			for k := 0; k < M; k++ {
@@ -290,6 +287,58 @@ func (d *Decoder) LastFinalRange() uint32 {
 	return d.lastFinalRange
 }
 
+// CopyStateFrom transfers inter-frame CELT decoder history from another
+// decoder instance. The public Opus decoder uses separate CELT instances for
+// packet bandwidth/frame/channel variants, but the Opus stream has one logical
+// CELT state across those variants.
+func (d *Decoder) CopyStateFrom(src *Decoder) {
+	if src == nil || src == d {
+		return
+	}
+
+	for c := range d.overlap {
+		sc := c
+		if sc >= len(src.overlap) {
+			sc = len(src.overlap) - 1
+		}
+		if sc >= 0 {
+			copy(d.overlap[c], src.overlap[sc])
+		}
+	}
+
+	dstBands := d.mode.Bands.NumBands
+	srcBands := src.mode.Bands.NumBands
+	for c := 0; c < d.mode.Channels; c++ {
+		sc := c
+		if sc >= src.mode.Channels {
+			sc = src.mode.Channels - 1
+		}
+		for i := 0; i < dstBands; i++ {
+			di := c*dstBands + i
+			if i >= srcBands || sc < 0 {
+				d.prevEnergies[di] = 0
+				d.prevEnergies2[di] = -28
+				continue
+			}
+			si := sc*srcBands + i
+			d.prevEnergies[di] = src.prevEnergies[si]
+			d.prevEnergies2[di] = src.prevEnergies2[si]
+		}
+	}
+
+	for c := range d.postFilter {
+		sc := c
+		if sc >= len(src.postFilter) {
+			sc = len(src.postFilter) - 1
+		}
+		if sc >= 0 {
+			d.postFilter[c].copyFrom(src.postFilter[sc])
+		}
+	}
+
+	d.lastFinalRange = src.lastFinalRange
+}
+
 // decodeBandEnergies is superseded by UnquantizeCoarseEnergy (RFC 6716 §5.1.2).
 // Kept as an unexported no-op to avoid compilation errors if referenced elsewhere.
 func (d *Decoder) decodeBandEnergies(_ *entcode.Decoder) error {
@@ -326,7 +375,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 
 	// libopus-faithful compute_allocation: pulses[] are per-band Q3 PVQ budgets,
 	// balance is the leftover, codedBands the last coded band.
-	pulses, eBits, balance, intensityV, codedBands, dualStereoV := computeAllocation(dec, numBands, lm, ch, allocTrim, bitsQ3, offsets)
+	pulses, eBits, finePriority, balance, intensityV, codedBands, dualStereoV := computeAllocation(dec, numBands, lm, ch, allocTrim, bitsQ3, offsets)
 	intensity, dualStereo = intensityV, dualStereoV
 
 	// Fine energy — raw bits from END (do NOT affect forward rng). FORWARD band order.
@@ -351,9 +400,35 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	}
 	collapse := make([]byte, numBands*ch)
 	totalBitsQ3 := lenBytes*8<<3 - antiCollapseRsv
-	QuantAllBands(dec, 0, numBands, X[:frameLen], Y, collapse, pulses, isTransient,
+	seed := QuantAllBands(dec, 0, numBands, X[:frameLen], Y, collapse, pulses, isTransient,
 		spread, dualStereo, intensity, tfRes, totalBitsQ3, balance, lm, codedBands,
 		dec.GetRng(), false)
+
+	// Anti-collapse bit — RAW bit (ec_dec_bits), read AFTER PVQ. Does not affect rng.
+	antiCollapseOn := false
+	if antiCollapseRsv > 0 {
+		antiCollapseOn = dec.DecodeBits(1) != 0
+	}
+
+	// Final fine energy pass — consumes any remaining raw bits after PVQ and
+	// anti-collapse reservation. Like libopus, priority 0 bands are refined first.
+	bitsLeft := lenBytes*8 - dec.ECTell()
+	for prio := 0; prio < 2; prio++ {
+		for i := 0; i < numBands && bitsLeft >= ch; i++ {
+			if eBits[i] >= MaxFineEnergy || finePriority[i] != prio {
+				continue
+			}
+			for c := 0; c < ch; c++ {
+				q2 := int(dec.DecodeBits(1))
+				d.bandProcs[c].ApplyFinalFineEnergy(i, q2, eBits[i])
+				bitsLeft--
+			}
+		}
+	}
+
+	if antiCollapseOn {
+		d.antiCollapse(X, collapse, pulses, lm, frameLen, seed)
+	}
 
 	// Copy decoded (unit-norm) band coefficients back into the band processors.
 	for c := 0; c < ch; c++ {
@@ -367,12 +442,72 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 		}
 	}
 
-	// Anti-collapse bit — RAW bit (ec_dec_bits), read AFTER PVQ. Does not affect rng.
-	if antiCollapseRsv > 0 {
-		_ = dec.DecodeBits(1)
-	}
-
 	return intensity, dualStereo, nil
+}
+
+func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, lm, frameLen int, seed uint32) {
+	numBands := d.mode.Bands.NumBands
+	ch := d.mode.Channels
+	M := 1 << uint(lm)
+
+	for i := 0; i < numBands; i++ {
+		n0 := int(EBands48000[i+1] - EBands48000[i])
+		if n0 <= 0 {
+			continue
+		}
+		depth := ((1 + pulses[i]) / n0) >> uint(lm)
+		thresh := 0.5 * math.Exp2(-0.125*float64(depth))
+		sqrt1 := 1.0 / math.Sqrt(float64(n0*M))
+
+		for c := 0; c < ch; c++ {
+			prev1 := d.prevEnergies[c*numBands+i]
+			prev2 := d.prevEnergies2[c*numBands+i]
+			if ch == 1 && len(d.prevEnergies) >= 2*numBands {
+				prev1 = max(prev1, d.prevEnergies[numBands+i])
+				prev2 = max(prev2, d.prevEnergies2[numBands+i])
+			}
+
+			energy := d.bandProcs[c].bands[i].Energy
+			if energy < 1e-20 {
+				energy = 1e-20
+			}
+			logE := 0.5*math.Log2(energy) - EMean(i)
+			eDiff := logE - min(prev1, prev2)
+			if eDiff < 0 {
+				eDiff = 0
+			}
+
+			r := 2.0 * math.Exp2(-eDiff)
+			if lm == 3 {
+				r *= math.Sqrt2
+			}
+			r = min(thresh, r) * sqrt1
+
+			offset := c*frameLen + int(EBands48000[i])*M
+			if offset+n0*M > len(X) {
+				continue
+			}
+			renorm := false
+			mask := collapse[i*ch+c]
+			for k := 0; k < M; k++ {
+				if mask&(1<<uint(k)) != 0 {
+					continue
+				}
+				for j := 0; j < n0; j++ {
+					seed = celtLCGRand(seed)
+					v := r
+					if seed&0x8000 == 0 {
+						v = -v
+					}
+					X[offset+(j<<uint(lm))+k] = v
+				}
+				renorm = true
+			}
+			if renorm {
+				renormaliseVector(X[offset:], n0*M, 1.0)
+			}
+		}
+	}
 }
 
 // decodeLoss performs packet loss concealment
@@ -412,9 +547,9 @@ func (d *Decoder) Reset() {
 		}
 	}
 
-	// Reset energy history
+	// Reset energy history.
 	for i := range d.prevEnergies {
-		d.prevEnergies[i] = -28.0
+		d.prevEnergies[i] = 0
 		d.prevEnergies2[i] = -28.0
 	}
 

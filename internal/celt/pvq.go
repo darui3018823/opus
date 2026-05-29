@@ -368,42 +368,103 @@ func PVQDecode(dec *entcode.Decoder, n, k int) []float64 {
 	return output
 }
 
-// cwrsiLibopus decodes a CWRS index into a pulse vector matching libopus ordering.
-// Processes dimensions from N-1 down to 0 (last dimension is most significant).
-// This matches libopus celt/cwrs.c cwrsi().
+// celtPVQU returns libopus CELT_PVQ_U(n,k). U is symmetric, and
+// U(n,k) = (V(n-1,k-1)+V(n,k-1))/2 for n>0,k>0.
+func celtPVQU(n, k int) uint64 {
+	if n > k {
+		n, k = k, n
+	}
+	if n == 0 {
+		if k == 0 {
+			return 1
+		}
+		return 0
+	}
+	if k == 0 {
+		return 0
+	}
+	return (cwrsV(n-1, k-1) + cwrsV(n, k-1)) >> 1
+}
+
+// cwrsiLibopus decodes a CWRS index into a pulse vector matching libopus
+// celt/cwrs.c cwrsi(). Unlike the older direct V-based implementation, the
+// libopus codebook order is defined in terms of U(N,K), so the exact same
+// branch structure is used here.
 func cwrsiLibopus(n, k int, index uint32) []int {
 	y := make([]int, n)
-	for j := n - 1; j > 0; j-- {
-		p := k
-		// Skip groups with |y[j]| = p, p = k down to 1 (each group = 2*V(j, k-p) codewords).
-		for p > 0 {
-			groupSize := uint32(min64(2*cwrsV(j, k-p), cwrsMax))
-			if index < groupSize {
-				break
+	i := uint64(index)
+	pos := 0
+	for n > 2 {
+		var p uint64
+		if k >= n {
+			p = celtPVQU(n, k+1)
+			s := 0
+			if i >= p {
+				s = -1
+				i -= p
 			}
-			index -= groupSize
-			p--
-		}
-		// p is the absolute value at position j.
-		if p > 0 {
-			halfGroup := uint32(min64(cwrsV(j, k-p), cwrsMax))
-			if index < halfGroup {
-				y[j] = p
+			k0 := k
+			q := celtPVQU(n, n)
+			if q > i {
+				k = n
+				for {
+					k--
+					p = celtPVQU(k, n)
+					if p <= i {
+						break
+					}
+				}
 			} else {
-				index -= halfGroup
-				y[j] = -p
+				for p = celtPVQU(n, k); p > i; p = celtPVQU(n, k) {
+					k--
+				}
 			}
-			k -= p
+			i -= p
+			y[pos] = (k0 - k + s) ^ s
+		} else {
+			p = celtPVQU(k, n)
+			q := celtPVQU(k+1, n)
+			if p <= i && i < q {
+				i -= p
+				y[pos] = 0
+			} else {
+				s := 0
+				if i >= q {
+					s = -1
+					i -= q
+				}
+				k0 := k
+				for {
+					k--
+					p = celtPVQU(k, n)
+					if p <= i {
+						break
+					}
+				}
+				i -= p
+				y[pos] = (k0 - k + s) ^ s
+			}
 		}
-		// p == 0: y[j] stays 0, k unchanged, remaining pulses go to dims 0..j-1.
+		pos++
+		n--
 	}
-	// Dimension 0 gets the remaining k pulses; sign from remaining index.
-	if k > 0 {
-		y[0] = k
-		if index > 0 {
-			y[0] = -k
-		}
+
+	p := uint64(2*k + 1)
+	s := 0
+	if i >= p {
+		s = -1
+		i -= p
 	}
+	k0 := k
+	k = int((i + 1) >> 1)
+	if k != 0 {
+		i -= uint64(2*k - 1)
+	}
+	y[pos] = (k0 - k + s) ^ s
+	pos++
+
+	s = -int(i)
+	y[pos] = (k + s) ^ s
 	return y
 }
 

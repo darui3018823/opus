@@ -93,8 +93,8 @@ var betaCoef = [4]float64{
 const betaIntra = 4915.0 / 32768.0
 
 // eMeans is the mean log2-amplitude per band, from libopus celt/quant_bands.c.
-// Band energies are stored as (actual_log2_amplitude - eMeans[band]).
-// This reduces the residuals, saving bits.
+// Coarse/fine energy coding stores values before this mean is added; synthesis
+// applies exp2(oldBandE[i] + eMeans[i]).
 var eMeans = [25]float64{
 	6.437500, 6.250000, 5.750000, 5.312500, 5.062500,
 	4.812500, 4.500000, 4.375000, 4.875000, 4.687500,
@@ -134,8 +134,8 @@ func lmClamp(lm int) int {
 //
 //	enc       — range encoder
 //	logE      — current frame log2-amplitude energies, length numBands
-//	prevLogE  — previous frame quantised log2-amplitude energies, length numBands
-//	prevLogE2 — two-frames-ago quantised log2-amplitude energies, length numBands
+//	prevLogE  — previous frame quantised mean-subtracted energies, length numBands
+//	prevLogE2 — two-frames-ago quantised mean-subtracted energies, length numBands
 //	intra     — true for first frame (no inter predictor)
 //	numBands, lm, channels — frame configuration
 //	totalBits — total bit budget for this packet (used to select coding path)
@@ -180,13 +180,12 @@ func QuantizeCoarseEnergy(
 		decay := int(probModel[pi+1]) << 6
 
 		// Inter-frame prediction — matches libopus quant_coarse_energy_impl:
-		//   tmp = coef * MAX(-9, oldEBands[i]) + eMeans[i] + prev
-		// logE[i] and oldEBands are in actual log2-amplitude (not mean-subtracted).
+		//   tmp = coef * MAX(-9, oldEBands[i]) + prev
 		oldE := prevLogE[i]
 		if oldE < -9.0 {
 			oldE = -9.0
 		}
-		predicted := coef*oldE + eMeans[i] + prev
+		predicted := coef*oldE + prev
 
 		// Quantise residual (nearest integer) — same rounding as libopus floor(.5+f)
 		diff := logE[i] - predicted
@@ -229,8 +228,8 @@ func QuantizeCoarseEnergy(
 			qi = -1
 		}
 
-		// Reconstruct actual log2-amplitude (includes eMeans[i], same as libopus).
-		quantLogE[i] = coef*oldE + eMeans[i] + prev + float64(qi)
+		// Reconstruct mean-subtracted log2-amplitude.
+		quantLogE[i] = coef*oldE + prev + float64(qi)
 		if quantLogE[i] < -28.0 {
 			quantLogE[i] = -28.0
 		}
@@ -255,8 +254,9 @@ func encodeSmallEnergySym(qi int) int {
 
 // UnquantizeCoarseEnergy decodes band log2-amplitude energies using RFC 6716 §5.1.2.
 //
-// prevLogE and prevLogE2 supply the predictor state; they are NOT updated
-// here — the caller must update them after this call.
+// prevLogE supplies oldBandE in channel-major layout (c*numBands+i). prevLogE2
+// is accepted for API symmetry but not used by libopus' coarse predictor.
+// The returned values use the same channel-major, mean-subtracted layout.
 // totalBits must match the value passed to QuantizeCoarseEnergy.
 func UnquantizeCoarseEnergy(
 	dec *entcode.Decoder,
@@ -284,8 +284,7 @@ func UnquantizeCoarseEnergy(
 
 	budget := totalBits // whole bits, matches libopus: budget = dec->storage*8
 
-	// quantLogE[i*channels + c] = actual log2-amplitude for band i, channel c.
-	// Matches libopus oldEBands[i*C + c] layout.
+	// quantLogE[c*numBands+i] matches libopus oldEBands[c*nbEBands+i].
 	quantLogE := make([]float64, numBands*channels)
 	prev := make([]float64, channels) // per-channel inter-band predictor
 
@@ -299,12 +298,13 @@ func UnquantizeCoarseEnergy(
 
 		for c := 0; c < channels; c++ {
 			// Inter-frame prediction — matches libopus unquant_coarse_energy:
-			//   tmp = coef * MAX(-9, oldEBands[i*C+c]) + eMeans[i] + prev[c]
-			oldE := prevLogE[i*channels+c]
+			//   tmp = coef * MAX(-9, oldEBands[c*nbEBands+i]) + prev[c]
+			idx := c*numBands + i
+			oldE := prevLogE[idx]
 			if oldE < -9.0 {
 				oldE = -9.0
 			}
-			predicted := coef*oldE + eMeans[i] + prev[c]
+			predicted := coef*oldE + prev[c]
 
 			// Coding path selection must mirror the encoder exactly.
 			tell := dec.ECTell()
@@ -326,12 +326,12 @@ func UnquantizeCoarseEnergy(
 				qi = -1
 			}
 
-			// Reconstruct actual log2-amplitude (includes eMeans contribution).
+			// Reconstruct mean-subtracted log2-amplitude.
 			v := predicted + float64(qi)
 			if v < -28.0 {
 				v = -28.0
 			}
-			quantLogE[i*channels+c] = v
+			quantLogE[idx] = v
 			prev[c] += float64(qi) - beta*float64(qi)
 		}
 	}

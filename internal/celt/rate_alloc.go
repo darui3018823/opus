@@ -302,10 +302,11 @@ func computeAllocation(
 	dec *entcode.Decoder,
 	numBands, lm, ch, allocTrim, available int,
 	offsets []int,
-) (pulses []int, eBits []int, balance, intensity, codedBands int, dualStereo bool) {
+) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
 	pulses = make([]int, numBands)
 	codedBands = numBands
 	eBits = make([]int, numBands)
+	finePriority = make([]int, numBands)
 	intensity = numBands
 	dualStereo = false
 
@@ -742,6 +743,9 @@ func computeAllocation(
 				fb = MaxFineBits
 			}
 			eBits[j] = fb
+			if fb*(den<<3) >= bandBits[j]+offset {
+				finePriority[j] = 1
+			}
 			bandBits[j] -= ch * fb << 3 // remove fine energy bits
 		} else {
 			// N==1: all bits for fine energy, no PVQ bits for sign
@@ -751,6 +755,7 @@ func computeAllocation(
 			}
 			bandBits[j] = bit - excess
 			eBits[j] = 0
+			finePriority[j] = 1
 		}
 
 		// Fine energy can't take advantage of the re-balancing in
@@ -763,7 +768,13 @@ func computeAllocation(
 				extraFine = MaxFineBits - eBits[j]
 			}
 			eBits[j] += extraFine
-			excess -= extraFine * ch << 3 // extraFine*C<<BITRES
+			extraBits := extraFine * ch << 3 // extraFine*C<<BITRES
+			if extraBits >= excess-balance {
+				finePriority[j] = 1
+			} else {
+				finePriority[j] = 0
+			}
+			excess -= extraBits
 		}
 		balance = excess
 		if allocDebug {
@@ -775,6 +786,9 @@ func computeAllocation(
 	for j := codedBands; j < numBands; j++ {
 		eBits[j] = bandBits[j] >> stereoFlag >> 3 // bits[j]>>stereo>>BITRES
 		bandBits[j] = 0
+		if eBits[j] < 1 {
+			finePriority[j] = 1
+		}
 	}
 
 	if allocDebug {

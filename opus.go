@@ -234,6 +234,7 @@ type Decoder struct {
 	// chIdx: 0=mono, 1=stereo
 	// CELT always runs at 48kHz internally; bandwidth only limits numBands.
 	celtDecoders [4][4][2]*celt.Decoder
+	lastCeltDec  *celt.Decoder
 
 	// SILK decoders indexed by [rateIdx 0-2][frameIdx 0=10ms,1=20ms][chIdx 0=mono,1=stereo].
 	// rateIdx: 0=8kHz, 1=12kHz, 2=16kHz
@@ -623,10 +624,14 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 
 	var allPCM []float64
 	for _, frame := range frames {
+		if d.lastCeltDec != nil && d.lastCeltDec != activeCeltDec {
+			activeCeltDec.CopyStateFrom(d.lastCeltDec)
+		}
 		pcm, err := activeCeltDec.Decode(frame)
 		if err != nil {
 			return nil, fmt.Errorf("CELT decoding failed: %w", err)
 		}
+		d.lastCeltDec = activeCeltDec
 
 		// Resample from 48kHz to output sample rate if needed
 		if d.celtResampler != nil {
@@ -982,6 +987,7 @@ func (d *Decoder) Reset() error {
 	if d.celtResampler != nil {
 		d.celtResampler.Reset()
 	}
+	d.lastCeltDec = nil
 	return nil
 }
 

@@ -153,6 +153,16 @@ func (bp *BandProcessor) ApplyFineEnergy(bandIdx, q2, fb int) {
 	band.Energy *= math.Exp2(2.0 * offset)
 }
 
+// ApplyFinalFineEnergy applies the one-bit final energy refinement pass.
+func (bp *BandProcessor) ApplyFinalFineEnergy(bandIdx, q2, fb int) {
+	if bandIdx < 0 || bandIdx >= len(bp.bands) || fb < 0 || fb >= MaxFineEnergy {
+		return
+	}
+	band := bp.bands[bandIdx]
+	offset := (float64(q2) - 0.5) * math.Exp2(float64(-fb-1))
+	band.Energy *= math.Exp2(2.0 * offset)
+}
+
 // ComputeBandEnergy computes the energy of a band from coefficients
 func ComputeBandEnergy(coeffs []float64) float64 {
 	energy := 0.0

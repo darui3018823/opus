@@ -128,7 +128,7 @@ func TestOracleTraceStereo(t *testing.T) {
 	}
 	bitsQ3 -= antiRsv
 	allocDebug = os.Getenv("ALLOCDBG") != ""
-	pulses, eBits, balance, intensity, codedBands, dualStereo := computeAllocation(dec, numBands, lm, ch, allocTrim, bitsQ3, offsets)
+	pulses, eBits, _, balance, intensity, codedBands, dualStereo := computeAllocation(dec, numBands, lm, ch, allocTrim, bitsQ3, offsets)
 	allocDebug = false
 	snap("allocation")
 	fmt.Printf("   codedBands=%d balance=%d intensity=%d dual_stereo=%v antiRsv=%d\n", codedBands, balance, intensity, dualStereo, antiRsv)

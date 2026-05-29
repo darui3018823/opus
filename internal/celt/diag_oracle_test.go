@@ -106,7 +106,7 @@ func TestOracleTrace(t *testing.T) {
 		antiRsv = 1 << 3
 	}
 	bitsQ3 -= antiRsv
-	pulses, eBits, balance, intensity, codedBands, dualStereo := computeAllocation(dec, numBands, lm, ch, allocTrim, bitsQ3, offsets)
+	pulses, eBits, _, balance, intensity, codedBands, dualStereo := computeAllocation(dec, numBands, lm, ch, allocTrim, bitsQ3, offsets)
 	snap("allocation")
 	fmt.Printf("   pulses: %v\n", pulses)
 	fmt.Printf("   eBits : %v\n", eBits)

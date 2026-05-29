@@ -6,7 +6,7 @@ import (
 )
 
 func TestIMDCTFormula(t *testing.T) {
-	for _, N := range []int{2, 4, 8, 120} {
+	for _, N := range []int{2, 4, 8, 120, 240, 480, 960} {
 		// Create a test spectral vector
 		X := make([]float64, N)
 		for k := range X {

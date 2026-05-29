@@ -144,6 +144,12 @@ func TestOracleTrace(t *testing.T) {
 		fmt.Printf("    DP n=%d k=%d V=%d idx=%d dif %08x->%08x tellf %d->%d (d=%d)\n", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[7]-d[6])
 	}
 	snap("pvq")
+	// Print first 16 coefficients after QuantAllBands (unit-norm, before denorm)
+	fmt.Printf("X[0:16]:")
+	for i := 0; i < 16 && i < len(X); i++ {
+		fmt.Printf(" %.4f", X[i])
+	}
+	fmt.Println()
 
 	if antiRsv > 0 {
 		dec.DecodeBits(1)

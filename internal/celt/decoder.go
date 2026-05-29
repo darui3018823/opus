@@ -10,10 +10,11 @@ import (
 
 // Decoder is a CELT decoder instance
 type Decoder struct {
-	mode      *Mode
-	celtMode  *dsp.CELTMode
-	bandProcs [2]*BandProcessor // band processors per channel (index 0 = L/M, index 1 = R/S)
-	overlap   [][]float64       // Overlap buffer per channel (120 samples each)
+	mode          *Mode
+	celtMode      *dsp.CELTMode // long-block (N-point) IMDCT mode
+	shortCeltMode *dsp.CELTMode // short-block (NBase-point) IMDCT mode for transient frames
+	bandProcs     [2]*BandProcessor // band processors per channel (index 0 = L/M, index 1 = R/S)
+	overlap       [][]float64       // Overlap buffer per channel (NBase samples each)
 
 	// Decoder state — two-tap energy history required by RFC 6716 §5.1.2
 	// prevEnergies[i*C+c] = actual log2-amplitude for band i, channel c.
@@ -47,10 +48,13 @@ func NewDecoderEx(frameSize, sampleRate, numBands, channels int) (*Decoder, erro
 	overlap := mode.Overlap
 	win := celtWindow(overlap)
 	celtMode := dsp.NewCELTMode(frameSize, overlap, win)
+	// Short-block mode (NBase=overlap samples) used for transient IMDCT synthesis.
+	shortCeltMode := dsp.NewCELTMode(overlap, overlap, win)
 
 	d := &Decoder{
-		mode:     mode,
-		celtMode: celtMode,
+		mode:          mode,
+		celtMode:      celtMode,
+		shortCeltMode: shortCeltMode,
 		overlap:  make([][]float64, channels),
 	}
 	d.bandProcs[0] = NewBandProcessor(mode)
@@ -174,10 +178,6 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 		}
 	}
 
-	// Update energy history (size = numBands * channels)
-	copy(d.prevEnergies2, d.prevEnergies)
-	copy(d.prevEnergies, quantLogE)
-
 	d.bandProcs[0].InterpolateBandEnergies()
 	if ch == 2 {
 		d.bandProcs[1].InterpolateBandEnergies()
@@ -189,6 +189,24 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	_, _, err := d.decodeBandCoeffs(dec, len(frameData), allocTrim, isTransient, spread, tfRes, offsets)
 	if err != nil {
 		return nil, err
+	}
+
+	// Update energy history with fine-corrected values (band.Energy has been updated
+	// by ApplyFineEnergy inside decodeBandCoeffs). libopus updates oldBandE after both
+	// coarse and fine energy passes. Log2-amplitude = 0.5*log2(Energy).
+	copy(d.prevEnergies2, d.prevEnergies)
+	for i := 0; i < numBands; i++ {
+		for c := 0; c < ch; c++ {
+			e := d.bandProcs[c].bands[i].Energy
+			if e < 1e-20 {
+				e = 1e-20
+			}
+			v := 0.5 * math.Log2(e)
+			if v < -28.0 {
+				v = -28.0
+			}
+			d.prevEnergies[i*ch+c] = v
+		}
 	}
 
 	// Apply energy denormalization per channel
@@ -209,11 +227,46 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 
 	// Note: stereo M/S→L/R merge is handled inside quant_all_bands (quant_band_stereo).
 
-	// Perform IMDCT per channel
+	// Perform IMDCT per channel.
+	// Transient frames (isTransient=true, lm>0) use M=2^lm separate NBase-point IMDCTs
+	// (libopus "shortMdct" path). Non-transient frames use a single N-point IMDCT.
 	output := make([]float64, frameSize*ch)
+	nBase := d.mode.NBase // = NBase (e.g. 120 for 48kHz)
+	M := 1 << uint(lm)   // number of sub-frames for transient
+
 	for c := 0; c < ch; c++ {
-		y := d.celtMode.IMDCT(mdctCoeffsPerCh[c])
-		samplesOut := d.celtMode.InverseOverlapAdd(y, d.overlap[c])
+		coeffs := mdctCoeffsPerCh[c]
+		var samplesOut []float64
+
+		if isTransient && lm > 0 {
+			// Transient synthesis: M separate NBase-point IMDCTs.
+			// Each sub-frame k uses coeffs[k*nBase:(k+1)*nBase].
+			// Sub-frames chain together using sequential OLA with a NBase-sized tail.
+			subTail := make([]float64, nBase) // temporary tail for sub-frame chaining
+			copy(subTail, d.overlap[c])        // first sub-frame uses previous frame's overlap
+
+			samplesOut = make([]float64, frameSize)
+			for k := 0; k < M; k++ {
+				start := k * nBase
+				end := start + nBase
+				var subCoeffs []float64
+				if end <= len(coeffs) {
+					subCoeffs = coeffs[start:end]
+				} else {
+					subCoeffs = make([]float64, nBase)
+					copy(subCoeffs, coeffs[start:])
+				}
+				subY := d.shortCeltMode.IMDCT(subCoeffs)
+				subOut := d.shortCeltMode.InverseOverlapAdd(subY, subTail)
+				copy(samplesOut[k*nBase:], subOut)
+			}
+			// The final sub-frame's tail becomes the new overlap for next frame.
+			copy(d.overlap[c], subTail)
+		} else {
+			// Non-transient: single N-point IMDCT.
+			y := d.celtMode.IMDCT(coeffs)
+			samplesOut = d.celtMode.InverseOverlapAdd(y, d.overlap[c])
+		}
 
 		if pfEnabled {
 			samplesOut = d.postFilter[c].Apply(samplesOut, pfPeriod, pfTaps)

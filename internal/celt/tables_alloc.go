@@ -185,5 +185,5 @@ var EBands48000 = [22]int16{
 const NumBands48000 = 21
 
 // TrimICDF is the ICDF table for the allocation trim (7 bits, 11 symbols 0-10).
-// From libopus celt/rate.c: static const unsigned char trim_icdf[12].
-var TrimICDF = [12]uint8{126, 124, 119, 109, 87, 41, 19, 10, 5, 3, 2, 0}
+// From libopus celt/celt.h: static const unsigned char trim_icdf[11].
+var TrimICDF = [11]uint8{126, 124, 119, 109, 87, 41, 19, 9, 4, 2, 0}

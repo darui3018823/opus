@@ -539,8 +539,8 @@ static opus_val32 cwrsi(int _n,int _k,opus_uint32 _i,int *_y){
 
 opus_val32 decode_pulses(int *_y,int _n,int _k,ec_dec *_dec){
   opus_uint32 _v=CELT_PVQ_V(_n,_k);
-  { int tb=ec_tell_frac(_dec); opus_uint32 r=ec_dec_uint(_dec,_v); int ta=ec_tell_frac(_dec);
-    fprintf(stderr,"    DP n=%d k=%d V=%u tellf %d->%d (d=%d)\n",_n,_k,(unsigned)_v,tb,ta,ta-tb);
+  { int tb=ec_tell_frac(_dec); opus_uint32 vb=_dec->val; opus_uint32 r=ec_dec_uint(_dec,_v); int ta=ec_tell_frac(_dec);
+    fprintf(stderr,"    DP n=%d k=%d V=%u idx=%u val %08x->%08x tellf %d->%d (d=%d)\n",_n,_k,(unsigned)_v,(unsigned)r,(unsigned)vb,(unsigned)_dec->val,tb,ta,ta-tb);
     return cwrsi(_n,_k,r,_y); }
 }
 

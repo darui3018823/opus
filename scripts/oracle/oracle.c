@@ -31,6 +31,11 @@ int main(int argc, char **argv)
             int stereo = (toc >> 2) & 1;
             int code = toc & 3;
             int C = stereo ? 2 : 1;
+            int lm = config & 3;
+            int bw = (config - 16) >> 2;
+            int frame_size = 120 << lm;
+            int endband_table[4] = {13, 17, 19, 21};
+            int endband = (bw >= 0 && bw < 4) ? endband_table[bw] : 21;
             fprintf(stderr, "pkt%d: TOC=0x%02x config=%d stereo=%d code=%d size=%u rexp=%08x\n",
                     idx, toc, config, stereo, code, psize, rexp);
             if (config < 16) { fprintf(stderr, "not CELT-only; skipping\n"); return 1; }
@@ -38,10 +43,12 @@ int main(int argc, char **argv)
             int err = celt_decoder_get_size(C);
             CELTDecoder *dec = malloc(err);
             celt_decoder_init(dec, 48000, C);
+            celt_decoder_ctl(dec, CELT_SET_START_BAND(0));
+            celt_decoder_ctl(dec, CELT_SET_END_BAND(endband));
 
             float pcm[5760*2];
             /* code 0: single frame, payload = pkt+1 .. psize-1 */
-            int ret = celt_decode_with_ec(dec, pkt+1, psize-1, pcm, 960, NULL, 0);
+            int ret = celt_decode_with_ec(dec, pkt+1, psize-1, pcm, frame_size, NULL, 0);
             unsigned int rng = 0;
             celt_decoder_ctl(dec, OPUS_GET_FINAL_RANGE(&rng));
             fprintf(stderr, "RESULT ret=%d finalrng=%08x expected=%08x match=%d\n",

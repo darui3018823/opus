@@ -307,7 +307,7 @@ func UnquantizeCoarseEnergy(
 			predicted := coef*oldE + eMeans[i] + prev[c]
 
 			// Coding path selection must mirror the encoder exactly.
-			tell := dec.Tell()
+			tell := dec.ECTell()
 			bitsNow := budget - tell
 
 			var qi int

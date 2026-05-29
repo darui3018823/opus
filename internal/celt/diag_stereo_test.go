@@ -71,7 +71,7 @@ func TestOracleTraceStereo(t *testing.T) {
 
 	dec := entcode.NewDecoder(frameData)
 	snap := func(label string) {
-		fmt.Printf("[%-12s] tell=%d tellf=%d rng=%08x\n", label, dec.ECTell(), dec.TellFrac(), dec.GetRng())
+		fmt.Printf("[%-12s] tell=%d tellf=%d rng=%08x dif=%08x\n", label, dec.ECTell(), dec.TellFrac(), dec.GetRng(), dec.GetDif())
 	}
 
 	silence := false
@@ -158,12 +158,19 @@ func TestOracleTraceStereo(t *testing.T) {
 	qabDebug = true
 	qabLog = nil
 	qabDP = nil
+	qabTheta = nil
 	QuantAllBands(dec, 0, numBands, X[:frameLen], Y, collapse, pulses, isTransient, 2,
 		dualStereo, intensity, tfRes, totalBitsQ3, balance, lm, codedBands,
 		dec.GetRng(), false)
 	qabDebug = false
 	for _, tr := range qabLog {
 		fmt.Printf("  QB band%2d N=%3d b=%5d -> tellf=%d rng=%08x xcm=%d\n", tr.i, tr.N, tr.b, tr.tellf, tr.rng, tr.xcm)
+	}
+	for _, th := range qabTheta {
+		fmt.Printf("    TH band=%d n=%d qn=%d itheta=%d qalloc=%d tellf=%d\n", th[0], th[1], th[2], th[3], th[4], th[5])
+	}
+	for _, d := range qabDP {
+		fmt.Printf("    DP n=%d k=%d V=%d idx=%d dif %08x->%08x tellf %d->%d (d=%d)\n", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[7]-d[6])
 	}
 	snap("pvq")
 

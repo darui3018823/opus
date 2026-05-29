@@ -33,7 +33,7 @@
 
 #define CELT_DECODER_C
 #include <stdio.h>
-#define TRC(label) fprintf(stderr, "[%-14s] tell=%d tellf=%d rng=%08x\n", label, ec_tell(dec), ec_tell_frac(dec), (unsigned)dec->rng)
+#define TRC(label) fprintf(stderr, "[%-14s] tell=%d tellf=%d rng=%08x val=%08x\n", label, ec_tell(dec), ec_tell_frac(dec), (unsigned)dec->rng, (unsigned)dec->val)
 
 #include "cpu_support.h"
 #include "os_support.h"

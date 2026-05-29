@@ -41,7 +41,7 @@ func TestOracleTrace(t *testing.T) {
 
 	dec := entcode.NewDecoder(frameData)
 	snap := func(label string) {
-		fmt.Printf("[%-12s] tellf=%d rng=%08x\n", label, dec.TellFrac(), dec.GetRng())
+		fmt.Printf("[%-12s] tellf=%d rng=%08x dif=%08x\n", label, dec.TellFrac(), dec.GetRng(), dec.GetDif())
 	}
 
 	// silence
@@ -141,7 +141,7 @@ func TestOracleTrace(t *testing.T) {
 		fmt.Printf("  QB band%2d N=%3d b=%5d -> tellf=%d rng=%08x xcm=%d\n", t.i, t.N, t.b, t.tellf, t.rng, t.xcm)
 	}
 	for _, d := range qabDP {
-		fmt.Printf("    DP n=%d k=%d V=%d tellf %d->%d (d=%d)\n", d[0], d[1], d[2], d[3], d[4], d[4]-d[3])
+		fmt.Printf("    DP n=%d k=%d V=%d idx=%d dif %08x->%08x tellf %d->%d (d=%d)\n", d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], d[7]-d[6])
 	}
 	snap("pvq")
 

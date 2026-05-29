@@ -63,6 +63,15 @@ func (dec *Decoder) Tell() int {
 // so this is simply Tell()+1. Use this where porting libopus guards verbatim.
 func (dec *Decoder) ECTell() int { return dec.Tell() + 1 }
 
+// AdvanceTellTo pretends that bits have been consumed up to the supplied
+// libopus ec_tell position without changing the range. CELT uses this for
+// packets carrying the silence flag.
+func (dec *Decoder) AdvanceTellTo(bits int) {
+	if bits > dec.ECTell() {
+		dec.nbitsTotal += bits - dec.ECTell()
+	}
+}
+
 // TellFrac returns bits consumed in 1/8-bit (Q3) resolution.
 // Bit-exact with ec_tell_frac in libopus (celt/entcode.c).
 func (dec *Decoder) TellFrac() int {
@@ -93,7 +102,7 @@ func (dec *Decoder) GetNendBits() uint  { return dec.nendBits }
 
 // readByte reads one byte from the buffer, returning 0 past the end.
 func (dec *Decoder) readByte() byte {
-	if dec.pos+dec.endOffs < len(dec.buf) {
+	if dec.pos < len(dec.buf) {
 		b := dec.buf[dec.pos]
 		dec.pos++
 		return b
@@ -102,7 +111,7 @@ func (dec *Decoder) readByte() byte {
 }
 
 func (dec *Decoder) readByteFromEnd() byte {
-	if dec.pos+dec.endOffs < len(dec.buf) {
+	if dec.endOffs < len(dec.buf) {
 		dec.endOffs++
 		return dec.buf[len(dec.buf)-dec.endOffs]
 	}

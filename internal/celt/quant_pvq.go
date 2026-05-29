@@ -33,8 +33,10 @@ type qabBandTrace struct {
 
 var qabLog []qabBandTrace
 
-// qabDP records decodePulses (n,k,V,tellBefore,tellAfter) calls when qabDebug is set.
-var qabDP [][5]uint64
+// qabDP records decodePulses (n,k,V,idx,difBefore,difAfter,tellBefore,tellAfter) calls when qabDebug is set.
+var qabDP [][8]uint64
+
+var qabTheta [][6]int
 
 // celtLCGRand matches libopus celt_lcg_rand (celt.c).
 func celtLCGRand(seed uint32) uint32 { return 1664525*seed + 1013904223 }
@@ -116,12 +118,14 @@ func decodePulses(dec *entcode.Decoder, n, k int) ([]int, float64) {
 		ft = 0xFFFFFFFF
 	}
 	tb := 0
+	db := uint32(0)
 	if qabDebug {
 		tb = dec.TellFrac()
+		db = dec.GetDif()
 	}
 	idx := dec.DecodeUint(ft)
 	if qabDebug {
-		qabDP = append(qabDP, [5]uint64{uint64(n), uint64(k), v, uint64(tb), uint64(dec.TellFrac())})
+		qabDP = append(qabDP, [8]uint64{uint64(n), uint64(k), v, uint64(idx), uint64(db), uint64(dec.GetDif()), uint64(tb), uint64(dec.TellFrac())})
 	}
 	iy := cwrsiLibopus(n, k, idx)
 	ryy := 0.0
@@ -394,6 +398,9 @@ func computeTheta(ctx *bandCtx, X, Y []float64, n int, b *int, B, B0, lm int, st
 		imid = bitexactCos(int16(itheta))
 		iside = bitexactCos(int16(16384 - itheta))
 		delta = fracMul16((n-1)<<7, bitexactLog2Tan(iside, imid))
+	}
+	if qabDebug {
+		qabTheta = append(qabTheta, [6]int{i, n, qn, itheta, qalloc, ctx.dec.TellFrac()})
 	}
 	return splitResult{inv: inv, imid: imid, iside: iside, delta: delta, itheta: itheta, qalloc: qalloc}
 }

@@ -84,6 +84,7 @@ func NewDecoderEx(frameSize, sampleRate, numBands, channels int) (*Decoder, erro
 // Decode decodes a CELT frame to PCM samples
 func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	if len(frameData) == 0 {
+		d.lastFinalRange = 0x01000000
 		return d.decodeLoss(), nil
 	}
 
@@ -106,6 +107,9 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 		silence = true
 	} else if dec.ECTell() == 1 {
 		silence = dec.DecodeBitLogp(15)
+	}
+	if silence {
+		dec.AdvanceTellTo(totalBits)
 	}
 
 	// Post-filter parameters — read BEFORE isTransient (start==0, ec_tell+16<=total_bits).

@@ -462,6 +462,12 @@ func computeAllocation(
 		} else {
 			b2 = allocAtLevel(j, hi)
 		}
+		if hi >= numAllocLevels && b2 > 0 {
+			b2 += trimOff[j]
+			if b2 < 0 {
+				b2 = 0
+			}
+		}
 		b2 += offsets[j]
 		b2 -= b1
 		if b2 < 0 {
@@ -533,7 +539,7 @@ func computeAllocation(
 			fmt.Printf("[alloc] phase4: bandBits[0..5]=%v\n", bandBits[:6])
 			fmt.Printf("[alloc] phase4: bits1[0..5]=%v bits2[0..5]=%v\n", bits1[:6], bits2[:6])
 			fmt.Printf("[alloc] phase4: thresh[0..5]=%v cap[0..5]=%v trimOff[0..5]=%v\n", thresh[:6], cap[:6], trimOff[:6])
-			for j := 16; j <= 20; j++ {
+			for j := 16; j <= 20 && j < numBands; j++ {
 				fmt.Printf("[alloc] phase4 j=%d bits1=%d bits2=%d interp=%d bandBits=%d cap=%d\n",
 					j, bits1[j], bits2[j], bits1[j]+loF*bits2[j]>>AllocSteps, bandBits[j], cap[j])
 			}
@@ -657,7 +663,7 @@ func computeAllocation(
 		}
 		left -= totalN0 * percoeff
 		if allocDebug {
-			fmt.Printf("[alloc] ph7 total=%d psum=%d left0=%d totalN0=%d percoeff=%d leftRem=%d bb17=%d bb18=%d\n", total, psum, total-psum, totalN0, percoeff, left, bandBits[17], bandBits[18])
+			fmt.Printf("[alloc] ph7 total=%d psum=%d left0=%d totalN0=%d percoeff=%d leftRem=%d\n", total, psum, total-psum, totalN0, percoeff, left)
 		}
 		for j := start; j < codedBands; j++ {
 			N0 := int(EBands48000[j+1]) - int(EBands48000[j])

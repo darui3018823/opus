@@ -1731,8 +1731,11 @@ func (d *Decoder) synthesize(
 		lag := pitchLags[sf]
 
 		if signalType == SignalTypeVoiced {
-			if sf == 0 || (sf == 2 && nlsfInterpolation) {
-				startIdx := ltpMemLen - lag - d.lpcOrder - 2
+			// libopus decode_core.c: re-whiten when (sf & (3 - NLSFInterpCoef_Q2>>1)) == 0.
+			// With interpFactor=4 (no interpolation, nlsfInterpolation=false): mask=1, re-whiten at sf=0 and sf=2.
+			// With interpFactor<4 (interpolation, nlsfInterpolation=true): mask>=2, re-whiten only at sf=0.
+			if sf == 0 || (sf == 2 && !nlsfInterpolation) {
+				startIdx := sLTPBufIdx - lag - d.lpcOrder - 2
 				if startIdx < 0 {
 					startIdx = 0
 				}
@@ -1741,7 +1744,7 @@ func (d *Decoder) synthesize(
 						outBufQ0[ltpMemLen+i] = int32(output[i])
 					}
 				}
-				filterLen := ltpMemLen - startIdx
+				filterLen := sLTPBufIdx - startIdx
 				sLTP := make([]int16, filterLen)
 				silkLPCAnalysisFilter(sLTP, outBufQ0[startIdx:startIdx+filterLen], lpc, filterLen, d.lpcOrder)
 				if sf == 0 {

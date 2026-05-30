@@ -34,9 +34,12 @@ func TestOracleTrace(t *testing.T) {
 
 	prevLogE := make([]float64, numBands*ch)
 	prevLogE2 := make([]float64, numBands*ch)
+	oldLogE := make([]float64, numBands*ch)
+	oldLogE2 := make([]float64, numBands*ch)
 	for i := range prevLogE {
-		prevLogE[i] = -28.0
 		prevLogE2[i] = -28.0
+		oldLogE[i] = -28.0
+		oldLogE2[i] = -28.0
 	}
 
 	dec := entcode.NewDecoder(frameData)
@@ -75,7 +78,7 @@ func TestOracleTrace(t *testing.T) {
 	snap(fmt.Sprintf("intra=%v", intra))
 
 	// coarse energy
-	UnquantizeCoarseEnergy(dec, prevLogE, prevLogE2, intra, numBands, lm, ch, totalBits)
+	quantLogE := UnquantizeCoarseEnergy(dec, prevLogE, prevLogE2, intra, numBands, lm, ch, totalBits)
 	snap("coarse")
 
 	// tf
@@ -106,22 +109,13 @@ func TestOracleTrace(t *testing.T) {
 		antiRsv = 1 << 3
 	}
 	bitsQ3 -= antiRsv
-	pulses, eBits, _, balance, intensity, codedBands, dualStereo := computeAllocation(dec, numBands, lm, ch, allocTrim, bitsQ3, offsets)
+	pulses, eBits, finePriority, balance, intensity, codedBands, dualStereo := computeAllocation(dec, numBands, lm, ch, allocTrim, bitsQ3, offsets)
 	snap("allocation")
 	fmt.Printf("   pulses: %v\n", pulses)
 	fmt.Printf("   eBits : %v\n", eBits)
 	fmt.Printf("   balance=%d codedBands=%d intensity=%d\n", balance, codedBands, intensity)
 
-	// fine energy (raw bits)
-	for i := 0; i < numBands; i++ {
-		fb := eBits[i]
-		if fb <= 0 {
-			continue
-		}
-		for c := 0; c < ch; c++ {
-			dec.DecodeBits(uint(fb))
-		}
-	}
+	applyFineEnergyLogE(dec, quantLogE, numBands, ch, eBits)
 	snap("fine_energy")
 
 	// PVQ via faithful quant_all_bands port
@@ -133,7 +127,7 @@ func TestOracleTrace(t *testing.T) {
 	qabDebug = true
 	qabLog = nil
 	qabDP = nil
-	QuantAllBands(dec, 0, numBands, X, nil, collapse, pulses, isTransient, 2,
+	seed := QuantAllBands(dec, 0, numBands, X, nil, collapse, pulses, isTransient, 2,
 		dualStereo, intensity, tfRes, totalBitsQ3, balance, lm, codedBands,
 		0, false)
 	qabDebug = false
@@ -151,10 +145,27 @@ func TestOracleTrace(t *testing.T) {
 	}
 	fmt.Println()
 
+	antiCollapseOn := false
 	if antiRsv > 0 {
-		dec.DecodeBits(1)
+		antiCollapseOn = dec.DecodeBits(1) != 0
 	}
 	snap("anticollapse")
+
+	applyFinalFineEnergyLogE(dec, quantLogE, numBands, ch, eBits, finePriority, len(frameData)*8-dec.ECTell())
+	snap("fine_final")
+
+	if antiCollapseOn {
+		diagDec, _ := NewDecoderEx(frameLen, 48000, numBands, ch)
+		copy(diagDec.prevEnergies, oldLogE)
+		copy(diagDec.prevEnergies2, oldLogE2)
+		for i := 0; i < numBands; i++ {
+			amp := logEAmplitude(quantLogE[i], i)
+			diagDec.bandProcs[0].bands[i].Energy = amp * amp
+		}
+		diagDec.antiCollapse(X, collapse, pulses, lm, frameLen, seed)
+	}
+
+	dumpDenormalizedMDCT(denormalizedMDCTViaBandProcessor(frameLen, numBands, ch, X, quantLogE), numBands, lm)
 
 	got := dec.GetRng()
 	fmt.Printf("\nFinal rng: got=%08x expected=%08x match=%v\n", got, expectedFinal, got == expectedFinal)

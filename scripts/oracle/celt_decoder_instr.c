@@ -381,6 +381,25 @@ void deemphasis(celt_sig *in[], opus_val16 *pcm, int N, int C, int downsample, c
 #ifndef RESYNTH
 static
 #endif
+void dump_denorm_bands(const CELTMode *mode, const celt_sig *freq,
+                       int ch, int start, int end, int M)
+{
+   int bi, bj;
+   const opus_int16 *eBands = mode->eBands;
+   for (bi=start; bi<end; bi++)
+   {
+      int bandN = M*(eBands[bi+1]-eBands[bi]);
+      int off = M*eBands[bi];
+      fprintf(stderr, "[XD] ch=%d band=%d N=%d", ch, bi, bandN);
+      for (bj=0; bj<bandN; bj++)
+         fprintf(stderr, " X[%d]=%.9g", bj, (double)freq[off+bj]);
+      fprintf(stderr, "\n");
+   }
+}
+
+#ifndef RESYNTH
+static
+#endif
 void celt_synthesis(const CELTMode *mode, celt_norm *X, celt_sig * out_syn[],
                     opus_val16 *oldBandE, int start, int effEnd, int C, int CC,
                     int isTransient, int LM, int downsample,
@@ -420,6 +439,7 @@ void celt_synthesis(const CELTMode *mode, celt_norm *X, celt_sig * out_syn[],
       celt_sig *freq2;
       denormalise_bands(mode, X, freq, oldBandE, start, effEnd, M,
             downsample, silence);
+      dump_denorm_bands(mode, freq, 0, start, effEnd, M);
       /* Store a temporary copy in the output buffer because the IMDCT destroys its input. */
       freq2 = out_syn[1]+overlap/2;
       OPUS_COPY(freq2, freq, N);
@@ -434,9 +454,11 @@ void celt_synthesis(const CELTMode *mode, celt_norm *X, celt_sig * out_syn[],
       freq2 = out_syn[0]+overlap/2;
       denormalise_bands(mode, X, freq, oldBandE, start, effEnd, M,
             downsample, silence);
+      dump_denorm_bands(mode, freq, 0, start, effEnd, M);
       /* Use the output buffer as temp array before downmixing. */
       denormalise_bands(mode, X+N, freq2, oldBandE+nbEBands, start, effEnd, M,
             downsample, silence);
+      dump_denorm_bands(mode, freq2, 1, start, effEnd, M);
       for (i=0;i<N;i++)
          freq[i] = ADD32(HALF32(freq[i]), HALF32(freq2[i]));
       for (b=0;b<B;b++)
@@ -446,6 +468,7 @@ void celt_synthesis(const CELTMode *mode, celt_norm *X, celt_sig * out_syn[],
       c=0; do {
          denormalise_bands(mode, X+c*N, freq, oldBandE+c*nbEBands, start, effEnd, M,
                downsample, silence);
+         dump_denorm_bands(mode, freq, c, start, effEnd, M);
          for (b=0;b<B;b++)
             clt_mdct_backward(&mode->mdct, &freq[b], out_syn[c]+NB*b, mode->window, overlap, shift, B, arch);
       } while (++c<CC);

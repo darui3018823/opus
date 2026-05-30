@@ -64,9 +64,12 @@ func TestOracleTraceStereo(t *testing.T) {
 
 	prevLogE := make([]float64, numBands*ch)
 	prevLogE2 := make([]float64, numBands*ch)
+	oldLogE := make([]float64, numBands*ch)
+	oldLogE2 := make([]float64, numBands*ch)
 	for i := range prevLogE {
-		prevLogE[i] = -28.0
 		prevLogE2[i] = -28.0
+		oldLogE[i] = -28.0
+		oldLogE2[i] = -28.0
 	}
 
 	dec := entcode.NewDecoder(frameData)
@@ -100,7 +103,7 @@ func TestOracleTraceStereo(t *testing.T) {
 	}
 	snap(fmt.Sprintf("intra=%v", intra))
 
-	UnquantizeCoarseEnergy(dec, prevLogE, prevLogE2, intra, numBands, lm, ch, totalBits)
+	quantLogE := UnquantizeCoarseEnergy(dec, prevLogE, prevLogE2, intra, numBands, lm, ch, totalBits)
 	snap("coarse")
 
 	tfRes := celtTFDecode(dec, totalBits, isTransient, numBands, lm)
@@ -128,22 +131,14 @@ func TestOracleTraceStereo(t *testing.T) {
 	}
 	bitsQ3 -= antiRsv
 	allocDebug = os.Getenv("ALLOCDBG") != ""
-	pulses, eBits, _, balance, intensity, codedBands, dualStereo := computeAllocation(dec, numBands, lm, ch, allocTrim, bitsQ3, offsets)
+	pulses, eBits, finePriority, balance, intensity, codedBands, dualStereo := computeAllocation(dec, numBands, lm, ch, allocTrim, bitsQ3, offsets)
 	allocDebug = false
 	snap("allocation")
 	fmt.Printf("   codedBands=%d balance=%d intensity=%d dual_stereo=%v antiRsv=%d\n", codedBands, balance, intensity, dualStereo, antiRsv)
 	fmt.Printf("   pulses: %v\n", pulses)
 	fmt.Printf("   eBits : %v\n", eBits)
 
-	for i := 0; i < numBands; i++ {
-		fb := eBits[i]
-		if fb <= 0 {
-			continue
-		}
-		for c := 0; c < ch; c++ {
-			dec.DecodeBits(uint(fb))
-		}
-	}
+	applyFineEnergyLogE(dec, quantLogE, numBands, ch, eBits)
 	snap("fine_energy")
 
 	M := 1 << uint(lm)
@@ -159,7 +154,7 @@ func TestOracleTraceStereo(t *testing.T) {
 	qabLog = nil
 	qabDP = nil
 	qabTheta = nil
-	QuantAllBands(dec, 0, numBands, X[:frameLen], Y, collapse, pulses, isTransient, 2,
+	seed := QuantAllBands(dec, 0, numBands, X[:frameLen], Y, collapse, pulses, isTransient, 2,
 		dualStereo, intensity, tfRes, totalBitsQ3, balance, lm, codedBands,
 		0, false)
 	qabDebug = false
@@ -174,10 +169,29 @@ func TestOracleTraceStereo(t *testing.T) {
 	}
 	snap("pvq")
 
+	antiCollapseOn := false
 	if antiRsv > 0 {
-		dec.DecodeBits(1)
+		antiCollapseOn = dec.DecodeBits(1) != 0
 	}
 	snap("anticollapse")
+
+	applyFinalFineEnergyLogE(dec, quantLogE, numBands, ch, eBits, finePriority, len(frameData)*8-dec.ECTell())
+	snap("fine_final")
+
+	if antiCollapseOn {
+		diagDec, _ := NewDecoderEx(frameLen, 48000, numBands, ch)
+		copy(diagDec.prevEnergies, oldLogE)
+		copy(diagDec.prevEnergies2, oldLogE2)
+		for c := 0; c < ch; c++ {
+			for i := 0; i < numBands; i++ {
+				amp := logEAmplitude(quantLogE[c*numBands+i], i)
+				diagDec.bandProcs[c].bands[i].Energy = amp * amp
+			}
+		}
+		diagDec.antiCollapse(X, collapse, pulses, lm, frameLen, seed)
+	}
+
+	dumpDenormalizedMDCT(denormalizedMDCTViaBandProcessor(frameLen, numBands, ch, X, quantLogE), numBands, lm)
 
 	got := dec.GetRng()
 	fmt.Printf("\nFinal rng: got=%08x expected=%08x match=%v\n", got, expectedFinal, got == expectedFinal)

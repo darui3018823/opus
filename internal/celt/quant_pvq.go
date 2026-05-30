@@ -753,8 +753,7 @@ func stereoMerge(X, Y []float64, mid float64, n int) {
 		side += Y[j] * Y[j]
 	}
 	xp *= mid
-	mid2 := mid // SHR16(mid,1) is for Q-domain; in float we follow reference: mid2=0.5*mid? see note
-	mid2 = 0.5 * mid
+	mid2 := mid // SHR16(mid,1) is no-op in float build (libopus arch.h), so mid2=mid
 	El := mid2*mid2 + side - 2*xp
 	Er := mid2*mid2 + side + 2*xp
 	if Er < 6e-4 || El < 6e-4 {

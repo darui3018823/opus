@@ -189,7 +189,34 @@ func TestOfficialVectors(t *testing.T) {
 				rmse += d * d
 			}
 			rmse = math.Sqrt(rmse / float64(n))
-			t.Logf("frames=%d PCM=%d RMSE=%.6f", len(frames), len(decoded), rmse)
+			maxAbs := 0.0
+			sumSq2 := 0.0
+			for i := 0; i < n; i++ {
+				v := math.Abs(float64(decoded[i]))
+				if v > maxAbs { maxAbs = v }
+				sumSq2 += float64(decoded[i]) * float64(decoded[i])
+			}
+			// Compute ref rms and find max region
+			refRmsSq := 0.0
+			refMaxAbs := 0.0
+			refMaxIdx := 0
+			for i := 0; i < n; i++ {
+				v := math.Abs(ref[i])
+				if v > refMaxAbs { refMaxAbs = v; refMaxIdx = i }
+				refRmsSq += ref[i] * ref[i]
+			}
+			t.Logf("ref_rms=%.6f (float) ref_maxAbs=%.6f at idx=%d", math.Sqrt(refRmsSq/float64(n)), refMaxAbs, refMaxIdx)
+			if refMaxIdx >= 10 && refMaxIdx+10 < n {
+				decodedSlice := make([]int, 20)
+				refSlice := make([]float64, 20)
+				for i := 0; i < 20; i++ {
+					decodedSlice[i] = int(decoded[refMaxIdx-10+i])
+					refSlice[i] = ref[refMaxIdx-10+i]
+				}
+				t.Logf("near ref_max: decoded=%v", decodedSlice)
+				t.Logf("near ref_max: ref(float)=%v", refSlice)
+			}
+			t.Logf("frames=%d PCM=%d RMSE=%.6f decoded_maxAbs=%.1f decoded_rms=%.3f", len(frames), len(decoded), rmse, maxAbs, math.Sqrt(sumSq2/float64(n)))
 			if rmse > 0.001 {
 				t.Errorf("RMSE %.6f exceeds 0.001 threshold", rmse)
 			}

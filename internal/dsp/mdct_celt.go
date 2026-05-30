@@ -55,27 +55,52 @@ func (m *CELTMode) IMDCT(X []float64) []float64 {
 	return y
 }
 
-// InverseOverlapAdd performs the CELT overlap-add using a small tail buffer of
-// length Overlap.  Windowing is applied here rather than in IMDCT:
-//   - current frame's first Overlap samples get the rising window (Window[0..ov-1])
-//   - the stored tail (previous frame's last Overlap raw samples) gets the falling window
+// CELTOverlapAdd performs the CELT TDAC mirror overlap-add matching libopus
+// clt_mdct_backward. The carry buffer holds ov/2 samples from the previous frame.
 //
-// Returns N output samples; updates tail in-place with the last Overlap raw samples of y.
+// In libopus decode_mem layout (shifted by ov/2 relative to frame start):
+//   x1 = y[ov/2-1-i]   (IMDCT output first-half, reversed: the "mirror region")
+//   x2 = carry[i]       (y_prev[N-ov/2..N-1]: last ov/2 raw IMDCT samples of prev frame)
+//   out[i]      = W[ov-1-i]*x2 - W[i]*x1    (for i=0..ov/2-1)
+//   out[ov-1-i] = W[i]*x2      + W[ov-1-i]*x1
+// Direct (no window): out[ov+j] = y[ov/2+j]   (for j=0..N-ov-1)
+// New carry = y[N-ov/2..N-1]  (last ov/2 IMDCT samples, used as x2 next frame)
+func (m *CELTMode) CELTOverlapAdd(y []float64, carry []float64) []float64 {
+	N := m.N
+	ov := m.Overlap
+	half := ov / 2
+	out := make([]float64, N)
+
+	for i := 0; i < half; i++ {
+		x1 := y[half-1-i] // y[ov/2-1], y[ov/2-2], ..., y[0]
+		x2 := carry[i]
+		wi := m.Window[i]
+		wj := m.Window[ov-1-i]
+		out[i] = wj*x2 - wi*x1
+		out[ov-1-i] = wi*x2 + wj*x1
+	}
+	// Direct output: y[ov/2..ov/2+N-ov-1]
+	for j := 0; j < N-ov; j++ {
+		out[ov+j] = y[half+j]
+	}
+
+	// New carry = y[N-ov/2:N] (last ov/2 raw IMDCT samples, preserved as decode_mem future).
+	copy(carry, y[N-half:])
+	return out
+}
+
+// InverseOverlapAdd is the original MDCT-IV overlap-add (kept for tests).
+// CELT synthesis uses CELTOverlapAdd instead.
 func (m *CELTMode) InverseOverlapAdd(y []float64, tail []float64) []float64 {
 	N := m.N
 	ov := m.Overlap
 	out := make([]float64, N)
-
-	// OLA region: rising_window * current + falling_window * prev_tail.
 	for i := 0; i < ov; i++ {
 		out[i] = y[i]*m.Window[i] + tail[i]*m.Window[ov-1-i]
 	}
-	// Non-overlap region: direct.
 	for i := ov; i < N; i++ {
 		out[i] = y[i]
 	}
-
-	// Save the last ov raw samples as the tail for the next frame.
 	copy(tail, y[N-ov:])
 	return out
 }

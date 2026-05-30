@@ -237,10 +237,8 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 
 		if isTransient && lm > 0 {
 			// Transient synthesis: M separate NBase-point IMDCTs.
-			// Each sub-frame k uses coeffs[k*nBase:(k+1)*nBase].
-			// Sub-frames chain together using sequential OLA with a NBase-sized tail.
-			subTail := make([]float64, nBase) // temporary tail for sub-frame chaining
-			copy(subTail, d.overlap[c])       // first sub-frame uses previous frame's overlap
+			subTail := make([]float64, nBase)
+			copy(subTail, d.overlap[c])
 
 			samplesOut = make([]float64, frameSize)
 			for k := 0; k < M; k++ {
@@ -257,7 +255,6 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 				subOut := d.shortCeltMode.InverseOverlapAdd(subY, subTail)
 				copy(samplesOut[k*nBase:], subOut)
 			}
-			// The final sub-frame's tail becomes the new overlap for next frame.
 			copy(d.overlap[c], subTail)
 		} else {
 			// Non-transient: single N-point IMDCT.

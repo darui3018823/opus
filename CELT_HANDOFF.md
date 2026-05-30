@@ -1,3 +1,106 @@
+# CELT デコーダー bit-exact 化 — 引き継ぎメモ (2026-05-30 更新)
+
+---
+
+## ★ UPDATE 2026-05-30 セッション3 — resynth RMSE 調査（未解決）
+
+### 状況
+- **TestRangeVectors tv01〜tv12 全パス** は前回セッションで達成済み。ビットストリーム復号は完全一致。
+- **TestOfficialVectors 全12本が RMSE 閾値超**：
+
+| ベクター | RMSE | 主因候補 |
+|---------|------|---------|
+| tv02-06, tv12 | ≈0.02 | SILK 未実装（silence 出力）|
+| tv07 | 0.441 | 純 CELT FB 20ms stereo |
+| tv08-09 | 0.38-0.40 | 混在 CELT |
+| tv10 | 0.54 | 混在 |
+| tv11 | 0.72 | 混在（SILK 多め？）|
+| tv01 | 0.69 | 混在 |
+
+### 今回の主な調査内容
+
+#### 試みた修正（効果なし or 逆効果）
+- **transient IMDCT 係数デインターリーブ修正**を試みた
+  - 仮説: quantBand(B=M) → interleaveHadamard 後は `coeffs[j*M+k]` が sub-frame k の bin j
+  - `coeffs[k*nBase:(k+1)*nBase]` → `coeffs[j*M+k]` に変更
+  - 結果: **RMSE が 0.441 → 0.460 に悪化**。よって元のコード（連続ブロック）の方がまだ近い。
+  - **暫定結論**: 係数インターリーブが想定と異なるか、別の箇所がより大きな影響を持つ。
+
+#### libopus MDCT の重要な発見
+`$env:TEMP\opussrc\opus-1.5.2\celt\celt_decoder.c` の実ソースを読んで判明：
+
+```c
+// celt_synthesis 内 (transient 時)
+if (isTransient) {
+    B = M;
+    NB = mode->shortMdctSize;  // = 120
+    shift = mode->maxLM;       // = 3 (NOT maxLM-LM=0!)
+} else {
+    B = 1;
+    NB = mode->shortMdctSize<<LM;  // = 960
+    shift = mode->maxLM-LM;         // = 0
+}
+// transient sub-frame b:
+clt_mdct_backward(&mode->mdct, &freq[b], out_syn[c]+NB*b,
+                  mode->window, overlap, shift, B, arch);
+// 入力: &freq[b] (b=0..7, ストライド8でアクセス)
+// N = l->n >> shift = 960 >> 3 = 120 (shortMdctSize)
+```
+
+- **transient**: shift=3 → N=120, stride=M=8, 入力 `&freq[b]`。stride アクセスで freq[b], freq[b+8], ..., freq[b+8*59] を読む（60値=N/2）。
+- **non-transient**: shift=0 → N=960, stride=1, 入力 `freq`。freq[0..479] を読む（480値=N/2）。
+
+#### **libopus MDCT の根本的な違い**
+libopus の clt_mdct_backward は **N/2 入力**から **N 出力**を生成する（テスト test_unit_mdct.c より確認済み）：
+- 非 transient (N=960): freq[0..479] (480値) → 960 time samples
+- transient sub-frame b (N=120): freq[b+j*8] for j=0..59 (60値) → 120 time samples
+
+一方、**我々の IMDCT は N=960 全入力**を使う：
+- `DenormalizeBands` が coeffs[0..799] を埋める（bands 0-20）
+- coeffs[800..959] は zero-pad
+- `IMDCT(coeffs[0..959])` → libopus が無視する coeffs[480..799]（bands 19-20 の上位）も含めてしまう
+
+この「upper half bands（NBase bins 60-99 相当）の不正使用」が RMSE 高騰の一因の可能性がある。
+
+#### stereoMerge の確認（正しいと確認）
+libopus bands.c の `stereo_merge` float ビルド:
+```c
+dual_inner_prod(Y, X, Y, N, &xp, &side, arch);
+xp = MULT16_32_Q15(mid, xp);      // mid * dot(X,Y)
+mid2 = SHR16(mid, 1);              // = mid/2 (float ビルドでは SHR16 は NO-OP なので mid/2)
+// Wait: float ビルドでは SHR16(a,n) = a（シフトはダミー）
+```
+
+**重要**: float ビルドでは `SHR16(mid, 1) = mid`（no-op）。よって `mid2 = mid`（÷2 しない）。
+
+我々の Go コード: `mid2 := 0.5 * mid` — **これは間違い可能性がある**。
+- libopus float ビルドの `SHR16(a, shift)` は `arch.h` で `#define SHR16(a,shift) (a)` → mid2 = mid
+- 我々は mid/2 → **stereoMerge の El, Er 計算が libopus と違う**
+
+→ **要修正**: `mid2 := mid`（÷2 なし）に変更して RMSE を確認。
+
+#### libopus decode_mem 構造（OLA の仕組み）
+- out_syn は `decode_mem + DECODE_BUFFER_SIZE - N` を指す（**スタックではなく永続バッファ**）
+- OPUS_MOVE(decode_mem, decode_mem+N, ...) でフレーム毎にシフト
+- clt_mdct_backward の TDAC は out[0..59] を前フレームからの carry-over として使う
+- **transient の各 sub-frame は独立した OLA 状態を持つ**（前 sub-frame でなく前フレームの同 sub-frame から引き継ぐ）
+- 我々のコード: subTail をフレーム内でチェーン → 正確には sub-frame k ごとに独立した overlap を保持すべき（M 個の overlap バッファが必要）
+
+### 次セッションの試みリスト（優先順）
+
+1. **stereoMerge の `mid2` 修正**: `mid2 := 0.5 * mid` → `mid2 := mid` (libopus float SHR16はno-op)
+2. **IMDCT に渡す coeffs の上位半分をゼロクリア**: 非 transient なら coeffs[N/2..N-1]=0、transient なら sub-frame 入力の j>=60 部分=0 にして RMSE 変化を確認
+3. **transient sub-frame 独立 OLA**: M 個の overlap バッファを `Decoder` に追加
+4. **band 19-20 の non-transient での扱い**: libopus は freq[480..959]=0 を前提。我々は bands 19-20 を DenormalizeBands で書くが、IMDCT に渡す前にゼロにすべき？
+
+### 確認済みの正しい実装（手を付けない）
+- range coder / bitstream 復号 → TestRangeVectors 全パス ✓
+- cwrsiLibopus, PVQ, expRotation → range 一致から正確と判断
+- computeAllocation (rate_alloc.go) → 前セッションで修正済み ✓
+- stereoMerge の El/Er 符号 → 要再確認（mid2 の問題）
+
+---
+
 # CELT デコーダー bit-exact 化 — 引き継ぎメモ (2026-05-29)
 
 次セッションが調査をやり直さずに済むよう、現状・手法・次の一手を詳細に残す。

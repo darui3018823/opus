@@ -16,11 +16,15 @@ type Decoder struct {
 	bandProcs     [2]*BandProcessor // band processors per channel (index 0 = L/M, index 1 = R/S)
 	overlap       [][]float64       // Overlap buffer per channel (NBase samples each)
 
-	// Decoder state — oldBandE/oldLogE history in libopus' mean-subtracted
-	// log2-amplitude domain. Layout is channel-major: c*numBands+i.
-	prevEnergies  []float64
-	prevEnergies2 []float64
-	frameCount    int
+	// Decoder energy state in libopus' mean-subtracted log2-amplitude domain.
+	// prevEnergies is oldBandE (used by coarse-energy prediction); prevLogE and
+	// prevLogE2 are oldLogE/oldLogE2 (used by anti-collapse). Layout is
+	// channel-major: c*numBands+i. Libopus keeps two channels of history even
+	// for mono, so mono decoders allocate 2*numBands entries.
+	prevEnergies []float64
+	prevLogE     []float64
+	prevLogE2    []float64
+	frameCount   int
 
 	// Post-filter (one per channel)
 	postFilter []*PostFilter
@@ -67,11 +71,17 @@ func NewDecoderEx(frameSize, sampleRate, numBands, channels int) (*Decoder, erro
 	}
 
 	// oldBandE is zeroed by OPUS_RESET_STATE; oldLogE/oldLogE2 start at -28.
-	nEBands := mode.Bands.NumBands * channels
+	historyChannels := channels
+	if historyChannels < 2 {
+		historyChannels = 2
+	}
+	nEBands := mode.Bands.NumBands * historyChannels
 	d.prevEnergies = make([]float64, nEBands)
-	d.prevEnergies2 = make([]float64, nEBands)
-	for i := range d.prevEnergies2 {
-		d.prevEnergies2[i] = -28.0
+	d.prevLogE = make([]float64, nEBands)
+	d.prevLogE2 = make([]float64, nEBands)
+	for i := range d.prevLogE {
+		d.prevLogE[i] = -28.0
+		d.prevLogE2[i] = -28.0
 	}
 
 	// Initialize post-filters (one per channel)
@@ -136,7 +146,7 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 
 	// Coarse band log-energies (Laplace, forward).
 	quantLogE := UnquantizeCoarseEnergy(
-		dec, d.prevEnergies, d.prevEnergies2, intra, numBands, lm, ch, totalBits,
+		dec, d.prevEnergies, nil, intra, numBands, lm, ch, totalBits,
 	)
 
 	// Time-frequency allocation bits.
@@ -190,8 +200,7 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 		return nil, err
 	}
 
-	// Update oldLogE history with fine-corrected mean-subtracted values.
-	copy(d.prevEnergies2, d.prevEnergies)
+	// Update oldBandE with fine-corrected mean-subtracted values.
 	for i := 0; i < numBands; i++ {
 		for c := 0; c < ch; c++ {
 			e := d.bandProcs[c].bands[i].Energy
@@ -205,6 +214,10 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 			d.prevEnergies[c*numBands+i] = v
 		}
 	}
+	if ch == 1 && len(d.prevEnergies) >= 2*numBands {
+		copy(d.prevEnergies[numBands:2*numBands], d.prevEnergies[:numBands])
+	}
+	d.updateLogEnergyHistory(isTransient)
 
 	// Apply energy denormalization per channel
 	frameSize := d.mode.FrameSize
@@ -305,21 +318,25 @@ func (d *Decoder) CopyStateFrom(src *Decoder) {
 
 	dstBands := d.mode.Bands.NumBands
 	srcBands := src.mode.Bands.NumBands
-	for c := 0; c < d.mode.Channels; c++ {
+	dstHistCh := len(d.prevEnergies) / dstBands
+	srcHistCh := len(src.prevEnergies) / srcBands
+	for c := 0; c < dstHistCh; c++ {
 		sc := c
-		if sc >= src.mode.Channels {
-			sc = src.mode.Channels - 1
+		if sc >= srcHistCh {
+			sc = srcHistCh - 1
 		}
 		for i := 0; i < dstBands; i++ {
 			di := c*dstBands + i
 			if i >= srcBands || sc < 0 {
 				d.prevEnergies[di] = 0
-				d.prevEnergies2[di] = -28
+				d.prevLogE[di] = -28
+				d.prevLogE2[di] = -28
 				continue
 			}
 			si := sc*srcBands + i
 			d.prevEnergies[di] = src.prevEnergies[si]
-			d.prevEnergies2[di] = src.prevEnergies2[si]
+			d.prevLogE[di] = src.prevLogE[si]
+			d.prevLogE2[di] = src.prevLogE2[si]
 		}
 	}
 
@@ -457,11 +474,11 @@ func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, lm, f
 		sqrt1 := 1.0 / math.Sqrt(float64(n0*M))
 
 		for c := 0; c < ch; c++ {
-			prev1 := d.prevEnergies[c*numBands+i]
-			prev2 := d.prevEnergies2[c*numBands+i]
-			if ch == 1 && len(d.prevEnergies) >= 2*numBands {
-				prev1 = max(prev1, d.prevEnergies[numBands+i])
-				prev2 = max(prev2, d.prevEnergies2[numBands+i])
+			prev1 := d.prevLogE[c*numBands+i]
+			prev2 := d.prevLogE2[c*numBands+i]
+			if ch == 1 && len(d.prevLogE) >= 2*numBands {
+				prev1 = max(prev1, d.prevLogE[numBands+i])
+				prev2 = max(prev2, d.prevLogE2[numBands+i])
 			}
 
 			energy := d.bandProcs[c].bands[i].Energy
@@ -507,6 +524,17 @@ func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, lm, f
 	}
 }
 
+func (d *Decoder) updateLogEnergyHistory(isTransient bool) {
+	if isTransient {
+		for i := range d.prevLogE {
+			d.prevLogE[i] = min(d.prevLogE[i], d.prevEnergies[i])
+		}
+		return
+	}
+	copy(d.prevLogE2, d.prevLogE)
+	copy(d.prevLogE, d.prevEnergies)
+}
+
 // decodeLoss performs packet loss concealment
 func (d *Decoder) decodeLoss() []float64 {
 	// Simple PLC: fade out previous frame
@@ -524,7 +552,8 @@ func (d *Decoder) decodeLoss() []float64 {
 	const logDecay = 0.32193 // log2(1.25) ≈ 0.322
 	for i := range d.prevEnergies {
 		d.prevEnergies[i] -= logDecay
-		d.prevEnergies2[i] -= logDecay
+		d.prevLogE[i] -= logDecay
+		d.prevLogE2[i] -= logDecay
 	}
 
 	return output
@@ -547,7 +576,8 @@ func (d *Decoder) Reset() {
 	// Reset energy history.
 	for i := range d.prevEnergies {
 		d.prevEnergies[i] = 0
-		d.prevEnergies2[i] = -28.0
+		d.prevLogE[i] = -28.0
+		d.prevLogE2[i] = -28.0
 	}
 
 	// Reset post-filters

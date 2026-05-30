@@ -155,9 +155,9 @@ func TestOracleTrace(t *testing.T) {
 	snap("fine_final")
 
 	if antiCollapseOn {
-		diagDec, _ := NewDecoderEx(frameLen, 48000, numBands, ch)
-		copy(diagDec.prevEnergies, oldLogE)
-		copy(diagDec.prevEnergies2, oldLogE2)
+		diagDec, _ := NewDecoderEx(M*FrameSize2_5ms, 48000, numBands, ch)
+		copy(diagDec.prevLogE, oldLogE)
+		copy(diagDec.prevLogE2, oldLogE2)
 		for i := 0; i < numBands; i++ {
 			amp := logEAmplitude(quantLogE[i], i)
 			diagDec.bandProcs[0].bands[i].Energy = amp * amp
@@ -165,7 +165,7 @@ func TestOracleTrace(t *testing.T) {
 		diagDec.antiCollapse(X, collapse, pulses, lm, frameLen, seed)
 	}
 
-	dumpDenormalizedMDCT(denormalizedMDCTViaBandProcessor(frameLen, numBands, ch, X, quantLogE), numBands, lm)
+	dumpDenormalizedMDCT(denormalizedMDCTViaBandProcessor(frameLen, numBands, ch, lm, X, quantLogE), numBands, lm)
 
 	got := dec.GetRng()
 	fmt.Printf("\nFinal rng: got=%08x expected=%08x match=%v\n", got, expectedFinal, got == expectedFinal)

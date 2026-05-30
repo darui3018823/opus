@@ -37,12 +37,9 @@ func applyFinalFineEnergyLogE(dec *entcode.Decoder, logE []float64, numBands, ch
 	}
 }
 
-func denormalizedMDCTViaBandProcessor(frameLen, numBands, channels int, X []float64, logE []float64) [][]float64 {
-	mode := NewModeEx(frameLen, 48000, numBands, channels)
-	M := frameLen / mode.NBase
-	if M < 1 {
-		M = 1
-	}
+func denormalizedMDCTViaBandProcessor(frameLen, numBands, channels, lm int, X []float64, logE []float64) [][]float64 {
+	M := 1 << uint(lm)
+	mode := NewModeEx(M*FrameSize2_5ms, 48000, numBands, channels)
 
 	out := make([][]float64, channels)
 	for c := 0; c < channels; c++ {

@@ -30,6 +30,7 @@ type Decoder struct {
 
 	// Post-filter (one per channel)
 	postFilter []*PostFilter
+	preemphMem []float64
 
 	// lastFinalRange is the range coder rng after the last Decode call.
 	lastFinalRange uint32
@@ -88,6 +89,7 @@ func NewDecoderEx(frameSize, sampleRate, numBands, channels int) (*Decoder, erro
 
 	// Initialize post-filters (one per channel)
 	d.postFilter = make([]*PostFilter, channels)
+	d.preemphMem = make([]float64, channels)
 	for i := range d.postFilter {
 		d.postFilter[i] = NewPostFilter()
 	}
@@ -278,6 +280,7 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 		} else {
 			d.postFilter[c].updateHistory(samplesOut)
 		}
+		d.applyDeemphasis(c, samplesOut)
 
 		for i := 0; i < len(samplesOut) && i < frameSize; i++ {
 			output[i*ch+c] = samplesOut[i] * celtFloatScale
@@ -347,8 +350,28 @@ func (d *Decoder) CopyStateFrom(src *Decoder) {
 			d.postFilter[c].copyFrom(src.postFilter[sc])
 		}
 	}
+	for c := range d.preemphMem {
+		sc := c
+		if sc >= len(src.preemphMem) {
+			sc = len(src.preemphMem) - 1
+		}
+		if sc >= 0 {
+			d.preemphMem[c] = src.preemphMem[sc]
+		}
+	}
 
 	d.lastFinalRange = src.lastFinalRange
+}
+
+func (d *Decoder) applyDeemphasis(ch int, samples []float64) {
+	const coef = 0.85
+	mem := d.preemphMem[ch]
+	for i, x := range samples {
+		y := x + mem
+		mem = coef * y
+		samples[i] = y
+	}
+	d.preemphMem[ch] = mem
 }
 
 // decodeBandEnergies is superseded by UnquantizeCoarseEnergy (RFC 6716 §5.1.2).
@@ -581,6 +604,9 @@ func (d *Decoder) Reset() {
 	// Reset post-filters
 	for _, pf := range d.postFilter {
 		pf.Reset()
+	}
+	for i := range d.preemphMem {
+		d.preemphMem[i] = 0
 	}
 
 	d.frameCount = 0

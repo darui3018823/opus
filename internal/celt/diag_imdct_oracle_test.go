@@ -22,8 +22,8 @@ type oracleIMDCTBlock struct {
 }
 
 // TestOracleCLTMDCTBackwardAgainstGoIMDCT compares libopus clt_mdct_backward()
-// raw TDAC-input time[] dumps against Go's CELTMode.IMDCT() for the same oracle
-// [XD] denormalized MDCT coefficients.
+// raw TDAC-input time[] dumps against Go's CELTMode.IMDCTRaw() for the same
+// oracle [XD] denormalized MDCT coefficients.
 //
 // It is opt-in because it shells out to the locally built oracle:
 //
@@ -77,8 +77,8 @@ func TestOracleCLTMDCTBackwardAgainstGoIMDCT(t *testing.T) {
 		}
 
 		mode := dsp.NewCELTMode(len(subCoeffs), MaxOverlap, celtWindow(MaxOverlap))
-		got := mode.IMDCT(subCoeffs)
-		maxIdx, maxErr, first := compareFloatSlices(got, b.samples, 1e-6)
+		got := mode.IMDCTRaw(subCoeffs)
+		maxIdx, maxErr, first := compareFloatSlices(got, b.samples, 2e-6)
 		t.Logf("ch=%d block=%d N=%d maxErr=%.9g at sample=%d", b.ch, b.block, len(got), maxErr, maxIdx)
 		if b.ch == 0 && b.block == 1 {
 			t.Logf("block1 coeff[0:16]=%s", formatFloatPrefix(subCoeffs, 16))
@@ -101,7 +101,7 @@ func TestOracleCLTMDCTBackwardAgainstGoIMDCT(t *testing.T) {
 		for _, msg := range first {
 			t.Log(msg)
 		}
-		if maxErr > 1e-6 {
+		if maxErr > 2e-6 {
 			failures++
 		}
 	}

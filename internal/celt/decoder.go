@@ -8,6 +8,8 @@ import (
 	"github.com/darui3018823/opus/internal/entcode"
 )
 
+const celtFloatScale = 1.0 / 32768.0
+
 // Decoder is a CELT decoder instance
 type Decoder struct {
 	mode          *Mode
@@ -255,24 +257,20 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 
 			samplesOut = make([]float64, frameSize)
 			for k := 0; k < M; k++ {
-				start := k * nBase
-				end := start + nBase
-				var subCoeffs []float64
-				if end <= len(coeffs) {
-					subCoeffs = coeffs[start:end]
-				} else {
-					subCoeffs = make([]float64, nBase)
-					copy(subCoeffs, coeffs[start:])
+				subCoeffs := make([]float64, nBase)
+				for i := range subCoeffs {
+					idx := k + i*M
+					if idx < len(coeffs) {
+						subCoeffs[i] = coeffs[idx]
+					}
 				}
-				subY := d.shortCeltMode.IMDCT(subCoeffs)
-				subOut := d.shortCeltMode.InverseOverlapAdd(subY, subTail)
+				subOut := d.shortCeltMode.CLTMDCTBackward(subCoeffs, subTail)
 				copy(samplesOut[k*nBase:], subOut)
 			}
 			copy(d.overlap[c], subTail)
 		} else {
 			// Non-transient: single N-point IMDCT.
-			y := d.celtMode.IMDCT(coeffs)
-			samplesOut = d.celtMode.InverseOverlapAdd(y, d.overlap[c])
+			samplesOut = d.celtMode.CLTMDCTBackward(coeffs, d.overlap[c])
 		}
 
 		if pfEnabled {
@@ -282,7 +280,7 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 		}
 
 		for i := 0; i < len(samplesOut) && i < frameSize; i++ {
-			output[i*ch+c] = samplesOut[i]
+			output[i*ch+c] = samplesOut[i] * celtFloatScale
 		}
 	}
 
@@ -544,7 +542,7 @@ func (d *Decoder) decodeLoss() []float64 {
 		// Fade out overlap buffer
 		for i := 0; i < len(d.overlap[ch]) && i < d.mode.FrameSize; i++ {
 			fade := 1.0 - float64(i)/float64(d.mode.FrameSize)
-			output[i*d.mode.Channels+ch] = d.overlap[ch][i] * fade * 0.5
+			output[i*d.mode.Channels+ch] = d.overlap[ch][i] * fade * 0.5 * celtFloatScale
 		}
 	}
 

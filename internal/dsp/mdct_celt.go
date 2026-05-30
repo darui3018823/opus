@@ -55,42 +55,88 @@ func (m *CELTMode) IMDCT(X []float64) []float64 {
 	return y
 }
 
-// CELTOverlapAdd performs the CELT TDAC mirror overlap-add matching libopus
-// clt_mdct_backward. The carry buffer holds ov/2 samples from the previous frame.
-//
-// In libopus decode_mem layout (shifted by ov/2 relative to frame start):
-//   x1 = y[ov/2-1-i]   (IMDCT output first-half, reversed: the "mirror region")
-//   x2 = carry[i]       (y_prev[N-ov/2..N-1]: last ov/2 raw IMDCT samples of prev frame)
-//   out[i]      = W[ov-1-i]*x2 - W[i]*x1    (for i=0..ov/2-1)
-//   out[ov-1-i] = W[i]*x2      + W[ov-1-i]*x1
-// Direct (no window): out[ov+j] = y[ov/2+j]   (for j=0..N-ov-1)
-// New carry = y[N-ov/2..N-1]  (last ov/2 IMDCT samples, used as x2 next frame)
-func (m *CELTMode) CELTOverlapAdd(y []float64, carry []float64) []float64 {
+// IMDCTRaw computes the raw libopus clt_mdct_backward buffer before the final
+// TDAC mirror/window step. Unlike IMDCT, this is not normalised by 2/N and the
+// samples are in libopus' internal half-overlap-shifted order.
+func (m *CELTMode) IMDCTRaw(X []float64) []float64 {
+	N := m.N
+	N2 := N
+	N4 := N / 2
+
+	f := make([]Complex, N4)
+	for i := 0; i < N4; i++ {
+		xp1 := X[2*i]
+		xp2 := X[N2-1-2*i]
+		t0 := math.Cos(2 * math.Pi * (float64(i) + 0.125) / float64(2*N))
+		t1 := math.Cos(2 * math.Pi * (float64(N4+i) + 0.125) / float64(2*N))
+		yr := xp2*t0 + xp1*t1
+		yi := xp1*t0 - xp2*t1
+		f[i] = Complex{Real: yi, Imag: yr}
+	}
+
+	z := AnyFFT(f)
+	buf := make([]float64, N2)
+	for i, c := range z {
+		buf[2*i] = c.Real
+		buf[2*i+1] = c.Imag
+	}
+
+	for i := 0; i < (N4+1)/2; i++ {
+		yp0 := 2 * i
+		yp1 := N2 - 2 - 2*i
+
+		re := buf[yp0+1]
+		im := buf[yp0]
+		t0 := math.Cos(2 * math.Pi * (float64(i) + 0.125) / float64(2*N))
+		t1 := math.Cos(2 * math.Pi * (float64(N4+i) + 0.125) / float64(2*N))
+		yr := re*t0 + im*t1
+		yi := re*t1 - im*t0
+
+		re = buf[yp1+1]
+		im = buf[yp1]
+		buf[yp0] = yr
+		buf[yp1+1] = yi
+
+		t0 = math.Cos(2 * math.Pi * (float64(N4-i-1) + 0.125) / float64(2*N))
+		t1 = math.Cos(2 * math.Pi * (float64(N2-i-1) + 0.125) / float64(2*N))
+		yr = re*t0 + im*t1
+		yi = re*t1 - im*t0
+		buf[yp1] = yr
+		buf[yp0+1] = yi
+	}
+
+	return buf
+}
+
+// CLTMDCTBackward performs the CELT inverse transform and TDAC mirror/window
+// step matching libopus clt_mdct_backward. carry holds the ov/2 future samples
+// preserved from the previous call in libopus' decode_mem layout.
+func (m *CELTMode) CLTMDCTBackward(X []float64, carry []float64) []float64 {
 	N := m.N
 	ov := m.Overlap
 	half := ov / 2
-	out := make([]float64, N)
+	raw := m.IMDCTRaw(X)
+	buf := make([]float64, N+half)
+	copy(buf[:half], carry)
+	copy(buf[half:], raw)
 
 	for i := 0; i < half; i++ {
-		x1 := y[half-1-i] // y[ov/2-1], y[ov/2-2], ..., y[0]
-		x2 := carry[i]
+		x1 := buf[ov-1-i]
+		x2 := buf[i]
 		wi := m.Window[i]
 		wj := m.Window[ov-1-i]
-		out[i] = wj*x2 - wi*x1
-		out[ov-1-i] = wi*x2 + wj*x1
-	}
-	// Direct output: y[ov/2..ov/2+N-ov-1]
-	for j := 0; j < N-ov; j++ {
-		out[ov+j] = y[half+j]
+		buf[i] = wj*x2 - wi*x1
+		buf[ov-1-i] = wi*x2 + wj*x1
 	}
 
-	// New carry = y[N-ov/2:N] (last ov/2 raw IMDCT samples, preserved as decode_mem future).
-	copy(carry, y[N-half:])
-	return out
+	copy(carry, buf[N:N+half])
+	for i := half; i < len(carry); i++ {
+		carry[i] = 0
+	}
+	return buf[:N]
 }
 
 // InverseOverlapAdd is the MDCT-IV overlap-add currently used by CELT synthesis.
-// CELTOverlapAdd is a candidate replacement but not yet wired up (simple swap worsens tv07).
 func (m *CELTMode) InverseOverlapAdd(y []float64, tail []float64) []float64 {
 	N := m.N
 	ov := m.Overlap

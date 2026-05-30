@@ -183,3 +183,109 @@ func TestSILKCode3FrameCountHeader(t *testing.T) {
 	}
 	t.Logf("code-3 header: config=%d frameCount=%d", config, frameCount)
 }
+
+func TestSILKNLSFAndLPCOracle(t *testing.T) {
+	tests := []struct {
+		name       string
+		vector     string
+		packet     int
+		wantConfig int
+		wantFrames []struct {
+			indices []int
+			nlsfQ15 []int16
+			pred0   []int16
+			pred1   []int16
+		}
+	}{
+		{
+			name:       "tv02-pkt0-60ms",
+			vector:     "testvector02.bit",
+			packet:     0,
+			wantConfig: 3,
+			wantFrames: []struct {
+				indices []int
+				nlsfQ15 []int16
+				pred0   []int16
+				pred1   []int16
+			}{
+				{
+					indices: []int{1, -1, -1, -1, 0, 0, 0, 0, 0, 0, 0},
+					nlsfQ15: []int16{321, 2471, 5904, 9856, 12928, 16000, 19328, 22400, 25728, 28800},
+					pred0:   []int16{5041, -1246, 1017, -614, 431, -560, 131, -357, 284, -46},
+					pred1:   []int16{5041, -1246, 1017, -614, 431, -560, 131, -357, 284, -46},
+				},
+				{
+					indices: []int{2, 1, -3, -1, 0, 0, 0, 0, 0, 0, 0},
+					nlsfQ15: []int16{634, 1000, 7286, 11392, 14592, 17536, 20736, 23552, 26752, 29440},
+					pred0:   []int16{1856, 1608, 1448, 540, 174, -469, -368, -496, -34, -289},
+					pred1:   []int16{1856, 1608, 1448, 540, 174, -469, -368, -496, -34, -289},
+				},
+				{
+					indices: []int{5, 0, -2, 1, 0, 0, -1, 1, 0, 0, 0},
+					nlsfQ15: []int16{633, 1144, 7947, 10055, 13266, 16136, 21156, 23040, 26240, 29184},
+					pred0:   []int16{3337, 576, 263, -494, 1292, 334, -560, -166, 560, -1174},
+					pred1:   []int16{3337, 576, 263, -494, 1292, 334, -560, -166, 560, -1174},
+				},
+			},
+		},
+		{
+			name:       "tv12-pkt0-20ms",
+			vector:     "testvector12.bit",
+			packet:     0,
+			wantConfig: 1,
+			wantFrames: []struct {
+				indices []int
+				nlsfQ15 []int16
+				pred0   []int16
+				pred1   []int16
+			}{
+				{
+					indices: []int{0, 0, -1, 0, 0, 0, -1, 0, 0, 0, 0},
+					nlsfQ15: []int16{841, 3241, 7454, 10221, 13122, 15707, 20096, 23040, 26368, 29184},
+					pred0:   []int16{3811, -131, -149, 96, 953, -301, -188, -77, 487, -585},
+					pred1:   []int16{3811, -131, -149, 96, 953, -301, -188, -77, 487, -585},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pkt := readOpusDemoPacket(t, tt.vector, tt.packet)
+			toc := pkt[0]
+			config := int((toc >> 3) & 0x1f)
+			countCode := int(toc & 3)
+			if config != tt.wantConfig {
+				t.Fatalf("config=%d want=%d", config, tt.wantConfig)
+			}
+
+			nFrames, stream := silkOracleFrameCount(config, countCode, pkt[1:])
+			dec, err := NewDecoderWithFrameMs(8000, 1, 20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := &decodeTrace{}
+			dec.trace = tr
+			_, _ = dec.DecodeMulti(stream, nFrames)
+			if len(tr.Frames) < len(tt.wantFrames) {
+				t.Fatalf("traced frames=%d want at least %d", len(tr.Frames), len(tt.wantFrames))
+			}
+			for i, want := range tt.wantFrames {
+				got := tr.Frames[i]
+				if !reflect.DeepEqual(got.NLSFIndices, want.indices) {
+					t.Fatalf("frame %d NLSF indices=%v want=%v", i, got.NLSFIndices, want.indices)
+				}
+				if !reflect.DeepEqual(got.NLSFQ15, want.nlsfQ15) {
+					t.Fatalf("frame %d NLSF_Q15=%v want=%v", i, got.NLSFQ15, want.nlsfQ15)
+				}
+				if !reflect.DeepEqual(got.PredCoef0Q12, want.pred0) {
+					t.Fatalf("frame %d PredCoef0_Q12=%v want=%v", i, got.PredCoef0Q12, want.pred0)
+				}
+				if !reflect.DeepEqual(got.PredCoef1Q12, want.pred1) {
+					t.Fatalf("frame %d PredCoef1_Q12=%v want=%v", i, got.PredCoef1Q12, want.pred1)
+				}
+				t.Logf("frame %d: nlsf=%v pred0=%v", i, got.NLSFQ15, got.PredCoef0Q12)
+			}
+		})
+	}
+}

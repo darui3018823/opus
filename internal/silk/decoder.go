@@ -160,25 +160,25 @@ var silkShellCodeTableOffsets = [17]uint8{
 
 // ── silk_LSFCosTab_FIX_Q12: 129-element cosine table ────────────────────────
 // silk_LSFCosTab_FIX_Q12[i] = round(2^12 * 2 * cos(pi * i / 128)) for i=0..128.
-// From libopus (silk/tables_other.c or similar).
+// From libopus silk/table_LSF_cos.c.
 var silkLSFCosTabFixQ12 = [129]int32{
 	8192, 8190, 8182, 8170, 8152, 8130, 8104, 8072,
-	8034, 7992, 7946, 7895, 7839, 7779, 7714, 7644,
-	7571, 7492, 7410, 7323, 7232, 7137, 7038, 6935,
-	6829, 6718, 6604, 6486, 6364, 6239, 6111, 5979,
-	5844, 5706, 5564, 5420, 5273, 5122, 4969, 4813,
-	4655, 4495, 4332, 4166, 3998, 3828, 3656, 3483,
-	3307, 3129, 2950, 2769, 2586, 2402, 2216, 2029,
-	1840, 1651, 1460, 1269, 1076, 882, 688, 493,
-	297, 101, -95, -291, -487, -683, -878, -1073,
-	-1267, -1461, -1654, -1847, -2040, -2232, -2423, -2613,
-	-2802, -2991, -3179, -3366, -3552, -3736, -3919, -4101,
-	-4282, -4461, -4638, -4815, -4990, -5163, -5334, -5504,
-	-5671, -5836, -6000, -6162, -6321, -6479, -6634, -6787,
-	-6938, -7086, -7232, -7375, -7515, -7653, -7788, -7920,
-	-8049, -8175, -8298, -8417, -8534, -8647, -8757, -8864,
-	-8967, -9067, -9163, -9256, -9345, -9431, -9512, -9591,
-	-9666,
+	8034, 7994, 7946, 7896, 7840, 7778, 7714, 7644,
+	7568, 7490, 7406, 7318, 7226, 7128, 7026, 6922,
+	6812, 6698, 6580, 6458, 6332, 6204, 6070, 5934,
+	5792, 5648, 5502, 5352, 5198, 5040, 4880, 4718,
+	4552, 4382, 4212, 4038, 3862, 3684, 3502, 3320,
+	3136, 2948, 2760, 2570, 2378, 2186, 1990, 1794,
+	1598, 1400, 1202, 1002, 802, 602, 402, 202,
+	0, -202, -402, -602, -802, -1002, -1202, -1400,
+	-1598, -1794, -1990, -2186, -2378, -2570, -2760, -2948,
+	-3136, -3320, -3502, -3684, -3862, -4038, -4212, -4382,
+	-4552, -4718, -4880, -5040, -5198, -5352, -5502, -5648,
+	-5792, -5934, -6070, -6204, -6332, -6458, -6580, -6698,
+	-6812, -6922, -7026, -7128, -7226, -7318, -7406, -7490,
+	-7568, -7644, -7714, -7778, -7840, -7896, -7946, -7994,
+	-8034, -8072, -8104, -8130, -8152, -8170, -8182, -8190,
+	-8192,
 }
 
 // Ordering arrays used by silk_NLSF2A for order 10 and 16.
@@ -246,6 +246,11 @@ type frameTrace struct {
 	RawGainIndices  []int
 	AbsGainIndices  []int
 	GainsQ16        []int32
+	NLSFIndices     []int
+	NLSFQ15         []int16
+	InterpFactor    int
+	PredCoef0Q12    []int16
+	PredCoef1Q12    []int16
 }
 
 // NewDecoder creates a new SILK decoder with 20ms frame size.
@@ -546,6 +551,16 @@ func rshiftRound(v int64, shift uint) int32 {
 	return int32((v + (int64(1) << (shift - 1))) >> shift)
 }
 
+func silkRShiftRound(v int64, shift int) int32 {
+	if shift <= 0 {
+		return int32(v)
+	}
+	if shift == 1 {
+		return int32((v >> 1) + (v & 1))
+	}
+	return int32(((v >> (shift - 1)) + 1) >> 1)
+}
+
 func (d *Decoder) stereoMSToLR(mid, side []float64, predQ13 [2]int32) []float64 {
 	n := d.frameSize
 	x1 := make([]int16, n+2)
@@ -703,7 +718,7 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 
 	// ── 4. Decode NLSF indices ───────────────────────────────────────────────
 	cb := getNLSFCB(d.lpcOrder)
-	nlsfQ15, err := d.decodeNLSF(dec, cb, signalType)
+	nlsfQ15, nlsfIndices, err := d.decodeNLSF(dec, cb, signalType)
 	if err != nil {
 		return nil, err
 	}
@@ -740,6 +755,14 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 	lpcCoeffsQ12 := make([][]int16, d.nSubframes)
 	for sf := 0; sf < d.nSubframes; sf++ {
 		lpcCoeffsQ12[sf] = lpcSets[sf>>1]
+	}
+	if d.trace != nil && len(d.trace.Frames) > 0 {
+		tf := &d.trace.Frames[len(d.trace.Frames)-1]
+		tf.NLSFIndices = append([]int(nil), nlsfIndices...)
+		tf.NLSFQ15 = append([]int16(nil), nlsfQ15...)
+		tf.InterpFactor = interpFactor
+		tf.PredCoef0Q12 = append([]int16(nil), lpcSets[0]...)
+		tf.PredCoef1Q12 = append([]int16(nil), lpcSets[1]...)
 	}
 
 	// ── 5. Decode pitch parameters (voiced only) ─────────────────────────────
@@ -965,7 +988,7 @@ func lpcAnalysisResidualQ0(samples []int32, idx int, aQ12 []int16, order int) in
 // decodeNLSF decodes NLSF values from the range coder.
 // Implements silk_NLSF_decode + silk_decode_indices NLSF portion from libopus.
 // Returns NLSF in Q15.
-func (d *Decoder) decodeNLSF(dec *entcode.Decoder, cb *nlsfCBParams, signalType int) ([]int16, error) {
+func (d *Decoder) decodeNLSF(dec *entcode.Decoder, cb *nlsfCBParams, signalType int) ([]int16, []int, error) {
 	order := cb.order
 	// NLSF_QUANT_MAX_AMPLITUDE = 4
 	const nlsfQuantMaxAmp = 4
@@ -984,6 +1007,8 @@ func (d *Decoder) decodeNLSF(dec *entcode.Decoder, cb *nlsfCBParams, signalType 
 	if cb1Idx >= cb.nEntries {
 		cb1Idx = cb.nEntries - 1
 	}
+	nlsfIndices := make([]int, order+1)
+	nlsfIndices[0] = cb1Idx
 
 	// Step 2: Unpack ec_ix[] and pred_Q8[] from cb2Select table
 	// silk_NLSF_unpack: for each pair of coefficients
@@ -1029,6 +1054,7 @@ func (d *Decoder) decodeNLSF(dec *entcode.Decoder, cb *nlsfCBParams, signalType 
 			ix += dec.DecodeIcdf(silkNLSFExtICDF[:], 8)
 		}
 		nlsfRawIdx[i] = int8(ix - nlsfQuantMaxAmp)
+		nlsfIndices[i+1] = int(nlsfRawIdx[i])
 	}
 
 	// Now dequantize residuals backward (silk_NLSF_residual_dequant)
@@ -1095,7 +1121,7 @@ func (d *Decoder) decodeNLSF(dec *entcode.Decoder, cb *nlsfCBParams, signalType 
 	// Step 5: NLSF stabilization
 	silkNLSFStabilize(nlsfQ15, cb.deltaMinQ15, order)
 
-	return nlsfQ15, nil
+	return nlsfQ15, nlsfIndices, nil
 }
 
 // silkNLSFStabilize implements silk_NLSF_stabilize.
@@ -1174,7 +1200,6 @@ func silkNLSFStabilize(nlsf []int16, deltaMin []int16, order int) {
 func nlsfToLPCLibopus(nlsfQ15 []int16, order int) []int16 {
 	const QA = 16
 
-	// Select ordering array
 	var ordering []int
 	if order == 16 {
 		ordering = nlsf2AOrdering16[:]
@@ -1182,17 +1207,9 @@ func nlsfToLPCLibopus(nlsfQ15 []int16, order int) []int16 {
 		ordering = nlsf2AOrdering10[:]
 	}
 
-	// Convert NLSF Q15 to 2*cos(LSF) in QA using the cosine table.
-	// silk_LSFCosTab_FIX_Q12 has 129 entries for angles 0..pi (i*pi/128).
-	// The NLSF values range [0, 32767] which maps to [0, pi].
-	// For NLSF value n (Q15): angle = n*pi/32768
-	// Table index: f_int = (n >> (15-7)) = n >> 8 (0..127), frac = (n & 0xFF)
-	// 2*cos(angle) = cosTab[f_int] + ((cosTab[f_int+1] - cosTab[f_int]) * frac) >> 8 (in Q12)
-	// Convert Q12 → QA: << (QA-12) = << 4
-
-	cLSF := make([]int32, order) // in QA
+	cLSF := make([]int32, order)
 	for i := 0; i < order; i++ {
-		n := int32(nlsfQ15[ordering[i]])
+		n := int32(nlsfQ15[i])
 		if n < 0 {
 			n = 0
 		}
@@ -1207,15 +1224,12 @@ func nlsfToLPCLibopus(nlsfQ15 []int16, order int) []int16 {
 		if fInt >= 128 {
 			fInt = 127
 		}
-		// Interpolate between cosTab[fInt] and cosTab[fInt+1]
-		cos0 := silkLSFCosTabFixQ12[fInt]
-		cos1 := silkLSFCosTabFixQ12[fInt+1]
-		cosVal := cos0 + ((cos1-cos0)*fFrac)>>8
-		cLSF[i] = cosVal << (QA - 12) // Q12 → QA
+		cosVal := silkLSFCosTabFixQ12[fInt]
+		delta := silkLSFCosTabFixQ12[fInt+1] - cosVal
+		interp := int64(cosVal<<8) + int64(delta)*int64(fFrac)
+		cLSF[ordering[i]] = silkRShiftRound(interp, 20-QA)
 	}
 
-	// Build P and Q polynomials via silk_NLSF2A_find_poly
-	// P has order/2+1 coefficients, Q has order/2+1 coefficients
 	halfOrder := order / 2
 	P := make([]int32, halfOrder+1)
 	Q := make([]int32, halfOrder+1)
@@ -1223,36 +1237,15 @@ func nlsfToLPCLibopus(nlsfQ15 []int16, order int) []int16 {
 	nlsf2APolyFindPoly(P, cLSF, halfOrder)
 	nlsf2APolyFindPoly(Q, cLSF[1:], halfOrder)
 
-	// Combine P and Q into LPC coefficients, matching libopus silk/NLSF2A.c:
-	//   for k = 0..halfOrder-1:
-	//     Ptmp = P[k+1] + P[k]
-	//     Qtmp = Q[k+1] - Q[k]
-	//     a[k]         = -RSHIFT_ROUND(Ptmp + Qtmp, shift)  (shift = 2*QA+1-12 = 21)
-	//     a[order-1-k] = -RSHIFT_ROUND(Ptmp - Qtmp, shift)
-	const shift = 2*QA + 1 - 12 // = 21
-	round := int64(1) << (shift - 1)
-	coeffsQ12 := make([]int16, order)
+	a32QA1 := make([]int32, order)
 	for k := 0; k < halfOrder; k++ {
-		Ptmp := int64(P[k+1]) + int64(P[k])
-		Qtmp := int64(Q[k+1]) - int64(Q[k])
-
-		a0 := -((Ptmp + Qtmp + round) >> shift)
-		a1 := -((Ptmp - Qtmp + round) >> shift)
-
-		if a0 > 32767 {
-			a0 = 32767
-		} else if a0 < -32768 {
-			a0 = -32768
-		}
-		if a1 > 32767 {
-			a1 = 32767
-		} else if a1 < -32768 {
-			a1 = -32768
-		}
-		coeffsQ12[k] = int16(a0)
-		coeffsQ12[order-1-k] = int16(a1) // libopus: a[order-k-1]
+		Ptmp := P[k+1] + P[k]
+		Qtmp := Q[k+1] - Q[k]
+		a32QA1[k] = -Qtmp - Ptmp
+		a32QA1[order-k-1] = Qtmp - Ptmp
 	}
-	return coeffsQ12
+
+	return silkLPCFit(a32QA1, 12, QA+1, order)
 }
 
 // nlsf2APolyFindPoly implements silk_NLSF2A_find_poly.
@@ -1264,13 +1257,64 @@ func nlsf2APolyFindPoly(out []int32, cLSF []int32, dd int) {
 	out[1] = -cLSF[0]
 	for k := 1; k < dd; k++ {
 		ftmp := cLSF[2*k]
-		// out[k+1] = 2*out[k-1] - round(ftmp * out[k] / 2^QA)
-		out[k+1] = (out[k-1] << 1) - int32((int64(ftmp)*int64(out[k])+int64(1<<(QA-1)))>>QA)
+		out[k+1] = (out[k-1] << 1) - silkRShiftRound(int64(ftmp)*int64(out[k]), QA)
 		for n := k; n > 1; n-- {
-			out[n] += out[n-2] - int32((int64(ftmp)*int64(out[n-1])+int64(1<<(QA-1)))>>QA)
+			out[n] += out[n-2] - silkRShiftRound(int64(ftmp)*int64(out[n-1]), QA)
 		}
 		out[1] -= ftmp
 	}
+}
+
+func silkLPCFit(aQIN []int32, qOut, qIn, order int) []int16 {
+	coeffs := make([]int16, order)
+	shift := qIn - qOut
+
+	for i := 0; i < 10; i++ {
+		maxabs := int32(0)
+		idx := 0
+		for k := 0; k < order; k++ {
+			absval := aQIN[k]
+			if absval < 0 {
+				absval = -absval
+			}
+			if absval > maxabs {
+				maxabs = absval
+				idx = k
+			}
+		}
+		maxabs = silkRShiftRound(int64(maxabs), shift)
+		if maxabs <= 32767 {
+			break
+		}
+		if maxabs > 163838 {
+			maxabs = 163838
+		}
+		denom := int32((int64(maxabs) * int64(idx+1)) >> 2)
+		chirpQ16 := int32(65470)
+		if denom != 0 {
+			chirpQ16 -= int32((int64(maxabs-32767) << 14) / int64(denom))
+		}
+		silkBWExpander32(aQIN, order, chirpQ16)
+	}
+
+	for k := 0; k < order; k++ {
+		coeffs[k] = clamp16(silkRShiftRound(int64(aQIN[k]), shift))
+	}
+	return coeffs
+}
+
+func silkBWExpander32(ar []int32, order int, chirpQ16 int32) {
+	for i := 0; i < order-1; i++ {
+		ar[i] = silkSMULWW(chirpQ16, ar[i])
+		chirpQ16 = silkSMULWW(chirpQ16, chirpQ16)
+	}
+	if order > 0 {
+		ar[order-1] = silkSMULWW(chirpQ16, ar[order-1])
+	}
+}
+
+func silkSMULWW(a, b int32) int32 {
+	return int32((int64(a) * int64(b)) >> 16)
 }
 
 // silkPitchContourOffsets returns per-subframe pitch lag offsets from contour index.

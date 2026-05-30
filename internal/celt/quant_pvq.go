@@ -1,7 +1,9 @@
 package celt
 
 import (
+	"fmt"
 	"math"
+	"os"
 
 	"github.com/darui3018823/opus/internal/entcode"
 )
@@ -14,12 +16,12 @@ import (
 // in the float build, so MULT16_16*/PSHR32/EXTRACT16 etc. become direct arithmetic.
 
 const (
-	bitres              = 3 // libopus BITRES (1<<bitres == 8)
-	spreadNone          = 0
-	spreadAggressive    = 3
-	qThetaOffset        = 4
+	bitres               = 3 // libopus BITRES (1<<bitres == 8)
+	spreadNone           = 0
+	spreadAggressive     = 3
+	qThetaOffset         = 4
 	qThetaOffsetTwoPhase = 16
-	logMaxPseudo        = 6
+	logMaxPseudo         = 6
 )
 
 // qabDebug enables per-band trace capture in QuantAllBands (test diagnostics).
@@ -365,7 +367,7 @@ func computeTheta(ctx *bandCtx, X, Y []float64, n int, b *int, B, B0, lm int, st
 			} else {
 				itheta = (2*(qn+1) - isqrt32(uint32(8*(ft-fm-1)+1))) >> 1
 				fs = qn + 1 - itheta
-				fl = ft - ((qn+1-itheta)*(qn+2-itheta)>>1)
+				fl = ft - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1)
 			}
 			ctx.dec.DecodeUpdate(uint32(fl), uint32(fl+fs), uint32(ft))
 		}
@@ -948,6 +950,11 @@ func QuantAllBands(dec *entcode.Decoder, start, end int, X, Y []float64,
 		collapseMasks[i*C+C-1] = byte(ycm)
 		if qabDebug {
 			qabLog = append(qabLog, qabBandTrace{i: i, N: N, b: b, tellf: dec.TellFrac(), rng: dec.GetRng(), xcm: xcm})
+			fmt.Fprintf(os.Stderr, "[XB] band=%d N=%d", i, N)
+			for j := 0; j < N; j++ {
+				fmt.Fprintf(os.Stderr, " X[%d]=%.9g", j, Xband[j])
+			}
+			fmt.Fprintln(os.Stderr)
 		}
 		balance += pulses[i] + tell
 		updateLowband = b > (N << bitres)

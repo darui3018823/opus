@@ -135,7 +135,7 @@ func TestOracleTrace(t *testing.T) {
 	qabDP = nil
 	QuantAllBands(dec, 0, numBands, X, nil, collapse, pulses, isTransient, 2,
 		dualStereo, intensity, tfRes, totalBitsQ3, balance, lm, codedBands,
-		dec.GetRng(), false)
+		0, false)
 	qabDebug = false
 	for _, t := range qabLog {
 		fmt.Printf("  QB band%2d N=%3d b=%5d -> tellf=%d rng=%08x xcm=%d\n", t.i, t.N, t.b, t.tellf, t.rng, t.xcm)

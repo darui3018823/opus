@@ -161,7 +161,7 @@ func TestOracleTraceStereo(t *testing.T) {
 	qabTheta = nil
 	QuantAllBands(dec, 0, numBands, X[:frameLen], Y, collapse, pulses, isTransient, 2,
 		dualStereo, intensity, tfRes, totalBitsQ3, balance, lm, codedBands,
-		dec.GetRng(), false)
+		0, false)
 	qabDebug = false
 	for _, tr := range qabLog {
 		fmt.Printf("  QB band%2d N=%3d b=%5d -> tellf=%d rng=%08x xcm=%d\n", tr.i, tr.N, tr.b, tr.tellf, tr.rng, tr.xcm)

@@ -399,7 +399,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	totalBitsQ3 := lenBytes*8<<3 - antiCollapseRsv
 	seed := QuantAllBands(dec, 0, numBands, X[:frameLen], Y, collapse, pulses, isTransient,
 		spread, dualStereo, intensity, tfRes, totalBitsQ3, balance, lm, codedBands,
-		dec.GetRng(), false)
+		d.lastFinalRange, false)
 
 	// Anti-collapse bit — RAW bit (ec_dec_bits), read AFTER PVQ. Does not affect rng.
 	antiCollapseOn := false

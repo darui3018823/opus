@@ -1295,6 +1295,18 @@ int celt_decode_with_ec_dred(CELTDecoder * OPUS_RESTRICT st, const unsigned char
          NULL, pulses, shortBlocks, spread_decision, dual_stereo, intensity, tf_res,
          len*(8<<BITRES)-anti_collapse_rsv, balance, dec, LM, codedBands, &st->rng, 0,
          st->arch, st->disable_inv);
+   {
+      int bi, bj;
+      for (bi=start; bi<end; bi++)
+      {
+         int bandN = M*(eBands[bi+1]-eBands[bi]);
+         celt_norm *bandX = X + M*eBands[bi];
+         fprintf(stderr, "[XB] band=%d N=%d", bi, bandN);
+         for (bj=0; bj<bandN; bj++)
+            fprintf(stderr, " X[%d]=%.9g", bj, (double)bandX[bj]);
+         fprintf(stderr, "\n");
+      }
+   }
    TRC("pvq");
 
    if (anti_collapse_rsv > 0)

@@ -33,7 +33,8 @@
 
 #define CELT_DECODER_C
 #include <stdio.h>
-#define TRC(label) fprintf(stderr, "[%-14s] tell=%d tellf=%d rng=%08x val=%08x\n", label, ec_tell(dec), ec_tell_frac(dec), (unsigned)dec->rng, (unsigned)dec->val)
+extern int oracle_trace_enabled;
+#define TRC(label) do { if (oracle_trace_enabled) fprintf(stderr, "[%-14s] tell=%d tellf=%d rng=%08x val=%08x\n", label, ec_tell(dec), ec_tell_frac(dec), (unsigned)dec->rng, (unsigned)dec->val); } while (0)
 
 #include "cpu_support.h"
 #include "os_support.h"
@@ -386,6 +387,7 @@ void dump_denorm_bands(const CELTMode *mode, const celt_sig *freq,
 {
    int bi, bj;
    const opus_int16 *eBands = mode->eBands;
+   if (!oracle_trace_enabled) return;
    for (bi=start; bi<end; bi++)
    {
       int bandN = M*(eBands[bi+1]-eBands[bi]);
@@ -403,6 +405,7 @@ static
 void dump_imdct_time(const celt_sig *time, int ch, int block, int N)
 {
    int i;
+   if (!oracle_trace_enabled) return;
    fprintf(stderr, "[CLT_TIME] ch=%d block=%d N=%d", ch, block, N);
    for (i=0;i<N;i++)
       fprintf(stderr, " T[%d]=%.17g", i, (double)time[i]);
@@ -1264,7 +1267,7 @@ int celt_decode_with_ec_dred(CELTDecoder * OPUS_RESTRICT st, const unsigned char
    unquant_coarse_energy(mode, start, end, oldBandE,
          intra_ener, dec, C, LM);
    TRC("coarse");
-   { int _i; fprintf(stderr,"   coarseE:"); for(_i=start;_i<end;_i++) fprintf(stderr," %.3f", oldBandE[_i]); fprintf(stderr,"\n"); }
+   if (oracle_trace_enabled) { int _i; fprintf(stderr,"   coarseE:"); for(_i=start;_i<end;_i++) fprintf(stderr," %.3f", oldBandE[_i]); fprintf(stderr,"\n"); }
 
    ALLOC(tf_res, nbEBands, int);
    tf_decode(start, end, isTransient, tf_res, LM, dec);
@@ -1313,13 +1316,13 @@ int celt_decode_with_ec_dred(CELTDecoder * OPUS_RESTRICT st, const unsigned char
          dynalloc_logp = IMAX(2, dynalloc_logp-1);
    }
    TRC("dynalloc");
-   { int _i; fprintf(stderr,"   offsets:"); for(_i=start;_i<end;_i++) fprintf(stderr," %d", offsets[_i]); fprintf(stderr,"\n"); }
+   if (oracle_trace_enabled) { int _i; fprintf(stderr,"   offsets:"); for(_i=start;_i<end;_i++) fprintf(stderr," %d", offsets[_i]); fprintf(stderr,"\n"); }
 
    ALLOC(fine_quant, nbEBands, int);
    alloc_trim = tell+(6<<BITRES) <= total_bits ?
          ec_dec_icdf(dec, trim_icdf, 7) : 5;
    TRC("alloc_trim");
-   fprintf(stderr,"   alloc_trim=%d\n", alloc_trim);
+   if (oracle_trace_enabled) fprintf(stderr,"   alloc_trim=%d\n", alloc_trim);
 
    bits = (((opus_int32)len*8)<<BITRES) - ec_tell_frac(dec) - 1;
    anti_collapse_rsv = isTransient&&LM>=2&&bits>=((LM+2)<<BITRES) ? (1<<BITRES) : 0;
@@ -1332,9 +1335,9 @@ int celt_decode_with_ec_dred(CELTDecoder * OPUS_RESTRICT st, const unsigned char
          alloc_trim, &intensity, &dual_stereo, bits, &balance, pulses,
          fine_quant, fine_priority, C, LM, dec, 0, 0, 0);
    TRC("allocation");
-   fprintf(stderr,"   codedBands=%d balance=%d intensity=%d dual_stereo=%d antiRsv=%d bits=%d\n",
+   if (oracle_trace_enabled) fprintf(stderr,"   codedBands=%d balance=%d intensity=%d dual_stereo=%d antiRsv=%d bits=%d\n",
        codedBands, balance, intensity, dual_stereo, anti_collapse_rsv, bits);
-   { int _i; fprintf(stderr,"   pulses :"); for(_i=start;_i<end;_i++) fprintf(stderr," %d", pulses[_i]); fprintf(stderr,"\n");
+   if (oracle_trace_enabled) { int _i; fprintf(stderr,"   pulses :"); for(_i=start;_i<end;_i++) fprintf(stderr," %d", pulses[_i]); fprintf(stderr,"\n");
             fprintf(stderr,"   fineQ  :"); for(_i=start;_i<end;_i++) fprintf(stderr," %d", fine_quant[_i]); fprintf(stderr,"\n"); }
 
    unquant_fine_energy(mode, start, end, oldBandE, fine_quant, dec, C);
@@ -1353,7 +1356,7 @@ int celt_decode_with_ec_dred(CELTDecoder * OPUS_RESTRICT st, const unsigned char
          NULL, pulses, shortBlocks, spread_decision, dual_stereo, intensity, tf_res,
          len*(8<<BITRES)-anti_collapse_rsv, balance, dec, LM, codedBands, &st->rng, 0,
          st->arch, st->disable_inv);
-   {
+   if (oracle_trace_enabled) {
       int bi, bj;
       for (bi=start; bi<end; bi++)
       {

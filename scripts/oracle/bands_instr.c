@@ -34,6 +34,7 @@
 #include <math.h>
 #include "bands.h"
 #include <stdio.h>
+extern int oracle_trace_enabled;
 #include "modes.h"
 #include "vq.h"
 #include "cwrs.h"
@@ -1659,7 +1660,7 @@ void quant_all_bands(int encode, const CELTMode *m, int start, int end,
       }
       collapse_masks[i*C+0] = (unsigned char)x_cm;
       collapse_masks[i*C+C-1] = (unsigned char)y_cm;
-      fprintf(stderr, "  QB band%2d N=%3d b=%5d tf=%d B=%d -> tellf=%d rng=%08x xcm=%u\n",
+      if (oracle_trace_enabled) fprintf(stderr, "  QB band%2d N=%3d b=%5d tf=%d B=%d -> tellf=%d rng=%08x xcm=%u\n",
               i, N, b, tf_change, B, ec_tell_frac(ec), (unsigned)ec->rng, x_cm);
       balance += pulses[i] + tell;
 

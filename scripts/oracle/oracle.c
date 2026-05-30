@@ -1,12 +1,22 @@
-/* Ground-truth CELT decode tracer using libopus internals.
+/* Ground-truth Opus decode tracer using libopus internals.
    Usage: oracle <testvectorNN.bit> [pktIndex]
    Parses opus_demo .bit format (BE u32 size, BE u32 final-range, payload),
-   decodes the given packet's CELT payload, and prints the libopus final range. */
+   decodes through the given packet, and prints the libopus final range. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "opus_defines.h"
-#include "celt.h"
+#include "opus.h"
+
+int oracle_trace_enabled = 0;
+
+static int frame_samples_48k(const unsigned char *pkt, int len)
+{
+    int s = opus_packet_get_samples_per_frame(pkt, 48000);
+    int n = opus_packet_get_nb_frames(pkt, len);
+    if (n < 1) n = 1;
+    return s * n;
+}
 
 int main(int argc, char **argv)
 {
@@ -30,33 +40,44 @@ int main(int argc, char **argv)
             int config = (toc >> 3) & 0x1f;
             int stereo = (toc >> 2) & 1;
             int code = toc & 3;
-            int C = stereo ? 2 : 1;
-            int lm = config & 3;
-            int bw = (config - 16) >> 2;
-            int frame_size = 120 << lm;
-            int endband_table[4] = {13, 17, 19, 21};
-            int endband = (bw >= 0 && bw < 4) ? endband_table[bw] : 21;
+            const char *mode = config < 12 ? "SILK" : (config < 16 ? "HYBRID" : "CELT");
             fprintf(stderr, "pkt%d: TOC=0x%02x config=%d stereo=%d code=%d size=%u rexp=%08x\n",
                     idx, toc, config, stereo, code, psize, rexp);
-            if (config < 16) { fprintf(stderr, "not CELT-only; skipping\n"); return 1; }
-
-            int err = celt_decoder_get_size(C);
-            CELTDecoder *dec = malloc(err);
-            celt_decoder_init(dec, 48000, C);
-            celt_decoder_ctl(dec, CELT_SET_START_BAND(0));
-            celt_decoder_ctl(dec, CELT_SET_END_BAND(endband));
-
+            fprintf(stderr, "mode=%s\n", mode);
+            int err = OPUS_OK;
+            int api_channels = 2;
+            OpusDecoder *dec = opus_decoder_create(48000, api_channels, &err);
+            if (dec == NULL || err != OPUS_OK) {
+                fprintf(stderr, "opus_decoder_create failed: %d\n", err);
+                return 2;
+            }
             float pcm[5760*2];
-            /* code 0: single frame, payload = pkt+1 .. psize-1 */
-            int ret = celt_decode_with_ec(dec, pkt+1, psize-1, pcm, frame_size, NULL, 0);
+            long off2 = 0;
+            int idx2 = 0;
+            int ret = 0;
+            while (off2 + 8 <= sz && idx2 <= want) {
+                unsigned int psize2 = (buf[off2]<<24)|(buf[off2+1]<<16)|(buf[off2+2]<<8)|buf[off2+3];
+                unsigned char *pkt2 = buf + off2 + 8;
+                if (off2 + 8 + psize2 > sz) break;
+                oracle_trace_enabled = idx2 == want;
+                ret = opus_decode_float(dec, pkt2, psize2, pcm, 5760, 0);
+                if (ret < 0) {
+                    fprintf(stderr, "decode pkt%d failed: %d\n", idx2, ret);
+                    opus_decoder_destroy(dec);
+                    return 1;
+                }
+                off2 += 8 + psize2;
+                idx2++;
+            }
+            oracle_trace_enabled = 0;
             unsigned int rng = 0;
-            celt_decoder_ctl(dec, OPUS_GET_FINAL_RANGE(&rng));
-            fprintf(stderr, "RESULT ret=%d finalrng=%08x expected=%08x match=%d\n",
-                    ret, rng, rexp, rng == rexp);
+            opus_decoder_ctl(dec, OPUS_GET_FINAL_RANGE(&rng));
+            fprintf(stderr, "RESULT ret=%d samples_expected=%d finalrng=%08x expected=%08x match=%d\n",
+                    ret, frame_samples_48k(pkt, (int)psize), rng, rexp, rng == rexp);
             fprintf(stderr, "pcm[0..7]:");
-            for (int i = 0; i < 8 && i < ret*C; i++) fprintf(stderr, " %.5f", pcm[i]);
+            for (int i = 0; i < 8 && i < ret*api_channels; i++) fprintf(stderr, " %.5f", pcm[i]);
             fprintf(stderr, "\n");
-            free(dec);
+            opus_decoder_destroy(dec);
             return 0;
         }
         off += 8 + psize;

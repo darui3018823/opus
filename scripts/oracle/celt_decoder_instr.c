@@ -392,10 +392,25 @@ void dump_denorm_bands(const CELTMode *mode, const celt_sig *freq,
       int off = M*eBands[bi];
       fprintf(stderr, "[XD] ch=%d band=%d N=%d", ch, bi, bandN);
       for (bj=0; bj<bandN; bj++)
-         fprintf(stderr, " X[%d]=%.9g", bj, (double)freq[off+bj]);
+         fprintf(stderr, " X[%d]=%.17g", bj, (double)freq[off+bj]);
       fprintf(stderr, "\n");
    }
 }
+
+#ifndef RESYNTH
+static
+#endif
+void dump_imdct_time(const celt_sig *time, int ch, int block, int N)
+{
+   int i;
+   fprintf(stderr, "[CLT_TIME] ch=%d block=%d N=%d", ch, block, N);
+   for (i=0;i<N;i++)
+      fprintf(stderr, " T[%d]=%.17g", i, (double)time[i]);
+   fprintf(stderr, "\n");
+}
+
+int oracle_mdct_dump_ch = -1;
+int oracle_mdct_dump_block = -1;
 
 #ifndef RESYNTH
 static
@@ -444,9 +459,19 @@ void celt_synthesis(const CELTMode *mode, celt_norm *X, celt_sig * out_syn[],
       freq2 = out_syn[1]+overlap/2;
       OPUS_COPY(freq2, freq, N);
       for (b=0;b<B;b++)
+      {
+         oracle_mdct_dump_ch = 0;
+         oracle_mdct_dump_block = b;
          clt_mdct_backward(&mode->mdct, &freq2[b], out_syn[0]+NB*b, mode->window, overlap, shift, B, arch);
+         dump_imdct_time(out_syn[0]+NB*b, 0, b, NB);
+      }
       for (b=0;b<B;b++)
+      {
+         oracle_mdct_dump_ch = 1;
+         oracle_mdct_dump_block = b;
          clt_mdct_backward(&mode->mdct, &freq[b], out_syn[1]+NB*b, mode->window, overlap, shift, B, arch);
+         dump_imdct_time(out_syn[1]+NB*b, 1, b, NB);
+      }
    } else if (CC==1&&C==2)
    {
       /* Downmixing a stereo stream to mono */
@@ -462,7 +487,12 @@ void celt_synthesis(const CELTMode *mode, celt_norm *X, celt_sig * out_syn[],
       for (i=0;i<N;i++)
          freq[i] = ADD32(HALF32(freq[i]), HALF32(freq2[i]));
       for (b=0;b<B;b++)
+      {
+         oracle_mdct_dump_ch = 0;
+         oracle_mdct_dump_block = b;
          clt_mdct_backward(&mode->mdct, &freq[b], out_syn[0]+NB*b, mode->window, overlap, shift, B, arch);
+         dump_imdct_time(out_syn[0]+NB*b, 0, b, NB);
+      }
    } else {
       /* Normal case (mono or stereo) */
       c=0; do {
@@ -470,7 +500,12 @@ void celt_synthesis(const CELTMode *mode, celt_norm *X, celt_sig * out_syn[],
                downsample, silence);
          dump_denorm_bands(mode, freq, c, start, effEnd, M);
          for (b=0;b<B;b++)
+         {
+            oracle_mdct_dump_ch = c;
+            oracle_mdct_dump_block = b;
             clt_mdct_backward(&mode->mdct, &freq[b], out_syn[c]+NB*b, mode->window, overlap, shift, B, arch);
+            dump_imdct_time(out_syn[c]+NB*b, c, b, NB);
+         }
       } while (++c<CC);
    }
    /* Saturate IMDCT output so that we can't overflow in the pitch postfilter

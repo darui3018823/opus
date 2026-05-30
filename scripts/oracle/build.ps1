@@ -33,11 +33,29 @@ Copy-Item "$PSScriptRoot\cwrs_instr.c"         "$bld\cwrs_instr.c"         -Forc
 Copy-Item "$PSScriptRoot\oracle.c"             "$bld\oracle.c"             -Force
 
 $celt = "$srcDir\celt"
+
+$mdct = Get-Content "$celt\mdct.c" -Raw
+$mdct = $mdct.Replace("#include <math.h>", "#include <math.h>`r`n#include <stdio.h>")
+$mdctDump = @'
+   {
+      int _i;
+      extern int oracle_mdct_dump_ch;
+      extern int oracle_mdct_dump_block;
+      fprintf(stderr, "[IMDCT_RAW] ch=%d block=%d N=%d", oracle_mdct_dump_ch, oracle_mdct_dump_block, N2);
+      for (_i=0; _i<N2; _i++)
+         fprintf(stderr, " T[%d]=%.17g", _i, (double)out[(overlap>>1)+_i]);
+      fprintf(stderr, "\n");
+   }
+
+'@
+$mdct = $mdct.Replace("   /* Mirror on both sides for TDAC */", $mdctDump + "   /* Mirror on both sides for TDAC */")
+Set-Content "$bld\mdct_instr.c" $mdct
+
 # Stock decode-subset sources MINUS the three we instrumented (and minus encoder/demo).
 $stock = @('celt','celt_lpc','entcode','entdec','entenc','kiss_fft','laplace',
-           'mathops','mdct','modes','pitch','quant_bands','rate','vq') |
+           'mathops','modes','pitch','quant_bands','rate','vq') |
          ForEach-Object { "$celt\$_.c" }
-$srcs = $stock + @("$bld\bands_instr.c","$bld\cwrs_instr.c","$bld\celt_decoder_instr.c","$bld\oracle.c")
+$srcs = $stock + @("$bld\mdct_instr.c","$bld\bands_instr.c","$bld\cwrs_instr.c","$bld\celt_decoder_instr.c","$bld\oracle.c")
 $inc  = @("-I$celt","-I$srcDir\include","-I$srcDir","-I$srcDir\silk")
 
 # NOTE: build WITHOUT -DCUSTOM_MODES so the exact static 48000/960 mode (shipped tables) is used.

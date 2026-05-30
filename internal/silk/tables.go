@@ -53,11 +53,19 @@ var silkPitchContourICDF = [34]uint8{
 	1, 0,
 }
 
+// silkPitchContourNBICDF — 8 kHz pitch contour iCDF for 20ms frames (11 values).
+var silkPitchContourNBICDF = [11]uint8{
+	188, 176, 155, 138, 119, 97, 67, 43, 26, 10, 0,
+}
+
 // silkPitchContour10msICDF — pitch contour iCDF for 10ms frames (12 values).
 var silkPitchContour10msICDF = [12]uint8{
 	165, 119, 80, 61, 47, 35, 27, 20,
 	14, 9, 4, 0,
 }
+
+// silkPitchContour10msNBICDF — 8 kHz pitch contour iCDF for 10ms frames (3 values).
+var silkPitchContour10msNBICDF = [3]uint8{113, 63, 0}
 
 // ── LTP tables (silk/tables_LTP.c) ──────────────────────────────────────────
 

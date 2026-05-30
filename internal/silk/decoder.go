@@ -20,6 +20,8 @@ const (
 	log2ShellCodecFrameLen = 4  // LOG2_SHELL_CODEC_FRAME_LENGTH
 	silkMaxPulses          = 16 // SILK_MAX_PULSES
 	nRateLevels            = 10 // N_RATE_LEVELS
+	silkMaxLPCOrder        = 16 // MAX_LPC_ORDER
+	silkLTPMemLengthMs     = 20 // LTP_MEM_LENGTH_MS
 )
 
 // ── Pulse decoding tables ────────────────────────────────────────────────────
@@ -207,11 +209,11 @@ type Decoder struct {
 	prevSignalType int     // previous signal type
 	firstFrame     bool    // true until the first decoded frame after reset
 
-	// LPC synthesis state: last lpcOrder samples
+	// LPC synthesis state: last MAX_LPC_ORDER samples
 	lpcState []int32 // Q14
 
 	// LTP (long-term prediction) state: decoded PCM history, one sample per entry.
-	ltpState []int32 // Q0, length maxLag + frameSize
+	ltpState []int32 // Q0, length LTP_MEM_LENGTH_MS * fsKHz
 
 	// Random seed for excitation
 	randSeed int32
@@ -286,7 +288,7 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 	}
 	frameSize := sampleRate * frameMs / 1000
 	subfrmLen := frameSize / nSubframes
-	maxLag := PitchEstMaxLagMs * fsKHz
+	ltpMemLen := silkLTPMemLengthMs * fsKHz
 
 	d := &Decoder{
 		sampleRate:     sampleRate,
@@ -300,11 +302,11 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 		lagPrev:        100,
 		prevLagIndex:   0,
 		prevGainQ16:    65536,
-		prevGainIndex:  0,
+		prevGainIndex:  10,
 		prevSignalType: SignalTypeUnvoiced,
 		firstFrame:     true,
-		lpcState:       make([]int32, lpcOrder),
-		ltpState:       make([]int32, maxLag+frameSize),
+		lpcState:       make([]int32, silkMaxLPCOrder),
+		ltpState:       make([]int32, ltpMemLen),
 		randSeed:       7818,
 		prevLPCQ12:     make([]int16, lpcOrder),
 		prevOutput:     make([]int32, frameSize),
@@ -787,33 +789,29 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 		if decodeAbsoluteLagIndex {
 			lagIndex := dec.DecodeIcdf(silkPitchLagICDF[:], 8)
 			lagLowBits := decodePitchLagLowBits(dec, d.fsKHz)
-			// libopus SILK_PITCH_LAG_LOW_BITS: 4 for 8kHz, 8 for others.
-			step := 8
-			if d.fsKHz == 8 {
-				step = 4
-			}
+			step := d.fsKHz >> 1
 			lag = lagIndex*step + lagLowBits
 		}
 		d.prevLagIndex = lag
-		minLag := PitchEstMinLagMs * d.fsKHz
-		maxLag := PitchEstMaxLagMs * d.fsKHz
-		if lag < minLag {
-			lag = minLag
-		}
-		if lag > maxLag {
-			lag = maxLag
-		}
 
 		// Pitch contour
 		var pitchContourIdx int
-		if d.nSubframes == 4 {
+		switch {
+		case d.fsKHz == 8 && d.nSubframes == 4:
+			pitchContourIdx = dec.DecodeIcdf(silkPitchContourNBICDF[:], 8)
+		case d.fsKHz == 8:
+			pitchContourIdx = dec.DecodeIcdf(silkPitchContour10msNBICDF[:], 8)
+		case d.nSubframes == 4:
 			pitchContourIdx = dec.DecodeIcdf(silkPitchContourICDF[:], 8)
-		} else {
+		default:
 			pitchContourIdx = dec.DecodeIcdf(silkPitchContour10msICDF[:], 8)
 		}
+		minLag := PitchEstMinLagMs * d.fsKHz
+		maxLag := PitchEstMaxLagMs * d.fsKHz
+		baseLag := minLag + lag
 		contourOffsets := silkPitchContourOffsets(pitchContourIdx, d.nSubframes, d.fsKHz)
 		for sf := 0; sf < d.nSubframes; sf++ {
-			pitchLags[sf] = lag + contourOffsets[sf]
+			pitchLags[sf] = baseLag + contourOffsets[sf]
 			if pitchLags[sf] < minLag {
 				pitchLags[sf] = minLag
 			}
@@ -894,6 +892,9 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 func decodePitchLagLowBits(dec *entcode.Decoder, fsKHz int) int {
 	if fsKHz == 8 {
 		return dec.DecodeIcdf(silkUniform4ICDF[:], 8) // 4 values, step=4
+	}
+	if fsKHz == 12 {
+		return dec.DecodeIcdf(silkUniform6ICDF[:], 8) // 6 values, step=6
 	}
 	return dec.DecodeIcdf(silkUniform8ICDF[:], 8) // 8 values, step=8
 }
@@ -1320,35 +1321,53 @@ func silkSMULWW(a, b int32) int32 {
 // silkPitchContourOffsets returns per-subframe pitch lag offsets from contour index.
 func silkPitchContourOffsets(contourIdx, nSubframes, fsKHz int) []int {
 	offsets := make([]int, nSubframes)
-	if nSubframes == 4 {
-		// 34 pitch contour patterns from libopus
-		patterns := [][4]int{
-			{0, 0, 0, 0}, {0, 0, 0, -1}, {0, 0, -1, -1}, {0, 0, -1, -2},
-			{0, -1, -1, -1}, {0, -1, -1, -2}, {0, -1, -2, -2}, {0, -1, -2, -3},
-			{0, -2, -2, -2}, {0, -2, -2, -3}, {0, -2, -3, -3}, {0, -2, -3, -4},
-			{0, -3, -3, -3}, {0, -3, -3, -4}, {0, -3, -4, -4}, {0, -3, -4, -5},
-			{0, -4, -4, -4}, {0, -4, -4, -5}, {0, -4, -5, -5}, {0, -4, -5, -6},
-			{0, -5, -5, -5}, {0, -5, -5, -6}, {0, -5, -6, -6}, {0, -5, -6, -7},
-			{0, -6, -6, -6}, {0, -6, -6, -7}, {0, -6, -7, -7}, {0, -6, -7, -8},
-			{0, 0, 0, 1}, {0, 0, 1, 1}, {0, 1, 1, 1}, {0, 1, 1, 2},
-			{0, 1, 2, 2}, {0, 1, 2, 3},
+	if fsKHz == 8 && nSubframes == 4 {
+		patterns := [4][11]int{
+			{0, 2, -1, -1, -1, 0, 0, 1, 1, 0, 1},
+			{0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0},
+			{0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0},
+			{0, -1, 2, 1, 0, 1, 1, 0, 0, -1, -1},
 		}
-		if contourIdx >= 0 && contourIdx < len(patterns) {
+		if contourIdx >= 0 && contourIdx < 11 {
 			for sf := 0; sf < 4; sf++ {
-				offsets[sf] = patterns[contourIdx][sf]
+				offsets[sf] = patterns[sf][contourIdx]
 			}
 		}
-	} else {
-		// 12 pitch contour patterns for 10ms frames
-		patterns := [][2]int{
-			{0, 0}, {0, -1}, {0, -2}, {0, -3},
-			{0, -4}, {0, -5}, {0, 1}, {0, 2},
-			{0, 3}, {0, 4}, {0, -6}, {0, -7},
+		return offsets
+	}
+	if fsKHz == 8 && nSubframes == 2 {
+		patterns := [2][3]int{
+			{0, 1, 0},
+			{0, 0, 1},
 		}
-		if contourIdx >= 0 && contourIdx < len(patterns) {
+		if contourIdx >= 0 && contourIdx < 3 {
 			for sf := 0; sf < 2; sf++ {
-				offsets[sf] = patterns[contourIdx][sf]
+				offsets[sf] = patterns[sf][contourIdx]
 			}
+		}
+		return offsets
+	}
+	if nSubframes == 4 {
+		patterns := [4][34]int{
+			{0, 0, 1, -1, 0, 1, -1, 0, -1, 1, -2, 2, -2, -2, 2, -3, 2, 3, -3, -4, 3, -4, 4, 4, -5, 5, -6, -5, 6, -7, 6, 5, 8, -9},
+			{0, 0, 1, 0, 0, 0, 0, 0, 0, 0, -1, 1, 0, 0, 1, -1, 0, 1, -1, -1, 1, -1, 2, 1, -1, 2, -2, -2, 2, -2, 2, 2, 3, -3},
+			{0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, -1, 1, 0, 0, 2, 1, -1, 2, -1, -1, 2, -1, 2, 2, -1, 3, -2, -2, -2, 3},
+			{0, 1, 0, 0, 1, 0, 1, -1, 2, -1, 2, -1, 2, 3, -2, 3, -2, -2, 4, 4, -3, 5, -3, -4, 6, -4, 6, 5, -5, 8, -6, -5, -7, 9},
+		}
+		if contourIdx >= 0 && contourIdx < 34 {
+			for sf := 0; sf < 4; sf++ {
+				offsets[sf] = patterns[sf][contourIdx]
+			}
+		}
+		return offsets
+	}
+	patterns := [2][12]int{
+		{0, 0, 1, -1, 1, -1, 2, -2, 2, -2, 3, -3},
+		{0, 1, 0, 1, -1, 2, -1, 2, -2, 3, -2, 3},
+	}
+	if contourIdx >= 0 && contourIdx < 12 {
+		for sf := 0; sf < 2; sf++ {
+			offsets[sf] = patterns[sf][contourIdx]
 		}
 	}
 	return offsets
@@ -1521,6 +1540,121 @@ func (d *Decoder) decodeSigns(dec *entcode.Decoder, pulses []int16, frameLen, si
 	}
 }
 
+func silkSMULWB(a int32, b int16) int32 {
+	return int32((int64(a) * int64(b)) >> 16)
+}
+
+func silkSMLAWB(a, b int32, c int16) int32 {
+	return a + silkSMULWB(b, c)
+}
+
+func silkSMLAWW(a, b, c int32) int32 {
+	return a + silkSMULWW(b, c)
+}
+
+func silkSMMUL(a, b int32) int32 {
+	return int32((int64(a) * int64(b)) >> 32)
+}
+
+func silkLShiftSat32(a int32, shift int) int32 {
+	if shift <= 0 {
+		return a
+	}
+	lo := int32(math.MinInt32 >> shift)
+	hi := int32(math.MaxInt32 >> shift)
+	if a < lo {
+		a = lo
+	} else if a > hi {
+		a = hi
+	}
+	return a << shift
+}
+
+func silkAddSat32(a, b int32) int32 {
+	sum := int64(a) + int64(b)
+	if sum > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	if sum < math.MinInt32 {
+		return math.MinInt32
+	}
+	return int32(sum)
+}
+
+func silkAbs32(a int32) int32 {
+	if a < 0 {
+		if a == math.MinInt32 {
+			return math.MaxInt32
+		}
+		return -a
+	}
+	return a
+}
+
+func silkCLZ32(a int32) int {
+	u := uint32(a)
+	if u == 0 {
+		return 32
+	}
+	n := 0
+	for (u & 0x80000000) == 0 {
+		n++
+		u <<= 1
+	}
+	return n
+}
+
+func silkDIV32VarQ(a32, b32 int32, qres int) int32 {
+	aHeadrm := silkCLZ32(silkAbs32(a32)) - 1
+	a32Nrm := a32 << aHeadrm
+	bHeadrm := silkCLZ32(silkAbs32(b32)) - 1
+	b32Nrm := b32 << bHeadrm
+	b32Inv := int32((math.MaxInt32 >> 2) / int(b32Nrm>>16))
+	result := silkSMULWB(a32Nrm, int16(b32Inv))
+	a32Nrm = a32Nrm - (silkSMMUL(b32Nrm, result) << 3)
+	result = silkSMLAWB(result, a32Nrm, int16(b32Inv))
+	lshift := 29 + aHeadrm - bHeadrm - qres
+	if lshift < 0 {
+		return silkLShiftSat32(result, -lshift)
+	}
+	if lshift < 32 {
+		return result >> lshift
+	}
+	return 0
+}
+
+func silkInverse32VarQ(b32 int32, qres int) int32 {
+	bHeadrm := silkCLZ32(silkAbs32(b32)) - 1
+	b32Nrm := b32 << bHeadrm
+	b32Inv := int32((math.MaxInt32 >> 2) / int(b32Nrm>>16))
+	result := b32Inv << 16
+	errQ32 := ((int32(1) << 29) - silkSMULWB(b32Nrm, int16(b32Inv))) << 3
+	result = silkSMLAWW(result, errQ32, b32Inv)
+	lshift := 61 - bHeadrm - qres
+	if lshift <= 0 {
+		return silkLShiftSat32(result, -lshift)
+	}
+	if lshift < 32 {
+		return result >> lshift
+	}
+	return 0
+}
+
+func silkLPCAnalysisFilter(out []int16, in []int32, b []int16, length, order int) {
+	for ix := order; ix < length; ix++ {
+		inPtr := ix - 1
+		out32Q12 := int32(int16(in[inPtr])) * int32(b[0])
+		for j := 1; j < order; j++ {
+			out32Q12 += int32(int16(in[inPtr-j])) * int32(b[j])
+		}
+		out32Q12 = (int32(in[ix]) << 12) - out32Q12
+		out[ix] = clamp16(silkRShiftRound(int64(out32Q12), 12))
+	}
+	for ix := 0; ix < order && ix < length; ix++ {
+		out[ix] = 0
+	}
+}
+
 // synthesize performs inverse NSQ (noise-shaping quantizer) synthesis.
 // Implements silk_decode_core from libopus silk/decode_core.c.
 // synthesize implements libopus silk/decode_core.c, producing int32 Q14 output samples.
@@ -1567,149 +1701,100 @@ func (d *Decoder) synthesize(
 		seed += int32(pulses[i]) // silk_ADD32_ovflw (wrapping)
 	}
 
-	// ── Step 2: Per-subframe LPC synthesis matching libopus decode_core.c ──────
-	// libopus uses a rolling window buffer of size (LPC_order + subfr_length),
-	// moves historical samples to [0..LPC_order-1] at the start of each subframe,
-	// applies gain adjustment there, then fills [LPC_order..LPC_order+subfr_length-1].
-	maxLag := PitchEstMaxLagMs * d.fsKHz
-
-	// sLTP_Q15 buffer for LTP prediction (voiced frames). The persistent LTP
-	// history stores decoded PCM; voiced subframes re-whiten it with the active
-	// LPC coefficients before prediction, matching silk_decode_core.
-	ltpStateLen := len(d.ltpState)
-	ltpBufLen := ltpStateLen + d.frameSize
-	sLTPQ15 := make([]int32, ltpBufLen)
-	outBufQ0 := make([]int32, ltpBufLen)
+	ltpMemLen := len(d.ltpState)
+	sLTPQ15 := make([]int32, ltpMemLen+d.frameSize)
+	outBufQ0 := make([]int32, ltpMemLen+d.frameSize)
 	copy(outBufQ0, d.ltpState)
-	sLTPBufIdx := ltpStateLen // first write position for current frame
+	sLTPBufIdx := ltpMemLen
 
-	prevGainQ16 := d.prevGainQ16
-	if prevGainQ16 == 0 {
-		prevGainQ16 = gainsQ16[0]
-	}
-
-	// Rolling subframe buffer: [0..lpcOrder-1] = history, [lpcOrder..lpcOrder+subfrmLen-1] = output.
-	subfrmBuf := make([]int32, d.lpcOrder+d.subfrmLen)
-	copy(subfrmBuf[:d.lpcOrder], d.lpcState)
-
+	sLPCQ14 := make([]int32, silkMaxLPCOrder+d.subfrmLen)
+	copy(sLPCQ14[:silkMaxLPCOrder], d.lpcState)
 	output := make([]int16, d.frameSize)
-	synthQ14 := make([]int32, d.frameSize) // all synthesized sLPC_Q14 values
+	nlsfInterpolation := false
+	if d.nSubframes == 4 && len(lpcCoeffsQ12[0]) > 0 && len(lpcCoeffsQ12[d.nSubframes-1]) > 0 {
+		nlsfInterpolation = &lpcCoeffsQ12[0][0] != &lpcCoeffsQ12[d.nSubframes-1][0]
+	}
 
 	for sf := 0; sf < d.nSubframes; sf++ {
 		start := sf * d.subfrmLen
-		gainQ10 := gainsQ16[sf] >> 6 // Q16 → Q10 (RSHIFT by 6)
-
-		// Gain adjustment on the historical window [0..lpcOrder-1] — matches
-		// silk_bwexpander_32 in libopus (uniform scaling is the dominant effect).
-		if gainsQ16[sf] != prevGainQ16 {
-			var gainAdjQ16 int32
-			if gainsQ16[sf] != 0 {
-				gainAdjQ16 = int32((int64(prevGainQ16) << 16) / int64(gainsQ16[sf]))
-			} else {
-				gainAdjQ16 = 1 << 16
-			}
-			for i := 0; i < d.lpcOrder; i++ {
-				subfrmBuf[i] = int32((int64(gainAdjQ16) * int64(subfrmBuf[i])) >> 16)
+		gainQ10 := gainsQ16[sf] >> 6
+		invGainQ31 := silkInverse32VarQ(gainsQ16[sf], 47)
+		gainAdjQ16 := int32(1 << 16)
+		if gainsQ16[sf] != d.prevGainQ16 {
+			gainAdjQ16 = silkDIV32VarQ(d.prevGainQ16, gainsQ16[sf], 16)
+			for i := 0; i < silkMaxLPCOrder; i++ {
+				sLPCQ14[i] = silkSMULWW(gainAdjQ16, sLPCQ14[i])
 			}
 		}
-		prevGainQ16 = gainsQ16[sf]
-
+		d.prevGainQ16 = gainsQ16[sf]
 		lpc := lpcCoeffsQ12[sf]
 		lag := pitchLags[sf]
-		if lag < 2 {
-			lag = 2
-		}
-		if lag > maxLag {
-			lag = maxLag
-		}
 
 		if signalType == SignalTypeVoiced {
-			// invGain = (1<<31)/gainQ16 — silk_INVERSE32_varQ(gain,31) gives Q31.
-			// SMULWB(invGain_Q31, pcm) = (invGain*pcm)>>16 gives Q15 residual.
-			invGain := int32(math.MaxInt32)
-			if gainsQ16[sf] > 0 {
-				v64 := (int64(1) << 31) / int64(gainsQ16[sf])
-				if v64 <= math.MaxInt32 {
-					invGain = int32(v64)
+			if sf == 0 || (sf == 2 && nlsfInterpolation) {
+				startIdx := ltpMemLen - lag - d.lpcOrder - 2
+				if startIdx < 0 {
+					startIdx = 0
 				}
-			}
-			if sf == 0 {
-				// First subframe: RSHIFT(SMULWB(invGain_Q31, ltpScale_Q14), 1) → Q31×Q14>>17.
-				invGain = int32((int64(invGain) * int64(ltpScaleQ14)) >> 17)
-			}
-			rewhiteLen := lag + 2
-			if rewhiteLen > sLTPBufIdx {
-				rewhiteLen = sLTPBufIdx
-			}
-			// Re-whiten: approximate excitation = pcm * invGain (not LPC residual).
-			// Matches libopus: sLTP_Q15[i] = silk_SMULWB(invGainQ16, xq[i]).
-			for i := 0; i < rewhiteLen; i++ {
-				idx := sLTPBufIdx - i - 1
-				pcm := outBufQ0[idx]
-				sLTPQ15[idx] = int32((int64(invGain) * int64(pcm)) >> 16)
+				if sf == 2 {
+					for i := 0; i < 2*d.subfrmLen; i++ {
+						outBufQ0[ltpMemLen+i] = int32(output[i])
+					}
+				}
+				filterLen := ltpMemLen - startIdx
+				sLTP := make([]int16, filterLen)
+				silkLPCAnalysisFilter(sLTP, outBufQ0[startIdx:startIdx+filterLen], lpc, filterLen, d.lpcOrder)
+				if sf == 0 {
+					invGainQ31 = silkSMULWB(invGainQ31, ltpScaleQ14) << 2
+				}
+				for i := 0; i < lag+2 && i < filterLen; i++ {
+					sLTPQ15[sLTPBufIdx-i-1] = silkSMULWB(invGainQ31, sLTP[filterLen-i-1])
+				}
+			} else if gainAdjQ16 != 1<<16 {
+				for i := 0; i < lag+2 && sLTPBufIdx-i-1 >= 0; i++ {
+					idx := sLTPBufIdx - i - 1
+					sLTPQ15[idx] = silkSMULWW(gainAdjQ16, sLTPQ15[idx])
+				}
 			}
 		}
 
+		presQ14 := excQ14[start : start+d.subfrmLen]
 		for i := 0; i < d.subfrmLen; i++ {
-			presQ14 := excQ14[start+i]
-
-			// LTP prediction (voiced only).
-			// silk_SMLAWB: acc += (sLTP_Q15 * B_Q14) >> 16 = Q13
-			// pres_Q14 += LTP_pred_Q13 << 1
 			if signalType == SignalTypeVoiced {
 				ltpPredQ13 := int32(2) // rounding bias (matches libopus)
 				for k := 0; k < 5; k++ {
 					ltpIdx := sLTPBufIdx - lag + 2 - k
-					if ltpIdx >= 0 && ltpIdx < ltpBufLen {
-						ltpPredQ13 += int32((int64(ltpCoeffsQ14[sf][k]) * int64(sLTPQ15[ltpIdx])) >> 16)
+					if ltpIdx >= 0 && ltpIdx < len(sLTPQ15) {
+						ltpPredQ13 = silkSMLAWB(ltpPredQ13, sLTPQ15[ltpIdx], ltpCoeffsQ14[sf][k])
 					}
 				}
-				presQ14 += ltpPredQ13 << 1
-				sLTPQ15[sLTPBufIdx] = presQ14 << 1
+				presQ14[i] = excQ14[start+i] + (ltpPredQ13 << 1)
+				sLTPQ15[sLTPBufIdx] = presQ14[i] << 1
 				sLTPBufIdx++
 			}
 
-			// LPC synthesis: LPC_pred_Q10 = sum(SMULWB(sLPC_Q14, A_Q12)) -> Q10.
-			// Then sLPC_Q14 = pres_Q14 + (LPC_pred_Q10 << 4).
-			lpcPredQ10 := int32(0)
+			lpcPredQ10 := int32(d.lpcOrder >> 1)
 			for j := 0; j < d.lpcOrder; j++ {
-				lpcPredQ10 += int32((int64(subfrmBuf[d.lpcOrder+i-j-1]) * int64(lpc[j])) >> 16)
+				lpcPredQ10 = silkSMLAWB(lpcPredQ10, sLPCQ14[silkMaxLPCOrder+i-j-1], lpc[j])
 			}
-			v := presQ14 + (lpcPredQ10 << 4)
-			if v > 1_000_000_000 {
-				v = 32767 << 14
-			} else if v < -1_000_000_000 {
-				v = -32768 << 14
-			}
-			subfrmBuf[d.lpcOrder+i] = v
-			synthQ14[start+i] = v
-
-			// Output: libopus silk_RSHIFT_ROUND(silk_SMULWW(sLPC_Q14, gainQ10), 12)
-			// SMULWW(a,b) = (a*b)>>16; RSHIFT_ROUND(x,12) = (x+2048)>>12.
-			smulww := int32((int64(v) * int64(gainQ10)) >> 16)
-			pxq := (smulww + 2048) >> 12
-			if pxq > 32767 {
-				pxq = 32767
-			} else if pxq < -32768 {
-				pxq = -32768
-			}
-			output[start+i] = int16(pxq)
-			outBufQ0[ltpStateLen+start+i] = pxq
+			predQ14 := silkLShiftSat32(lpcPredQ10, 4)
+			v := silkAddSat32(presQ14[i], predQ14)
+			sLPCQ14[silkMaxLPCOrder+i] = v
+			pxq := silkRShiftRound(int64(silkSMULWW(v, gainQ10)), 8)
+			output[start+i] = clamp16(pxq)
 		}
 
-		// Roll the buffer: copy last lpcOrder synthesized samples to the history window.
-		copy(subfrmBuf[:d.lpcOrder], subfrmBuf[d.subfrmLen:d.subfrmLen+d.lpcOrder])
+		copy(sLPCQ14[:silkMaxLPCOrder], sLPCQ14[d.subfrmLen:d.subfrmLen+silkMaxLPCOrder])
 	}
 
-	// Save LPC state (the historical window of the last subframe).
-	copy(d.lpcState, subfrmBuf[:d.lpcOrder])
-
-	// Update LTP state ring buffer with decoded PCM samples.
-	if d.frameSize <= ltpStateLen {
-		copy(d.ltpState, outBufQ0[d.frameSize:])
+	copy(d.lpcState, sLPCQ14[:silkMaxLPCOrder])
+	if d.frameSize <= ltpMemLen {
+		mvLen := ltpMemLen - d.frameSize
+		copy(d.ltpState[:mvLen], d.ltpState[d.frameSize:])
+		for i := 0; i < d.frameSize; i++ {
+			d.ltpState[mvLen+i] = int32(output[i])
+		}
 	}
-
-	d.prevGainQ16 = prevGainQ16
 	d.randSeed = seed
 	return output
 }
@@ -1777,7 +1862,7 @@ func (d *Decoder) Reset() {
 	d.lagPrev = 100
 	d.prevLagIndex = 0
 	d.prevGainQ16 = 65536
-	d.prevGainIndex = 0
+	d.prevGainIndex = 10
 	d.prevSignalType = SignalTypeUnvoiced
 	d.firstFrame = true
 	for i := range d.lpcState {

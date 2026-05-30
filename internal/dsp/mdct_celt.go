@@ -89,8 +89,8 @@ func (m *CELTMode) CELTOverlapAdd(y []float64, carry []float64) []float64 {
 	return out
 }
 
-// InverseOverlapAdd is the original MDCT-IV overlap-add (kept for tests).
-// CELT synthesis uses CELTOverlapAdd instead.
+// InverseOverlapAdd is the MDCT-IV overlap-add currently used by CELT synthesis.
+// CELTOverlapAdd is a candidate replacement but not yet wired up (simple swap worsens tv07).
 func (m *CELTMode) InverseOverlapAdd(y []float64, tail []float64) []float64 {
 	N := m.N
 	ov := m.Overlap

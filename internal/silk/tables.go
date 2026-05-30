@@ -5,21 +5,25 @@ package silk
 
 // ── Gain tables (silk/tables_gain.c) ────────────────────────────────────────
 
-// silkGainICDF is the first-subframe gain iCDF [signalType/2][9].
-// silk_gain_iCDF[3][N_LEVELS_QGAIN/8+1] from libopus silk/tables_gain.c.
-// 9 entries per row → 8 symbols (0..7), representing the lower 3 bits of the gain index.
-var silkGainICDF = [3][9]uint8{
-	{253, 250, 245, 235, 220, 190, 160, 20, 0},  // Inactive
-	{255, 252, 250, 240, 225, 195, 160, 20, 0},  // Unvoiced
-	{255, 252, 250, 240, 225, 195, 160, 2, 0},   // Voiced
+// silkGainICDF is the first-subframe gain iCDF [signalType][8].
+// silk_gain_iCDF[3][N_LEVELS_QGAIN/8] from libopus silk/tables_gain.c.
+// 8 entries per row -> 8 MSB symbols (0..7) for the first gain index.
+var silkGainICDF = [3][8]uint8{
+	{224, 112, 44, 15, 3, 2, 1, 0},     // Inactive
+	{254, 237, 192, 132, 70, 23, 4, 0}, // Unvoiced
+	{255, 252, 226, 155, 61, 11, 2, 0}, // Voiced
 }
 
-// silkDeltaGainICDF — delta gain iCDF (16 entries → 15 symbols).
+// silkDeltaGainICDF — delta gain iCDF (41 entries -> 41 symbols).
 // silk_delta_gain_iCDF from libopus silk/tables_gain.c.
-// Decoded symbol + MIN_DELTA_GAIN_QUANT(-6) = actual delta in [-6..8].
-var silkDeltaGainICDF = [16]uint8{
-	255, 244, 230, 212, 186, 152, 114, 83,
-	55, 33, 18, 8, 4, 2, 1, 0,
+// Decoded symbol + MIN_DELTA_GAIN_QUANT(-4) = actual delta in [-4..36].
+var silkDeltaGainICDF = [41]uint8{
+	250, 245, 234, 203, 71, 50, 42, 38,
+	35, 33, 31, 29, 28, 27, 26, 25,
+	24, 23, 22, 21, 20, 19, 18, 17,
+	16, 15, 14, 13, 12, 11, 10, 9,
+	8, 7, 6, 5, 4, 3, 2, 1,
+	0,
 }
 
 // ── Pitch tables (silk/tables_pitch_lag.c) ───────────────────────────────────
@@ -217,10 +221,10 @@ var silkLTPScalesTable = [3]int16{15565, 12288, 8192}
 const (
 	// NLevelsQGain = 64 — number of gain quantization levels
 	NLevelsQGain = 64
-	// MaxDeltaGainQuant = 9 (from libopus silk/define.h)
-	MaxDeltaGainQuant = 9
-	// MinDeltaGainQuant = -6 (from libopus silk/define.h)
-	MinDeltaGainQuant = -6
+	// MaxDeltaGainQuant = 36 (from libopus silk/define.h)
+	MaxDeltaGainQuant = 36
+	// MinDeltaGainQuant = -4 (from libopus silk/define.h)
+	MinDeltaGainQuant = -4
 	// PitchEstMaxLagMs = 18
 	PitchEstMaxLagMs = 18
 	// PitchEstMinLagMs = 2

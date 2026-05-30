@@ -227,6 +227,25 @@ type Decoder struct {
 	stereoMid            [2]int16
 	stereoSide           [2]int16
 	prevDecodeOnlyMiddle bool
+
+	trace *decodeTrace
+}
+
+type decodeTrace struct {
+	VADFlags  [][]uint32
+	LBRRFlags []uint32
+	Frames    []frameTrace
+}
+
+type frameTrace struct {
+	Channel         int
+	VADFlag         uint32
+	ConditionalGain bool
+	SignalType      int
+	QuantOffset     int
+	RawGainIndices  []int
+	AbsGainIndices  []int
+	GainsQ16        []int32
 }
 
 // NewDecoder creates a new SILK decoder with 20ms frame size.
@@ -352,7 +371,15 @@ func (d *Decoder) DecodeMulti(packet []byte, nFrames int) ([]float64, error) {
 	}
 	// LBRR flag (1 bit for mono channel)
 	lbrrFlag := dec.DecodeBitLogp(1)
-	_ = lbrrFlag
+	if d.trace != nil {
+		vadCopy := append([]uint32(nil), vadFlags...)
+		d.trace.VADFlags = append(d.trace.VADFlags, vadCopy)
+		if lbrrFlag {
+			d.trace.LBRRFlags = append(d.trace.LBRRFlags, 1)
+		} else {
+			d.trace.LBRRFlags = append(d.trace.LBRRFlags, 0)
+		}
+	}
 
 	// Decode each frame sequentially
 	var allPCM []float64
@@ -398,6 +425,13 @@ func (d *Decoder) decodeMultiStereo(packet []byte, nFrames int) ([]float64, erro
 		if dec.DecodeBitLogp(1) {
 			lbrrFlags[ch] = 1
 		}
+	}
+	if d.trace != nil {
+		d.trace.VADFlags = append(d.trace.VADFlags,
+			append([]uint32(nil), vadFlags[0]...),
+			append([]uint32(nil), vadFlags[1]...),
+		)
+		d.trace.LBRRFlags = append(d.trace.LBRRFlags, lbrrFlags[0], lbrrFlags[1])
 	}
 
 	// LBRR side data precedes regular frame data when present. The official
@@ -587,10 +621,13 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 
 	// ── 3. Decode gains ──────────────────────────────────────────────────────
 	// silk_gains_dequant from libopus silk/gain_quant.c
-	// First subframe: 3 MSBs from gain_iCDF[signalType], 3 LSBs from uniform8.
+	// First subframe: MSBs from gain_iCDF[signalType], then 3 LSBs from uniform8.
 	gainsQ16 := make([]int32, d.nSubframes)
-	// libopus uses signalType>>1 to index silk_gain_iCDF: 0=inactive,1=voiced
-	stIdx := signalType >> 1
+	rawGainIndices := make([]int, d.nSubframes)
+	absGainIndices := make([]int, d.nSubframes)
+	// libopus indexes silk_gain_iCDF by signalType directly:
+	// 0=inactive, 1=unvoiced, 2=voiced.
+	stIdx := signalType
 	if stIdx >= len(silkGainICDF) {
 		stIdx = len(silkGainICDF) - 1
 	}
@@ -600,7 +637,8 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 		// Conditional: delta-coded using silk_delta_gain_iCDF.
 		// ind[0] = icdf_result, then apply double-step formula.
 		deltaIdx := dec.DecodeIcdf(silkDeltaGainICDF[:], 8)
-		indTmp := deltaIdx + MinDeltaGainQuant // signed delta in [-6..8]
+		rawGainIndices[0] = deltaIdx
+		indTmp := deltaIdx + MinDeltaGainQuant
 		dblStepThresh := 2*MaxDeltaGainQuant - NLevelsQGain + prevInd
 		if indTmp > dblStepThresh {
 			prevInd += 2*indTmp - dblStepThresh
@@ -608,23 +646,29 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 			prevInd += indTmp
 		}
 	} else {
-		// Independent: gain_iCDF gives lower 3 bits, uniform8 gives upper 3 bits.
-		// From libopus: ind[0] = gain_iCDF + LSHIFT(uniform8, 3)
-		gainLow := dec.DecodeIcdf(silkGainICDF[stIdx][:], 8)  // lower 3 bits (0..7)
-		gainHigh := dec.DecodeIcdf(silkUniform8ICDF[:], 8)    // upper 3 bits (0..7)
-		prevInd = gainLow + gainHigh*8
+		// Independent: gain_iCDF gives MSBs, uniform8 gives the 3 LSBs.
+		// From libopus: ind[0] = LSHIFT(gain_iCDF, 3) + uniform8.
+		gainMSB := dec.DecodeIcdf(silkGainICDF[stIdx][:], 8)
+		gainLSB := dec.DecodeIcdf(silkUniform8ICDF[:], 8)
+		prevInd = gainMSB*8 + gainLSB
+		rawGainIndices[0] = prevInd
 	}
 	// Clamp to [0, N_LEVELS_QGAIN-1]
+	if !conditionalGain && prevInd < int(d.prevGainIndex)-16 {
+		prevInd = int(d.prevGainIndex) - 16
+	}
 	if prevInd < 0 {
 		prevInd = 0
 	}
 	if prevInd >= NLevelsQGain {
 		prevInd = NLevelsQGain - 1
 	}
+	absGainIndices[0] = prevInd
 	gainsQ16[0] = silkGainDequantQ16(prevInd)
 
 	for sf := 1; sf < d.nSubframes; sf++ {
 		deltaIdx := dec.DecodeIcdf(silkDeltaGainICDF[:], 8)
+		rawGainIndices[sf] = deltaIdx
 		indTmp := deltaIdx + MinDeltaGainQuant // indTmp = ind[sf] + MIN_DELTA_GAIN_QUANT
 
 		// double_step_size_threshold = 2*MAX_DELTA_GAIN_QUANT - N_LEVELS_QGAIN + prev_ind
@@ -641,9 +685,21 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 		if prevInd >= NLevelsQGain {
 			prevInd = NLevelsQGain - 1
 		}
+		absGainIndices[sf] = prevInd
 		gainsQ16[sf] = silkGainDequantQ16(prevInd)
 	}
 	d.prevGainIndex = int8(prevInd)
+	if d.trace != nil {
+		d.trace.Frames = append(d.trace.Frames, frameTrace{
+			VADFlag:         vadFlag,
+			ConditionalGain: conditionalGain,
+			SignalType:      signalType,
+			QuantOffset:     quantOffset,
+			RawGainIndices:  append([]int(nil), rawGainIndices...),
+			AbsGainIndices:  append([]int(nil), absGainIndices...),
+			GainsQ16:        append([]int32(nil), gainsQ16...),
+		})
+	}
 
 	// ── 4. Decode NLSF indices ───────────────────────────────────────────────
 	cb := getNLSFCB(d.lpcOrder)

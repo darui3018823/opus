@@ -130,10 +130,11 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 
 	// Post-filter parameters — read BEFORE isTransient (start==0, ec_tell+16<=total_bits).
 	pfPeriod := 0
-	var pfTaps [3]float64
+	pfGain := 0.0
+	pfTapset := 0
 	pfEnabled := false
 	if dec.ECTell()+16 <= totalBits {
-		pfPeriod, pfTaps, pfEnabled = DecodePostFilterParams(dec, totalBits, lm)
+		pfPeriod, pfGain, pfTapset, pfEnabled = DecodePostFilterParams(dec, totalBits, lm)
 	}
 
 	// isTransient (logp 3, only when LM>0).
@@ -275,11 +276,12 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 			samplesOut = d.celtMode.CLTMDCTBackward(coeffs, d.overlap[c])
 		}
 
-		if pfEnabled {
-			samplesOut = d.postFilter[c].Apply(samplesOut, pfPeriod, pfTaps)
-		} else {
-			d.postFilter[c].updateHistory(samplesOut)
+		if !pfEnabled {
+			pfPeriod = 0
+			pfGain = 0
+			pfTapset = 0
 		}
+		samplesOut = d.postFilter[c].Apply(samplesOut, pfPeriod, pfGain, pfTapset, d.mode.NBase, lm, d.celtMode.Window)
 		d.applyDeemphasis(c, samplesOut)
 
 		for i := 0; i < len(samplesOut) && i < frameSize; i++ {

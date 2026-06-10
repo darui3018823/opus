@@ -4,10 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Additional live handoff notes from Codex are kept in `.claude/Codex.md`; check that file before continuing CELT oracle/diagnostic work.
 
+For current repository status, read `docs/CURRENT_IMPLEMENTATION.md`. It is the
+code-derived snapshot and takes precedence over older roadmap or README claims
+when they disagree.
+
 ## Commands
 
 ```bash
-# Run all tests
+# Run all tests. Currently expected to fail; see docs/CURRENT_IMPLEMENTATION.md.
 go test ./...
 
 # Run tests with verbose output
@@ -34,45 +38,72 @@ go fmt ./...
 go vet ./...
 ```
 
-No build step is needed — this is a library with no `main` package.
+This repository is primarily a library, but it also contains diagnostic command
+packages under `cmd_diag*`. At the current snapshot, `cmd_diag` does not build
+because two files define `main`.
 
 ## Architecture
 
-This is a pure Go implementation of the Opus audio codec (RFC 6716), with zero CGO or external dependencies (module: `github.com/darui3018823/opus`).
+This is a pure Go implementation of the Opus audio codec (RFC 6716), with no
+runtime CGO dependency in the codec implementation (module:
+`github.com/darui3018823/opus`). The `internal/cgoref` package is a
+`//go:build cgo` libopus wrapper used only for golden/reference comparisons.
 
 ### Layer structure
 
 ```
-opus.go / constants.go / errors.go    ← Public API (Encoder/Decoder)
-internal/opus_framing.go              ← TOC byte parsing/generation (RFC 6716 §3.1)
-internal/celt/                        ← CELT codec (music, MDCT-based) — primary implemented layer
-internal/silk/                        ← SILK codec (speech, LPC-based) — scaffolded, incomplete
-internal/dsp/                         ← FFT, MDCT, window functions, math utilities
-internal/entcode/                     ← Entropy range coder (encode + decode)
-internal/resampler/                   ← Polyphase FIR sample rate conversion
+opus.go / constants.go / errors.go    <- Public API (Encoder/Decoder)
+internal/opus_framing.go              <- TOC byte parsing/generation (RFC 6716 section 3.1)
+internal/celt/                        <- CELT codec work: decoder parity path plus simplified encoder
+internal/silk/                        <- SILK decoder/encoder work, tables, LPC/NLSF/pitch/gain helpers
+internal/dsp/                         <- FFT, MDCT/IMDCT, window functions, math utilities
+internal/entcode/                     <- Entropy range coder (encode + decode)
+internal/resampler/                   <- Opus-rate sample rate conversion
 ```
 
 ### Public API (`opus.go`)
 
-- `NewEncoder(sampleRate, channels, application)` → `*Encoder`
+- `NewEncoder(sampleRate, channels, application)` -> `*Encoder`
 - `Encoder.Encode(pcm []int16, frameSize)` / `EncodeFloat(pcm []float64, frameSize)`
-- `NewDecoder(sampleRate, channels)` → `*Decoder`
+- `NewDecoder(sampleRate, channels)` -> `*Decoder`
 - `Decoder.Decode(data []byte, pcm []int16)` / `DecodeFloat` / `DecodeFEC`
 
-### Strict Phase 1 compliance
+There is no public `EncodeFloat32`, `DecodeFloat32`, or `DecodePLC(pcm,
+frameSize)` API at the current snapshot. Use `EncodeFloat`/`DecodeFloat` for
+float64 data; `DecodeFEC` currently falls back to CELT PLC behavior.
 
-Currently only **48 kHz, 20 ms frames, CELT-only** (configs 20/22) are supported. Any other configuration returns `ErrBadArg`. This is intentional — see `IMPLEMENTATION_STATUS.md` for the roadmap to full Opus 1.3.1 compliance.
+### Current implementation status
+
+The top-level encoder accepts 8/12/16/24/48 kHz mono or stereo input, resamples
+non-48 kHz input to 48 kHz, and emits CELT-only fullband 20 ms packets. The
+`application` and `SetVBR` values are stored but do not currently drive full
+libopus-compatible mode selection or packetization.
+
+The top-level decoder accepts the five Opus rates, pre-creates CELT decoders
+for bandwidth/frame/channel variants, and pre-creates SILK decoders for
+8/12/16 kHz packet rates. CELT configs are routed through the CELT path; SILK
+and hybrid configs are routed through the SILK packet path. Complete hybrid
+SILK+CELT reconstruction is not finished.
+
+`go test ./...` is not green at the current snapshot. Known failures include
+root official-vector RMSE checks, root cgo/libopus reference RMSE checks,
+`internal/silk` synthesis oracle tests, and the `cmd_diag` duplicate-main build
+failure.
 
 ### Encoding data flow
 
-PCM (int16 or float64) → CELT encoder (MDCT → band processing → PVQ quantization) → range coder → TOC byte prepended → Opus packet
+PCM (int16 or float64) -> optional resampler to 48 kHz -> CELT encoder (MDCT,
+band processing, PVQ quantization) -> range coder -> TOC byte prepended ->
+Opus packet
 
 ### Decoding data flow
 
-Opus packet → TOC parsed → range decoder → PVQ decoding → IMDCT → PCM output
+Opus packet -> TOC parsed -> CELT or SILK/hybrid packet path -> range decoder
+and codec reconstruction -> optional resampler/channel adjustment -> PCM output
 
 ### Key design notes
 
 - Float64 is used as the primary numeric type; simulated fixed-point is used only in performance-critical sections.
-- SILK is scaffolded but not functional in the current strict compliance phase.
 - TOC byte encodes: config (upper 5 bits), stereo flag (bit 2), frame count code (lower 2 bits).
+- Official Opus bit-exact compliance is still in progress. Do not claim all
+  official vectors pass until the failing tests are fixed.

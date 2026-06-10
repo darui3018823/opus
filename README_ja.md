@@ -186,6 +186,7 @@ github.com/darui3018823/opus/
 
 ## ドキュメント
 
+- **[CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md)**: 現在のコードから確認したAPI、内部構造、テスト状況、既知の差分
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**: 詳細な設計判断とlibopus解析
 - **[ROADMAP.md](docs/ROADMAP.md)**: 開発フェーズとマイルストーン
 - **[DEVELOPER.md](docs/DEVELOPER.md)**: コードスタイル、移植ガイダンス、プロファイリング

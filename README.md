@@ -186,6 +186,7 @@ github.com/darui3018823/opus/
 
 ## Documentation
 
+- **[CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md)**: Code-derived snapshot of the current API, internals, tests, and known gaps
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**: Detailed design decisions and libopus analysis
 - **[ROADMAP.md](docs/ROADMAP.md)**: Development phases and milestones
 - **[DEVELOPER.md](docs/DEVELOPER.md)**: Code style, porting guidance, profiling tips

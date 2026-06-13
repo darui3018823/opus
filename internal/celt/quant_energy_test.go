@@ -69,7 +69,7 @@ func TestQuantizeCoarseEnergyRoundtrip(t *testing.T) {
 			// Decode with identical initial state
 			dec := entcode.NewDecoder(enc.Bytes())
 			decodedLogE := UnquantizeCoarseEnergy(dec, prevLogEDec, prevLogE2Dec,
-				tt.intra, numBands, lm, channels, testBufBytes*8)
+				tt.intra, numBands, 0, numBands, lm, channels, testBufBytes*8)
 
 			// decoded must exactly equal quantised (bit-exact ICDF roundtrip)
 			for i := 0; i < numBands; i++ {
@@ -132,7 +132,7 @@ func TestQuantizeCoarseEnergyClampedRoundtrip(t *testing.T) {
 
 			dec := entcode.NewDecoder(enc.Bytes())
 			decodedLogE := UnquantizeCoarseEnergy(dec, prevLogEDec, prevLogE2Dec,
-				intra, numBands, lm, channels, clamped512*8)
+				intra, numBands, 0, numBands, lm, channels, clamped512*8)
 
 			// Must be bit-exact
 			for i := 0; i < numBands; i++ {

@@ -6,6 +6,7 @@ import (
 
 	framing "github.com/darui3018823/opus/internal"
 	"github.com/darui3018823/opus/internal/celt"
+	"github.com/darui3018823/opus/internal/entcode"
 	"github.com/darui3018823/opus/internal/resampler"
 	"github.com/darui3018823/opus/internal/silk"
 )
@@ -633,11 +634,15 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 	payload := data[1:]
 
 	if config < 16 {
-		// SILK or Hybrid mode
 		pktChannels := 1
 		if stereo {
 			pktChannels = 2
 		}
+		if config >= 12 {
+			// Hybrid mode: SILK low band + CELT high band sharing one stream.
+			return d.decodeHybridPacket(payload, countCode, config, pktChannels)
+		}
+		// SILK-only mode.
 		return d.decodeSILKPacket(payload, countCode, config, pktChannels)
 	}
 
@@ -889,14 +894,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 	var silkStreams [][]byte
 	var nSilkFramesPerStream int
 
-	if config >= 12 {
-		var err error
-		silkStreams, err = splitOpusFrames(payload, countCode)
-		if err != nil {
-			silkStreams = [][]byte{payload}
-		}
-		nSilkFramesPerStream = subframesPerOpusFrame
-	} else if countCode <= 1 {
+	if countCode <= 1 {
 		// Code 0 or 1: one SILK range stream for all Opus frames
 		opusFrameCount := 1
 		if countCode == 1 {
@@ -904,14 +902,14 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		}
 		silkStreams = [][]byte{payload}
 		nSilkFramesPerStream = opusFrameCount * subframesPerOpusFrame
-	} else if countCode == 3 && config < 12 {
+	} else if countCode == 3 {
 		stream, opusFrameCount, err := silkCode3Stream(payload)
 		if err != nil {
 			return nil, err
 		}
 		silkStreams = [][]byte{stream}
 		nSilkFramesPerStream = opusFrameCount * subframesPerOpusFrame
-	} else if countCode == 2 && config < 12 {
+	} else if countCode == 2 {
 		stream, opusFrameCount := silkCode2Stream(payload)
 		silkStreams = [][]byte{stream}
 		nSilkFramesPerStream = opusFrameCount * subframesPerOpusFrame
@@ -973,6 +971,132 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		// Pad or trim to exact expected length
 		pcm = padOrTrim(pcm, samplesPerStream)
 		allPCM = append(allPCM, pcm...)
+	}
+	d.prevSilkInternalCh = pktChannels
+
+	if pktChannels == 1 && stereoPeer != nil && stereoPeer.dec != nil {
+		stereoPeer.dec.CopyPrimaryStateFrom(info.dec)
+	} else if pktChannels == 2 && monoPeer != nil && monoPeer.dec != nil {
+		monoPeer.dec.CopyPrimaryStateFrom(info.dec)
+	}
+
+	return allPCM, nil
+}
+
+// decodeHybridPacket decodes a hybrid-mode packet (config 12-15): a SILK
+// wideband (16 kHz internal) low-frequency layer and a CELT high-frequency
+// layer (start band 17) that share a single range-coded stream per Opus frame.
+// SILK is decoded from the front of the stream; the CELT decoder continues from
+// the same decoder. The resampled SILK signal and the CELT high band are summed
+// in the time domain (mirrors libopus opus_decode_frame's hybrid path).
+func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChannels int) ([]float64, error) {
+	const rateKHz = 16 // hybrid SILK layer is always wideband
+	ri := silkRateIdx(rateKHz)
+	ci := pktChannels - 1
+	frameDurationMs := silkConfigFrameMs(config) // 10 (even config) or 20 (odd)
+
+	// CELT band range: hybrid SWB (config 12,13) -> end 19; FB (14,15) -> end 21.
+	const celtStart = 17
+	celtEnd := 21
+	if config < 14 {
+		celtEnd = 19
+	}
+	// CELT high-band decoder: fullband mode (21 bands), LM by frame duration.
+	celtLMIdx := 3 // 20ms -> 960 samples
+	if frameDurationMs == 10 {
+		celtLMIdx = 2 // 10ms -> 480 samples
+	}
+	const celtBWIdx = 3 // fullband (21 bands)
+	celtActualCh := pktChannels
+	celtDec := d.celtDecoders[celtBWIdx][celtLMIdx][ci]
+	if celtDec == nil {
+		celtDec = d.celtDecoders[celtBWIdx][celtLMIdx][0]
+		celtActualCh = 1
+	}
+
+	if d.silkDecoders[ri][ci] == nil {
+		return nil, fmt.Errorf("SILK decoder not initialized for hybrid rate=%dkHz ch=%d", rateKHz, pktChannels)
+	}
+	info := d.silkDecoders[ri][ci]
+	info.dec.SetFrameMs(frameDurationMs)
+	monoPeer := d.silkDecoders[ri][0]
+	stereoPeer := d.silkDecoders[ri][1]
+	if pktChannels == 2 && monoPeer != nil && monoPeer.dec != nil {
+		info.dec.CopyPrimaryStateFrom(monoPeer.dec)
+	}
+
+	// One SILK frame per Opus frame in hybrid mode.
+	nSilkFrames := silkSubframesPerOpusFrame(config)
+	silkStreams, err := splitOpusFrames(payload, countCode)
+	if err != nil {
+		silkStreams = [][]byte{payload}
+	}
+
+	// Bit-exact SILK resampler setup, identical to the SILK-only path so that
+	// per-channel resampler state stays continuous across SILK<->hybrid packets.
+	d.ensureSilkResampler(0, rateKHz)
+	if pktChannels == 2 {
+		d.ensureSilkResampler(1, rateKHz)
+	}
+	if pktChannels == 2 && d.prevSilkInternalCh == 1 && d.silkRS[0] != nil {
+		seeded := *d.silkRS[0]
+		d.silkRS[1] = &seeded
+		d.silkRSInKHz[1] = rateKHz
+	}
+	stereoToMono := pktChannels == 1 && d.prevSilkInternalCh == 2 &&
+		d.silkRS[1] != nil && d.silkRSInKHz[1] == rateKHz
+
+	samplesPerFrame := (d.sampleRate * frameDurationMs / 1000) * d.channels
+
+	var allPCM []float64
+	for si, stream := range silkStreams {
+		// One shared range decoder per Opus frame: SILK reads first, CELT after.
+		dec := entcode.NewDecoder(stream)
+		if dec.Error() != nil {
+			allPCM = append(allPCM, make([]float64, samplesPerFrame)...)
+			continue
+		}
+
+		// SILK low-band layer (front of the stream), at the 16 kHz internal rate.
+		silkPCM, serr := info.dec.DecodeMultiWithDecoder(dec, nSilkFrames)
+		if serr != nil {
+			silkPCM = make([]float64, info.dec.FrameSize()*pktChannels*nSilkFrames)
+		}
+		silkOut := d.resampleSILK(silkPCM, nSilkFrames, pktChannels, stereoToMono && si == 0)
+		silkOut = padOrTrim(silkOut, samplesPerFrame)
+
+		// Hybrid redundancy flag (logp 12), decoded between SILK and CELT in
+		// libopus opus_decode_frame. It is almost always 0; consuming the symbol
+		// keeps the shared range decoder aligned for the CELT layer. (The rare
+		// redundant-frame reconstruction is not implemented.)
+		if dec.ECTell()+37 <= len(stream)*8 {
+			_ = dec.DecodeBitLogp(12)
+		}
+
+		// CELT high-band layer continues from the same range decoder.
+		if d.lastCeltDec != nil && d.lastCeltDec != celtDec {
+			celtDec.CopyStateFrom(d.lastCeltDec)
+		}
+		celtPCM, cerr := celtDec.DecodeHybrid(dec, len(stream), celtStart, celtEnd)
+		if cerr == nil {
+			d.lastCeltDec = celtDec
+			if d.celtResampler != nil {
+				celtPCM = d.celtResampler.Process(celtPCM)
+			}
+			celtPCM = adjustChannels(celtPCM, celtActualCh, d.channels)
+			celtPCM = padOrTrim(celtPCM, samplesPerFrame)
+			// Time-domain sum of the two layers, clipped to [-1, 1].
+			for i := 0; i < samplesPerFrame; i++ {
+				v := silkOut[i] + celtPCM[i]
+				if v > 1.0 {
+					v = 1.0
+				} else if v < -1.0 {
+					v = -1.0
+				}
+				silkOut[i] = v
+			}
+		}
+		allPCM = append(allPCM, silkOut...)
 	}
 	d.prevSilkInternalCh = pktChannels
 

@@ -103,10 +103,10 @@ func TestOracleTraceStereo(t *testing.T) {
 	}
 	snap(fmt.Sprintf("intra=%v", intra))
 
-	quantLogE := UnquantizeCoarseEnergy(dec, prevLogE, prevLogE2, intra, numBands, lm, ch, totalBits)
+	quantLogE := UnquantizeCoarseEnergy(dec, prevLogE, prevLogE2, intra, numBands, 0, numBands, lm, ch, totalBits)
 	snap("coarse")
 
-	tfRes := celtTFDecode(dec, totalBits, isTransient, numBands, lm)
+	tfRes := celtTFDecode(dec, totalBits, isTransient, numBands, 0, numBands, lm)
 	snap("tf")
 
 	if dec.ECTell()+4 <= totalBits {
@@ -114,7 +114,7 @@ func TestOracleTraceStereo(t *testing.T) {
 	}
 	snap("spread")
 
-	offsets := decodeDynalloc(dec, numBands, lm, ch, totalBits)
+	offsets := decodeDynalloc(dec, numBands, 0, numBands, lm, ch, totalBits)
 	snap("dynalloc")
 	fmt.Printf("   offsets: %v\n", offsets)
 
@@ -131,7 +131,7 @@ func TestOracleTraceStereo(t *testing.T) {
 	}
 	bitsQ3 -= antiRsv
 	allocDebug = os.Getenv("ALLOCDBG") != ""
-	pulses, eBits, finePriority, balance, intensity, codedBands, dualStereo := computeAllocation(dec, numBands, lm, ch, allocTrim, bitsQ3, offsets)
+	pulses, eBits, finePriority, balance, intensity, codedBands, dualStereo := computeAllocation(dec, numBands, 0, numBands, lm, ch, allocTrim, bitsQ3, offsets)
 	allocDebug = false
 	snap("allocation")
 	fmt.Printf("   codedBands=%d balance=%d intensity=%d dual_stereo=%v antiRsv=%d\n", codedBands, balance, intensity, dualStereo, antiRsv)
@@ -188,7 +188,7 @@ func TestOracleTraceStereo(t *testing.T) {
 				diagDec.bandProcs[c].bands[i].Energy = amp * amp
 			}
 		}
-		diagDec.antiCollapse(X, collapse, pulses, lm, frameLen, seed)
+		diagDec.antiCollapse(X, collapse, pulses, lm, frameLen, seed, 0, numBands)
 	}
 
 	dumpDenormalizedMDCT(denormalizedMDCTViaBandProcessor(frameLen, numBands, ch, lm, X, quantLogE), numBands, lm)

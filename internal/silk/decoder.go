@@ -415,7 +415,26 @@ func (d *Decoder) DecodeMulti(packet []byte, nFrames int) ([]float64, error) {
 	if dec.Error() != nil {
 		return d.concealPacketLoss()
 	}
+	return d.decodeMultiMonoEC(dec, nFrames)
+}
 
+// DecodeMultiWithDecoder decodes nFrames SILK frames from an already-initialised
+// range decoder, used by the hybrid path where SILK and CELT share one entropy
+// stream. The caller is responsible for the decoder lifetime; this method does
+// not create or finalise it. The result is interleaved SILK PCM at the internal
+// rate (one frame's worth per SILK frame).
+func (d *Decoder) DecodeMultiWithDecoder(dec *entcode.Decoder, nFrames int) ([]float64, error) {
+	if nFrames < 1 {
+		nFrames = 1
+	}
+	if d.channels == 2 {
+		return d.decodeMultiStereoEC(dec, nFrames)
+	}
+	return d.decodeMultiMonoEC(dec, nFrames)
+}
+
+// decodeMultiMonoEC decodes the mono SILK frames from a shared range decoder.
+func (d *Decoder) decodeMultiMonoEC(dec *entcode.Decoder, nFrames int) ([]float64, error) {
 	// Per libopus dec_API.c: decode VAD flags for all frames first, then LBRR flag
 	vadFlags := make([]uint32, nFrames)
 	for i := 0; i < nFrames; i++ {
@@ -463,6 +482,14 @@ func (d *Decoder) decodeMultiStereo(packet []byte, nFrames int) ([]float64, erro
 	dec := entcode.NewDecoder(packet)
 	if dec.Error() != nil {
 		return d.concealPacketLoss()
+	}
+	return d.decodeMultiStereoEC(dec, nFrames)
+}
+
+// decodeMultiStereoEC decodes the stereo SILK frames from a shared range decoder.
+func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]float64, error) {
+	if d.side == nil {
+		return nil, fmt.Errorf("missing SILK side-channel decoder")
 	}
 
 	vadFlags := [2][]uint32{

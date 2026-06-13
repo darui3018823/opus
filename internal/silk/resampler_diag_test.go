@@ -175,6 +175,131 @@ func TestSILK8kHzGrowth(t *testing.T) {
 	}
 }
 
+// TestSILK12kHzGrowth is the 12 kHz (MB, testvector03) analogue of
+// TestSILK8kHzGrowth. It decodes tv03 packets in sequence and, for the packets
+// where an oracle trace was captured, reports the per-packet 12 kHz internal-rate
+// divergence from libopus. tv03 is MB 60 ms (config 7): each packet is 3 SILK
+// frames of 240 samples. This isolates whether the ~0.011 RMSE at 48 kHz comes
+// from the 12 kHz SILK synthesis itself (vs the resampler, which is bit-exact).
+func TestSILK12kHzGrowth(t *testing.T) {
+	dec, err := NewDecoderWithFrameMs(12000, 1, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	haveOracle := map[int]bool{0: true, 1: true, 2: true, 3: true, 4: true, 5: true, 6: true, 10: true}
+
+	for pktIdx := 0; pktIdx <= 10; pktIdx++ {
+		pkt := readOpusDemoPacket(t, "testvector03.bit", pktIdx)
+		toc := pkt[0]
+		config := int((toc >> 3) & 0x1f)
+		countCode := int(toc & 3)
+		nFrames, stream := silkOracleFrameCount(config, countCode, pkt[1:])
+
+		pcm, decErr := dec.DecodeMulti(stream, nFrames)
+		if decErr != nil {
+			t.Fatalf("pkt%d decode error: %v", pktIdx, decErr)
+		}
+		if !haveOracle[pktIdx] {
+			continue
+		}
+		oracle := parseOracleFrameOut(t, "testdata_oracle_tv03_pkt"+strconv.Itoa(pktIdx)+".txt")
+		if len(oracle) != nFrames {
+			t.Logf("pkt%d: oracle frames=%d decoder frames=%d (skip)", pktIdx, len(oracle), nFrames)
+			continue
+		}
+		var sumSq float64
+		maxDiff := 0
+		firstDiffFrame := -1
+		for fr := 0; fr < nFrames; fr++ {
+			frMax := 0
+			for i := 0; i < dec.frameSize && i < len(oracle[fr]); i++ {
+				got := int(math.Round(pcm[fr*dec.frameSize+i] * 32768.0))
+				diff := got - int(oracle[fr][i])
+				if diff < 0 {
+					diff = -diff
+				}
+				if diff > maxDiff {
+					maxDiff = diff
+				}
+				if diff > frMax {
+					frMax = diff
+				}
+				sumSq += float64(diff) * float64(diff)
+			}
+			if frMax > 4 && firstDiffFrame < 0 {
+				firstDiffFrame = fr
+			}
+			t.Logf("  pkt%2d frame%d: maxDiff=%d", pktIdx, fr, frMax)
+		}
+		rmse := math.Sqrt(sumSq / float64(nFrames*dec.frameSize))
+		t.Logf("pkt%2d: 12kHz maxDiff=%4d rmse=%7.2f LSB (%.6f norm) firstDivergeFrame=%d",
+			pktIdx, maxDiff, rmse, rmse/32768.0, firstDiffFrame)
+	}
+}
+
+// TestSILKResampler12kVsDec is the 12 kHz analogue of TestSILKResamplerVsDec:
+// it feeds the libopus oracle's bit-exact 12 kHz SILK frames (tv03 pkt0..6)
+// through our 12->48 kHz resampler with the same 1-sample sMid delay, then
+// compares the 48 kHz result against the reference .dec mono channel. Since the
+// 12 kHz synthesis is already proven bit-exact (TestSILK12kHzGrowth), any
+// divergence here is a 12 kHz-specific resampler issue.
+func TestSILKResampler12kVsDec(t *testing.T) {
+	decPath := filepath.Join("..", "..", "testdata", "opus_newvectors", "testvector03.dec")
+	raw, err := os.ReadFile(decPath)
+	if err != nil {
+		t.Skipf(".dec not found: %v", err)
+	}
+	refStereo := make([]int16, len(raw)/2)
+	for i := range refStereo {
+		refStereo[i] = int16(binary.LittleEndian.Uint16(raw[i*2:]))
+	}
+
+	rs, err := NewResampler(12000, 48000)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var sMid int16
+	var got []int16
+	for pktIdx := 0; pktIdx <= 6; pktIdx++ {
+		frames := parseOracleFrameOut(t, "testdata_oracle_tv03_pkt"+strconv.Itoa(pktIdx)+".txt")
+		for _, frame := range frames {
+			n := len(frame)
+			rin := make([]int16, n)
+			rin[0] = sMid
+			copy(rin[1:], frame[:n-1])
+			sMid = frame[n-1]
+			got = append(got, rs.Process(rin)...)
+		}
+	}
+
+	var sumSq float64
+	maxDiff := 0
+	firstDiff := -1
+	n := len(got)
+	if n*2 > len(refStereo) {
+		n = len(refStereo) / 2
+	}
+	for i := 0; i < n; i++ {
+		ref := int(refStereo[i*2])
+		diff := int(got[i]) - ref
+		if diff < 0 {
+			diff = -diff
+		}
+		if diff > maxDiff {
+			maxDiff = diff
+		}
+		if diff > 0 && firstDiff < 0 {
+			firstDiff = i
+		}
+		sumSq += float64(diff) * float64(diff)
+	}
+	rmse := math.Sqrt(sumSq / float64(n))
+	t.Logf("12k resampler-only vs .dec: samples=%d maxDiff=%d firstDiff@%d rmse=%.3f LSB = %.6f normalized",
+		n, maxDiff, firstDiff, rmse, rmse/32768.0)
+}
+
 // TestSILKResamplerVsDec validates the SILK resampler in isolation: it feeds the
 // libopus oracle's 8 kHz SILK frames (so synthesis error is excluded) through our
 // resampler with the same 1-sample sMid delay libopus uses, then compares the

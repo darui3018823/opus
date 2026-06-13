@@ -335,6 +335,11 @@ func (d *Decoder) Decode(packet []byte) ([]float64, error) {
 	return d.DecodeMulti(packet, 1)
 }
 
+// FrameSize returns the number of internal-rate samples per decoded SILK frame.
+func (d *Decoder) FrameSize() int {
+	return d.frameSize
+}
+
 // DecodeMulti decodes nFrames SILK frames from a single range-coded packet.
 // In SILK mode, all frames are encoded in a single bitstream:
 //   - VAD flags for all frames (1 bit each)

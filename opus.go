@@ -1006,11 +1006,13 @@ func resampleSILKStereo(info *silkRateInfo, pcm []float64, nFrames int) []float6
 		return pcm
 	}
 
-	var outL, outR []int16
+	lin := make([]int16, perChanFrameLen)
+	rin := make([]int16, perChanFrameLen)
+	estCap := (len(pcm) / 2) * 6
+	outL := make([]int16, 0, estCap)
+	outR := make([]int16, 0, estCap)
 	for f := 0; f < nFrames; f++ {
 		base := f * perChanFrameLen * 2
-		lin := make([]int16, perChanFrameLen)
-		rin := make([]int16, perChanFrameLen)
 		for i := 0; i < perChanFrameLen; i++ {
 			lin[i] = int16(math.Round(pcm[base+i*2] * 32768.0))
 			rin[i] = int16(math.Round(pcm[base+i*2+1] * 32768.0))

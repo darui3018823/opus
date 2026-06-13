@@ -253,6 +253,12 @@ type frameTrace struct {
 	InterpFactor    int
 	PredCoef0Q12    []int16
 	PredCoef1Q12    []int16
+	PitchLags       []int
+	LTPCoefQ14      []int16 // flattened nSubframes*5
+	LTPScaleQ14     int16
+	Seed            int32
+	SumPulses       []int
+	Pulses          []int16
 }
 
 // NewDecoder creates a new SILK decoder with 20ms frame size.
@@ -326,6 +332,35 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 	}
 
 	return d, nil
+}
+
+// SetFrameMs reconfigures the decoder's Opus frame duration (10 or 20 ms)
+// WITHOUT resetting synthesis state. libopus uses a single SILK decoder per
+// channel whose synthesis state (LPC/LTP history, previous gain, random seed,
+// previous NLSF) carries across packets regardless of frame size; only the
+// per-packet frame geometry (frameSize / nSubframes / subfrmLen) changes. The
+// state buffers (lpcState, ltpState) are sized by sample rate, not frame size,
+// so they are preserved here. This is required for bit-exact decoding of streams
+// that switch between 10 ms and 20 ms configs at the same internal rate (e.g.
+// NB config 1 -> config 0), where keeping separate 10 ms / 20 ms decoder
+// instances would discontinue the synthesis state at every switch.
+func (d *Decoder) SetFrameMs(frameMs int) {
+	if frameMs != 10 && frameMs != 20 {
+		return
+	}
+	nSubframes := 4
+	if frameMs == 10 {
+		nSubframes = 2
+	}
+	d.nSubframes = nSubframes
+	d.frameSize = d.sampleRate * frameMs / 1000
+	d.subfrmLen = d.frameSize / nSubframes
+	if len(d.prevOutput) != d.frameSize {
+		d.prevOutput = make([]int32, d.frameSize)
+	}
+	if d.side != nil {
+		d.side.SetFrameMs(frameMs)
+	}
 }
 
 // Decode decodes all SILK frames from a packet (one range-coded stream).
@@ -863,6 +898,19 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 
 	// ── 7. Decode pulses ─────────────────────────────────────────────────────
 	pulses := d.decodePulses(dec, signalType, quantOffset, d.frameSize)
+
+	if d.trace != nil && len(d.trace.Frames) > 0 {
+		tf := &d.trace.Frames[len(d.trace.Frames)-1]
+		tf.PitchLags = append([]int(nil), pitchLags...)
+		flat := make([]int16, 0, d.nSubframes*5)
+		for sf := 0; sf < d.nSubframes; sf++ {
+			flat = append(flat, ltpCoeffsQ14[sf][:]...)
+		}
+		tf.LTPCoefQ14 = flat
+		tf.LTPScaleQ14 = ltpScaleQ14
+		tf.Seed = seed
+		tf.Pulses = append([]int16(nil), pulses...)
+	}
 
 	// ── 8. Synthesize ────────────────────────────────────────────────────────
 	outputI16 := d.synthesize(pulses, gainsQ16, lpcCoeffsQ12,

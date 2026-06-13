@@ -249,9 +249,15 @@ type Decoder struct {
 	celtDecoders [4][4][2]*celt.Decoder
 	lastCeltDec  *celt.Decoder
 
-	// SILK decoders indexed by [rateIdx 0-2][frameIdx 0=10ms,1=20ms][chIdx 0=mono,1=stereo].
+	// SILK decoders indexed by [rateIdx 0-2][chIdx 0=mono,1=stereo].
 	// rateIdx: 0=8kHz, 1=12kHz, 2=16kHz
-	silkDecoders [3][2][2]*silkRateInfo
+	// libopus keeps ONE SILK decoder per channel whose synthesis state carries
+	// across packets regardless of Opus frame duration; the per-packet frame
+	// geometry is switched with (*silk.Decoder).SetFrameMs. Keeping separate
+	// 10ms/20ms instances would discontinue the synthesis state at every
+	// frame-size switch (e.g. NB config 1 -> config 0), causing voiced bursts to
+	// diverge for a few frames after each switch.
+	silkDecoders [3][2]*silkRateInfo
 
 	// Bit-exact SILK resampler state at the physical-channel level, mirroring
 	// libopus channel_state[n].resampler_state. These persist across packets and
@@ -345,44 +351,44 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 		}
 	}
 
-	// Pre-create SILK decoders for all 3 rates × 2 frame durations × 2 channel configs
+	// Pre-create ONE SILK decoder per rate × channel config. The Opus frame
+	// duration (10ms/20ms) is switched per packet via SetFrameMs so that the
+	// SILK synthesis state stays continuous across frame-size changes, matching
+	// libopus (which uses a single decoder per channel).
 	silkRates := []int{8000, 12000, 16000}
-	frameMsArr := []int{10, 20}
 	for ri, silkRate := range silkRates {
-		for fi, frameMs := range frameMsArr {
-			for ch := 1; ch <= 2; ch++ {
-				sd, err := silk.NewDecoderWithFrameMs(silkRate, ch, frameMs)
-				if err != nil {
-					return nil, fmt.Errorf("failed to create SILK decoder (rate=%d ch=%d frameMs=%d): %w", silkRate, ch, frameMs, err)
-				}
-				var rs *resampler.Resampler
-				if silkRate != sampleRate {
-					rs, err = resampler.NewResampler(silkRate, sampleRate, ch, resampler.QualityDefault)
-					if err != nil {
-						return nil, fmt.Errorf("failed to create SILK resampler (%d->%d, ch=%d): %w", silkRate, sampleRate, ch, err)
-					}
-				}
-				// Bit-exact libopus SILK resampler (used for the mono path).
-				silkRs, err := silk.NewResampler(silkRate, sampleRate)
-				if err != nil {
-					return nil, fmt.Errorf("failed to create bit-exact SILK resampler (%d->%d): %w", silkRate, sampleRate, err)
-				}
-				info := &silkRateInfo{dec: sd, resampler: rs, silkResampler: silkRs}
-				if ch == 2 {
-					// Per-channel bit-exact resamplers for the stereo L/R path.
-					lRs, lErr := silk.NewResampler(silkRate, sampleRate)
-					if lErr != nil {
-						return nil, fmt.Errorf("failed to create stereo bit-exact SILK resampler L (%d->%d): %w", silkRate, sampleRate, lErr)
-					}
-					rRs, rErr := silk.NewResampler(silkRate, sampleRate)
-					if rErr != nil {
-						return nil, fmt.Errorf("failed to create stereo bit-exact SILK resampler R (%d->%d): %w", silkRate, sampleRate, rErr)
-					}
-					info.silkResamplerL = lRs
-					info.silkResamplerR = rRs
-				}
-				dec.silkDecoders[ri][fi][ch-1] = info
+		for ch := 1; ch <= 2; ch++ {
+			sd, err := silk.NewDecoderWithFrameMs(silkRate, ch, 20)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create SILK decoder (rate=%d ch=%d): %w", silkRate, ch, err)
 			}
+			var rs *resampler.Resampler
+			if silkRate != sampleRate {
+				rs, err = resampler.NewResampler(silkRate, sampleRate, ch, resampler.QualityDefault)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create SILK resampler (%d->%d, ch=%d): %w", silkRate, sampleRate, ch, err)
+				}
+			}
+			// Bit-exact libopus SILK resampler (used for the mono path).
+			silkRs, err := silk.NewResampler(silkRate, sampleRate)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create bit-exact SILK resampler (%d->%d): %w", silkRate, sampleRate, err)
+			}
+			info := &silkRateInfo{dec: sd, resampler: rs, silkResampler: silkRs}
+			if ch == 2 {
+				// Per-channel bit-exact resamplers for the stereo L/R path.
+				lRs, lErr := silk.NewResampler(silkRate, sampleRate)
+				if lErr != nil {
+					return nil, fmt.Errorf("failed to create stereo bit-exact SILK resampler L (%d->%d): %w", silkRate, sampleRate, lErr)
+				}
+				rRs, rErr := silk.NewResampler(silkRate, sampleRate)
+				if rErr != nil {
+					return nil, fmt.Errorf("failed to create stereo bit-exact SILK resampler R (%d->%d): %w", silkRate, sampleRate, rErr)
+				}
+				info.silkResamplerL = lRs
+				info.silkResamplerR = rRs
+			}
+			dec.silkDecoders[ri][ch-1] = info
 		}
 	}
 
@@ -864,20 +870,15 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 	// subframesPerOpusFrame: how many 20ms (or 10ms) SILK frames are in one Opus frame
 	subframesPerOpusFrame := silkSubframesPerOpusFrame(config)
 
-	// Select frame-duration-specific decoder
-	fi := 1 // 20ms decoder (also handles 40ms/60ms via nFrames=2,3)
-	if frameDurationMs == 10 {
-		fi = 0
+	if d.silkDecoders[ri][ci] == nil {
+		return nil, fmt.Errorf("SILK decoder not initialized for rate=%dkHz ch=%d", rateKHz, pktChannels)
 	}
-
-	if d.silkDecoders[ri][fi][ci] == nil {
-		return nil, fmt.Errorf("SILK decoder not initialized for rate=%dkHz frameMs=%d ch=%d", rateKHz, frameDurationMs, pktChannels)
-	}
-	info := d.silkDecoders[ri][fi][ci]
-	var monoPeer *silkRateInfo
-	var stereoPeer *silkRateInfo
-	monoPeer = d.silkDecoders[ri][fi][0]
-	stereoPeer = d.silkDecoders[ri][fi][1]
+	info := d.silkDecoders[ri][ci]
+	// Switch the per-packet frame geometry (10ms/20ms) without resetting the
+	// synthesis state, so it stays continuous across frame-size changes.
+	info.dec.SetFrameMs(frameDurationMs)
+	monoPeer := d.silkDecoders[ri][0]
+	stereoPeer := d.silkDecoders[ri][1]
 	if pktChannels == 2 && monoPeer != nil && monoPeer.dec != nil {
 		info.dec.CopyPrimaryStateFrom(monoPeer.dec)
 	}
@@ -1162,25 +1163,23 @@ func (d *Decoder) Reset() error {
 		}
 	}
 	for ri := range d.silkDecoders {
-		for fi := range d.silkDecoders[ri] {
-			for ci := range d.silkDecoders[ri][fi] {
-				info := d.silkDecoders[ri][fi][ci]
-				if info != nil {
-					info.dec.Reset()
-					if info.resampler != nil {
-						info.resampler.Reset()
-					}
-					if info.silkResampler != nil {
-						info.silkResampler.Reset()
-					}
-					if info.silkResamplerL != nil {
-						info.silkResamplerL.Reset()
-					}
-					if info.silkResamplerR != nil {
-						info.silkResamplerR.Reset()
-					}
-					info.sMid = 0
+		for ci := range d.silkDecoders[ri] {
+			info := d.silkDecoders[ri][ci]
+			if info != nil {
+				info.dec.Reset()
+				if info.resampler != nil {
+					info.resampler.Reset()
 				}
+				if info.silkResampler != nil {
+					info.silkResampler.Reset()
+				}
+				if info.silkResamplerL != nil {
+					info.silkResamplerL.Reset()
+				}
+				if info.silkResamplerR != nil {
+					info.silkResamplerR.Reset()
+				}
+				info.sMid = 0
 			}
 		}
 	}

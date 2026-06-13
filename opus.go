@@ -2,6 +2,7 @@ package opus
 
 import (
 	"fmt"
+	"math"
 
 	framing "github.com/darui3018823/opus/internal"
 	"github.com/darui3018823/opus/internal/celt"
@@ -220,7 +221,12 @@ func (e *Encoder) Reset() error {
 // silkRateInfo holds a SILK decoder and its associated resampler for one SILK sample rate.
 type silkRateInfo struct {
 	dec       *silk.Decoder
-	resampler *resampler.Resampler // silkRate -> outputRate (nil if same rate)
+	resampler *resampler.Resampler // silkRate -> outputRate (nil if same rate); stereo fallback
+
+	// silkResampler is the bit-exact libopus SILK resampler used for the mono
+	// path. sMid carries the 1-sample delay libopus applies via sStereo.sMid.
+	silkResampler *silk.Resampler
+	sMid          int16
 }
 
 // Decoder represents an Opus decoder instance
@@ -338,7 +344,12 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 						return nil, fmt.Errorf("failed to create SILK resampler (%d->%d, ch=%d): %w", silkRate, sampleRate, ch, err)
 					}
 				}
-				dec.silkDecoders[ri][fi][ch-1] = &silkRateInfo{dec: sd, resampler: rs}
+				// Bit-exact libopus SILK resampler (used for the mono path).
+				silkRs, err := silk.NewResampler(silkRate, sampleRate)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create bit-exact SILK resampler (%d->%d): %w", silkRate, sampleRate, err)
+				}
+				dec.silkDecoders[ri][fi][ch-1] = &silkRateInfo{dec: sd, resampler: rs, silkResampler: silkRs}
 			}
 		}
 	}
@@ -895,11 +906,17 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		// Decode SILK sub-frames from this stream
 		pcm, err := info.dec.DecodeMulti(stream, nSilkFramesPerStream)
 		if err != nil {
-			pcm = make([]float64, samplesPerStream)
+			allPCM = append(allPCM, make([]float64, samplesPerStream)...)
+			continue
 		}
 
-		// Resample from SILK rate to output rate if needed
-		if info.resampler != nil {
+		// Resample from SILK rate to output rate.
+		// Mono uses the bit-exact libopus SILK resampler (with the 1-sample
+		// sMid delay, applied per SILK frame). Stereo falls back to the
+		// generic resampler until the bit-exact stereo path is wired up.
+		if pktChannels == 1 && info.silkResampler != nil {
+			pcm = resampleSILKMono(info, pcm, nSilkFramesPerStream)
+		} else if info.resampler != nil {
 			pcm = info.resampler.Process(pcm)
 		}
 
@@ -918,6 +935,39 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 	}
 
 	return allPCM, nil
+}
+
+// resampleSILKMono resamples a mono SILK decode (internal-rate float64, one or
+// more concatenated SILK frames) to the output rate using the bit-exact libopus
+// SILK resampler. It mirrors libopus: the resampler is invoked once per SILK
+// frame on a 1-sample-delayed stream (the sMid carry), and its filter state
+// persists across frames and packets.
+func resampleSILKMono(info *silkRateInfo, pcm []float64, nFrames int) []float64 {
+	if nFrames < 1 {
+		nFrames = 1
+	}
+	frameLen := len(pcm) / nFrames
+	if frameLen < 1 {
+		return pcm
+	}
+
+	var resampled []int16
+	for f := 0; f < nFrames; f++ {
+		chunk := pcm[f*frameLen : (f+1)*frameLen]
+		rin := make([]int16, frameLen)
+		rin[0] = info.sMid
+		for i := 0; i < frameLen-1; i++ {
+			rin[i+1] = int16(math.Round(chunk[i] * 32768.0))
+		}
+		info.sMid = int16(math.Round(chunk[frameLen-1] * 32768.0))
+		resampled = append(resampled, info.silkResampler.Process(rin)...)
+	}
+
+	out := make([]float64, len(resampled))
+	for i, v := range resampled {
+		out[i] = float64(v) / 32768.0
+	}
+	return out
 }
 
 // DecodeFEC decodes forward error correction data
@@ -980,6 +1030,10 @@ func (d *Decoder) Reset() error {
 					if info.resampler != nil {
 						info.resampler.Reset()
 					}
+					if info.silkResampler != nil {
+						info.silkResampler.Reset()
+					}
+					info.sMid = 0
 				}
 			}
 		}

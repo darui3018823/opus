@@ -39,3 +39,5 @@ testdata/
 diff.txt
 diff_1.txt
 req.py
+# Local Go build cache (set via GOCACHE during diagnostics)
+.gocache/

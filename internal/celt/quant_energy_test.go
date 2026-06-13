@@ -60,15 +60,16 @@ func TestQuantizeCoarseEnergyRoundtrip(t *testing.T) {
 			}
 
 			// Encode
-			enc := entcode.NewEncoder(256)
+			const testBufBytes = 256
+			enc := entcode.NewEncoder(testBufBytes)
 			quantLogE := QuantizeCoarseEnergy(enc, logE, prevLogEEnc, prevLogE2Enc,
-				tt.intra, numBands, lm, channels)
+				tt.intra, numBands, lm, channels, testBufBytes*8)
 			enc.Flush()
 
 			// Decode with identical initial state
 			dec := entcode.NewDecoder(enc.Bytes())
 			decodedLogE := UnquantizeCoarseEnergy(dec, prevLogEDec, prevLogE2Dec,
-				tt.intra, numBands, lm, channels)
+				tt.intra, numBands, lm, channels, testBufBytes*8)
 
 			// decoded must exactly equal quantised (bit-exact ICDF roundtrip)
 			for i := 0; i < numBands; i++ {
@@ -123,14 +124,15 @@ func TestQuantizeCoarseEnergyClampedRoundtrip(t *testing.T) {
 				logE[i] = math.Log(1.0) // 0 nats, much higher than initLogE ≈ -18.4
 			}
 
-			enc := entcode.NewEncoder(512)
+			const clamped512 = 512
+			enc := entcode.NewEncoder(clamped512)
 			quantLogE := QuantizeCoarseEnergy(enc, logE, prevLogEEnc, prevLogE2Enc,
-				intra, numBands, lm, channels)
+				intra, numBands, lm, channels, clamped512*8)
 			enc.Flush()
 
 			dec := entcode.NewDecoder(enc.Bytes())
 			decodedLogE := UnquantizeCoarseEnergy(dec, prevLogEDec, prevLogE2Dec,
-				intra, numBands, lm, channels)
+				intra, numBands, lm, channels, clamped512*8)
 
 			// Must be bit-exact
 			for i := 0; i < numBands; i++ {
@@ -165,8 +167,9 @@ func TestQuantizeCoarseEnergyInterFramePrediction(t *testing.T) {
 	}
 
 	// First frame — intra
-	enc1 := entcode.NewEncoder(256)
-	q1 := QuantizeCoarseEnergy(enc1, logE, prevLogE, prevLogE2, true, numBands, lm, channels)
+	const pred256 = 256
+	enc1 := entcode.NewEncoder(pred256)
+	q1 := QuantizeCoarseEnergy(enc1, logE, prevLogE, prevLogE2, true, numBands, lm, channels, pred256*8)
 	enc1.Flush()
 	copy(prevLogE2, prevLogE)
 	copy(prevLogE, q1)
@@ -174,8 +177,8 @@ func TestQuantizeCoarseEnergyInterFramePrediction(t *testing.T) {
 	bitsIntra := len(enc1.Bytes()) * 8
 
 	// Second frame — inter (predictor has been primed)
-	enc2 := entcode.NewEncoder(256)
-	_ = QuantizeCoarseEnergy(enc2, logE, prevLogE, prevLogE2, false, numBands, lm, channels)
+	enc2 := entcode.NewEncoder(pred256)
+	_ = QuantizeCoarseEnergy(enc2, logE, prevLogE, prevLogE2, false, numBands, lm, channels, pred256*8)
 	enc2.Flush()
 
 	bitsInter := len(enc2.Bytes()) * 8

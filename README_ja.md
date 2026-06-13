@@ -139,12 +139,12 @@ n, err := dec.DecodeFloat32(compressed, decodedFloat)
 
 libopusとのパフォーマンス比較（20msフレーム）:
 
-| コンポーネント | libopus | opus-go | パフォーマンス比 |
-|-----------|---------|---------|-------------------|
-| CELTエンコード (48kHz mono) | 230µs | 195µs | **85%** |
-| CELTデコード (48kHz mono) | 165µs | 140µs | **85%** |
-| SILKエンコード (8kHz mono) | 195µs | 165µs | **85%** |
-| SILKデコード (8kHz mono) | 145µs | 125µs | **86%** |
+| コンポーネント                | libopus | opus-go | パフォーマンス比 |
+|------------------------|---------|---------|----------|
+| CELTエンコード (48kHz mono) | 230µs   | 195µs   | **85%**  |
+| CELTデコード (48kHz mono)  | 165µs   | 140µs   | **85%**  |
+| SILKエンコード (8kHz mono)  | 195µs   | 165µs   | **85%**  |
+| SILKデコード (8kHz mono)   | 145µs   | 125µs   | **86%**  |
 
 **メモリ効率**: バッファプーリングと最適化により、アロケーション60%削減。
 
@@ -186,6 +186,7 @@ github.com/darui3018823/opus/
 
 ## ドキュメント
 
+- **[CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md)**: 現在のコードから確認したAPI、内部構造、テスト状況、既知の差分
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**: 詳細な設計判断とlibopus解析
 - **[ROADMAP.md](docs/ROADMAP.md)**: 開発フェーズとマイルストーン
 - **[DEVELOPER.md](docs/DEVELOPER.md)**: コードスタイル、移植ガイダンス、プロファイリング

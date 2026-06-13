@@ -1,5 +1,7 @@
 package entcode
 
+import "fmt"
+
 // Decoder is a range decoder bit-exact with libopus ec_dec (celt/entdec.c).
 //
 // libopus uses a TOP-DOWN convention:
@@ -10,12 +12,16 @@ package entcode
 // The decoder reads bytes and combines them using the EC_CODE_EXTRA
 // (7-bit) overlap scheme from libopus.
 type Decoder struct {
-	buf []byte
-	pos int    // read position in buf
-	rng uint32 // current range
-	dif uint32 // coded value complement (top-down)
-	rem int    // remainder bits from previous byte read
-	err error
+	buf       []byte
+	pos       int    // forward range-coded read position in buf
+	endOffs   int    // raw-bit bytes consumed from the end of buf
+	endWindow uint32 // raw-bit window, least-significant bits first
+	nendBits  uint   // number of valid bits in endWindow
+	rng       uint32 // current range
+	dif       uint32 // coded value complement (top-down)
+	rem       int    // remainder bits from previous byte read
+	nbitsTotal int   // bits consumed, tracked like libopus nbits_total (counts past buffer end)
+	err       error
 }
 
 // NewDecoder creates a new range decoder from encoded data.
@@ -35,6 +41,9 @@ func NewDecoder(data []byte) *Decoder {
 	dec.rem = int(firstByte)
 	dec.dif = dec.rng - 1 - (firstByte >> (SymBits - CodeExtra))
 
+	// libopus: nbits_total = EC_CODE_BITS+1 - ((EC_CODE_BITS-EC_CODE_EXTRA)/EC_SYM_BITS)*EC_SYM_BITS = 9
+	dec.nbitsTotal = CodeBits + 1 - ((CodeBits-CodeExtra)/SymBits)*SymBits
+
 	// Normalize to fill the range
 	dec.normalize()
 
@@ -42,8 +51,40 @@ func NewDecoder(data []byte) *Decoder {
 }
 
 // Tell returns the number of bits consumed so far.
+// Matches ec_tell: bits from start (range coder) + bits consumed from end (raw).
 func (dec *Decoder) Tell() int {
-	return dec.pos*8 - ILog(dec.rng)
+	// libopus ec_tell == nbits_total - ILOG(rng). Our historical convention is
+	// (ec_tell - 1); ECTell() restores the libopus value.
+	return dec.nbitsTotal - ILog(dec.rng) - 1
+}
+
+// ECTell returns bits consumed using the libopus ec_tell convention
+// (== 1 immediately after init). Our internal Tell() reports ec_tell-1,
+// so this is simply Tell()+1. Use this where porting libopus guards verbatim.
+func (dec *Decoder) ECTell() int { return dec.Tell() + 1 }
+
+// AdvanceTellTo pretends that bits have been consumed up to the supplied
+// libopus ec_tell position without changing the range. CELT uses this for
+// packets carrying the silence flag.
+func (dec *Decoder) AdvanceTellTo(bits int) {
+	if bits > dec.ECTell() {
+		dec.nbitsTotal += bits - dec.ECTell()
+	}
+}
+
+// TellFrac returns bits consumed in 1/8-bit (Q3) resolution.
+// Bit-exact with ec_tell_frac in libopus (celt/entcode.c).
+func (dec *Decoder) TellFrac() int {
+	correction := [8]uint32{35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535}
+	nbits := dec.nbitsTotal << 3
+	l := ILog(dec.rng)
+	r := dec.rng >> uint(l-16)
+	b := (r >> 12) - 8
+	if r > correction[b] {
+		b++
+	}
+	l = (l << 3) + int(b)
+	return nbits - l
 }
 
 // Error returns any decoding error.
@@ -52,10 +93,12 @@ func (dec *Decoder) Error() error {
 }
 
 // Debug accessors for testing
-func (dec *Decoder) GetDif() uint32 { return dec.dif }
-func (dec *Decoder) GetRng() uint32 { return dec.rng }
-func (dec *Decoder) GetRem() int    { return dec.rem }
-func (dec *Decoder) GetPos() int    { return dec.pos }
+func (dec *Decoder) GetDif() uint32     { return dec.dif }
+func (dec *Decoder) GetRng() uint32     { return dec.rng }
+func (dec *Decoder) GetRem() int        { return dec.rem }
+func (dec *Decoder) GetPos() int        { return dec.pos }
+func (dec *Decoder) GetEndOffs() int    { return dec.endOffs }
+func (dec *Decoder) GetNendBits() uint  { return dec.nendBits }
 
 // readByte reads one byte from the buffer, returning 0 past the end.
 func (dec *Decoder) readByte() byte {
@@ -67,10 +110,19 @@ func (dec *Decoder) readByte() byte {
 	return 0
 }
 
+func (dec *Decoder) readByteFromEnd() byte {
+	if dec.endOffs < len(dec.buf) {
+		dec.endOffs++
+		return dec.buf[len(dec.buf)-dec.endOffs]
+	}
+	return 0
+}
+
 // normalize reads bytes while range is below threshold.
 // Matches ec_dec_normalize in libopus.
 func (dec *Decoder) normalize() {
 	for dec.rng != 0 && dec.rng <= CodeBot {
+		dec.nbitsTotal += SymBits
 		dec.rng <<= SymBits
 
 		// libopus: sym=rem; rem=readByte(); sym=(sym<<8|rem)>>1;
@@ -201,15 +253,58 @@ func (dec *Decoder) DecodeUint(ft uint32) uint32 {
 	return s
 }
 
-// DecodeBits decodes raw bits through the range coder.
+// DecodeBits decodes raw bits from the end of the packet, matching ec_dec_bits.
 func (dec *Decoder) DecodeBits(nbits uint) uint32 {
-	val := uint32(0)
-	for i := int(nbits) - 1; i >= 0; i-- {
-		if dec.DecodeBitLogp(1) {
-			val |= 1 << uint(i)
-		}
+	if nbits == 0 {
+		return 0
 	}
-	return val
+	for dec.nendBits < nbits {
+		dec.endWindow |= uint32(dec.readByteFromEnd()) << dec.nendBits
+		dec.nendBits += SymBits
+	}
+	var mask uint32
+	if nbits >= 32 {
+		mask = ^uint32(0)
+	} else {
+		mask = (uint32(1) << nbits) - 1
+	}
+	ret := dec.endWindow & mask
+	if nbits >= 32 {
+		dec.endWindow = 0
+	} else {
+		dec.endWindow >>= nbits
+	}
+	dec.nendBits -= nbits
+	dec.nbitsTotal += int(nbits) // libopus counts raw bits unconditionally (even past buffer end)
+	return ret
+}
+
+// DecodeUintTrace is a debug version of DecodeUint that prints intermediate steps.
+func (dec *Decoder) DecodeUintTrace(ft uint32) uint32 {
+	if ft <= 1 {
+		return 0
+	}
+	ft1 := ft - 1
+	ftb := ILog(ft1)
+	fmt.Printf("      [trace] DecodeUint ft=%d ft1=%d ftb=%d UintBits=%d\n", ft, ft1, ftb, UintBits)
+	if ftb > UintBits {
+		ftb -= UintBits
+		ft1 >>= uint(ftb)
+		fmt.Printf("      [trace] large: ftb=%d ft1>>ftb=%d Decode(%d)\n", ftb, ft1, ft1+1)
+		fmt.Printf("      [trace] pre-Decode: rng=0x%08x dif=0x%08x pos=%d endOffs=%d nendBits=%d\n",
+			dec.rng, dec.dif, dec.pos, dec.endOffs, dec.nendBits)
+		s := dec.Decode(ft1 + 1)
+		fmt.Printf("      [trace] Decode returned s=%d\n", s)
+		fmt.Printf("      [trace] pre-DecodeUpdate: rng=0x%08x\n", dec.rng)
+		dec.DecodeUpdate(s, s+1, ft1+1)
+		fmt.Printf("      [trace] post-DecodeUpdate: rng=0x%08x pos=%d\n", dec.rng, dec.pos)
+		low := dec.DecodeBits(uint(ftb))
+		fmt.Printf("      [trace] DecodeBits(%d) returned low=%d, post-rng=0x%08x\n", ftb, low, dec.rng)
+		return s<<uint(ftb) | low
+	}
+	s := dec.Decode(ft)
+	dec.DecodeUpdate(s, s+1, ft)
+	return s
 }
 
 // DecodeBit decodes a single bit. prob is probability of false on 0-32768 scale.
@@ -252,5 +347,5 @@ func (dec *Decoder) DecodeGetCumu(ft uint32) uint32 {
 
 // BytesLeft returns remaining unread bytes.
 func (dec *Decoder) BytesLeft() int {
-	return len(dec.buf) - dec.pos
+	return len(dec.buf) - dec.pos - dec.endOffs
 }

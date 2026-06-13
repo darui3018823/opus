@@ -131,12 +131,12 @@ github.com/darui3018823/opus/
 
 ## 8. Risk Mitigation
 
-| Risk | Mitigation |
-|------|------------|
-| PVQ complexity | Careful implementation, extensive testing |
-| Range coder bugs | Test exhaustively against libopus |
-| Performance issues | Profile early, optimize hot paths |
-| Numerical precision | Use float64, validate perceptual quality |
+| Risk                | Mitigation                                |
+|---------------------|-------------------------------------------|
+| PVQ complexity      | Careful implementation, extensive testing |
+| Range coder bugs    | Test exhaustively against libopus         |
+| Performance issues  | Profile early, optimize hot paths         |
+| Numerical precision | Use float64, validate perceptual quality  |
 
 ## 9. Timeline
 

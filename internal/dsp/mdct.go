@@ -17,26 +17,30 @@ type MDCT struct {
 
 // NewMDCT creates a new MDCT configuration.
 // size is the number of output coefficients (input is 2*size samples).
+// For non-power-of-2 sizes (e.g. 960), a direct cosine computation is used.
 func NewMDCT(size int) (*MDCT, error) {
-	if !IsPowerOf2(size) {
-		return nil, errors.New("dsp: MDCT size must be a power of 2")
-	}
-
-	fftSize := size / 2
-	fftCfg, err := NewFFTConfig(fftSize)
-	if err != nil {
-		return nil, err
+	if size <= 0 {
+		return nil, errors.New("dsp: MDCT size must be positive")
 	}
 
 	mdct := &MDCT{
 		size:     size,
-		fftSize:  fftSize,
-		fftCfg:   fftCfg,
 		window:   Window(WindowVorbis, 2*size),
 		twiddles: make([]Complex, size),
 	}
 
-	// Precompute twiddle factors for pre/post-rotation
+	if IsPowerOf2(size) {
+		fftSize := size / 2
+		fftCfg, err := NewFFTConfig(fftSize)
+		if err != nil {
+			return nil, err
+		}
+		mdct.fftSize = fftSize
+		mdct.fftCfg = fftCfg
+	}
+	// For non-power-of-2 sizes, fftCfg is nil → direct computation path.
+
+	// Precompute twiddle factors for pre/post-rotation (used by FFT path)
 	for i := 0; i < size; i++ {
 		angle := math.Pi * (float64(i) + 0.5) / float64(size)
 		mdct.twiddles[i] = Complex{
@@ -112,17 +116,26 @@ func (m *MDCT) Forward(input []float64) ([]float64, error) {
 }
 
 // Inverse performs the inverse MDCT transform (IMDCT).
-// Input: N coefficients, Output: 2*N samples.
+// Input: N coefficients, Output: 2*N samples (before overlap-add).
 func (m *MDCT) Inverse(input []float64) ([]float64, error) {
 	n := m.size
 	if len(input) != n {
 		return nil, errors.New("dsp: IMDCT input must be N coefficients")
 	}
 
+	if m.fftCfg != nil {
+		return m.inverseFft(input)
+	}
+	return m.inverseDirect(input), nil
+}
+
+// inverseFft is the FFT-based IMDCT (power-of-2 sizes only).
+func (m *MDCT) inverseFft(input []float64) ([]float64, error) {
+	n := m.size
+
 	// Pre-rotation
 	fftInput := make([]Complex, m.fftSize)
 	for i := 0; i < m.fftSize; i++ {
-		// Gather two coefficients and pre-rotate
 		angle1 := math.Pi * (float64(i) + 0.5) / float64(n)
 		angle2 := math.Pi * (float64(i+m.fftSize) + 0.5) / float64(n)
 
@@ -137,13 +150,11 @@ func (m *MDCT) Inverse(input []float64) ([]float64, error) {
 		}
 	}
 
-	// Perform IFFT
 	fftOutput, err := m.fftCfg.ExecuteInverse(fftInput)
 	if err != nil {
 		return nil, err
 	}
 
-	// Post-rotation and unfolding
 	output := make([]float64, 2*n)
 	scale := 2.0 / float64(n)
 
@@ -152,25 +163,37 @@ func (m *MDCT) Inverse(input []float64) ([]float64, error) {
 		cos := math.Cos(angle)
 		sin := math.Sin(angle)
 
-		re := fftOutput[i].Real*cos - fftOutput[i].Imag*sin
-		im := fftOutput[i].Real*sin + fftOutput[i].Imag*cos
+		re := (fftOutput[i].Real*cos - fftOutput[i].Imag*sin) * scale
+		im := (fftOutput[i].Real*sin + fftOutput[i].Imag*cos) * scale
 
-		re *= scale
-		im *= scale
-
-		// Unfold to output
 		output[i] = re
 		output[n+i] = im
 		output[n-1-i] = -re
 		output[2*n-1-i] = im
 	}
 
-	// Apply synthesis window
 	for i := 0; i < 2*n; i++ {
 		output[i] *= m.window[i]
 	}
 
 	return output, nil
+}
+
+// inverseDirect computes IMDCT via direct DCT-IV sum — correct for any N.
+// O(N²), intended for non-power-of-2 sizes like 960.
+func (m *MDCT) inverseDirect(input []float64) []float64 {
+	n := m.size
+	output := make([]float64, 2*n)
+	scale := 2.0 / float64(n)
+	for sn := 0; sn < 2*n; sn++ {
+		v := 0.0
+		base := math.Pi / float64(n) * (float64(sn) + 0.5 + float64(n)/2.0)
+		for k := 0; k < n; k++ {
+			v += input[k] * math.Cos(base*(float64(k)+0.5))
+		}
+		output[sn] = v * scale * m.window[sn]
+	}
+	return output
 }
 
 // ForwardOverlap performs forward MDCT with proper overlap handling for streaming.

@@ -227,6 +227,13 @@ type silkRateInfo struct {
 	// path. sMid carries the 1-sample delay libopus applies via sStereo.sMid.
 	silkResampler *silk.Resampler
 	sMid          int16
+
+	// silkResamplerL/R are bit-exact libopus SILK resamplers for the stereo
+	// path. libopus resamples each L/R channel separately at the internal rate
+	// after silk_stereo_MS_to_LR, with no sMid-style 1-sample delay (the MS->LR
+	// alignment already accounts for it). Used only for the stereo (ci=1) info.
+	silkResamplerL *silk.Resampler
+	silkResamplerR *silk.Resampler
 }
 
 // Decoder represents an Opus decoder instance
@@ -349,7 +356,18 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 				if err != nil {
 					return nil, fmt.Errorf("failed to create bit-exact SILK resampler (%d->%d): %w", silkRate, sampleRate, err)
 				}
-				dec.silkDecoders[ri][fi][ch-1] = &silkRateInfo{dec: sd, resampler: rs, silkResampler: silkRs}
+				info := &silkRateInfo{dec: sd, resampler: rs, silkResampler: silkRs}
+				if ch == 2 {
+					// Per-channel bit-exact resamplers for the stereo L/R path.
+					lRs, lErr := silk.NewResampler(silkRate, sampleRate)
+					rRs, rErr := silk.NewResampler(silkRate, sampleRate)
+					if lErr != nil || rErr != nil {
+						return nil, fmt.Errorf("failed to create stereo bit-exact SILK resamplers (%d->%d)", silkRate, sampleRate)
+					}
+					info.silkResamplerL = lRs
+					info.silkResamplerR = rRs
+				}
+				dec.silkDecoders[ri][fi][ch-1] = info
 			}
 		}
 	}
@@ -916,6 +934,8 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		// generic resampler until the bit-exact stereo path is wired up.
 		if pktChannels == 1 && info.silkResampler != nil {
 			pcm = resampleSILKMono(info, pcm, nSilkFramesPerStream)
+		} else if pktChannels == 2 && info.silkResamplerL != nil && info.silkResamplerR != nil {
+			pcm = resampleSILKStereo(info, pcm, nSilkFramesPerStream)
 		} else if info.resampler != nil {
 			pcm = info.resampler.Process(pcm)
 		}
@@ -966,6 +986,47 @@ func resampleSILKMono(info *silkRateInfo, pcm []float64, nFrames int) []float64 
 	out := make([]float64, len(resampled))
 	for i, v := range resampled {
 		out[i] = float64(v) / 32768.0
+	}
+	return out
+}
+
+// resampleSILKStereo resamples an interleaved L/R SILK decode (internal-rate
+// float64) to the output rate using two bit-exact libopus SILK resamplers, one
+// per channel. It mirrors libopus dec_API.c: after silk_stereo_MS_to_LR the L
+// and R channels are resampled separately, per SILK frame, with persistent
+// per-channel filter state. Unlike the mono path there is no sMid 1-sample
+// delay — the MS->LR step already produced the correctly-aligned L/R samples.
+func resampleSILKStereo(info *silkRateInfo, pcm []float64, nFrames int) []float64 {
+	if nFrames < 1 {
+		nFrames = 1
+	}
+	// pcm is interleaved L/R: 2 samples per frame position.
+	perChanFrameLen := (len(pcm) / 2) / nFrames
+	if perChanFrameLen < 1 {
+		return pcm
+	}
+
+	var outL, outR []int16
+	for f := 0; f < nFrames; f++ {
+		base := f * perChanFrameLen * 2
+		lin := make([]int16, perChanFrameLen)
+		rin := make([]int16, perChanFrameLen)
+		for i := 0; i < perChanFrameLen; i++ {
+			lin[i] = int16(math.Round(pcm[base+i*2] * 32768.0))
+			rin[i] = int16(math.Round(pcm[base+i*2+1] * 32768.0))
+		}
+		outL = append(outL, info.silkResamplerL.Process(lin)...)
+		outR = append(outR, info.silkResamplerR.Process(rin)...)
+	}
+
+	n := len(outL)
+	if len(outR) < n {
+		n = len(outR)
+	}
+	out := make([]float64, n*2)
+	for i := 0; i < n; i++ {
+		out[i*2] = float64(outL[i]) / 32768.0
+		out[i*2+1] = float64(outR[i]) / 32768.0
 	}
 	return out
 }

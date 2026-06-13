@@ -360,9 +360,12 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 				if ch == 2 {
 					// Per-channel bit-exact resamplers for the stereo L/R path.
 					lRs, lErr := silk.NewResampler(silkRate, sampleRate)
+					if lErr != nil {
+						return nil, fmt.Errorf("failed to create stereo bit-exact SILK resampler L (%d->%d): %w", silkRate, sampleRate, lErr)
+					}
 					rRs, rErr := silk.NewResampler(silkRate, sampleRate)
-					if lErr != nil || rErr != nil {
-						return nil, fmt.Errorf("failed to create stereo bit-exact SILK resamplers (%d->%d)", silkRate, sampleRate)
+					if rErr != nil {
+						return nil, fmt.Errorf("failed to create stereo bit-exact SILK resampler R (%d->%d): %w", silkRate, sampleRate, rErr)
 					}
 					info.silkResamplerL = lRs
 					info.silkResamplerR = rRs
@@ -1006,6 +1009,9 @@ func resampleSILKStereo(info *silkRateInfo, pcm []float64, nFrames int) []float6
 		return pcm
 	}
 
+	// Reuse the per-frame input buffers (Process copies what it needs into its
+	// own delay state and does not retain `in`). Pre-size the outputs for the
+	// max 6x ratio (8 kHz -> 48 kHz) to avoid repeated growth.
 	lin := make([]int16, perChanFrameLen)
 	rin := make([]int16, perChanFrameLen)
 	estCap := (len(pcm) / 2) * 6
@@ -1095,6 +1101,12 @@ func (d *Decoder) Reset() error {
 					}
 					if info.silkResampler != nil {
 						info.silkResampler.Reset()
+					}
+					if info.silkResamplerL != nil {
+						info.silkResamplerL.Reset()
+					}
+					if info.silkResamplerR != nil {
+						info.silkResamplerR.Reset()
 					}
 					info.sMid = 0
 				}

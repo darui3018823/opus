@@ -1736,10 +1736,12 @@ func (d *Decoder) synthesize(
 		lag := pitchLags[sf]
 
 		if signalType == SignalTypeVoiced {
-			// libopus decode_core.c: re-whiten when (sf & (3 - NLSFInterpCoef_Q2>>1)) == 0.
-			// With interpFactor=4 (no interpolation, nlsfInterpolation=false): mask=1, re-whiten at sf=0 and sf=2.
-			// With interpFactor<4 (interpolation, nlsfInterpolation=true): mask>=2, re-whiten only at sf=0.
-			if sf == 0 || (sf == 2 && !nlsfInterpolation) {
+			// libopus decode_core.c:141 — re-whiten when
+			//   k == 0 || (k == 2 && NLSF_interpolation_flag).
+			// NLSF_interpolation_flag == 1 iff interpFactor < 4 (interpolation active),
+			// i.e. nlsfInterpolation == true. So with interpolation we re-whiten at
+			// sf=0 AND sf=2; without it (interp=4) we re-whiten only at sf=0.
+			if sf == 0 || (sf == 2 && nlsfInterpolation) {
 				startIdx := sLTPBufIdx - lag - d.lpcOrder - 2
 				if startIdx < 0 {
 					startIdx = 0

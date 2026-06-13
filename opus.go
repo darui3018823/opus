@@ -253,6 +253,17 @@ type Decoder struct {
 	// rateIdx: 0=8kHz, 1=12kHz, 2=16kHz
 	silkDecoders [3][2][2]*silkRateInfo
 
+	// Bit-exact SILK resampler state at the physical-channel level, mirroring
+	// libopus channel_state[n].resampler_state. These persist across packets and
+	// across the mono/stereo internal split (unlike silkRateInfo, which is keyed
+	// per packet-channel-count). A channel's resampler is reset when its SILK
+	// internal rate changes (libopus silk_decoder_set_fs). silkSMid is the
+	// sStereo.sMid 1-sample carry used by the mono internal path.
+	silkRS             [2]*silk.Resampler
+	silkRSInKHz        [2]int // current internal rate (kHz) per channel; 0 = uninitialized
+	silkSMid           int16
+	prevSilkInternalCh int // previous packet's SILK internal channel count (0 = none yet)
+
 	// Resampler for non-48kHz CELT output rates
 	celtResampler *resampler.Resampler // 48kHz -> outRate
 
@@ -922,8 +933,29 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		samplesPerStream = (d.sampleRate * frameDurationMs / 1000) * d.channels
 	}
 
+	// --- Bit-exact SILK resampler setup (mirrors libopus dec_API.c) ---
+	// Ensure each active physical channel has a resampler for the current
+	// internal rate; a channel's resampler is reset when its rate changes.
+	d.ensureSilkResampler(0, rateKHz)
+	if pktChannels == 2 {
+		d.ensureSilkResampler(1, rateKHz)
+	}
+	// Mono->stereo internal transition: seed channel 1's resampler from
+	// channel 0 (dec_API.c:217). This runs after ensure (which models the
+	// init/set_fs that libopus overwrites with this memcpy).
+	if pktChannels == 2 && d.prevSilkInternalCh == 1 && d.silkRS[0] != nil {
+		seeded := *d.silkRS[0]
+		d.silkRS[1] = &seeded
+		d.silkRSInKHz[1] = rateKHz
+	}
+	// stereo_to_mono: previous packet stereo, now mono, internal rate unchanged.
+	// The right output channel of the first SILK frame is resampled through the
+	// still-warm channel-1 resampler from the same mono signal (dec_API.c:418-426).
+	stereoToMono := pktChannels == 1 && d.prevSilkInternalCh == 2 &&
+		d.silkRS[1] != nil && d.silkRSInKHz[1] == rateKHz
+
 	var allPCM []float64
-	for _, stream := range silkStreams {
+	for si, stream := range silkStreams {
 		// Decode SILK sub-frames from this stream
 		pcm, err := info.dec.DecodeMulti(stream, nSilkFramesPerStream)
 		if err != nil {
@@ -931,25 +963,17 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 			continue
 		}
 
-		// Resample from SILK rate to output rate.
-		// Mono uses the bit-exact libopus SILK resampler (with the 1-sample
-		// sMid delay, applied per SILK frame). Stereo falls back to the
-		// generic resampler until the bit-exact stereo path is wired up.
-		if pktChannels == 1 && info.silkResampler != nil {
-			pcm = resampleSILKMono(info, pcm, nSilkFramesPerStream)
-		} else if pktChannels == 2 && info.silkResamplerL != nil && info.silkResamplerR != nil {
-			pcm = resampleSILKStereo(info, pcm, nSilkFramesPerStream)
-		} else if info.resampler != nil {
-			pcm = info.resampler.Process(pcm)
-		}
-
-		// Adjust channels from packet channels to output channels
-		pcm = adjustChannels(pcm, pktChannels, d.channels)
+		// Resample from internal rate to the output rate using the persistent
+		// per-channel bit-exact resamplers, producing d.channels-interleaved PCM.
+		// stereoToMono applies only to the very first SILK frame after the
+		// transition (si == 0; the method gates further on f == 0).
+		pcm = d.resampleSILK(pcm, nSilkFramesPerStream, pktChannels, stereoToMono && si == 0)
 
 		// Pad or trim to exact expected length
 		pcm = padOrTrim(pcm, samplesPerStream)
 		allPCM = append(allPCM, pcm...)
 	}
+	d.prevSilkInternalCh = pktChannels
 
 	if pktChannels == 1 && stereoPeer != nil && stereoPeer.dec != nil {
 		stereoPeer.dec.CopyPrimaryStateFrom(info.dec)
@@ -960,81 +984,128 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 	return allPCM, nil
 }
 
-// resampleSILKMono resamples a mono SILK decode (internal-rate float64, one or
-// more concatenated SILK frames) to the output rate using the bit-exact libopus
-// SILK resampler. It mirrors libopus: the resampler is invoked once per SILK
-// frame on a 1-sample-delayed stream (the sMid carry), and its filter state
-// persists across frames and packets.
-func resampleSILKMono(info *silkRateInfo, pcm []float64, nFrames int) []float64 {
-	if nFrames < 1 {
-		nFrames = 1
+// ensureSilkResampler makes sure physical channel ch has a bit-exact SILK
+// resampler configured for the given internal rate (kHz). It (re)creates the
+// resampler when the rate changes, mirroring libopus silk_decoder_set_fs which
+// re-inits resampler_state only on a rate change. A reset clears the filter
+// state, which is the intended behaviour on a rate switch.
+func (d *Decoder) ensureSilkResampler(ch, rateKHz int) {
+	if d.silkRS[ch] != nil && d.silkRSInKHz[ch] == rateKHz {
+		return
 	}
-	frameLen := len(pcm) / nFrames
-	if frameLen < 1 {
-		return pcm
+	rs, err := silk.NewResampler(rateKHz*1000, d.sampleRate)
+	if err != nil {
+		// Unsupported rate combination: leave the channel without a bit-exact
+		// resampler; resampleSILK falls back to channel duplication.
+		d.silkRS[ch] = nil
+		d.silkRSInKHz[ch] = 0
+		return
 	}
-
-	var resampled []int16
-	for f := 0; f < nFrames; f++ {
-		chunk := pcm[f*frameLen : (f+1)*frameLen]
-		rin := make([]int16, frameLen)
-		rin[0] = info.sMid
-		for i := 0; i < frameLen-1; i++ {
-			rin[i+1] = int16(math.Round(chunk[i] * 32768.0))
-		}
-		info.sMid = int16(math.Round(chunk[frameLen-1] * 32768.0))
-		resampled = append(resampled, info.silkResampler.Process(rin)...)
-	}
-
-	out := make([]float64, len(resampled))
-	for i, v := range resampled {
-		out[i] = float64(v) / 32768.0
-	}
-	return out
+	d.silkRS[ch] = rs
+	d.silkRSInKHz[ch] = rateKHz
 }
 
-// resampleSILKStereo resamples an interleaved L/R SILK decode (internal-rate
-// float64) to the output rate using two bit-exact libopus SILK resamplers, one
-// per channel. It mirrors libopus dec_API.c: after silk_stereo_MS_to_LR the L
-// and R channels are resampled separately, per SILK frame, with persistent
-// per-channel filter state. Unlike the mono path there is no sMid 1-sample
-// delay — the MS->LR step already produced the correctly-aligned L/R samples.
-func resampleSILKStereo(info *silkRateInfo, pcm []float64, nFrames int) []float64 {
+// resampleSILK resamples one decoded SILK stream from the internal rate to the
+// output rate using the persistent per-channel bit-exact resamplers, returning
+// interleaved PCM with d.channels channels. It mirrors libopus dec_API.c's
+// resampling stage: the resampler is invoked once per SILK frame; the mono
+// internal path carries the sStereo.sMid 1-sample delay; and on a stereo->mono
+// transition the first SILK frame's right channel is resampled through the
+// still-warm channel-1 resampler from the same mono signal.
+func (d *Decoder) resampleSILK(pcm []float64, nFrames, pktChannels int, stereoToMono bool) []float64 {
 	if nFrames < 1 {
 		nFrames = 1
 	}
-	// pcm is interleaved L/R: 2 samples per frame position.
-	perChanFrameLen := (len(pcm) / 2) / nFrames
-	if perChanFrameLen < 1 {
-		return pcm
+	rs0 := d.silkRS[0]
+	if rs0 == nil {
+		// No bit-exact resampler available: fall back to generic behaviour.
+		return adjustChannels(pcm, pktChannels, d.channels)
 	}
+	rs1 := d.silkRS[1]
 
-	// Reuse the per-frame input buffers (Process copies what it needs into its
-	// own delay state and does not retain `in`). Pre-size the outputs for the
-	// max 6x ratio (8 kHz -> 48 kHz) to avoid repeated growth.
-	lin := make([]int16, perChanFrameLen)
-	rin := make([]int16, perChanFrameLen)
-	estCap := (len(pcm) / 2) * 6
-	outL := make([]int16, 0, estCap)
-	outR := make([]int16, 0, estCap)
-	for f := 0; f < nFrames; f++ {
-		base := f * perChanFrameLen * 2
-		for i := 0; i < perChanFrameLen; i++ {
-			lin[i] = int16(math.Round(pcm[base+i*2] * 32768.0))
-			rin[i] = int16(math.Round(pcm[base+i*2+1] * 32768.0))
+	if pktChannels == 2 {
+		// Internal stereo: L through channel 0, R through channel 1, per frame.
+		perChanFrameLen := (len(pcm) / 2) / nFrames
+		if perChanFrameLen < 1 {
+			return adjustChannels(pcm, pktChannels, d.channels)
 		}
-		outL = append(outL, info.silkResamplerL.Process(lin)...)
-		outR = append(outR, info.silkResamplerR.Process(rin)...)
+		lin := make([]int16, perChanFrameLen)
+		rin := make([]int16, perChanFrameLen)
+		estCap := (len(pcm) / 2) * 6
+		outL := make([]int16, 0, estCap)
+		outR := make([]int16, 0, estCap)
+		for f := 0; f < nFrames; f++ {
+			base := f * perChanFrameLen * 2
+			for i := 0; i < perChanFrameLen; i++ {
+				lin[i] = f64ToI16(pcm[base+i*2])
+				rin[i] = f64ToI16(pcm[base+i*2+1])
+			}
+			outL = append(outL, rs0.Process(lin)...)
+			if rs1 != nil {
+				outR = append(outR, rs1.Process(rin)...)
+			}
+		}
+		return interleaveSILKOut(outL, outR, d.channels)
 	}
 
-	n := len(outL)
-	if len(outR) < n {
-		n = len(outR)
+	// Internal mono: channel 0 carries the sMid 1-sample delay.
+	frameLen := len(pcm) / nFrames
+	if frameLen < 1 {
+		return adjustChannels(pcm, pktChannels, d.channels)
 	}
-	out := make([]float64, n*2)
-	for i := 0; i < n; i++ {
-		out[i*2] = float64(outL[i]) / 32768.0
-		out[i*2+1] = float64(outR[i]) / 32768.0
+	rin := make([]int16, frameLen)
+	estCap := len(pcm) * 6
+	outL := make([]int16, 0, estCap)
+	var outR []int16
+	if d.channels == 2 {
+		outR = make([]int16, 0, estCap)
+	}
+	for f := 0; f < nFrames; f++ {
+		chunk := pcm[f*frameLen : (f+1)*frameLen]
+		rin[0] = d.silkSMid
+		for i := 0; i < frameLen-1; i++ {
+			rin[i+1] = f64ToI16(chunk[i])
+		}
+		d.silkSMid = f64ToI16(chunk[frameLen-1])
+		lout := rs0.Process(rin)
+		outL = append(outL, lout...)
+		if d.channels == 2 {
+			// Only the very first SILK frame after a stereo->mono transition
+			// resamples the right channel separately; otherwise duplicate L.
+			if stereoToMono && f == 0 && rs1 != nil {
+				outR = append(outR, rs1.Process(rin)...)
+			} else {
+				outR = append(outR, lout...)
+			}
+		}
+	}
+	return interleaveSILKOut(outL, outR, d.channels)
+}
+
+// f64ToI16 converts a normalized float sample to int16, matching the existing
+// (non-saturating) SILK resampler input conversion.
+func f64ToI16(x float64) int16 {
+	return int16(math.Round(x * 32768.0))
+}
+
+// interleaveSILKOut builds normalized float64 output from int16 channel data.
+// For mono output it returns L only; for stereo it interleaves L/R, duplicating
+// L when R is missing or length-mismatched.
+func interleaveSILKOut(l, r []int16, channels int) []float64 {
+	if channels < 2 {
+		out := make([]float64, len(l))
+		for i, v := range l {
+			out[i] = float64(v) / 32768.0
+		}
+		return out
+	}
+	if len(r) != len(l) {
+		r = l
+	}
+	out := make([]float64, len(l)*2)
+	for i := range l {
+		out[i*2] = float64(l[i]) / 32768.0
+		out[i*2+1] = float64(r[i]) / 32768.0
 	}
 	return out
 }
@@ -1113,6 +1184,12 @@ func (d *Decoder) Reset() error {
 			}
 		}
 	}
+	d.silkRS[0] = nil
+	d.silkRS[1] = nil
+	d.silkRSInKHz[0] = 0
+	d.silkRSInKHz[1] = 0
+	d.silkSMid = 0
+	d.prevSilkInternalCh = 0
 	if d.celtResampler != nil {
 		d.celtResampler.Reset()
 	}

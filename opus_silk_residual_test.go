@@ -15,7 +15,7 @@ import (
 // SILK internal rate, then lists the worst packets. This localizes where the
 // remaining sub-0.0015 residual comes from after the resampler inputDelay fix.
 func TestSILKResidualLocalization(t *testing.T) {
-	for _, num := range []int{2, 4} {
+	for _, num := range []int{2, 4, 3, 5, 6, 10} {
 		t.Run(fmt.Sprintf("tv%02d", num), func(t *testing.T) {
 			vecDir := filepath.Join("testdata", "opus_newvectors")
 			bitPath := filepath.Join(vecDir, fmt.Sprintf("testvector%02d.bit", num))

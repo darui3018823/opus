@@ -200,6 +200,82 @@ func TestEncodeUintRoundtrip(t *testing.T) {
 	}
 }
 
+// TestEncodeBitsRawRoundtrip verifies that raw bits written to the end of the
+// packet by EncodeBits are read back correctly by DecodeBits (which reads from
+// the end of the packet). This guards the Phase 0 raw-bit symmetry fix.
+func TestEncodeBitsRawRoundtrip(t *testing.T) {
+	type item struct {
+		val  uint32
+		bits uint
+	}
+	// Bit widths stay within libopus's ec_window contract: a single ec_enc_bits
+	// call holds at most 32 bits in the window (the raw portion of ec_enc_uint is
+	// <= 24 bits), and consecutive writes flush whole bytes as they accumulate.
+	items := []item{
+		{5, 6}, {0, 1}, {1, 1}, {255, 8}, {0x1234, 16},
+		{63, 6}, {0xFFFFFF, 24}, {0xABCDEF, 24}, {7, 3}, {42, 11},
+	}
+	enc := NewEncoder(200)
+	// Interleave some range-coded symbols with raw bits to ensure both the
+	// forward range stream and the end raw stream coexist correctly.
+	icdf := []uint8{192, 128, 64, 0}
+	for i, it := range items {
+		enc.EncodeIcdf(i%4, icdf, 8)
+		enc.EncodeBits(it.val, it.bits)
+	}
+	enc.Flush()
+	data := enc.Bytes()
+
+	dec := NewDecoder(data)
+	for i, it := range items {
+		if got := dec.DecodeIcdf(icdf, 8); got != i%4 {
+			t.Fatalf("item %d: range symbol got %d, want %d", i, got, i%4)
+		}
+		var want uint32
+		if it.bits >= 32 {
+			want = it.val
+		} else {
+			want = it.val & ((1 << it.bits) - 1)
+		}
+		if got := dec.DecodeBits(it.bits); got != want {
+			t.Errorf("item %d: raw bits got %d, want %d (bits=%d)", i, got, want, it.bits)
+		}
+	}
+	if dec.Error() != nil {
+		t.Errorf("decoder error: %v", dec.Error())
+	}
+}
+
+// TestEncodeUintLargeFtRoundtrip exercises the ec_enc_uint high-bits path
+// (ftb > UintBits) that splits a value into a range-coded high part plus raw
+// low bits. This path was previously broken on the encoder side.
+func TestEncodeUintLargeFtRoundtrip(t *testing.T) {
+	cases := []struct {
+		val uint32
+		ft  uint32
+	}{
+		{0, 100000}, {99999, 100000}, {54321, 100000},
+		{1, 1 << 20}, {(1 << 20) - 1, 1 << 20}, {123456, 1 << 20},
+		{0, 1 << 24}, {(1 << 24) - 1, 1 << 24}, {7654321, 1 << 24},
+	}
+	enc := NewEncoder(400)
+	for _, c := range cases {
+		enc.EncodeUint(c.val, c.ft)
+	}
+	enc.Flush()
+	data := enc.Bytes()
+
+	dec := NewDecoder(data)
+	for i, c := range cases {
+		if got := dec.DecodeUint(c.ft); got != c.val {
+			t.Errorf("case %d: got %d, want %d (ft=%d)", i, got, c.val, c.ft)
+		}
+	}
+	if dec.Error() != nil {
+		t.Errorf("decoder error: %v", dec.Error())
+	}
+}
+
 func TestSingleSymbolICDF(t *testing.T) {
 	// Test encoding a single symbol with various icdf tables
 	tests := []struct {

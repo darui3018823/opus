@@ -29,8 +29,8 @@ type Encoder struct {
 	// Configuration
 	bitrate    int
 	complexity int
-	vbr        bool
-	frameSize  int // frame size in samples at sampleRate
+	rateMode   celt.RateMode // CBR/VBR/CVBR
+	frameSize  int           // frame size in samples at sampleRate
 
 	// Internal 48kHz frame size (always 960 for 20ms)
 	internalFrameSize int
@@ -77,9 +77,9 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		channels:          channels,
 		application:       application,
 		celtEncoder:       celtEnc,
-		bitrate:           64000, // Default bitrate
-		complexity:        5,     // Default complexity
-		vbr:               true,  // Default VBR on
+		bitrate:           64000,           // Default bitrate
+		complexity:        5,               // Default complexity
+		rateMode:          celt.RateModeCBR, // Default CBR (backward compatible)
 		frameSize:         frameSize,
 		internalFrameSize: internalFrameSize,
 	}
@@ -198,9 +198,31 @@ func (e *Encoder) SetComplexity(complexity int) error {
 	return nil
 }
 
-// SetVBR enables or disables variable bitrate mode
+// SetVBR enables or disables variable bitrate mode.
+// When enabled, this sets constrained VBR (CVBR), which is the libopus default:
+// the encoder produces variable-size packets but keeps the average bitrate
+// close to the target. Use SetVBRConstraint(false) for unconstrained VBR.
 func (e *Encoder) SetVBR(vbr bool) {
-	e.vbr = vbr
+	if vbr {
+		e.rateMode = celt.RateModeCVBR
+	} else {
+		e.rateMode = celt.RateModeCBR
+	}
+	e.celtEncoder.SetRateMode(e.rateMode)
+}
+
+// SetVBRConstraint controls the VBR constraint. When true (default), CVBR is
+// used; when false, unconstrained VBR is used. Has no effect if VBR is disabled.
+func (e *Encoder) SetVBRConstraint(constrained bool) {
+	if e.rateMode == celt.RateModeCBR {
+		return // VBR not enabled, nothing to do
+	}
+	if constrained {
+		e.rateMode = celt.RateModeCVBR
+	} else {
+		e.rateMode = celt.RateModeVBR
+	}
+	e.celtEncoder.SetRateMode(e.rateMode)
 }
 
 // SetApplication changes the application mode

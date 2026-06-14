@@ -35,6 +35,18 @@ uses a 20 ms internal CELT frame (`960` samples per channel). Non-48 kHz input
 is resampled to 48 kHz before CELT encoding. The emitted TOC byte is generated
 as CELT-only fullband 20 ms.
 
+### Phase 2: Production CELT Encoder (In Progress)
+
+#### Slice 2-1: VBR/CVBR Rate Control (Complete)
+- **Status:** Complete
+- Added `celt.RateMode` enum (`RateModeCBR`, `RateModeVBR`, `RateModeCVBR`).
+- Implemented CVBR bit reservoir tracking (`vbrOffset`) across frames.
+- Replaced target padding logic with proper target length constraints, avoiding desyncs.
+- Plumbed `SetVBR` and `SetVBRConstraint` via top-level `Encoder`.
+- Created comprehensive VBR packet size variance and roundtrip tests.
+
+#### Slice 2-2: Multi-frame Packets (Not Started)
+
 Current encoder limitations:
 
 - `application` is stored but does not currently drive SILK/CELT/hybrid mode

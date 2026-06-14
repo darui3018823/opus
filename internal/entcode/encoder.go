@@ -89,6 +89,38 @@ func (enc *Encoder) Bytes() []byte {
 	return out
 }
 
+// Shrink reduces the encoder's capacity (storage) to newSize bytes.
+// This is the equivalent of libopus ec_enc_shrink: for VBR mode, after encoding
+// all symbols, the packet can be shrunk so that the decoder sees a smaller
+// packet and computes its allocation accordingly. The raw end-of-packet bits
+// are logically relocated to the new end position.
+//
+// In libopus the raw tail bytes must be memmove'd because they live at the end
+// of a single flat buffer. Our encoder keeps endBytes in a separate slice, so
+// only the capacity field needs updating — Bytes() already places the tail at
+// offset capacity-1.
+//
+// Precondition: newSize >= len(buf) + len(endBytes) (the range-coded front and
+// raw tail must both fit).
+func (enc *Encoder) Shrink(newSize int) {
+	if newSize < len(enc.buf)+len(enc.endBytes) {
+		// Cannot shrink below the actually-used bytes.
+		return
+	}
+	enc.capacity = newSize
+}
+
+// UsedBytes returns the minimum number of bytes needed to hold the encoded
+// content. Valid after Flush(). This mirrors (ec_tell(&enc)+7)/8 in libopus
+// which is used to determine the shrink target for VBR packets.
+func (enc *Encoder) UsedBytes() int {
+	n := (enc.ECTell() + 7) >> 3
+	if n < 2 {
+		n = 2 // Opus minimum packet size
+	}
+	return n
+}
+
 // Debug accessors for testing
 func (enc *Encoder) GetVal() uint32 { return enc.val }
 func (enc *Encoder) GetRng() uint32 { return enc.rng }

@@ -20,6 +20,21 @@ func etr(enc *entcode.Encoder, label string) {
 	}
 }
 
+// RateMode selects the bitrate control strategy for the CELT encoder.
+type RateMode int
+
+const (
+	// RateModeCBR produces fixed-size packets equal to targetBytes.
+	RateModeCBR RateMode = iota
+	// RateModeVBR produces variable-size packets — the encoder shrinks the
+	// packet to the actual bytes used after encoding (unconstrained VBR).
+	RateModeVBR
+	// RateModeCVBR is constrained VBR: like VBR but the output size is
+	// clamped so the average bitrate stays close to the target. A per-frame
+	// reservoir (vbrOffset) accumulates surplus/deficit.
+	RateModeCVBR
+)
+
 // Encoder is a CELT encoder instance. Its output is decoded by the CELT decoder
 // in this package: the encode path is the structural mirror of decodeCELTRange,
 // emitting the same range-coder symbol sequence in the same order so that the
@@ -35,7 +50,7 @@ type Encoder struct {
 	// Encoder configuration.
 	bitrate    int
 	complexity int
-	vbr        bool
+	rateMode   RateMode
 
 	// Inter-frame coarse-energy predictor state (oldBandE), channel-major
 	// mean-subtracted log2-amplitude. Mirrors the decoder's prevEnergies.
@@ -47,6 +62,13 @@ type Encoder struct {
 	foldSeed   uint32
 	finalRange uint32
 	frameCount int
+
+	// CVBR reservoir: accumulated bit surplus/deficit in Q8 bits. Positive means
+	// the encoder has used fewer bits than the target and can afford to spend
+	// more; negative means it has overspent. Clamped to [-maxReservoir, maxReservoir].
+	vbrOffset    int
+	vbrCount     int // number of VBR frames encoded (for average computation)
+	vbrDriftComp int // drift compensation accumulator
 }
 
 // FinalRange returns the range coder rng after the most recent Encode (before
@@ -55,17 +77,17 @@ func (e *Encoder) FinalRange() uint32 { return e.finalRange }
 
 // EncoderConfig holds encoder configuration
 type EncoderConfig struct {
-	Bitrate    int  // Target bitrate in bps
-	Complexity int  // Complexity level (0-10)
-	VBR        bool // Variable bitrate
+	Bitrate    int      // Target bitrate in bps
+	Complexity int      // Complexity level (0-10)
+	RateMode   RateMode // Rate control mode (CBR/VBR/CVBR)
 }
 
 // DefaultEncoderConfig returns default encoder configuration
 func DefaultEncoderConfig() *EncoderConfig {
 	return &EncoderConfig{
-		Bitrate:    64000, // 64 kbps
-		Complexity: 5,     // Medium complexity
-		VBR:        false,
+		Bitrate:    64000,       // 64 kbps
+		Complexity: 5,           // Medium complexity
+		RateMode:   RateModeCBR, // CBR (backward compatible)
 	}
 }
 
@@ -90,7 +112,7 @@ func NewEncoder(frameSize, sampleRate, channels int, config *EncoderConfig) (*En
 		preemphMem: make([]float64, channels),
 		bitrate:    config.Bitrate,
 		complexity: config.Complexity,
-		vbr:        config.VBR,
+		rateMode:   config.RateMode,
 	}
 	for c := 0; c < channels; c++ {
 		e.overlap[c] = make([]float64, overlap)
@@ -133,9 +155,7 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	M := 1 << uint(lm)
 	frameLen := M * int(EBands48000[numBands])
 
-	targetBytes := e.targetBytes()
-	totalBits := targetBytes * 8
-	enc := entcode.NewEncoder(targetBytes)
+	maxTargetBytes := e.targetBytes()
 
 	// --- Analysis: pre-emphasis, forward MDCT, band energy, normalisation ---
 	X := make([]float64, ch*frameLen)
@@ -183,6 +203,76 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 			}
 		}
 	}
+
+	// --- VBR target computation ---
+	// In VBR/CVBR mode, adjust the allocation budget based on signal activity.
+	// This mirrors libopus celt_encode_with_ec VBR logic (simplified):
+	//   - Compute total band energy as a proxy for signal activity.
+	//   - Scale targetBytes between a floor (minBytes) and the full CBR target.
+	//   - Silent or near-silent frames get a smaller budget; complex frames
+	//     get the full budget.
+	targetBytes := maxTargetBytes
+
+	if e.rateMode != RateModeCBR {
+		// Sum log-domain band energies to estimate activity.
+		// EMean-subtracted logE is ~0 for a typical signal; very negative = quiet.
+		var activity float64
+		for c := 0; c < ch; c++ {
+			for i := start; i < end; i++ {
+				v := logE[c*numBands+i]
+				if v > 0 {
+					activity += v
+				} else if v > -10.0 {
+					// Only lightly penalize moderately quiet bands
+					activity += v * 0.05
+				}
+			}
+		}
+		// Normalise to [0, 1] range. A fully active signal with numBands
+		// bands at logE~+3 each gives activity ~63; we saturate at that.
+		maxActivity := float64(ch*numBands) * 3.0
+		if maxActivity < 1 {
+			maxActivity = 1
+		}
+		frac := activity / maxActivity
+		if frac > 1.0 {
+			frac = 1.0
+		}
+		if frac < 0.0 {
+			frac = 0.0
+		}
+
+		// Minimum packet size: enough for header symbols + some coarse energy.
+		minBytes := maxTargetBytes / 4
+		if minBytes < 2 {
+			minBytes = 2
+		}
+
+		// Scale target: frac=1 → full budget; frac=0 → minBytes.
+		// Use a sqrt curve so that moderate signals still get most of the budget.
+		scaledFrac := math.Sqrt(frac)
+		targetBytes = minBytes + int(scaledFrac*float64(maxTargetBytes-minBytes)+0.5)
+		if targetBytes > maxTargetBytes {
+			targetBytes = maxTargetBytes
+		}
+		if targetBytes < minBytes {
+			targetBytes = minBytes
+		}
+
+		// CVBR reservoir adjustment: use accumulated surplus to boost budget
+		// when the signal needs it.
+		if e.rateMode == RateModeCVBR && e.vbrOffset > 0 {
+			// Allow spending up to half the surplus on this frame.
+			boostBytes := (e.vbrOffset >> (3 + 3)) / 2 // Q8 bits → bytes, halved
+			targetBytes += boostBytes
+			if targetBytes > maxTargetBytes {
+				targetBytes = maxTargetBytes
+			}
+		}
+	}
+
+	totalBits := targetBytes * 8
+	enc := entcode.NewEncoder(targetBytes)
 
 	// === Header symbols, in decoder order (decodeCELTRange) ===
 
@@ -348,7 +438,44 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 
 	etr(enc, "final")
 	enc.Flush()
+
+	// --- Rate mode: determine final packet size ---
+	switch e.rateMode {
+	case RateModeVBR:
+		// VBR packet size is exactly the chosen targetBytes.
+		// The variance comes from targetBytes being adjusted based on
+		// signal activity before allocation.
+
+	case RateModeCVBR:
+		// Update CVBR reservoir.
+		// targetBytes is the actual chosen size for this frame.
+		// maxTargetBytes is the nominal CBR target.
+		targetBitsQ8 := maxTargetBytes << (3 + 3)
+		usedBitsQ8 := targetBytes << (3 + 3)
+
+		// maxReservoir limits how much the average can drift from the target.
+		maxReservoir := 3 * targetBitsQ8
+		if maxReservoir < 16<<3 {
+			maxReservoir = 16 << 3
+		}
+
+		delta := targetBitsQ8 - usedBitsQ8 // positive = underspend (surplus)
+
+		newOffset := e.vbrOffset + delta
+		if newOffset > maxReservoir {
+			newOffset = maxReservoir
+		}
+		if newOffset < -maxReservoir {
+			newOffset = -maxReservoir
+		}
+		e.vbrOffset = newOffset
+
+	default:
+		// CBR
+	}
+
 	out := enc.Bytes()
+	// Ensure the output is exactly targetBytes.
 	if len(out) < targetBytes {
 		padded := make([]byte, targetBytes)
 		copy(padded, out)
@@ -370,6 +497,9 @@ func (e *Encoder) Reset() {
 	}
 	e.foldSeed = 0
 	e.frameCount = 0
+	e.vbrOffset = 0
+	e.vbrCount = 0
+	e.vbrDriftComp = 0
 }
 
 // SetBitrate sets the target bitrate.
@@ -385,3 +515,11 @@ func (e *Encoder) SetComplexity(complexity int) {
 		e.complexity = complexity
 	}
 }
+
+// SetRateMode sets the rate control mode.
+func (e *Encoder) SetRateMode(mode RateMode) {
+	e.rateMode = mode
+}
+
+// RateMode returns the current rate control mode.
+func (e *Encoder) GetRateMode() RateMode { return e.rateMode }

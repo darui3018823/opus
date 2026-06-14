@@ -2,10 +2,19 @@
 
 This document tracks gaps versus the Opus 1.3.1 specification, prioritizes implementation, and defines validation/compatibility work. The library must remain **Pure Go** (no cgo / external binaries).
 
+> **Status update (2026-06-14):** the **decoder** is now complete and verified —
+> it passes all 12 official RFC 8251 vectors (RMSE < 0.001) and matches the
+> libopus 1.6.1 reference frame-by-frame (`TestCGORef`, `-tags opusref`). The
+> remaining work below is primarily **encoder-side** (bit-exact CELT and the
+> SILK/hybrid encoder paths) plus multistream/FEC/DTX. See
+> [docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md) for the
+> authoritative snapshot.
+
 ## Current Coverage Snapshot
-- ✅ RFC6716 framing, TOC parsing, basic CELT/SILK scaffolding, resampler, entropy coder scaffolding
-- ⚠️ Bit-exact Opus 1.3.1 behavior is **not yet verified**; several mandatory features are incomplete.
-- ❌ No official 1.3.1 test-vector automation in-tree yet.
+- ✅ RFC6716 framing, TOC parsing, resampler, entropy coder.
+- ✅ **Decoder**: SILK / CELT / hybrid reconstruction; 12/12 official RFC 8251 vectors and libopus 1.6.1 parity. Official-vector automation is in-tree (`TestOfficialVectors`, `TestCGORef`).
+- 🚧 **Encoder**: simplified CELT-only, not yet bit-exact.
+- ⚠️ Several encoder-side and multistream/FEC/DTX features remain incomplete (see below).
 
 ## Spec Gaps (prioritized)
 1. **Range coder parity**: symbol/uint ICDF paths must match libopus bit-exactly (highest priority for decoder correctness).

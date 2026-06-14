@@ -40,8 +40,9 @@ const (
 // emitting the same range-coder symbol sequence in the same order so that the
 // (RFC-conformant) decoder reconstructs the signal.
 type Encoder struct {
-	mode     *Mode
-	celtMode *dsp.CELTMode // forward (analysis) MDCT, N-point long block
+	mode          *Mode
+	celtMode      *dsp.CELTMode // forward (analysis) MDCT, N-point long block
+	shortCeltMode *dsp.CELTMode // forward MDCT for transient short blocks (NBase-point)
 
 	// Per-channel streaming state.
 	overlap    [][]float64 // MDCT analysis overlap memory (Overlap samples each)
@@ -69,6 +70,11 @@ type Encoder struct {
 	// the previous frame's decision, used for hysteresis.
 	tonalAverage int
 	lastSpread   int
+
+	// consecTransient counts consecutive transient frames (libopus
+	// st->consec_transient). It gates the anti-collapse decision: anti-collapse
+	// is enabled while consecTransient < 2.
+	consecTransient int
 
 	// CVBR reservoir: accumulated bit surplus/deficit in Q8 bits. Positive means
 	// the encoder has used fewer bits than the target and can afford to spend
@@ -118,16 +124,21 @@ func NewEncoder(frameSize, sampleRate, channels int, config *EncoderConfig) (*En
 
 	mode := NewMode(frameSize, sampleRate, channels)
 	overlap := mode.Overlap
-	celtMode := dsp.NewCELTMode(frameSize, overlap, celtWindow(overlap))
+	win := celtWindow(overlap)
+	celtMode := dsp.NewCELTMode(frameSize, overlap, win)
+	// Short-block analysis MDCT (NBase samples), the encode counterpart of the
+	// decoder's shortCeltMode, used to limit pre-echo on transient frames.
+	shortCeltMode := dsp.NewCELTMode(overlap, overlap, win)
 
 	e := &Encoder{
-		mode:       mode,
-		celtMode:   celtMode,
-		overlap:    make([][]float64, channels),
-		preemphMem: make([]float64, channels),
-		bitrate:    config.Bitrate,
-		complexity: config.Complexity,
-		rateMode:   config.RateMode,
+		mode:          mode,
+		celtMode:      celtMode,
+		shortCeltMode: shortCeltMode,
+		overlap:       make([][]float64, channels),
+		preemphMem:    make([]float64, channels),
+		bitrate:       config.Bitrate,
+		complexity:    config.Complexity,
+		rateMode:      config.RateMode,
 		// libopus opus_custom_encoder_init defaults.
 		tonalAverage: 256,
 		lastSpread:   spreadNormal,
@@ -182,6 +193,10 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	bandE := make([]float64, 2*nbEBands)
 	logE := make([]float64, ch*numBands)
 
+	// Pass 1: pre-emphasis and build the per-channel analysis buffers
+	// [overlap(prev) ‖ preemph(frame)], length frameSize+overlap. This is the
+	// time-domain signal both the transient detector and the forward MDCT read.
+	bufs := make([][]float64, ch)
 	for c := 0; c < ch; c++ {
 		pe := make([]float64, frameSize)
 		mem := e.preemphMem[c]
@@ -201,7 +216,38 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 		buf := make([]float64, frameSize+ov)
 		copy(buf[:ov], e.overlap[c])
 		copy(buf[ov:], pe)
-		coeffs := e.celtMode.CLTMDCTForward(buf)
+		bufs[c] = buf
+	}
+
+	// Transient detection (short MDCT blocks reduce pre-echo on attacks). The
+	// isTransient flag is only coded for LM>0; the bit's budget guard below is
+	// satisfied for every non-degenerate packet (the symbols before it cost only
+	// a couple of bits), so committing to short blocks here cannot desync.
+	isTransient := false
+	if lm > 0 && e.complexity >= 1 {
+		isTransient = transientAnalysis(bufs, frameSize+ov, ch)
+	}
+
+	// Pass 2: forward MDCT (M interleaved short blocks on transients, else one
+	// long block), band energy, and per-band normalisation.
+	nBase := e.mode.NBase
+	for c := 0; c < ch; c++ {
+		buf := bufs[c]
+		var coeffs []float64
+		if isTransient {
+			// M short MDCTs over overlapping NBase windows, interleaved into the
+			// layout the decoder's transient synthesis expects (coeff k+i*M).
+			coeffs = make([]float64, frameSize)
+			for b := 0; b < M; b++ {
+				sub := buf[b*nBase : b*nBase+nBase+ov]
+				sc := e.shortCeltMode.CLTMDCTForward(sub)
+				for i := 0; i < nBase; i++ {
+					coeffs[b+i*M] = sc[i]
+				}
+			}
+		} else {
+			coeffs = e.celtMode.CLTMDCTForward(buf)
+		}
 		copy(e.overlap[c], buf[frameSize:frameSize+ov])
 
 		base := c * frameLen
@@ -337,10 +383,12 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 		enc.EncodeBitLogp(false, 1)
 	}
 
-	// isTransient (logp 3, LM>0) — long blocks only for now.
-	isTransient := false
+	// isTransient (logp 3, LM>0). The decision was made in pass 1 and already
+	// drove the MDCT block size; here we just code it.
 	if lm > 0 && enc.ECTell()+3 <= totalBits {
 		enc.EncodeBitLogp(isTransient, 3)
+	} else {
+		isTransient = false
 	}
 
 	// intra/inter flag for coarse energy.
@@ -456,9 +504,16 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 		pulses, isTransient, spread, dualStereo, intensity, tfRes,
 		totalBitsQ3, balance, lm, codedBands, e.foldSeed, false)
 
-	// Anti-collapse bit (raw) — disabled for now (only reserved on transients).
+	// Anti-collapse bit (raw, reserved only on transients with LM>=2). libopus
+	// enables anti-collapse while the run of consecutive transients is short
+	// (consec_transient < 2); the decoder applies it using the PVQ collapse masks.
+	// consecTransient is read here (pre-update) and advanced at end of frame.
 	if antiCollapseRsv > 0 {
-		enc.EncodeBits(0, 1)
+		antiCollapseOn := uint32(0)
+		if e.consecTransient < 2 {
+			antiCollapseOn = 1
+		}
+		enc.EncodeBits(antiCollapseOn, 1)
 	}
 
 	// Final fine energy — one extra bit per (band,channel) by priority.
@@ -494,6 +549,13 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 		e.prevBandEnergies[idx] = v
 	}
 	e.frameCount++
+	// Advance the consecutive-transient run (libopus updates consec_transient at
+	// end of frame; the anti-collapse decision above used the pre-update value).
+	if isTransient {
+		e.consecTransient++
+	} else {
+		e.consecTransient = 0
+	}
 
 	etr(enc, "final")
 	enc.Flush()
@@ -567,6 +629,8 @@ func (e *Encoder) encodeSilenceFrame(maxTargetBytes int) ([]byte, error) {
 		e.prevBandEnergies[idx] = -28.0
 	}
 	e.frameCount++
+	// A silent frame is non-transient: reset the run.
+	e.consecTransient = 0
 
 	etr(enc, "silence(true)")
 	enc.Flush()
@@ -599,6 +663,7 @@ func (e *Encoder) Reset() {
 	e.frameCount = 0
 	e.tonalAverage = 256
 	e.lastSpread = spreadNormal
+	e.consecTransient = 0
 	e.vbrOffset = 0
 	e.vbrCount = 0
 	e.vbrDriftComp = 0

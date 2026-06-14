@@ -109,6 +109,116 @@ func TestCeltSilenceCBRPaddedSize(t *testing.T) {
 	}
 }
 
+// TestTransientAnalysisDetection checks the transient detector fires on a sharp
+// attack and stays quiet on a steady tone, using the same SIG-domain
+// (overlap‖preemph) buffer layout the encoder builds.
+func TestTransientAnalysisDetection(t *testing.T) {
+	const fs = 960
+	const ov = 120
+	const sr = 48000
+	length := fs + ov
+
+	steady := make([]float64, length)
+	for i := range steady {
+		// 1 kHz tone, pre-emphasised ×32768 domain order of magnitude.
+		steady[i] = 8000 * math.Sin(2*math.Pi*1000*float64(i)/sr)
+	}
+	if transientAnalysis([][]float64{steady}, length, 1) {
+		t.Errorf("steady tone misclassified as transient")
+	}
+
+	attack := make([]float64, length)
+	for i := range attack {
+		if i >= ov+fs/2 {
+			// Sudden onset halfway through the frame.
+			attack[i] = 12000 * math.Sin(2*math.Pi*1000*float64(i)/sr)
+		}
+	}
+	if !transientAnalysis([][]float64{attack}, length, 1) {
+		t.Errorf("sharp attack not detected as transient")
+	}
+}
+
+// TestCeltTransientRoundTrip drives the encoder onto the short-MDCT path with a
+// genuine attack (a loud burst inside an otherwise silent frame) and checks two
+// things: (1) every frame decodes with a matching final range — the short-block
+// bitstream is valid and the self-decoder stays in sync, including across the
+// transient↔steady boundary; (2) short blocks confine the burst's quantization
+// noise in time, so the decoded pre-attack region is markedly quieter than with
+// long blocks (the classic pre-echo reduction).
+func TestCeltTransientRoundTrip(t *testing.T) {
+	const sr = 48000
+	const fs = 960
+	const attackFrame = 4
+	const burst0 = 700 // attack onset within the frame
+
+	gen := func() [][]float64 {
+		var fr [][]float64
+		for f := 0; f < 8; f++ {
+			frame := make([]float64, fs)
+			if f == attackFrame {
+				for i := burst0; i < burst0+160; i++ {
+					n := f*fs + i
+					frame[i] = 0.8 * math.Sin(2*math.Pi*2500*float64(n)/sr)
+				}
+			}
+			fr = append(fr, frame)
+		}
+		return fr
+	}
+
+	// run encodes/decodes the signal at a given complexity (5 = transient
+	// detection on → short blocks; 0 = transient off → long blocks) and returns
+	// the concatenated decoded output. It fails on any final-range mismatch.
+	run := func(complexity int) []float64 {
+		cfg := DefaultEncoderConfig()
+		cfg.Complexity = complexity
+		enc, err := NewEncoder(fs, sr, 1, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dec, err := NewDecoder(fs, sr, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []float64
+		for f, frame := range gen() {
+			pkt, err := enc.Encode(frame)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dout, err := dec.Decode(pkt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if er, dr := enc.FinalRange(), dec.LastFinalRange(); er != dr {
+				t.Fatalf("complexity=%d frame=%d range mismatch: enc=%08x dec=%08x", complexity, f, er, dr)
+			}
+			out = append(out, dout...)
+		}
+		return out
+	}
+
+	// preEcho measures decoded RMS in the silent region before the burst.
+	preEcho := func(out []float64) float64 {
+		base := attackFrame * fs
+		var e float64
+		n := 0
+		for i := base; i < base+burst0-120; i++ {
+			e += out[i] * out[i]
+			n++
+		}
+		return math.Sqrt(e / float64(n))
+	}
+
+	shortPre := preEcho(run(5))
+	longPre := preEcho(run(0))
+	t.Logf("pre-echo RMS before burst: short=%.6f long=%.6f (long/short=%.2fx)", shortPre, longPre, longPre/shortPre)
+	if shortPre >= longPre {
+		t.Errorf("short blocks did not reduce pre-echo: short=%.6f long=%.6f", shortPre, longPre)
+	}
+}
+
 // TestCeltEncodeDecodeFinalRange checks that a self-encoded CELT frame decodes
 // with a matching final range. A mismatch means the encoder and decoder
 // desynced mid-frame (e.g. an asymmetric band-split symbol), which corrupts

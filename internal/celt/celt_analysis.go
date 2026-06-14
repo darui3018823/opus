@@ -24,6 +24,104 @@ const (
 // a band-independent constant, so it rarely affects the chosen boosts.
 const celtLSBDepth = 24
 
+// transientInvTable is libopus' inv_table (6*64/x, trained on real data) used by
+// transient_analysis to accumulate a harmonic-mean energy estimate.
+var transientInvTable = [128]int{
+	255, 255, 156, 110, 86, 70, 59, 51, 45, 40, 37, 33, 31, 28, 26, 25,
+	23, 22, 21, 20, 19, 18, 17, 16, 16, 15, 15, 14, 13, 13, 12, 12,
+	12, 12, 11, 11, 11, 10, 10, 10, 9, 9, 9, 9, 9, 9, 8, 8,
+	8, 8, 8, 7, 7, 7, 7, 7, 7, 6, 6, 6, 6, 6, 6, 6,
+	6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5, 5, 5, 5,
+	5, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+	4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 3, 3,
+	3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2,
+}
+
+// transientAnalysis is the float port of libopus celt_encoder.c transient_analysis
+// (the !FIXED_POINT branch). bufs[c] is the per-channel analysis buffer of length
+// `length` (= frameSize+overlap), holding the pre-emphasised signal (overlap from
+// the previous frame followed by the current frame), identical in layout to
+// libopus' `in`. It returns whether the frame should use short MDCT blocks.
+//
+// The metric is a bitrate-normalised temporal noise-to-mask ratio: a high-pass
+// filter isolates fast energy changes, forward/backward leaky integrators build
+// pre/post-echo masking thresholds, and the harmonic mean of the resulting
+// envelope (via transientInvTable) is compared against the frame energy. A
+// "spiky" envelope (an attack surrounded by quiet) yields a large mask_metric.
+// The absolute signal scale cancels in `norm`, so the ×32768 domain used here
+// matches libopus' threshold. The weak-transient/tone-detection refinements
+// (only used for low-bitrate hybrid) are omitted.
+func transientAnalysis(bufs [][]float64, length, C int) bool {
+	const forwardDecay = 0.0625 // 6.7 dB/ms forward masking (CELT-only path)
+	const epsilon = 1e-15
+	len2 := length / 2
+	maskMetric := 0
+	tmp := make([]float64, length)
+
+	for c := 0; c < C; c++ {
+		in := bufs[c]
+		// High-pass filter: (1 - 2*z^-1 + z^-2) / (1 - z^-1 + .5*z^-2),
+		// expressed with the shortened dependency chain libopus uses in float.
+		var mem0, mem1 float64
+		for i := 0; i < length; i++ {
+			x := in[i]
+			y := mem0 + x
+			mem00 := mem0
+			mem0 = mem0 - x + 0.5*mem1
+			mem1 = x - mem00
+			tmp[i] = y
+		}
+		// First few samples are unreliable (memory not propagated).
+		for i := 0; i < 12 && i < length; i++ {
+			tmp[i] = 0
+		}
+
+		// Forward pass: group by two and build the post-echo threshold.
+		var mean float64
+		mem0 = 0
+		for i := 0; i < len2; i++ {
+			x2 := tmp[2*i]*tmp[2*i] + tmp[2*i+1]*tmp[2*i+1]
+			mean += x2
+			mem0 = x2 + (1.0-forwardDecay)*mem0
+			tmp[i] = forwardDecay * mem0
+		}
+
+		// Backward pass: pre-echo threshold (13.9 dB/ms) and envelope max.
+		mem0 = 0
+		var maxE float64
+		for i := len2 - 1; i >= 0; i-- {
+			mem0 = tmp[i] + 0.875*mem0
+			tmp[i] = 0.125 * mem0
+			if tmp[i] > maxE {
+				maxE = tmp[i]
+			}
+		}
+
+		// Frame energy: geometric mean of the energy and half the max.
+		mean = math.Sqrt(mean * maxE * 0.5 * float64(len2))
+		norm := float64(len2) / (epsilon + mean)
+
+		// Harmonic mean of the envelope, sampling every 4th point.
+		unmask := 0
+		for i := 12; i < len2-5; i += 4 {
+			id := int(math.Floor(64.0 * norm * (tmp[i] + epsilon)))
+			if id < 0 {
+				id = 0
+			}
+			if id > 127 {
+				id = 127
+			}
+			unmask += transientInvTable[id]
+		}
+		// Normalise (1/4 sampling, factor of 6 in the table).
+		unmask = 64 * unmask * 4 / (6 * (len2 - 17))
+		if unmask > maskMetric {
+			maskMetric = unmask
+		}
+	}
+	return maskMetric > 200
+}
+
 // innerProdF returns the dot product of the first n elements of a and b.
 func innerProdF(a, b []float64, n int) float64 {
 	var s float64
@@ -86,7 +184,7 @@ func spreadingDecision(X []float64, frameLen, end, C, M int, average *int, lastD
 	sum = (sum + *average) >> 1
 	*average = sum
 	// Hysteresis toward the previous decision.
-	sum = (3*sum + (((3-lastDecision)<<7)+64) + 2) >> 2
+	sum = (3*sum + (((3 - lastDecision) << 7) + 64) + 2) >> 2
 	switch {
 	case sum < 80:
 		return spreadAggressive

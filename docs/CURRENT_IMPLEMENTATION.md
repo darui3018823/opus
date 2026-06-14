@@ -115,6 +115,36 @@ as CELT-only fullband 20 ms.
   `TestEncoderRoundTripAlignedSNR` thresholds were raised to 24..30 dB.
 - 12/12 official vectors unchanged.
 
+#### Slice 2-5b: Transient Detection + Short-Block MDCT + Anti-Collapse (Complete)
+- **Status:** Complete
+- Added a float port of libopus `transient_analysis` (`internal/celt/celt_analysis.go`,
+  the `!FIXED_POINT` branch): a high-pass filter plus forward/backward leaky
+  masking integrators produce a bitrate-normalised temporal noise-to-mask ratio
+  (`mask_metric`) compared against the same `>200` threshold libopus uses. The
+  signal scale cancels in the metric, so the encoder's ×32768 domain matches the
+  threshold. The weak-transient and tone-detection refinements (low-bitrate
+  hybrid only) are omitted.
+- The CELT encoder now runs detection on the time-domain pre-emphasis buffers
+  before the MDCT. On a detected transient it computes `M = 2^LM` interleaved
+  `NBase`-point forward MDCTs (a new encoder `shortCeltMode`, the analysis
+  counterpart of the decoder's transient synthesis) into the `coeff[b+i*M]`
+  layout the decoder expects, instead of one long block. The `isTransient`
+  symbol is coded as before; `tfEncode` already branches on it.
+- Anti-collapse: the encoder tracks `consec_transient` and codes the
+  anti-collapse bit as `consec_transient < 2` (libopus semantics), read
+  pre-update and advanced at end of frame. The decoder applies anti-collapse
+  using the PVQ collapse masks, unchanged.
+- Verification: `TestTransientAnalysisDetection` (attack vs steady tone),
+  `TestCLTMDCTShortBlockRoundtrip` (dsp short forward/backward pair reconstructs
+  through chained overlap-add, 149 dB), and `TestCeltTransientRoundTrip` (every
+  frame's final range matches across the transient↔steady boundary, and short
+  blocks cut pre-echo ~1.8× vs forced long blocks on an impulse-in-silence).
+- 12/12 official vectors unchanged; steady-sine aligned SNR unchanged (steady
+  tones don't trigger detection).
+- Not yet done (future quality work): real `tf_analysis` (per-band tf_res RDO is
+  still flat 0), the complexity≥8 second long-block MDCT for `bandLogE2`, and
+  intensity/dual-stereo decisions.
+
 Current encoder limitations:
 
 - `application` is stored but does not currently drive SILK/CELT/hybrid mode

@@ -48,7 +48,7 @@ jobs:
           set -euo pipefail
           mkdir -p testdata
           curl -fSL -o /tmp/opus_testvectors.tar.gz \
-            https://opus-codec.org/testvectors/opus_testvectors-rfc8251.tar.gz
+            https://opus-codec.org/docs/opus_testvectors-rfc8251.tar.gz
           tar -xzf /tmp/opus_testvectors.tar.gz -C testdata/
           if [ ! -f testdata/opus_newvectors/testvector01.bit ]; then
             src="$(find testdata -name testvector01.bit | head -n1)"

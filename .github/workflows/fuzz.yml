@@ -25,7 +25,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Full cross product: both target and arch are base dimensions so the
+        # include entries only attach the runner label to each arch.
         target: [FuzzDecode, FuzzDecodeFloat]
+        arch: [amd64, arm64]
         include:
           - arch: amd64
             runner: ubuntu-latest

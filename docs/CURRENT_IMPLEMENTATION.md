@@ -108,9 +108,14 @@ The entropy coder implements libopus-style range encoder/decoder state:
 - decoder-side raw bits from the end of packet via `DecodeBits`
 - Laplace roundtrip helpers
 
-Important caveat: `EncodeBits` currently writes uniform bits through the range
-coder rather than through a true end-of-packet raw-bit buffer. Decoder-side raw
-bit behavior is closer to libopus than encoder-side raw-bit behavior.
+As of the encoder Phase 0 work, `EncodeBits` is a true end-of-packet raw-bit
+writer (ported from libopus `ec_enc_bits`/`ec_enc_done`): raw bits accumulate in
+an end-window and are flushed LSB-first to the tail of the packet, symmetric with
+the decoder's `DecodeBits`. `Bytes()` assembles the forward range bytes, a zeroed
+gap, and the raw tail at the absolute end; it still returns the minimal front
+buffer when no raw bits are used. `Tell()` now counts raw bits (matching
+`ec_tell`'s `nbits_total`). Round-trip guards: `TestEncodeBitsRawRoundtrip` and
+`TestEncodeUintLargeFtRoundtrip` (the `ec_enc_uint` ftb>UintBits split path).
 
 ### `internal/dsp`
 

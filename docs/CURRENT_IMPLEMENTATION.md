@@ -28,6 +28,8 @@ Implemented public entry points:
 - `(*Encoder).SetDTX(enabled bool)` / `(*Encoder).DTX() bool`
 - `(*Encoder).SetPacketPadding(n int)`
 - `(*Encoder).SetApplication(application Application)`
+- `(*Encoder).SetMaxBandwidth(bw int) error`
+- `(*Encoder).SetBandwidth(bw int) error` / `(*Encoder).Bandwidth() int`
 - `(*Encoder).Reset() error`
 
 Accepted sample rates are `8000`, `12000`, `16000`, `24000`, and `48000`.
@@ -35,8 +37,10 @@ Accepted channel counts are mono and stereo.
 
 The top-level encoder always creates an internal CELT encoder at 48 kHz and
 uses a 20 ms internal CELT frame (`960` samples per channel). Non-48 kHz input
-is resampled to 48 kHz before CELT encoding. The emitted TOC byte is generated
-as CELT-only fullband 20 ms.
+is resampled to 48 kHz before CELT encoding. The emitted TOC byte is CELT-only
+20 ms, with the **coded bandwidth selected per the input sample rate, target
+bitrate, and explicit bandwidth settings** (see Slice 2-6 below); it is no longer
+always fullband.
 
 ### Phase 2: Production CELT Encoder (In Progress)
 
@@ -172,6 +176,33 @@ as CELT-only fullband 20 ms.
 - 12/12 official vectors unchanged; `go build/vet/test ./...` green.
 - Not yet done (future quality work): real `tf_analysis` (per-band tf_res RDO is
   still flat 0) and the complexity≥8 second long-block MDCT for `bandLogE2`.
+
+#### Slice 2-6: Bandwidth Selection (Phase 4 lite) (Complete)
+- **Status:** Complete
+- The CELT encoder gained a configurable coded-band count (`(*celt.Encoder).SetEndBand`),
+  so it can code NB (13 bands), WB (17), SWB (19), or FB (21) instead of always
+  fullband. The value must match the band count the decoder derives from the
+  packet's TOC config; `endBand` is a config field, not cleared by `Reset`.
+- The top-level encoder selects the coded bandwidth per frame from the input
+  sample rate's Nyquist limit, a coarse bitrate ceiling, and the explicit
+  bandwidth settings, then sets the CELT end-band and emits the matching TOC
+  config (CELT-only NB/WB/SWB/FB, 20 ms). Selection is config-driven (not
+  signal-driven), so all frames in a multi-frame packet share one config.
+  - Nyquist mapping: 8 kHz → NB, 12/16 kHz → WB (CELT has no medium band, so
+    12 kHz rounds up to WB rather than dropping 4–6 kHz), 24 kHz → SWB, 48 kHz → FB.
+  - Bitrate ceiling (heuristic, conservative; default 64 kbps stays FB):
+    <16 kbps → NB, <28 → WB, <44 → SWB, else FB.
+- New public API: `SetMaxBandwidth(bw)` (caps auto-selection), `SetBandwidth(bw)`
+  (forces a bandwidth, still clamped to Nyquist; `BandwidthAuto` returns to auto),
+  and `Bandwidth()` (reports the current choice). A new `BandwidthAuto` constant
+  was added.
+- Verification: `TestBandwidthSelection` (Nyquist/cap/force/bitrate logic),
+  `TestBandwidthRoundTrip` (each forced bandwidth emits the right config and
+  decodes a 1 kHz tone back: NB 47, WB 45, SWB 40, FB 39 dB aligned SNR),
+  `TestTOCByteMultiRate` (updated: each input rate emits its Nyquist bandwidth),
+  and the libopus cross-check `TestCGOEncodeRefBandwidth` (libopus decodes every
+  bandwidth-limited stream: NB 46.7, WB 44.8, SWB 39.7, FB 39.0 dB).
+- 12/12 official vectors unchanged; `go build/vet/test ./...` green.
 
 Current encoder limitations:
 

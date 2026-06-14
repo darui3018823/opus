@@ -53,6 +53,12 @@ type Encoder struct {
 	complexity int
 	rateMode   RateMode
 	dtx        bool // discontinuous transmission: minimal packets for silence
+	// endBand is the number of coded bands (the CELT "end" band). 0 means full
+	// band (mode.Bands.NumBands). A smaller value limits the coded bandwidth
+	// (NB=13, WB=17, SWB=19, FB=21), matching the decoder's per-config band count.
+	// It is a configuration field, not reset by Reset (libopus keeps end out of
+	// OPUS_RESET_STATE).
+	endBand int
 
 	// Inter-frame coarse-energy predictor state (oldBandE), channel-major
 	// mean-subtracted log2-amplitude. Mirrors the decoder's prevEnergies.
@@ -186,6 +192,9 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	frameSize := e.mode.FrameSize
 	ov := e.mode.Overlap
 	start, end := 0, numBands
+	if e.endBand > 0 && e.endBand < numBands {
+		end = e.endBand
+	}
 	M := 1 << uint(lm)
 	frameLen := M * int(EBands48000[numBands])
 
@@ -726,6 +735,17 @@ func (e *Encoder) SetComplexity(complexity int) {
 // SetRateMode sets the rate control mode.
 func (e *Encoder) SetRateMode(mode RateMode) {
 	e.rateMode = mode
+}
+
+// SetEndBand sets the number of coded bands (the CELT "end" band), limiting the
+// coded bandwidth. Pass 0 (or a value >= the full band count) for full band. The
+// value must match the band count the decoder derives from the packet's TOC
+// config bandwidth (NB=13, WB=17, SWB=19, FB=21).
+func (e *Encoder) SetEndBand(n int) {
+	if n < 0 {
+		n = 0
+	}
+	e.endBand = n
 }
 
 // SetDTX enables or disables discontinuous transmission. When enabled, silent

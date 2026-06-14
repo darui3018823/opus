@@ -34,6 +34,12 @@ type Encoder struct {
 	padBytes   int           // code-3 padding-data bytes to append (0 = none)
 	dtx        bool          // discontinuous transmission: minimal silence packets
 
+	// Bandwidth control (CELT-only path). maxBandwidth caps the automatic
+	// selection; forcedBandwidth pins an exact bandwidth (BandwidthAuto means
+	// automatic). Both use the public Bandwidth* constants.
+	maxBandwidth    int
+	forcedBandwidth int
+
 	// Internal 48kHz frame size (always 960 for 20ms)
 	internalFrameSize int
 }
@@ -83,6 +89,8 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		complexity:        5,               // Default complexity
 		rateMode:          celt.RateModeCBR, // Default CBR (backward compatible)
 		frameSize:         frameSize,
+		maxBandwidth:      BandwidthFullband,
+		forcedBandwidth:   BandwidthAuto,
 		internalFrameSize: internalFrameSize,
 	}
 
@@ -144,10 +152,15 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 // (RFC 6716 §3.2, count codes 1/2/3). Otherwise a single-frame (code 0) packet
 // is produced.
 func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
-	// Generate the base TOC byte (CELT-only fullband 20 ms). The per-frame
-	// duration is always 20 ms; multi-frame packets express longer durations
-	// via the count code rather than a different config.
-	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, framing.BandwidthFullband, e.channels, framing.FrameSize20ms)
+	// Select the coded bandwidth (NB/WB/SWB/FB) and limit the CELT encoder's
+	// coded bands to match, then generate the base TOC byte for that bandwidth.
+	// The per-frame duration is always 20 ms; multi-frame packets express longer
+	// durations via the count code rather than a different config. Selection is
+	// config-driven (sample rate, bitrate, explicit settings), not signal-driven,
+	// so every frame in a packet shares the same bandwidth/config.
+	bw := e.selectCeltBandwidth()
+	e.celtEncoder.SetEndBand(celtEndBandForFramingBW(bw))
+	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, bw, e.channels, framing.FrameSize20ms)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate TOC: %w", err)
 	}
@@ -307,6 +320,151 @@ func (e *Encoder) DTX() bool { return e.dtx }
 // SetApplication changes the application mode
 func (e *Encoder) SetApplication(application Application) {
 	e.application = application
+}
+
+// SetMaxBandwidth caps the automatically selected coded bandwidth. bw must be one
+// of the public Bandwidth* constants (Narrowband..Fullband). The encoder never
+// exceeds this cap, nor the input sample rate's Nyquist limit. The default is
+// BandwidthFullband (no extra cap). Has no effect when an explicit bandwidth is
+// forced via SetBandwidth.
+func (e *Encoder) SetMaxBandwidth(bw int) error {
+	if !isValidBandwidth(bw) {
+		return fmt.Errorf("invalid bandwidth: %d", bw)
+	}
+	e.maxBandwidth = bw
+	return nil
+}
+
+// SetBandwidth forces a specific coded bandwidth, overriding the automatic
+// selection (it is still clamped to the input sample rate's Nyquist limit). Pass
+// BandwidthAuto to return to automatic selection (the default). bw must be
+// BandwidthAuto or one of the public Bandwidth* constants. CELT has no
+// medium-band mode, so BandwidthMediumband is rounded up to BandwidthWideband.
+func (e *Encoder) SetBandwidth(bw int) error {
+	if bw != BandwidthAuto && !isValidBandwidth(bw) {
+		return fmt.Errorf("invalid bandwidth: %d", bw)
+	}
+	e.forcedBandwidth = bw
+	return nil
+}
+
+// Bandwidth reports the coded bandwidth the encoder would currently use, as a
+// public Bandwidth* constant.
+func (e *Encoder) Bandwidth() int {
+	return celtFramingBWToPublic(e.selectCeltBandwidth())
+}
+
+// isValidBandwidth reports whether bw is one of the public Bandwidth* constants.
+func isValidBandwidth(bw int) bool {
+	switch bw {
+	case BandwidthNarrowband, BandwidthMediumband, BandwidthWideband,
+		BandwidthSuperWideband, BandwidthFullband:
+		return true
+	}
+	return false
+}
+
+// selectCeltBandwidth chooses the coded bandwidth (an internal framing.Bandwidth*
+// value: NB/WB/SWB/FB) for the CELT-only path. It starts from the input sample
+// rate's Nyquist limit, then applies either the forced bandwidth (clamped to
+// Nyquist) or, for automatic selection, the max-bandwidth cap and a coarse
+// bitrate-based reduction. Narrower bandwidths avoid spending bits on frequency
+// bands the source rate or bitrate cannot meaningfully support.
+func (e *Encoder) selectCeltBandwidth() int {
+	nyq := nyquistCeltBandwidth(e.sampleRate)
+	if e.forcedBandwidth != BandwidthAuto {
+		bw := publicToCeltFramingBW(e.forcedBandwidth)
+		if bw > nyq {
+			bw = nyq
+		}
+		return bw
+	}
+	bw := nyq
+	if cap := publicToCeltFramingBW(e.maxBandwidth); cap < bw {
+		bw = cap
+	}
+	if br := bitrateCeltBandwidth(e.bitrate); br < bw {
+		bw = br
+	}
+	return bw
+}
+
+// nyquistCeltBandwidth returns the widest CELT bandwidth supported by an input
+// sample rate's Nyquist limit. CELT has no medium-band mode, so 12 kHz input
+// (6 kHz Nyquist) maps to wideband rather than dropping the 4–6 kHz range.
+func nyquistCeltBandwidth(sampleRate int) int {
+	switch sampleRate {
+	case 8000:
+		return framing.BandwidthNarrowband
+	case 12000, 16000:
+		return framing.BandwidthWideband
+	case 24000:
+		return framing.BandwidthSuperwideband
+	default: // 48000
+		return framing.BandwidthFullband
+	}
+}
+
+// bitrateCeltBandwidth returns a coarse bandwidth ceiling for a target bitrate so
+// that low bitrates do not waste bits on high-frequency bands. The thresholds are
+// heuristic and conservative (the default 64 kbps stays fullband); the decoder
+// reconstructs whatever bandwidth is signalled, so these only shape quality.
+func bitrateCeltBandwidth(bitrate int) int {
+	switch {
+	case bitrate < 16000:
+		return framing.BandwidthNarrowband
+	case bitrate < 28000:
+		return framing.BandwidthWideband
+	case bitrate < 44000:
+		return framing.BandwidthSuperwideband
+	default:
+		return framing.BandwidthFullband
+	}
+}
+
+// publicToCeltFramingBW maps a public Bandwidth* constant to the internal framing
+// bandwidth used for CELT. Medium-band is rounded up to wideband (CELT has no MB).
+func publicToCeltFramingBW(pub int) int {
+	switch pub {
+	case BandwidthNarrowband:
+		return framing.BandwidthNarrowband
+	case BandwidthMediumband, BandwidthWideband:
+		return framing.BandwidthWideband
+	case BandwidthSuperWideband:
+		return framing.BandwidthSuperwideband
+	default: // BandwidthFullband
+		return framing.BandwidthFullband
+	}
+}
+
+// celtFramingBWToPublic is the inverse of publicToCeltFramingBW for the framing
+// bandwidths CELT uses (NB/WB/SWB/FB).
+func celtFramingBWToPublic(bw int) int {
+	switch bw {
+	case framing.BandwidthNarrowband:
+		return BandwidthNarrowband
+	case framing.BandwidthWideband:
+		return BandwidthWideband
+	case framing.BandwidthSuperwideband:
+		return BandwidthSuperWideband
+	default:
+		return BandwidthFullband
+	}
+}
+
+// celtEndBandForFramingBW maps an internal framing bandwidth to the CELT "end"
+// band count the encoder and decoder must agree on for that bandwidth.
+func celtEndBandForFramingBW(bw int) int {
+	switch bw {
+	case framing.BandwidthNarrowband:
+		return 13
+	case framing.BandwidthWideband:
+		return 17
+	case framing.BandwidthSuperwideband:
+		return 19
+	default: // fullband
+		return 21
+	}
 }
 
 // Reset resets the encoder state

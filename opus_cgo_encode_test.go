@@ -149,6 +149,74 @@ func TestCGOEncodeRef(t *testing.T) {
 	}
 }
 
+// TestCGOEncodeRefBandwidth cross-validates the bandwidth-limited CELT path: it
+// forces each coded bandwidth (NB/WB/SWB/FB), encodes a low-frequency tone (well
+// within NB), and confirms libopus decodes the narrowed stream back to the tone.
+// This proves the reduced CELT end-band produces standard-compliant packets, not
+// streams only our own decoder accepts.
+func TestCGOEncodeRefBandwidth(t *testing.T) {
+	t.Logf("libopus version: %s", cgoref.Version())
+
+	const sampleRate = 48000
+	const frameSize = 960
+	const nFrames = 16
+	const maxSPC = 5760
+
+	cases := []struct {
+		name string
+		bw   int
+	}{
+		{"NB", opus.BandwidthNarrowband},
+		{"WB", opus.BandwidthWideband},
+		{"SWB", opus.BandwidthSuperWideband},
+		{"FB", opus.BandwidthFullband},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			enc, err := opus.NewEncoder(sampleRate, 1, opus.ApplicationAudio)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBandwidth(tc.bw); err != nil {
+				t.Fatalf("SetBandwidth: %v", err)
+			}
+			ref, err := cgoref.NewDecoder(sampleRate, 1)
+			if err != nil {
+				t.Fatalf("cgoref.NewDecoder: %v", err)
+			}
+			defer ref.Close()
+
+			var in, out []float64
+			for f := 0; f < nFrames; f++ {
+				frame := make([]float64, frameSize)
+				for i := 0; i < frameSize; i++ {
+					frame[i] = 0.5 * math.Sin(2*math.Pi*1000*float64(f*frameSize+i)/sampleRate)
+				}
+				pkt, err := enc.EncodeFloat(frame, frameSize)
+				if err != nil {
+					t.Fatalf("frame %d: EncodeFloat: %v", f, err)
+				}
+				refOut, err := ref.DecodeFloat(pkt, maxSPC)
+				if err != nil {
+					t.Fatalf("frame %d: libopus decode (%s stream non-conformant): %v", f, tc.name, err)
+				}
+				in = append(in, frame...)
+				for _, v := range refOut {
+					out = append(out, float64(v))
+				}
+			}
+
+			snr, delay, scale := alignedSNR(in, out, 1, frameSize)
+			t.Logf("%s: libopus-decoded 1kHz alignedSNR=%.2fdB delay=%d scale=%.4f", tc.name, snr, delay, scale)
+			if snr < 20 {
+				t.Errorf("%s: libopus-decoded aligned SNR %.2fdB below 20dB", tc.name, snr)
+			}
+		})
+	}
+}
+
 // TestCGOEncodeRefSilence checks that a silent input encoded by our encoder
 // decodes to (near) silence in libopus — i.e. the silence/DTX path produces a
 // conformant packet, not garbage that a reference decoder turns into noise.

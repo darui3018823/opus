@@ -1,65 +1,46 @@
 # Pure Go Opus Codec
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/darui3018823/opus.svg)](https://pkg.go.dev/github.com/darui3018823/opus)
-[![Go Report Card](https://goreportcard.com/badge/github.com/darui3018823/opus)](https://goreportcard.com/report/github.com/darui3018823/opus)
+[![Test](https://github.com/darui3018823/opus/actions/workflows/test.yml/badge.svg)](https://github.com/darui3018823/opus/actions/workflows/test.yml)
+[![Race](https://github.com/darui3018823/opus/actions/workflows/race.yml/badge.svg)](https://github.com/darui3018823/opus/actions/workflows/race.yml)
+[![Fuzz](https://github.com/darui3018823/opus/actions/workflows/fuzz.yml/badge.svg)](https://github.com/darui3018823/opus/actions/workflows/fuzz.yml)
 [![License](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)](LICENSE)
 
 [日本語](README_ja.md) | English
 
-A complete, production-ready implementation of the Opus audio codec in Pure Go. Zero CGO dependencies, 100% RFC 6716 compliant, and achieving 85% of libopus performance.
+A pure-Go implementation of the [Opus audio codec](https://opus-codec.org/)
+(RFC 6716 / RFC 8251) with **no runtime CGO dependency**. The **decoder** passes
+all 12 official RFC 8251 test vectors (RMSE < 0.001) and matches the libopus
+1.6.1 reference frame-by-frame. The **encoder** is still a simplified CELT-only
+path and is not yet bit-exact — see [Status](#status).
 
-## Features
+> Honesty note: this project is decoder-complete and encoder-in-progress. It is
+> suitable for decoding real Opus streams in Go; it is **not** yet a drop-in
+> bit-exact replacement for libopus on the encode side.
 
-- ✅ **Pure Go**: No CGO dependencies, works on any platform Go supports
-- ✅ **Complete Implementation (in progress)**: CELT and SILK with hybrid mode; Opus 1.3.1 parity tracked in IMPLEMENTATION_STATUS.md
-- ✅ **RFC 6716 / Opus 1.3.1**: Compliance work tracked with official test-vector harness (see IMPLEMENTATION_STATUS.md)
-- ✅ **High Performance**: 85% of libopus speed with 60% fewer allocations
-- ✅ **Production Ready**: 100M+ fuzz inputs tested, zero crashes
-- ✅ **Well Tested**: Growing coverage with official vectors and fuzzing harnesses
-- ✅ **Comprehensive API**: Compatible with layeh.com/gopus interface
+## Status
 
-## Quick Start
+| Area | State |
+|------|-------|
+| **Decoder** | ✅ Passes all 12 official RFC 8251 vectors (RMSE < 0.001); matches libopus 1.6.1 reference. SILK, CELT, and hybrid (SILK+CELT) modes are reconstructed, including hybrid SILK→CELT redundancy. |
+| **Encoder** | 🚧 Simplified CELT-only, fullband, 20 ms packets. Functional but **not** bit-exact against libopus. `application`/VBR settings are stored but do not yet drive full mode selection. |
+| **CGO** | None at runtime. A libopus wrapper exists only for reference tests, behind the `opusref` build tag. |
+| **CI** | `test`, `race`, `bench`, and `fuzz` workflows run on **amd64 and arm64**. |
 
-### Installation
+See [docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md) for the
+authoritative, code-derived snapshot.
+
+## Installation
 
 ```bash
 go get github.com/darui3018823/opus
 ```
 
-### Encoding Audio
+Requires Go 1.24 or newer (see `go.mod`).
 
-```go
-package main
+## Usage
 
-import (
-    "github.com/darui3018823/opus"
-)
-
-func main() {
-    // Create encoder for 48kHz stereo audio
-    enc, err := opus.NewEncoder(48000, 2, opus.ApplicationAudio)
-    if err != nil {
-        log.Fatalf("Failed to create encoder: %v", err)
-    }
-    
-    // Configure encoder
-    enc.SetBitrate(128000)     // 128 kbps
-    enc.SetComplexity(10)      // Maximum quality
-    
-    // Encode 20ms frame (960 samples per channel at 48kHz)
-    pcm := make([]int16, 960*2) // Interleaved stereo
-    // ... fill pcm with audio data ...
-    
-    compressed, err := enc.Encode(pcm, 960)
-    if err != nil {
-        panic(err)
-    }
-    
-    // compressed contains Opus packet
-}
-```
-
-### Decoding Audio
+### Decoding (int16)
 
 ```go
 package main
@@ -71,204 +52,221 @@ import (
 )
 
 func main() {
-	// Create decoder for 48kHz stereo audio
+	// 48 kHz, stereo.
 	dec, err := opus.NewDecoder(48000, 2)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Assuming 'compressed' contains a valid Opus packet from previous example
-	// In a real app, this would come from a network source or file
-	// compressed := ... 
+	// packet is one Opus packet (e.g. read from a file or the network).
+	var packet []byte
 
-	// Decode Opus packet
-	decoded := make([]int16, 960*2) // Buffer for decoded PCM
-	n, err := dec.Decode(compressed, decoded)
+	// Buffer for the decoded PCM. 120 ms at 48 kHz (the largest Opus frame)
+	// is 5760 samples per channel; size generously for the frames you expect.
+	pcm := make([]int16, 5760*2)
+
+	n, err := dec.Decode(packet, pcm)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	// decoded[:n*2] contains interleaved stereo PCM
-
-	// Packet loss concealment (for lost packets)
-	n, err = dec.DecodePLC(decoded, 960)
-	if err != nil {
-		log.Fatal(err)
-	}
+	// pcm[:n*2] now holds interleaved stereo samples (n samples per channel).
+	_ = n
 }
 ```
 
-### Using Float32 PCM
+### Decoding (float64)
 
 ```go
-// Encoding with float32
-pcmFloat := make([]float32, 960*2)
-compressed, err := enc.EncodeFloat32(pcmFloat, 960)
+// DecodeFloat returns a freshly allocated, interleaved []float64.
+samples, err := dec.DecodeFloat(packet)
+if err != nil {
+	log.Fatal(err)
+}
+_ = samples
+```
 
-// Decoding to float32
-decodedFloat := make([]float32, 960*2)
-n, err := dec.DecodeFloat32(compressed, decodedFloat)
+### Encoding
+
+> The encoder currently emits CELT-only fullband 20 ms packets and is not
+> bit-exact with libopus. Use it for round-trip/experimentation, not for
+> interoperability-critical encoding yet.
+
+```go
+enc, err := opus.NewEncoder(48000, 2, opus.ApplicationAudio)
+if err != nil {
+	log.Fatal(err)
+}
+enc.SetBitrate(128000)
+enc.SetComplexity(10)
+
+// 20 ms frame = 960 samples per channel at 48 kHz, interleaved stereo.
+pcm := make([]int16, 960*2)
+// ... fill pcm ...
+
+packet, err := enc.Encode(pcm, 960)
+if err != nil {
+	log.Fatal(err)
+}
+_ = packet
+
+// Float64 input is also supported:
+//   packet, err := enc.EncodeFloat(make([]float64, 960*2), 960)
 ```
 
 ## Supported Configurations
 
-### Sample Rates
-- 8 kHz (narrowband)
-- 12 kHz (mediumband)
-- 16 kHz (wideband)
-- 24 kHz (super-wideband)
-- 48 kHz (fullband)
+- **Sample rates**: 8 kHz, 12 kHz, 16 kHz, 24 kHz, 48 kHz. Non-48 kHz input to
+  the encoder is resampled to 48 kHz internally; the decoder resamples its
+  output to the requested rate.
+- **Channels**: mono and stereo.
+- **Decoder frame sizes**: all Opus durations (2.5/5/10/20/40/60 ms), selected
+  per packet by the TOC byte.
+- **Encoder frame size**: 20 ms (960 samples per channel at 48 kHz).
+- **Application types** (stored by the encoder; full mode selection is WIP):
+  - `opus.ApplicationVOIP`
+  - `opus.ApplicationAudio`
+  - `opus.ApplicationRestrictedLowDelay`
 
-### Frame Sizes
-- 2.5ms, 5ms, 10ms, 20ms (recommended), 40ms, 60ms
-
-### Bitrates
-- 6 kbps to 510 kbps
-- Automatic mode selection based on sample rate and application type
-
-### Channels
-- Mono (1 channel)
-- Stereo (2 channels)
-
-### Application Types
-- `ApplicationVOIP`: Optimized for voice (uses SILK for narrowband/wideband)
-- `ApplicationAudio`: Optimized for music (prefers CELT)
-- `ApplicationLowDelay`: Low-latency mode (CELT only)
-
-## Performance
-
-Performance comparison with libopus (on 20ms frames):
-
-| Component                | libopus | opus-go | Performance Ratio |
-|--------------------------|---------|---------|-------------------|
-| CELT Encode (48kHz mono) | 230µs   | 195µs   | **85%**           |
-| CELT Decode (48kHz mono) | 165µs   | 140µs   | **85%**           |
-| SILK Encode (8kHz mono)  | 195µs   | 165µs   | **85%**           |
-| SILK Decode (8kHz mono)  | 145µs   | 125µs   | **86%**           |
-
-**Memory efficiency**: 60% fewer allocations through buffer pooling and optimization.
-
-## Architecture
-
-```
-github.com/darui3018823/opus/
-├── opus.go              # Public API (encoder/decoder)
-├── internal/
-│   ├── dsp/            # FFT, MDCT, windows, math utilities
-│   ├── entcode/        # Range encoder/decoder
-│   ├── resampler/      # Polyphase sample rate conversion
-│   ├── celt/           # CELT codec (48kHz, music/general audio)
-│   └── silk/           # SILK codec (8-24kHz, speech)
-├── docs/               # Comprehensive documentation
-└── test/              # Validation suite (test vectors, compliance, fuzzing)
-```
-
-## Validation & Quality
-
-### RFC 6716 Compliance
-- ✅ 100% specification compliant
-- ✅ All 30 official test vectors passing
-- ✅ All TOC configurations tested
-- ✅ All frame sizes and sample rates validated
-
-### Robustness Testing
-- ✅ 24+ hours continuous fuzzing
-- ✅ 100M+ inputs per target (encoder, decoder, packet parser)
-- ✅ Zero crashes found
-- ✅ All error paths exercised
-
-### Quality Metrics
-- SNR (Speech @ 64kbps): 32.8 dB (target: >30 dB) ✅
-- SNR (Music @ 128kbps): 38.5 dB (target: >35 dB) ✅
-- Bitrate accuracy: ±2.5% ✅
-- Encode latency: 205µs/frame ✅
-- Decode latency: 135µs/frame ✅
-
-## Documentation
-
-- **[CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md)**: Code-derived snapshot of the current API, internals, tests, and known gaps
-- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**: Detailed design decisions and libopus analysis
-- **[ROADMAP.md](docs/ROADMAP.md)**: Development phases and milestones
-- **[DEVELOPER.md](docs/DEVELOPER.md)**: Code style, porting guidance, profiling tips
-- **[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)**: Spec gap list, priorities, compliance/test plan
-
-## API Reference
+## Public API
 
 ### Encoder
 
 ```go
-// Create encoder
-NewEncoder(sampleRate, channels int, application Application) (*Encoder, error)
+func NewEncoder(sampleRate, channels int, application Application) (*Encoder, error)
 
-// Configure encoder
-(*Encoder).SetBitrate(bitrate int) error        // 6000-510000 bps
-(*Encoder).SetComplexity(complexity int) error  // 0-10
-(*Encoder).SetVBR(vbr bool) error              // Variable bitrate
+func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error)
+func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error)
 
-// Encode audio
-(*Encoder).Encode(pcm []int16, frameSize int) ([]byte, error)
-(*Encoder).EncodeFloat32(pcm []float32, frameSize int) ([]byte, error)
-
-// Reset state
-(*Encoder).Reset() error
+func (e *Encoder) SetBitrate(bitrate int) error      // 6000–510000 bps
+func (e *Encoder) SetComplexity(complexity int) error // 0–10
+func (e *Encoder) SetVBR(vbr bool)
+func (e *Encoder) SetApplication(application Application)
+func (e *Encoder) Reset() error
 ```
 
 ### Decoder
 
 ```go
-// Create decoder
-NewDecoder(sampleRate, channels int) (*Decoder, error)
+func NewDecoder(sampleRate, channels int) (*Decoder, error)
 
-// Decode audio
-(*Decoder).Decode(data []byte, pcm []int16) (int, error)
-(*Decoder).DecodeFloat32(data []byte, pcm []float32) (int, error)
-
-// Packet loss concealment
-(*Decoder).DecodePLC(pcm []int16, frameSize int) (int, error)
-
-// Reset state
-(*Decoder).Reset() error
+func (d *Decoder) Decode(data []byte, pcm []int16) (int, error)
+func (d *Decoder) DecodeFloat(data []byte) ([]float64, error)
+func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) // currently a CELT PLC fallback
+func (d *Decoder) Reset() error
+func (d *Decoder) GetLastPacketDuration() int
 ```
 
-## Testing
+There is intentionally **no** `EncodeFloat32`, `DecodeFloat32`, or
+`DecodePLC(pcm, frameSize)` API. Use the float64 variants above.
 
-Run the full test suite:
+## Architecture
+
+```
+github.com/darui3018823/opus/
+├── opus.go / constants.go / errors.go  # Public API (Encoder/Decoder)
+├── internal/
+│   ├── opus_framing.go                  # TOC byte parsing/generation (RFC 6716 §3)
+│   ├── dsp/                             # FFT, MDCT/IMDCT, windows, math
+│   ├── entcode/                         # Range encoder/decoder
+│   ├── resampler/                       # Opus-rate sample rate conversion
+│   ├── celt/                            # CELT decoder parity + simplified encoder
+│   ├── silk/                            # SILK decoder/encoder, tables, helpers
+│   └── cgoref/                          # libopus reference wrapper (build tag: opusref)
+└── docs/                                # Design and status documentation
+```
+
+**Decoding flow**: Opus packet → TOC parsed → CELT or SILK/hybrid path → range
+decoder + reconstruction → optional resample/channel adjust → PCM.
+
+**Encoding flow**: PCM → optional resample to 48 kHz → CELT encoder (MDCT, band
+processing, PVQ) → range coder → TOC prepended → Opus packet.
+
+## Building & Testing
 
 ```bash
-go test ./...
+go build ./...
+go vet ./...
+go test ./...                 # library packages + official vectors (when present)
+go test -race ./...
+go test -bench=. -benchmem -run='^$' ./...
 ```
 
-Run with coverage:
+Official RFC 8251 test vectors are **not** committed (`testdata/` is
+git-ignored). Tests that need them call `t.Skip` when they are absent. To run
+them locally, download and extract the vectors so they land in
+`testdata/opus_newvectors/`:
 
 ```bash
-go test -cover ./...
+curl -fSL -o /tmp/v.tar.gz https://opus-codec.org/docs/opus_testvectors-rfc8251.tar.gz
+mkdir -p testdata && tar -xzf /tmp/v.tar.gz -C testdata/
+go test -run TestOfficialVectors ./...
 ```
 
-Run benchmarks:
+### libopus reference comparison (optional)
+
+The `TestCGORef` test decodes every vector with both this codec and libopus and
+compares them frame-by-frame. It requires a C toolchain plus libopus and is
+gated behind the `opusref` build tag (so normal builds stay CGO-free):
 
 ```bash
-go test -bench=. ./...
+go test -tags opusref -run TestCGORef .
 ```
+
+On Windows, run CGO builds from PowerShell with a working MinGW/MSYS2 toolchain.
+
+### Fuzzing
+
+```bash
+go test -run='^$' -fuzz='^FuzzDecode$' -fuzztime=60s .
+```
+
+`FuzzDecode` and `FuzzDecodeFloat` assert that the decoder never panics on
+arbitrary input. The `fuzz` CI workflow runs them nightly and on demand.
+
+## Continuous Integration
+
+Four GitHub Actions workflows, each running on a matrix of **amd64
+(`ubuntu-latest`)** and **arm64 (`ubuntu-24.04-arm`)**:
+
+- **`test.yml`** — `go vet`, `go test ./...`, and the official RFC 8251 vectors.
+- **`race.yml`** — `go test -race ./...`.
+- **`bench.yml`** — `go test -bench=. -benchmem`, uploading results as artifacts.
+- **`fuzz.yml`** — nightly + manual `go test -fuzz` per target.
+
+## Documentation
+
+- **[docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md)** — code-derived snapshot of the API, internals, tests, and known gaps (authoritative).
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — design decisions and libopus analysis.
+- **[docs/ROADMAP.md](docs/ROADMAP.md)** — development phases and milestones.
+- **[docs/DEVELOPER.md](docs/DEVELOPER.md)** — code style, porting guidance, profiling tips.
+- **[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)** — spec gap list and compliance/test plan.
+
+## Limitations
+
+- The encoder is simplified CELT-only and not bit-exact; there is no SILK-only
+  or hybrid encoder path.
+- `DecodeFEC` is currently a PLC fallback, not packet FEC extraction.
+- No multistream, surround, or Ogg Opus container API.
+- `application`, VBR, and some CTL-style settings are stored but not yet wired to
+  full libopus-compatible behavior.
 
 ## Contributing
 
-Contributions are welcome! Please ensure:
+Before opening a PR, please ensure:
 
-1. All tests pass: `go test ./...`
-2. Code is formatted: `go fmt ./...`
-3. No new lint warnings: `go vet ./...`
-4. Add tests for new functionality
+1. `go build ./...`, `go vet ./...`, and `go test ./...` pass.
+2. Code is formatted (`gofmt`).
+3. New behavior is covered by tests.
 
 ## License
 
-BSD 2-Clause License - see [LICENSE](LICENSE) file for details.
+BSD 2-Clause License — see [LICENSE](LICENSE).
 
 ## Acknowledgments
 
-- **libopus**: Reference implementation by Xiph.Org Foundation
-- **RFC 6716**: Definition of the Opus Audio Codec
-- **Go team**: For excellent language and tooling
+- **[libopus](https://github.com/xiph/opus)** — reference implementation by the Xiph.Org Foundation.
+- **[RFC 6716](https://datatracker.ietf.org/doc/html/rfc6716)** / **[RFC 8251](https://datatracker.ietf.org/doc/html/rfc8251)** — the Opus specification and its updates.
 
 ## Support
 
-For issues, questions, or contributions, please use the [GitHub issue tracker](https://github.com/darui3018823/opus/issues).
+For issues and questions, please use the [GitHub issue tracker](https://github.com/darui3018823/opus/issues).

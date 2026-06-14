@@ -1,274 +1,271 @@
 # Pure Go Opus コーデック
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/darui3018823/opus.svg)](https://pkg.go.dev/github.com/darui3018823/opus)
-[![Go Report Card](https://goreportcard.com/badge/github.com/darui3018823/opus)](https://goreportcard.com/report/github.com/darui3018823/opus)
+[![Test](https://github.com/darui3018823/opus/actions/workflows/test.yml/badge.svg)](https://github.com/darui3018823/opus/actions/workflows/test.yml)
+[![Race](https://github.com/darui3018823/opus/actions/workflows/race.yml/badge.svg)](https://github.com/darui3018823/opus/actions/workflows/race.yml)
+[![Fuzz](https://github.com/darui3018823/opus/actions/workflows/fuzz.yml/badge.svg)](https://github.com/darui3018823/opus/actions/workflows/fuzz.yml)
 [![License](https://img.shields.io/badge/license-BSD--2--Clause-blue.svg)](LICENSE)
 
 日本語 | [English](README.md)
 
-Pure Goで実装された、本番環境対応の完全なOpusオーディオコーデック。CGO依存なし、RFC 6716 100%準拠、libopusの85%のパフォーマンスを達成。
+[Opus オーディオコーデック](https://opus-codec.org/)（RFC 6716 / RFC 8251）の
+**ランタイム CGO 依存なし**の Pure Go 実装です。**デコーダー**は公式 RFC 8251
+テストベクター 12 個すべてに合格し（RMSE < 0.001）、libopus 1.6.1 リファレンスと
+フレーム単位で一致します。**エンコーダー**はまだ簡易な CELT-only 実装で、
+ビット精度一致には未到達です（[ステータス](#ステータス)参照）。
 
-## 特徴
+> 補足: 本プロジェクトは「デコーダー完成・エンコーダー開発中」です。Go から実際の
+> Opus ストリームをデコードする用途に適していますが、エンコード側は libopus の
+> ビット精度ドロップイン代替には**まだなっていません**。
 
-- ✅ **Pure Go**: CGO依存なし、Goがサポートするあらゆるプラットフォームで動作
-- ✅ **完全実装**: CELT・SILKコーデック完備、ハイブリッドモード対応
-- ✅ **RFC 6716準拠**: 100%仕様準拠、公式テストベクター30個全て合格
-- ✅ **高性能**: libopusの85%の速度、メモリアロケーション60%削減
-- ✅ **本番環境対応**: 1億回以上のファジングテスト、クラッシュゼロ
-- ✅ **高品質テスト**: 99%テストカバレッジ（142/144テスト合格）
-- ✅ **包括的API**: layeh.com/gopusインターフェース互換
+## ステータス
 
-## クイックスタート
+| 領域 | 状態 |
+|------|------|
+| **デコーダー** | ✅ 公式 RFC 8251 ベクター 12/12 合格（RMSE < 0.001）。libopus 1.6.1 と一致。SILK / CELT / ハイブリッド（SILK+CELT）を再構成済み（ハイブリッド SILK→CELT redundancy 含む）。 |
+| **エンコーダー** | 🚧 簡易 CELT-only・フルバンド・20ms パケット。動作はするが libopus とビット精度一致**ではない**。`application`/VBR は保持するがフルなモード選択は未連動。 |
+| **CGO** | ランタイム依存なし。libopus ラッパーは参照テスト専用で `opusref` ビルドタグ下にのみ存在。 |
+| **CI** | `test` / `race` / `bench` / `fuzz` を **amd64・arm64** で実行。 |
 
-### インストール
+正確な現状は [docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md)
+（コードから導出したスナップショット）を参照してください。
+
+## インストール
 
 ```bash
 go get github.com/darui3018823/opus
 ```
 
-### 音声のエンコード
+Go 1.24 以降が必要です（`go.mod` 参照）。
+
+## 使い方
+
+### デコード（int16）
 
 ```go
 package main
 
 import (
-    "github.com/darui3018823/opus"
+	"log"
+
+	"github.com/darui3018823/opus"
 )
 
 func main() {
-    // 48kHzステレオ用のエンコーダーを作成
-    enc, err := opus.NewEncoder(48000, 2, opus.ApplicationAudio)
-    if err != nil {
-        log.Fatalf("エンコーダーの作成に失敗しました: %v", err)
-    }
-    
-    // エンコーダーの設定
-    enc.SetBitrate(128000)     // 128 kbps
-    enc.SetComplexity(10)      // 最高品質
-    
-    // 20msフレームをエンコード（48kHzで1チャンネルあたり960サンプル）
-    pcm := make([]int16, 960*2) // インターリーブされたステレオ
-    // ... pcmに音声データを格納 ...
-    
-    compressed, err := enc.Encode(pcm, 960)
-    if err != nil {
-        panic(err)
-    }
-    
-    // compressedにOpusパケットが格納される
+	// 48kHz・ステレオ
+	dec, err := opus.NewDecoder(48000, 2)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// packet は 1 つの Opus パケット（ファイルやネットワークから取得）
+	var packet []byte
+
+	// デコード先 PCM バッファ。48kHz における最大フレーム 120ms は
+	// 1 チャンネルあたり 5760 サンプル。想定フレームに応じて余裕を持たせる。
+	pcm := make([]int16, 5760*2)
+
+	n, err := dec.Decode(packet, pcm)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// pcm[:n*2] にインターリーブされたステレオ（1ch あたり n サンプル）が入る。
+	_ = n
 }
 ```
 
-### 音声のデコード
+### デコード（float64）
 
 ```go
-package main
-
-import (
-    "log"
-
-    "github.com/darui3018823/opus"
-)
-
-func main() {
-    // 48kHzステレオ用のデコーダーを作成
-    dec, err := opus.NewDecoder(48000, 2)
-    if err != nil {
-        log.Fatal(err)
-    }
-    
-    // 変数 compressed に有効なOpusパケットが格納されていると仮定
-    // 実際のアプリケーションでは、ネットワークやファイルから取得します
-    // compressed := ...
-
-    // Opusパケットをデコード
-    decoded := make([]int16, 960*2) // デコードされたPCM用のバッファ
-    n, err := dec.Decode(compressed, decoded)
-    if err != nil {
-        log.Fatal(err)
-    }
-    
-    // decoded[:n*2]にインターリーブされたステレオPCMが格納される
-    
-    // パケットロス隠蔽（パケット損失時用）
-    n, err = dec.DecodePLC(decoded, 960)
-    if err != nil {
-        log.Fatal(err)
-    }
+// DecodeFloat は新規確保したインターリーブ []float64 を返す。
+samples, err := dec.DecodeFloat(packet)
+if err != nil {
+	log.Fatal(err)
 }
+_ = samples
 ```
 
-### Float32 PCMの使用
+### エンコード
+
+> エンコーダーは現状 CELT-only・フルバンド・20ms パケットを出力し、libopus とは
+> ビット精度一致ではありません。相互運用が必須の用途ではなく、ラウンドトリップや
+> 実験用途で利用してください。
 
 ```go
-// float32でのエンコード
-pcmFloat := make([]float32, 960*2)
-compressed, err := enc.EncodeFloat32(pcmFloat, 960)
+enc, err := opus.NewEncoder(48000, 2, opus.ApplicationAudio)
+if err != nil {
+	log.Fatal(err)
+}
+enc.SetBitrate(128000)
+enc.SetComplexity(10)
 
-// float32へのデコード
-decodedFloat := make([]float32, 960*2)
-n, err := dec.DecodeFloat32(compressed, decodedFloat)
+// 20ms フレーム = 48kHz で 1ch あたり 960 サンプル（インターリーブステレオ）
+pcm := make([]int16, 960*2)
+// ... pcm を埋める ...
+
+packet, err := enc.Encode(pcm, 960)
+if err != nil {
+	log.Fatal(err)
+}
+_ = packet
+
+// float64 入力も可能:
+//   packet, err := enc.EncodeFloat(make([]float64, 960*2), 960)
 ```
 
 ## サポート設定
 
-### サンプルレート
-- 8 kHz（ナローバンド）
-- 12 kHz（ミディアムバンド）
-- 16 kHz（ワイドバンド）
-- 24 kHz（スーパーワイドバンド）
-- 48 kHz（フルバンド）
+- **サンプルレート**: 8 / 12 / 16 / 24 / 48 kHz。エンコーダーは非 48kHz 入力を
+  内部で 48kHz にリサンプルし、デコーダーは出力を要求レートにリサンプルします。
+- **チャンネル**: モノラル・ステレオ。
+- **デコーダーのフレームサイズ**: 全 Opus 長（2.5/5/10/20/40/60 ms）を TOC バイトに
+  従いパケット単位で選択。
+- **エンコーダーのフレームサイズ**: 20ms（48kHz で 1ch あたり 960 サンプル）。
+- **アプリケーションタイプ**（エンコーダーは保持。フルなモード選択は開発中）:
+  - `opus.ApplicationVOIP`
+  - `opus.ApplicationAudio`
+  - `opus.ApplicationRestrictedLowDelay`
 
-### フレームサイズ
-- 2.5ms、5ms、10ms、20ms（推奨）、40ms、60ms
-
-### ビットレート
-- 6 kbps～510 kbps
-- サンプルレートとアプリケーションタイプに基づく自動モード選択
-
-### チャンネル
-- モノラル（1チャンネル）
-- ステレオ（2チャンネル）
-
-### アプリケーションタイプ
-- `ApplicationVOIP`: 音声用に最適化（ナローバンド/ワイドバンドでSILKを使用）
-- `ApplicationAudio`: 音楽用に最適化（CELTを優先）
-- `ApplicationLowDelay`: 低遅延モード（CELTのみ）
-
-## パフォーマンス
-
-libopusとのパフォーマンス比較（20msフレーム）:
-
-| コンポーネント                | libopus | opus-go | パフォーマンス比 |
-|------------------------|---------|---------|----------|
-| CELTエンコード (48kHz mono) | 230µs   | 195µs   | **85%**  |
-| CELTデコード (48kHz mono)  | 165µs   | 140µs   | **85%**  |
-| SILKエンコード (8kHz mono)  | 195µs   | 165µs   | **85%**  |
-| SILKデコード (8kHz mono)   | 145µs   | 125µs   | **86%**  |
-
-**メモリ効率**: バッファプーリングと最適化により、アロケーション60%削減。
-
-## アーキテクチャ
-
-```
-github.com/darui3018823/opus/
-├── opus.go              # パブリックAPI（エンコーダー/デコーダー）
-├── internal/
-│   ├── dsp/            # FFT、MDCT、窓関数、数学ユーティリティ
-│   ├── entcode/        # レンジエンコーダー/デコーダー
-│   ├── resampler/      # ポリフェーズサンプルレート変換
-│   ├── celt/           # CELTコーデック（48kHz、音楽/一般音声）
-│   └── silk/           # SILKコーデック（8-24kHz、音声）
-├── docs/               # 包括的ドキュメント
-└── test/              # 検証スイート（テストベクター、準拠性、ファジング）
-```
-
-## 検証と品質
-
-### RFC 6716準拠
-- ✅ 100%仕様準拠
-- ✅ 公式テストベクター30個全て合格
-- ✅ 全TOC設定テスト済み
-- ✅ 全フレームサイズ・サンプルレート検証済み
-
-### ロバストネステスト
-- ✅ 24時間以上の継続的ファジング
-- ✅ ターゲット毎に1億回以上の入力（エンコーダー、デコーダー、パケットパーサー）
-- ✅ クラッシュゼロ
-- ✅ 全エラーパス実行済み
-
-### 品質メトリクス
-- SNR（音声 @ 64kbps）: 32.8 dB（目標: >30 dB）✅
-- SNR（音楽 @ 128kbps）: 38.5 dB（目標: >35 dB）✅
-- ビットレート精度: ±2.5% ✅
-- エンコード遅延: 205µs/フレーム ✅
-- デコード遅延: 135µs/フレーム ✅
-
-## ドキュメント
-
-- **[CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md)**: 現在のコードから確認したAPI、内部構造、テスト状況、既知の差分
-- **[ARCHITECTURE.md](docs/ARCHITECTURE.md)**: 詳細な設計判断とlibopus解析
-- **[ROADMAP.md](docs/ROADMAP.md)**: 開発フェーズとマイルストーン
-- **[DEVELOPER.md](docs/DEVELOPER.md)**: コードスタイル、移植ガイダンス、プロファイリング
-- **[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)**: 進捗追跡とベンチマーク
-
-## APIリファレンス
+## 公開 API
 
 ### エンコーダー
 
 ```go
-// エンコーダーの作成
-NewEncoder(sampleRate, channels int, application Application) (*Encoder, error)
+func NewEncoder(sampleRate, channels int, application Application) (*Encoder, error)
 
-// エンコーダーの設定
-(*Encoder).SetBitrate(bitrate int) error        // 6000-510000 bps
-(*Encoder).SetComplexity(complexity int) error  // 0-10
-(*Encoder).SetVBR(vbr bool) error              // 可変ビットレート
+func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error)
+func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error)
 
-// 音声のエンコード
-(*Encoder).Encode(pcm []int16, frameSize int) ([]byte, error)
-(*Encoder).EncodeFloat32(pcm []float32, frameSize int) ([]byte, error)
-
-// 状態のリセット
-(*Encoder).Reset() error
+func (e *Encoder) SetBitrate(bitrate int) error       // 6000–510000 bps
+func (e *Encoder) SetComplexity(complexity int) error // 0–10
+func (e *Encoder) SetVBR(vbr bool)
+func (e *Encoder) SetApplication(application Application)
+func (e *Encoder) Reset() error
 ```
 
 ### デコーダー
 
 ```go
-// デコーダーの作成
-NewDecoder(sampleRate, channels int) (*Decoder, error)
+func NewDecoder(sampleRate, channels int) (*Decoder, error)
 
-// 音声のデコード
-(*Decoder).Decode(data []byte, pcm []int16) (int, error)
-(*Decoder).DecodeFloat32(data []byte, pcm []float32) (int, error)
-
-// パケットロス隠蔽
-(*Decoder).DecodePLC(pcm []int16, frameSize int) (int, error)
-
-// 状態のリセット
-(*Decoder).Reset() error
+func (d *Decoder) Decode(data []byte, pcm []int16) (int, error)
+func (d *Decoder) DecodeFloat(data []byte) ([]float64, error)
+func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) // 現状は CELT PLC フォールバック
+func (d *Decoder) Reset() error
+func (d *Decoder) GetLastPacketDuration() int
 ```
 
-## テスト
+`EncodeFloat32` / `DecodeFloat32` / `DecodePLC(pcm, frameSize)` は**ありません**。
+float64 版を使用してください。
 
-テストスイート全体の実行:
+## アーキテクチャ
+
+```
+github.com/darui3018823/opus/
+├── opus.go / constants.go / errors.go  # 公開 API（Encoder/Decoder）
+├── internal/
+│   ├── opus_framing.go                  # TOC バイトの解析/生成（RFC 6716 §3）
+│   ├── dsp/                             # FFT、MDCT/IMDCT、窓関数、数学
+│   ├── entcode/                         # レンジエンコーダー/デコーダー
+│   ├── resampler/                       # Opus レートのサンプルレート変換
+│   ├── celt/                            # CELT デコーダーパリティ + 簡易エンコーダー
+│   ├── silk/                            # SILK デコーダー/エンコーダー、テーブル、補助
+│   └── cgoref/                          # libopus 参照ラッパー（ビルドタグ: opusref）
+└── docs/                                # 設計・ステータス文書
+```
+
+**デコードフロー**: Opus パケット → TOC 解析 → CELT または SILK/ハイブリッド経路 →
+レンジデコード + 再構成 → 必要に応じてリサンプル/チャンネル調整 → PCM。
+
+**エンコードフロー**: PCM → 必要なら 48kHz へリサンプル → CELT エンコーダー（MDCT、
+バンド処理、PVQ）→ レンジコーダー → TOC 付加 → Opus パケット。
+
+## ビルドとテスト
 
 ```bash
-go test ./...
+go build ./...
+go vet ./...
+go test ./...                 # ライブラリ各パッケージ + 公式ベクター（存在時）
+go test -race ./...
+go test -bench=. -benchmem -run='^$' ./...
 ```
 
-カバレッジ付きで実行:
+公式 RFC 8251 テストベクターはリポジトリに含まれていません（`testdata/` は
+git-ignore）。必要なテストはベクター不在時に `t.Skip` します。ローカルで実行するには、
+`testdata/opus_newvectors/` に展開されるよう取得してください:
 
 ```bash
-go test -cover ./...
+curl -fSL -o /tmp/v.tar.gz https://opus-codec.org/docs/opus_testvectors-rfc8251.tar.gz
+mkdir -p testdata && tar -xzf /tmp/v.tar.gz -C testdata/
+go test -run TestOfficialVectors ./...
 ```
 
-ベンチマークの実行:
+### libopus 参照比較（任意）
+
+`TestCGORef` は各ベクターを本コーデックと libopus の両方でデコードしフレーム単位で
+比較します。C ツールチェーンと libopus が必要で、通常ビルドを CGO-free に保つため
+`opusref` ビルドタグ下に分離しています:
 
 ```bash
-go test -bench=. ./...
+go test -tags opusref -run TestCGORef .
 ```
+
+Windows では、動作する MinGW/MSYS2 ツールチェーンを用意し PowerShell から CGO
+ビルドを実行してください。
+
+### ファジング
+
+```bash
+go test -run='^$' -fuzz='^FuzzDecode$' -fuzztime=60s .
+```
+
+`FuzzDecode` / `FuzzDecodeFloat` は、デコーダーが任意入力で panic しないことを検証
+します。`fuzz` CI ワークフローが毎晩および手動で実行します。
+
+## 継続的インテグレーション
+
+GitHub Actions ワークフロー 4 本。いずれも **amd64（`ubuntu-latest`）** と
+**arm64（`ubuntu-24.04-arm`）** のマトリクスで実行します:
+
+- **`test.yml`** — `go vet`、`go test ./...`、公式 RFC 8251 ベクター。
+- **`race.yml`** — `go test -race ./...`。
+- **`bench.yml`** — `go test -bench=. -benchmem`（結果を artifact 化）。
+- **`fuzz.yml`** — 毎晩 + 手動の `go test -fuzz`（ターゲット別）。
+
+## ドキュメント
+
+- **[docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md)** — API・内部構造・テスト・既知の差分のコード由来スナップショット（正本）。
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — 設計判断と libopus 解析。
+- **[docs/ROADMAP.md](docs/ROADMAP.md)** — 開発フェーズとマイルストーン。
+- **[docs/DEVELOPER.md](docs/DEVELOPER.md)** — コードスタイル、移植ガイダンス、プロファイリング。
+- **[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)** — 仕様差分リストと準拠/テスト計画。
+
+## 制限事項
+
+- エンコーダーは簡易 CELT-only でビット精度一致ではなく、SILK-only / ハイブリッド
+  エンコード経路はありません。
+- `DecodeFEC` は現状 PLC フォールバックで、パケット FEC 抽出ではありません。
+- マルチストリーム・サラウンド・Ogg Opus コンテナ API はありません。
+- `application`・VBR や一部 CTL 相当の設定は保持されますが、フルな libopus 互換動作
+  には未連動です。
 
 ## コントリビューション
 
-コントリビューション歓迎！以下を確認してください：
+PR を出す前に以下を確認してください:
 
-1. 全テスト合格: `go test ./...`
-2. コードフォーマット: `go fmt ./...`
-3. 新しいlint警告なし: `go vet ./...`
-4. 新機能にはテストを追加
+1. `go build ./...`、`go vet ./...`、`go test ./...` が通ること。
+2. コードが `gofmt` 済みであること。
+3. 新しい挙動にテストがあること。
 
 ## ライセンス
 
-BSD 2-Clause License - 詳細は[LICENSE](LICENSE)ファイルを参照してください。
+BSD 2-Clause License — 詳細は [LICENSE](LICENSE) を参照してください。
 
 ## 謝辞
 
-- **libopus**: Xiph.Org Foundationによるリファレンス実装
-- **RFC 6716**: Opusオーディオコーデックの定義
-- **Goチーム**: 優れた言語とツールの提供
+- **[libopus](https://github.com/xiph/opus)** — Xiph.Org Foundation によるリファレンス実装。
+- **[RFC 6716](https://datatracker.ietf.org/doc/html/rfc6716)** / **[RFC 8251](https://datatracker.ietf.org/doc/html/rfc8251)** — Opus 仕様とその更新。
 
 ## サポート
 
-問題、質問、コントリビューションについては、[GitHub issue tracker](https://github.com/darui3018823/opus/issues)をご利用ください。
+問題・質問は [GitHub issue tracker](https://github.com/darui3018823/opus/issues) をご利用ください。

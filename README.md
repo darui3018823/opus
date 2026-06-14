@@ -252,11 +252,9 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
 
 ## Contributing
 
-Before opening a PR, please ensure:
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on how to contribute, report bugs, and submit pull requests.
 
-1. `go build ./...`, `go vet ./...`, and `go test ./...` pass.
-2. Code is formatted (`gofmt`).
-3. New behavior is covered by tests.
+Please note that this project is released with a [Contributor Code of Conduct](CODE_OF_CONDUCT.md). By participating you agree to abide by its terms.
 
 ## License
 

@@ -95,6 +95,26 @@ as CELT-only fullband 20 ms.
   `TestEncoderDTXOffCBRFixedSize`, `TestEncoderDTXMultiFrame`. 12/12 official
   vectors unchanged.
 
+#### Slice 2-5a: Allocation Shaping (Complete)
+- **Status:** Complete
+- Replaced the CELT encoder's fixed baseline decisions (spread = NORMAL,
+  dynalloc offsets = 0, alloc_trim = 5) with float ports of the libopus
+  `celt_encoder.c` analysis functions (`internal/celt/celt_analysis.go`):
+  - `spreadingDecision`: per-band tonality from the normalised spectrum with
+    recursive averaging and hysteresis (uniform spread_weight simplification).
+  - `dynallocAnalysis`: a masking "follower" over band log energies producing
+    per-band boost counts; the internal 2/3-budget break is dropped because
+    `dynallocEncode` already clamps the coded boost against the real range-coder
+    budget and the per-band cap, symmetric with the decoder.
+  - `allocTrimAnalysis`: trim index from spectral tilt plus, for stereo,
+    low-frequency inter-channel correlation.
+- These feed the existing symbol writers, so the decoder reads them unchanged;
+  enc/dec final-range symmetry is preserved.
+- Delay-aligned round-trip SNR improved (sine440 25.1→35.9, sine1k 22.7→38.9,
+  sine4k 27.3→28.9, sine1k-stereo 26.8→34.7 dB); the
+  `TestEncoderRoundTripAlignedSNR` thresholds were raised to 24..30 dB.
+- 12/12 official vectors unchanged.
+
 Current encoder limitations:
 
 - `application` is stored but does not currently drive SILK/CELT/hybrid mode

@@ -14,7 +14,8 @@ var hybTrace = os.Getenv("OPUS_HYB_TRACE") != ""
 
 func htr(dec *entcode.Decoder, label string) {
 	if hybTrace {
-		fmt.Printf("[HYB %-12s] tellf=%d rng=%08x\n", label, dec.TellFrac(), dec.GetRng())
+		fmt.Printf("[HYB %-12s] tell=%d tellf=%d rng=%08x val=%08x pos=%d\n",
+			label, dec.ECTell(), dec.TellFrac(), dec.GetRng(), dec.GetDif(), dec.GetPos())
 	}
 }
 

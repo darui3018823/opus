@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-06-11
+Last reviewed: 2026-06-14
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -79,8 +79,8 @@ Current decoder limitations:
 - There is no public `DecodeFloat32` method.
 - There is no public `DecodePLC(pcm, frameSize)` method; CELT PLC exists
   internally and is reached through `DecodeFEC`.
-- Official-vector and libopus reference parity tests currently fail, so decoder
-  output is not bit-exact yet.
+- The decoder passes all 12 official RFC 8251 vectors (RMSE < 0.001). The
+  separate cgo/libopus reference RMSE comparison test still fails.
 
 ## Internal Packages
 
@@ -187,18 +187,23 @@ Passing package-level tests in that run:
 - `internal/resampler`
 - `internal/testing`
 
-Observed failures:
+Official-vector status (update 2026-06-14): **all 12 RFC 8251 vectors PASS**
+with RMSE < 0.001 (`TestOfficialVectors`). testvector01 — previously the last
+failure and long mislabelled "heavy SILK" — is in fact CELT-only fullband
+stereo; it was fixed by correcting the code-3 multi-byte padding parse in
+`splitOpusFrames` (RFC 6716 §3.2.5: each 0xFF count byte = 254 padding-data
+bytes plus a continuation).
 
-- Root package official-vector tests fail RMSE thresholds for several vectors.
+Remaining non-green items in `go test ./...`:
+
 - Root package cgo/libopus reference comparison fails RMSE thresholds. The local
   run reported `libopus 1.6.1` from the cgo reference helper.
-- `internal/silk` fails `TestSynthesizeOracle` and `TestSynthesizeOracleWarm`.
 - `cmd_diag` does not build because both `cmd_diag/main.go` and
   `cmd_diag/toc_check.go` define `main`.
 
-This means the repository has useful component tests and diagnostic oracle
-coverage, but the full repository test suite is not green and Opus bit-exact
-compliance is not yet achieved.
+The decoder now passes the full official Opus test-vector suite; the open items
+above are the cgo reference comparison and the `cmd_diag` build, not decoder
+correctness on the official vectors.
 
 ## Known Gaps
 

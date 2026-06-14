@@ -497,19 +497,24 @@ func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
 			return nil, fmt.Errorf("code 3: invalid frame count %d", frameCount)
 		}
 
-		// Skip padding
+		// Skip padding (RFC 6716 §3.2.5): the padding length is a run of count
+		// bytes at the front. Each byte of value 255 contributes 254 data bytes
+		// and continues; the first byte < 255 contributes its value and ends the
+		// run. The padding data bytes themselves are stripped from the END.
 		if padding {
-			if len(payload) < 1 {
-				return nil, fmt.Errorf("code 3: missing padding count")
-			}
-			padLen := int(payload[0])
-			payload = payload[1:]
-			if padLen == 255 {
+			padLen := 0
+			for {
 				if len(payload) < 1 {
-					return nil, fmt.Errorf("code 3: missing extended padding count")
+					return nil, fmt.Errorf("code 3: missing padding count")
 				}
-				padLen += int(payload[0]) - 1
+				p := int(payload[0])
 				payload = payload[1:]
+				if p == 255 {
+					padLen += 254
+					continue
+				}
+				padLen += p
+				break
 			}
 			if padLen > len(payload) {
 				return nil, fmt.Errorf("code 3: padding %d > payload %d", padLen, len(payload))

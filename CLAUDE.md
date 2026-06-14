@@ -93,10 +93,15 @@ packet tail, the last 2.5 ms is crossfaded, and the redundant frame's state
 seeds the next CELT-only packet. See `docs/CURRENT_IMPLEMENTATION.md` and the
 `project-hybrid-architecture` / `project-tv10-celt-stereo` memories.
 
-`go test ./...` is not fully green at the current snapshot. The official RFC
-8251 vector suite is at **11/12 PASS** (only failing: testvector01 = heavy pure
-SILK, RMSE ~0.038). Other known failures: root cgo/libopus reference RMSE checks
-and the `cmd_diag` duplicate-main build failure (two files define `main`).
+The official RFC 8251 vector suite is at **12/12 PASS** (all vectors RMSE <
+0.001). testvector01 — long mislabelled "heavy SILK" — is in fact CELT-only
+fullband stereo (configs 28-31); its residual was a code-3 multi-byte padding
+parse bug in `splitOpusFrames` (only one 0xFF continuation was handled), which
+fed the CELT decoder the wrong bytes on packets with a `41 ff ff ..` padding
+run, causing full-scale clipping. Fixed to loop per RFC 6716 §3.2.5 (each 0xFF
+count byte = 254 padding-data bytes + continuation). Remaining `go test ./...`
+non-green items: root cgo/libopus reference RMSE checks and the `cmd_diag`
+duplicate-main build failure (two files define `main`).
 
 ### Encoding data flow
 

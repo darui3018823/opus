@@ -31,6 +31,7 @@ type Encoder struct {
 	complexity int
 	rateMode   celt.RateMode // CBR/VBR/CVBR
 	frameSize  int           // frame size in samples at sampleRate
+	padBytes   int           // code-3 padding-data bytes to append (0 = none)
 
 	// Internal 48kHz frame size (always 960 for 20ms)
 	internalFrameSize int
@@ -157,8 +158,8 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		nFrames = frameSize / base
 	}
 
-	// Single-frame (code 0) fast path.
-	if nFrames == 1 {
+	// Single-frame, no padding: compact code-0 packet (TOC + payload).
+	if nFrames == 1 && e.padBytes <= 0 {
 		compressed, err := e.encodeOneCELTFrame(pcm)
 		if err != nil {
 			return nil, err
@@ -166,8 +167,10 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		return append([]byte{toc}, compressed...), nil
 	}
 
-	// Multi-frame: encode each 20 ms chunk continuously (the resampler and CELT
-	// encoder keep their inter-frame state across chunks) and pack the frames.
+	// Encode each 20 ms chunk continuously (the resampler and CELT encoder keep
+	// their inter-frame state across chunks) and pack the frames. A single frame
+	// reaches here only when padding was requested, in which case it is wrapped in
+	// a code-3 packet (the only count code that carries padding).
 	chunkLen := base * e.channels
 	frames := make([][]byte, 0, nFrames)
 	for k := 0; k < nFrames; k++ {
@@ -180,9 +183,10 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	}
 
 	// CBR packs frames of equal size with the most compact code; VBR/CVBR
-	// frames vary in size and need explicit length prefixes.
+	// frames vary in size and need explicit length prefixes. Padding (when
+	// requested) forces a code-3 packet with the padding flag.
 	vbr := e.rateMode != celt.RateModeCBR
-	payload, code, err := packOpusFrames(frames, vbr)
+	payload, code, err := packOpusFramesPadded(frames, vbr, e.padBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack %d frames: %w", nFrames, err)
 	}
@@ -267,6 +271,20 @@ func (e *Encoder) SetVBRConstraint(constrained bool) {
 		e.rateMode = celt.RateModeVBR
 	}
 	e.celtEncoder.SetRateMode(e.rateMode)
+}
+
+// SetPacketPadding sets the number of code-3 padding-data bytes appended to each
+// emitted packet (RFC 6716 §3.2.5). When n > 0, every packet is encoded as a
+// code-3 packet with the padding flag set and n zero bytes appended at the end;
+// the padding does not affect the decoded audio (the decoder strips it). This is
+// useful for keeping a constant on-the-wire packet size or for obscuring the true
+// payload length. n <= 0 disables padding (the default), restoring the compact
+// code-0/1/2/3 selection.
+func (e *Encoder) SetPacketPadding(n int) {
+	if n < 0 {
+		n = 0
+	}
+	e.padBytes = n
 }
 
 // SetApplication changes the application mode
@@ -611,6 +629,80 @@ func packOpusFrames(frames [][]byte, vbr bool) ([]byte, int, error) {
 	for _, f := range frames {
 		out = append(out, f...)
 	}
+	return out, 3, nil
+}
+
+// encodePaddingCount encodes a padding-data-byte count as the run of count bytes
+// that prefixes a code-3 padding payload (RFC 6716 §3.2.5). It is the inverse of
+// the run the decoder consumes in splitOpusFrames: each 0xFF byte contributes 254
+// and continues; the first byte < 255 contributes its value (0..254) and ends the
+// run. padBytes is the number of trailing padding-data bytes (it does NOT count
+// the run bytes themselves). padBytes must be >= 0.
+func encodePaddingCount(padBytes int) []byte {
+	var run []byte
+	for padBytes > 254 {
+		run = append(run, 255)
+		padBytes -= 254
+	}
+	run = append(run, byte(padBytes))
+	return run
+}
+
+// packOpusFramesPadded is packOpusFrames with optional code-3 padding. When
+// padBytes <= 0 it is exactly packOpusFrames. When padBytes > 0 it forces a
+// code-3 packet (the only count code with a padding mechanism), sets the padding
+// flag (0x40) in the frame-count byte, writes the padding-count run, the frame
+// lengths (VBR) or nothing (CBR), all frame payloads, then padBytes zero bytes at
+// the very end. The result round-trips through splitOpusFrames, which strips the
+// padding-data bytes from the end. A single frame is legal under code 3
+// (frameCount=1), so padding is available for 1..48 frames.
+func packOpusFramesPadded(frames [][]byte, vbr bool, padBytes int) ([]byte, int, error) {
+	if padBytes <= 0 {
+		return packOpusFrames(frames, vbr)
+	}
+	n := len(frames)
+	if n == 0 {
+		return nil, 0, fmt.Errorf("no frames to pack")
+	}
+	if n > 48 {
+		return nil, 0, fmt.Errorf("too many frames: %d (max 48)", n)
+	}
+
+	allEqual := true
+	for i := 1; i < n; i++ {
+		if len(frames[i]) != len(frames[0]) {
+			allEqual = false
+			break
+		}
+	}
+	// CBR layout is only possible when every frame is the same size; otherwise
+	// explicit per-frame lengths (VBR layout) are required.
+	useVBR := vbr || !allEqual
+
+	runBytes := encodePaddingCount(padBytes)
+
+	out := make([]byte, 0, 1+len(runBytes)+2*n+padBytes)
+	flags := byte(0x40) | byte(n) // padding flag | frame count
+	if useVBR {
+		flags |= 0x80
+	}
+	out = append(out, flags)
+	out = append(out, runBytes...)
+	if useVBR {
+		// First n-1 frame lengths, then all payloads.
+		for i := 0; i < n-1; i++ {
+			lp, err := encodeOpusFrameLength(len(frames[i]))
+			if err != nil {
+				return nil, 0, err
+			}
+			out = append(out, lp...)
+		}
+	}
+	for _, f := range frames {
+		out = append(out, f...)
+	}
+	// Trailing padding-data bytes (zeros), stripped from the end on decode.
+	out = append(out, make([]byte, padBytes)...)
 	return out, 3, nil
 }
 

@@ -272,7 +272,24 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	}
 
 	totalBits := targetBytes * 8
-	enc := entcode.NewEncoder(targetBytes)
+
+	// Allocate the entropy coder at the full (CBR) budget, then shrink it to the
+	// chosen VBR target before any symbols are written (libopus ec_enc_shrink).
+	//
+	// Shrinking BEFORE the header/coarse-energy symbols — rather than after, as
+	// libopus celt_encode_with_ec does — is deliberate. The coarse-energy path
+	// selection (QuantizeCoarseEnergy) and clt_compute_allocation both read the
+	// budget as packet_length*8, and the decoder derives that from the FINAL
+	// (shrunk) packet length. Encoding against the shrunk budget here keeps those
+	// decisions bit-symmetric with the decoder. libopus can defer the shrink to
+	// after coarse energy because its budget guards never bind that early at its
+	// bitrates; doing the same unconditionally here would risk a low-bitrate
+	// stereo desync (the bitsLeft<30 qi-clamp in QuantizeCoarseEnergy can trip on
+	// the smaller decoder-side budget but not on the larger pre-shrink budget).
+	enc := entcode.NewEncoder(maxTargetBytes)
+	if targetBytes < maxTargetBytes {
+		enc.Shrink(targetBytes)
+	}
 
 	// === Header symbols, in decoder order (decodeCELTRange) ===
 
@@ -475,7 +492,11 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	}
 
 	out := enc.Bytes()
-	// Ensure the output is exactly targetBytes.
+	// Bytes() already returns max(capacity, range_front+raw_tail), so a genuine
+	// over-budget frame is reflected in len(out); the merge byte is shared between
+	// the range front and the raw tail, so the physical size is NOT (ec_tell+7)/8
+	// (that would double-count the shared byte). Just pad up to the committed
+	// target — for VBR this is the shrunk size, for CBR the full budget.
 	if len(out) < targetBytes {
 		padded := make([]byte, targetBytes)
 		copy(padded, out)

@@ -231,6 +231,8 @@ type Decoder struct {
 	prevDecodeOnlyMiddle bool
 
 	trace *decodeTrace
+
+	lastTellBeforeSigns int // diagnostic: ECTell() just before decodeSigns
 }
 
 type decodeTrace struct {
@@ -253,6 +255,17 @@ type frameTrace struct {
 	InterpFactor    int
 	PredCoef0Q12    []int16
 	PredCoef1Q12    []int16
+	PitchLags       []int
+	LTPCoefQ14      []int16 // flattened nSubframes*5
+	LTPScaleQ14     int16
+	Seed            int32
+	SumPulses       []int
+	Pulses          []int16
+	ExcQ14          []int32
+	TellAfterPulses int
+	RngAfterPulses  uint32
+	TellBeforePulse int
+	TellBeforeSigns int
 }
 
 // NewDecoder creates a new SILK decoder with 20ms frame size.
@@ -328,6 +341,35 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 	return d, nil
 }
 
+// SetFrameMs reconfigures the decoder's Opus frame duration (10 or 20 ms)
+// WITHOUT resetting synthesis state. libopus uses a single SILK decoder per
+// channel whose synthesis state (LPC/LTP history, previous gain, random seed,
+// previous NLSF) carries across packets regardless of frame size; only the
+// per-packet frame geometry (frameSize / nSubframes / subfrmLen) changes. The
+// state buffers (lpcState, ltpState) are sized by sample rate, not frame size,
+// so they are preserved here. This is required for bit-exact decoding of streams
+// that switch between 10 ms and 20 ms configs at the same internal rate (e.g.
+// NB config 1 -> config 0), where keeping separate 10 ms / 20 ms decoder
+// instances would discontinue the synthesis state at every switch.
+func (d *Decoder) SetFrameMs(frameMs int) {
+	if frameMs != 10 && frameMs != 20 {
+		return
+	}
+	nSubframes := 4
+	if frameMs == 10 {
+		nSubframes = 2
+	}
+	d.nSubframes = nSubframes
+	d.frameSize = d.sampleRate * frameMs / 1000
+	d.subfrmLen = d.frameSize / nSubframes
+	if len(d.prevOutput) != d.frameSize {
+		d.prevOutput = make([]int32, d.frameSize)
+	}
+	if d.side != nil {
+		d.side.SetFrameMs(frameMs)
+	}
+}
+
 // Decode decodes all SILK frames from a packet (one range-coded stream).
 // nFrames specifies how many SILK frames are in this packet (1, 2, or 3).
 // The packet must include the SILK payload (after the TOC byte has been stripped).
@@ -373,7 +415,26 @@ func (d *Decoder) DecodeMulti(packet []byte, nFrames int) ([]float64, error) {
 	if dec.Error() != nil {
 		return d.concealPacketLoss()
 	}
+	return d.decodeMultiMonoEC(dec, nFrames)
+}
 
+// DecodeMultiWithDecoder decodes nFrames SILK frames from an already-initialised
+// range decoder, used by the hybrid path where SILK and CELT share one entropy
+// stream. The caller is responsible for the decoder lifetime; this method does
+// not create or finalise it. The result is interleaved SILK PCM at the internal
+// rate (one frame's worth per SILK frame).
+func (d *Decoder) DecodeMultiWithDecoder(dec *entcode.Decoder, nFrames int) ([]float64, error) {
+	if nFrames < 1 {
+		nFrames = 1
+	}
+	if d.channels == 2 {
+		return d.decodeMultiStereoEC(dec, nFrames)
+	}
+	return d.decodeMultiMonoEC(dec, nFrames)
+}
+
+// decodeMultiMonoEC decodes the mono SILK frames from a shared range decoder.
+func (d *Decoder) decodeMultiMonoEC(dec *entcode.Decoder, nFrames int) ([]float64, error) {
 	// Per libopus dec_API.c: decode VAD flags for all frames first, then LBRR flag
 	vadFlags := make([]uint32, nFrames)
 	for i := 0; i < nFrames; i++ {
@@ -421,6 +482,14 @@ func (d *Decoder) decodeMultiStereo(packet []byte, nFrames int) ([]float64, erro
 	dec := entcode.NewDecoder(packet)
 	if dec.Error() != nil {
 		return d.concealPacketLoss()
+	}
+	return d.decodeMultiStereoEC(dec, nFrames)
+}
+
+// decodeMultiStereoEC decodes the stereo SILK frames from a shared range decoder.
+func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]float64, error) {
+	if d.side == nil {
+		return nil, fmt.Errorf("missing SILK side-channel decoder")
 	}
 
 	vadFlags := [2][]uint32{
@@ -862,7 +931,28 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 	seed := int32(seedIdx)
 
 	// ── 7. Decode pulses ─────────────────────────────────────────────────────
+	tellBeforePulse := 0
+	if d.trace != nil {
+		tellBeforePulse = dec.ECTell()
+	}
 	pulses := d.decodePulses(dec, signalType, quantOffset, d.frameSize)
+
+	if d.trace != nil && len(d.trace.Frames) > 0 {
+		tf := &d.trace.Frames[len(d.trace.Frames)-1]
+		tf.PitchLags = append([]int(nil), pitchLags...)
+		flat := make([]int16, 0, d.nSubframes*5)
+		for sf := 0; sf < d.nSubframes; sf++ {
+			flat = append(flat, ltpCoeffsQ14[sf][:]...)
+		}
+		tf.LTPCoefQ14 = flat
+		tf.LTPScaleQ14 = ltpScaleQ14
+		tf.Seed = seed
+		tf.Pulses = append([]int16(nil), pulses...)
+		tf.TellAfterPulses = dec.ECTell()
+		tf.RngAfterPulses = dec.GetRng()
+		tf.TellBeforePulse = tellBeforePulse
+		tf.TellBeforeSigns = d.lastTellBeforeSigns
+	}
 
 	// ── 8. Synthesize ────────────────────────────────────────────────────────
 	outputI16 := d.synthesize(pulses, gainsQ16, lpcCoeffsQ12,
@@ -1381,16 +1471,21 @@ func silkPitchContourOffsets(contourIdx, nSubframes, fsKHz int) []int {
 // decodePulses decodes the excitation pulse sequence using shell coding.
 // Returns signed pulse values (before dequantization/gain apply).
 func (d *Decoder) decodePulses(dec *entcode.Decoder, signalType, quantOffset, frameLen int) []int16 {
-	pulses := make([]int16, frameLen)
-
 	// Decode rate level
 	rateLevelIdx := dec.DecodeIcdf(silkRateLevelsICDF[signalType>>1][:], 8)
 
-	// Number of shell coding blocks
+	// Number of shell coding blocks. For 12 kHz 10 ms (frameLen=120) this is the
+	// only case where iter*16 > frameLen: libopus processes the full, block-
+	// aligned 16-sample blocks (decoding pulses, LSBs and signs for the trailing
+	// "phantom" positions beyond frameLen) and only truncates at the end. We
+	// mirror that by working on a block-aligned buffer; clamping to frameLen here
+	// would desync the range coder by the phantom positions' LSB/sign bits.
 	iter := frameLen >> log2ShellCodecFrameLen
 	if iter*shellCodecFrameLength < frameLen {
 		iter++
 	}
+	alignedLen := iter * shellCodecFrameLength
+	pulses := make([]int16, alignedLen)
 
 	sumPulses := make([]int, iter)
 	nLShifts := make([]int, iter)
@@ -1410,35 +1505,21 @@ func (d *Decoder) decodePulses(dec *entcode.Decoder, signalType, quantOffset, fr
 		}
 	}
 
-	// Shell-decode each block
+	// Shell-decode each full block.
 	for i := 0; i < iter; i++ {
 		blockStart := i * shellCodecFrameLength
-		if blockStart >= frameLen {
-			break
-		}
-		end := blockStart + shellCodecFrameLength
-		if end > frameLen {
-			end = frameLen
-		}
-		available := end - blockStart
 		if sumPulses[i] > 0 {
-			// Use a temporary full-size buffer to avoid slice bounds issues
-			// when the last block is a partial block
 			var tmpBuf [shellCodecFrameLength]int16
-			d.shellDecode(dec, tmpBuf[:], sumPulses[i], available)
-			copy(pulses[blockStart:end], tmpBuf[:available])
+			d.shellDecode(dec, tmpBuf[:], sumPulses[i], shellCodecFrameLength)
+			copy(pulses[blockStart:blockStart+shellCodecFrameLength], tmpBuf[:])
 		}
 	}
 
-	// Apply LSB shifts
+	// Apply LSB shifts over the full block (including phantom positions).
 	for i := 0; i < iter; i++ {
 		if nLShifts[i] > 0 {
 			blockStart := i * shellCodecFrameLength
-			end := blockStart + shellCodecFrameLength
-			if end > frameLen {
-				end = frameLen
-			}
-			for k := blockStart; k < end; k++ {
+			for k := blockStart; k < blockStart+shellCodecFrameLength; k++ {
 				absQ := int(pulses[k])
 				for j := 0; j < nLShifts[i]; j++ {
 					absQ <<= 1
@@ -1450,9 +1531,12 @@ func (d *Decoder) decodePulses(dec *entcode.Decoder, signalType, quantOffset, fr
 		}
 	}
 
-	// Decode signs
-	d.decodeSigns(dec, pulses, frameLen, signalType, quantOffset, sumPulses)
-	return pulses
+	// Decode signs over the full block-aligned buffer.
+	if d.trace != nil {
+		d.lastTellBeforeSigns = dec.ECTell()
+	}
+	d.decodeSigns(dec, pulses, alignedLen, signalType, quantOffset, sumPulses)
+	return pulses[:frameLen]
 }
 
 // shellDecode decodes 16 pulse values using the silk_shell_decoder algorithm.
@@ -1704,6 +1788,10 @@ func (d *Decoder) synthesize(
 			excQ14[i] = -excQ14[i]
 		}
 		seed += int32(pulses[i]) // silk_ADD32_ovflw (wrapping)
+	}
+	if d.trace != nil && len(d.trace.Frames) > 0 {
+		tf := &d.trace.Frames[len(d.trace.Frames)-1]
+		tf.ExcQ14 = append([]int32(nil), excQ14...)
 	}
 
 	ltpMemLen := len(d.ltpState)

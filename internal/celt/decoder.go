@@ -2,11 +2,22 @@ package celt
 
 import (
 	"errors"
+	"fmt"
 	"math"
+	"os"
 
 	"github.com/darui3018823/opus/internal/dsp"
 	"github.com/darui3018823/opus/internal/entcode"
 )
+
+var hybTrace = os.Getenv("OPUS_HYB_TRACE") != ""
+
+func htr(dec *entcode.Decoder, label string) {
+	if hybTrace {
+		fmt.Printf("[HYB %-12s] tell=%d tellf=%d rng=%08x val=%08x pos=%d\n",
+			label, dec.ECTell(), dec.TellFrac(), dec.GetRng(), dec.GetDif(), dec.GetPos())
+	}
+}
 
 const celtFloatScale = 1.0 / 32768.0
 
@@ -103,13 +114,27 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 		d.lastFinalRange = 0x01000000
 		return d.decodeLoss(), nil
 	}
-
-	// Capture total packet bits BEFORE any decoding so that the bit
-	// allocation in decodeBandCoeffs uses the same budget as the encoder.
-	totalBits := len(frameData) * 8
-
-	// Initialize range decoder
 	dec := entcode.NewDecoder(frameData)
+	return d.decodeCELTRange(dec, len(frameData), 0, d.mode.Bands.NumBands)
+}
+
+// DecodeHybrid decodes the CELT high-band layer of a hybrid Opus frame,
+// continuing from a range decoder that the SILK layer has already partially
+// consumed. start/end select the active CELT band range (hybrid uses start=17;
+// end=19 for SWB, 21 for FB). totalBytes is the full Opus frame byte length,
+// shared as the bit budget. Bands below `start` produce zero output, so the
+// result is the high-frequency signal to be summed with the SILK layer.
+func (d *Decoder) DecodeHybrid(dec *entcode.Decoder, totalBytes, start, end int) ([]float64, error) {
+	return d.decodeCELTRange(dec, totalBytes, start, end)
+}
+
+// decodeCELTRange is the shared CELT frame decode used by both the CELT-only
+// path (start=0, end=numBands) and the hybrid high-band path (start=17). It
+// reads from an already-initialised range decoder so the hybrid layers can
+// share one entropy stream.
+func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end int) ([]float64, error) {
+	// Total packet bits, shared as the bit-allocation budget (matches encoder).
+	totalBits := totalBytes * 8
 
 	numBands := d.mode.Bands.NumBands
 	lm := d.mode.LM
@@ -127,50 +152,61 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	if silence {
 		dec.AdvanceTellTo(totalBits)
 	}
+	htr(dec, "silence")
 
 	// Post-filter parameters — read BEFORE isTransient (start==0, ec_tell+16<=total_bits).
 	pfPeriod := 0
 	pfGain := 0.0
 	pfTapset := 0
 	pfEnabled := false
-	if dec.ECTell()+16 <= totalBits {
+	// Post-filter is CELT-only: libopus reads/applies it only when start==0.
+	// Hybrid frames (start==17) skip it entirely (no bits consumed).
+	if start == 0 && dec.ECTell()+16 <= totalBits {
 		pfPeriod, pfGain, pfTapset, pfEnabled = DecodePostFilterParams(dec, totalBits, lm)
 	}
+	htr(dec, "postfilter")
 
 	// isTransient (logp 3, only when LM>0).
 	isTransient := false
 	if lm > 0 && dec.ECTell()+3 <= totalBits {
 		isTransient = dec.DecodeBitLogp(3)
 	}
+	htr(dec, "isTransient")
 
 	// intra/inter flag for coarse energy (logp 3).
 	var intra bool
 	if dec.ECTell()+3 <= totalBits {
 		intra = dec.DecodeBitLogp(3)
 	}
+	htr(dec, "intra")
 
 	// Coarse band log-energies (Laplace, forward).
 	quantLogE := UnquantizeCoarseEnergy(
-		dec, d.prevEnergies, nil, intra, numBands, lm, ch, totalBits,
+		dec, d.prevEnergies, nil, intra, numBands, start, end, lm, ch, totalBits,
 	)
+	htr(dec, "coarse")
 
 	// Time-frequency allocation bits.
-	tfRes := celtTFDecode(dec, totalBits, isTransient, numBands, lm)
+	tfRes := celtTFDecode(dec, totalBits, isTransient, numBands, start, end, lm)
+	htr(dec, "tf_decode")
 
 	// Spread decision (default SPREAD_NORMAL).
 	spread := 2
 	if dec.ECTell()+4 <= totalBits {
 		spread = dec.DecodeIcdf(spreadIcdf[:], 5)
 	}
+	htr(dec, "spread")
 
 	// Per-band dynamic allocation boosts (BEFORE alloc_trim, libopus order).
-	offsets := decodeDynalloc(dec, numBands, lm, ch, totalBits)
+	offsets := decodeDynalloc(dec, numBands, start, end, lm, ch, totalBits)
+	htr(dec, "dynalloc")
 
 	// Allocation trim (7-bit ICDF, default 5 = neutral).
 	allocTrim := 5
 	if dec.ECTell()+6 <= totalBits {
 		allocTrim = dec.DecodeIcdf(TrimICDF[:], 7)
 	}
+	htr(dec, "alloc_trim")
 
 	// On silence, libopus forces band energies to the -28 dB floor.
 	if silence {
@@ -181,7 +217,7 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 
 	// quantLogE[c*numBands+i] is mean-subtracted log2-amplitude. libopus
 	// denormalise_bands adds eMeans[i] when applying the final gain.
-	for i := 0; i < numBands; i++ {
+	for i := start; i < end; i++ {
 		for c := 0; c < ch; c++ {
 			amp := math.Exp2(quantLogE[c*numBands+i] + EMean(i))
 			e := amp * amp
@@ -200,13 +236,14 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	// Decode band coefficients: allocation, fine energy, PVQ, anti-collapse.
 	// The Q3 bit budget is computed inside from len(frameData) and ec_tell_frac.
 	// quant_all_bands also performs stereo (M/S→L/R) merge internally.
-	_, _, err := d.decodeBandCoeffs(dec, len(frameData), allocTrim, isTransient, spread, tfRes, offsets)
+	_, _, err := d.decodeBandCoeffs(dec, totalBytes, allocTrim, isTransient, spread, tfRes, offsets, start, end)
 	if err != nil {
 		return nil, err
 	}
+	htr(dec, "bandcoeffs")
 
 	// Update oldBandE with fine-corrected mean-subtracted values.
-	for i := 0; i < numBands; i++ {
+	for i := start; i < end; i++ {
 		for c := 0; c < ch; c++ {
 			e := d.bandProcs[c].bands[i].Energy
 			if e < 1e-20 {
@@ -281,7 +318,10 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 			pfGain = 0
 			pfTapset = 0
 		}
-		samplesOut = d.postFilter[c].Apply(samplesOut, pfPeriod, pfGain, pfTapset, d.mode.NBase, lm, d.celtMode.Window)
+		// CELT-only applies the comb post-filter; hybrid (start!=0) does not.
+		if start == 0 {
+			samplesOut = d.postFilter[c].Apply(samplesOut, pfPeriod, pfGain, pfTapset, d.mode.NBase, lm, d.celtMode.Window)
+		}
 		d.applyDeemphasis(c, samplesOut)
 
 		for i := 0; i < len(samplesOut) && i < frameSize; i++ {
@@ -391,7 +431,7 @@ var spreadIcdf = [4]uint8{25, 23, 2, 0}
 // remaining is the PVQ budget (totalBits - tell, before stereo/skip bits).
 // Stereo parameters (intensity, dualStereo) are decoded inside computeAllocation.
 // Returns intensity and dualStereo for use by the caller's M/S conversion.
-func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int, isTransient bool, spread int, tfRes, offsets []int) (intensity int, dualStereo bool, err error) {
+func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int, isTransient bool, spread int, tfRes, offsets []int, start, end int) (intensity int, dualStereo bool, err error) {
 	numBands := d.mode.Bands.NumBands
 	lm := d.mode.LM
 	ch := d.mode.Channels
@@ -412,11 +452,11 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 
 	// libopus-faithful compute_allocation: pulses[] are per-band Q3 PVQ budgets,
 	// balance is the leftover, codedBands the last coded band.
-	pulses, eBits, finePriority, balance, intensityV, codedBands, dualStereoV := computeAllocation(dec, numBands, lm, ch, allocTrim, bitsQ3, offsets)
+	pulses, eBits, finePriority, balance, intensityV, codedBands, dualStereoV := computeAllocation(dec, numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets)
 	intensity, dualStereo = intensityV, dualStereoV
 
 	// Fine energy — raw bits from END (do NOT affect forward rng). FORWARD band order.
-	for i := 0; i < numBands; i++ {
+	for i := start; i < end; i++ {
 		fb := eBits[i]
 		if fb <= 0 {
 			continue
@@ -437,7 +477,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	}
 	collapse := make([]byte, numBands*ch)
 	totalBitsQ3 := lenBytes*8<<3 - antiCollapseRsv
-	seed := QuantAllBands(dec, 0, numBands, X[:frameLen], Y, collapse, pulses, isTransient,
+	seed := QuantAllBands(dec, start, end, X[:frameLen], Y, collapse, pulses, isTransient,
 		spread, dualStereo, intensity, tfRes, totalBitsQ3, balance, lm, codedBands,
 		d.lastFinalRange, false)
 
@@ -451,7 +491,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	// anti-collapse reservation. Like libopus, priority 0 bands are refined first.
 	bitsLeft := lenBytes*8 - dec.ECTell()
 	for prio := 0; prio < 2; prio++ {
-		for i := 0; i < numBands && bitsLeft >= ch; i++ {
+		for i := start; i < end && bitsLeft >= ch; i++ {
 			if eBits[i] >= MaxFineEnergy || finePriority[i] != prio {
 				continue
 			}
@@ -464,7 +504,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	}
 
 	if antiCollapseOn {
-		d.antiCollapse(X, collapse, pulses, lm, frameLen, seed)
+		d.antiCollapse(X, collapse, pulses, lm, frameLen, seed, start, end)
 	}
 
 	// Copy decoded (unit-norm) band coefficients back into the band processors.
@@ -482,12 +522,12 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	return intensity, dualStereo, nil
 }
 
-func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, lm, frameLen int, seed uint32) {
+func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, lm, frameLen int, seed uint32, start, end int) {
 	numBands := d.mode.Bands.NumBands
 	ch := d.mode.Channels
 	M := 1 << uint(lm)
 
-	for i := 0; i < numBands; i++ {
+	for i := start; i < end; i++ {
 		n0 := int(EBands48000[i+1] - EBands48000[i])
 		if n0 <= 0 {
 			continue
@@ -617,7 +657,7 @@ func (d *Decoder) Reset() {
 // decodeDynalloc decodes per-band dynamic allocation boosts between alloc_trim and
 // compute_allocation. Matches libopus celt_decode_with_ec dynalloc loop.
 // Returns Q3 boost per band. Even when all boosts are 0, the range coder state advances.
-func decodeDynalloc(dec *entcode.Decoder, numBands, lm, ch, totalBits int) []int {
+func decodeDynalloc(dec *entcode.Decoder, numBands, start, end, lm, ch, totalBits int) []int {
 	offsets := make([]int, numBands)
 	dynallocLogp := 6
 	// libopus: total_bits<<=BITRES (Q3), decreases as boosts are applied;
@@ -625,7 +665,7 @@ func decodeDynalloc(dec *entcode.Decoder, numBands, lm, ch, totalBits int) []int
 	totalQ3 := totalBits << 3
 	tell := dec.TellFrac()
 
-	for j := 0; j < numBands; j++ {
+	for j := start; j < end; j++ {
 		N0 := int(EBands48000[j+1] - EBands48000[j])
 		M := N0 << uint(lm)
 		width := ch * M
@@ -680,7 +720,7 @@ var tfSelectTable = [4][8]int{
 
 // celtTFDecode reads the time-frequency allocation bits and returns tf_res[i]
 // per band. Faithful port of libopus tf_decode() (celt/bands.c).
-func celtTFDecode(dec *entcode.Decoder, totalBits int, isTransient bool, numBands, lm int) []int {
+func celtTFDecode(dec *entcode.Decoder, totalBits int, isTransient bool, numBands, start, end, lm int) []int {
 	tfRes := make([]int, numBands)
 	isT := 0
 	if isTransient {
@@ -700,7 +740,7 @@ func celtTFDecode(dec *entcode.Decoder, totalBits int, isTransient bool, numBand
 
 	curr := 0
 	tfChanged := 0
-	for i := 0; i < numBands; i++ {
+	for i := start; i < end; i++ {
 		if dec.ECTell()+logp <= budget {
 			if dec.DecodeBitLogp(uint(logp)) {
 				curr ^= 1
@@ -729,7 +769,7 @@ func celtTFDecode(dec *entcode.Decoder, totalBits int, isTransient bool, numBand
 			tfSelect = 1
 		}
 	}
-	for i := 0; i < numBands; i++ {
+	for i := start; i < end; i++ {
 		tfRes[i] = tfSelectTable[lmC][4*isT+2*tfSelect+tfRes[i]]
 	}
 	return tfRes

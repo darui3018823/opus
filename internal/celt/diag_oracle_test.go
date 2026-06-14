@@ -78,11 +78,11 @@ func TestOracleTrace(t *testing.T) {
 	snap(fmt.Sprintf("intra=%v", intra))
 
 	// coarse energy
-	quantLogE := UnquantizeCoarseEnergy(dec, prevLogE, prevLogE2, intra, numBands, lm, ch, totalBits)
+	quantLogE := UnquantizeCoarseEnergy(dec, prevLogE, prevLogE2, intra, numBands, 0, numBands, lm, ch, totalBits)
 	snap("coarse")
 
 	// tf
-	tfRes := celtTFDecode(dec, totalBits, isTransient, numBands, lm)
+	tfRes := celtTFDecode(dec, totalBits, isTransient, numBands, 0, numBands, lm)
 	snap("tf")
 
 	// spread
@@ -92,7 +92,7 @@ func TestOracleTrace(t *testing.T) {
 	snap("spread")
 
 	// dynalloc
-	offsets := decodeDynalloc(dec, numBands, lm, ch, totalBits)
+	offsets := decodeDynalloc(dec, numBands, 0, numBands, lm, ch, totalBits)
 	snap("dynalloc")
 
 	// alloc_trim
@@ -109,7 +109,7 @@ func TestOracleTrace(t *testing.T) {
 		antiRsv = 1 << 3
 	}
 	bitsQ3 -= antiRsv
-	pulses, eBits, finePriority, balance, intensity, codedBands, dualStereo := computeAllocation(dec, numBands, lm, ch, allocTrim, bitsQ3, offsets)
+	pulses, eBits, finePriority, balance, intensity, codedBands, dualStereo := computeAllocation(dec, numBands, 0, numBands, lm, ch, allocTrim, bitsQ3, offsets)
 	snap("allocation")
 	fmt.Printf("   pulses: %v\n", pulses)
 	fmt.Printf("   eBits : %v\n", eBits)
@@ -162,7 +162,7 @@ func TestOracleTrace(t *testing.T) {
 			amp := logEAmplitude(quantLogE[i], i)
 			diagDec.bandProcs[0].bands[i].Energy = amp * amp
 		}
-		diagDec.antiCollapse(X, collapse, pulses, lm, frameLen, seed)
+		diagDec.antiCollapse(X, collapse, pulses, lm, frameLen, seed, 0, numBands)
 	}
 
 	dumpDenormalizedMDCT(denormalizedMDCTViaBandProcessor(frameLen, numBands, ch, lm, X, quantLogE), numBands, lm)

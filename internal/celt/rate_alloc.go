@@ -300,14 +300,14 @@ var log2FracTable = [24]int{
 // All internal accounting uses Q3 (bits × 8) matching libopus BITRES=3.
 func computeAllocation(
 	dec *entcode.Decoder,
-	numBands, lm, ch, allocTrim, available int,
+	numBands, start, end, lm, ch, allocTrim, available int,
 	offsets []int,
 ) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
 	pulses = make([]int, numBands)
-	codedBands = numBands
+	codedBands = end
 	eBits = make([]int, numBands)
 	finePriority = make([]int, numBands)
-	intensity = numBands
+	intensity = end
 	dualStereo = false
 
 	if offsets == nil {
@@ -335,7 +335,7 @@ func computeAllocation(
 	// Reserve Q3-bits for intensity stereo and dual-stereo (C==2 only).
 	intensityRsv, dualStereoRsv := 0, 0
 	if ch == 2 {
-		n := numBands
+		n := end - start
 		if n < len(log2FracTable) {
 			intensityRsv = log2FracTable[n]
 		} else {
@@ -381,7 +381,7 @@ func computeAllocation(
 		cap[j] = (capVal + 64) * ch * M >> 2
 		// trim_offset = C*N0*(alloc_trim-5-LM)*(end-j-1)*(1<<(LM+BITRES))>>6
 		//             = C*M*(alloc_trim-5-LM)*(end-j-1)>>3  (since M=N0<<LM, *8>>6 = >>3)
-		trimOff[j] = ch * M * (allocTrim - 5 - lm) * (numBands - 1 - j) >> 3
+		trimOff[j] = ch * M * (allocTrim - 5 - lm) * (end - 1 - j) >> 3
 		if M == 1 { // N0<<LM == 1: subtract C<<BITRES
 			trimOff[j] -= ch << 3
 		}
@@ -408,7 +408,7 @@ func computeAllocation(
 	// Matches libopus coarse search: bitsj + offsets[j], done branch = IMIN(bitsj,cap).
 	psumCoarse := func(k int) int {
 		psum, done := 0, false
-		for j := numBands - 1; j >= 0; j-- {
+		for j := end - 1; j >= start; j-- {
 			bitsj := allocAtLevel(j, k) + offsets[j]
 			if bitsj >= thresh[j] || done {
 				done = true
@@ -452,7 +452,8 @@ func computeAllocation(
 	// skip_start is advanced to last boosted band.
 	bits1 := make([]int, numBands)
 	bits2 := make([]int, numBands)
-	for j := 0; j < numBands; j++ {
+	skipStart = start
+	for j := start; j < end; j++ {
 		b1 := allocAtLevel(j, lo)
 		if lo > 0 {
 			b1 += offsets[j]
@@ -486,7 +487,7 @@ func computeAllocation(
 	// same logic as psumCoarse. NOT a simple forward sum — libopus uses done flag here too.
 	psumFine := func(s int) int {
 		psum, done := 0, false
-		for j := numBands - 1; j >= 0; j-- {
+		for j := end - 1; j >= start; j-- {
 			tmp := bits1[j] + s*bits2[j]>>AllocSteps
 			if tmp >= thresh[j] || done {
 				done = true
@@ -518,7 +519,7 @@ func computeAllocation(
 	bandBits := make([]int, numBands)
 	{
 		psum, done := 0, false
-		for j := numBands - 1; j >= 0; j-- {
+		for j := end - 1; j >= start; j-- {
 			tmp := bits1[j] + loF*bits2[j]>>AllocSteps
 			if tmp < thresh[j] && !done {
 				if tmp >= allocFloor {
@@ -559,11 +560,10 @@ func computeAllocation(
 		psum += b
 	}
 	intensityRsvLocal := intensityRsv
-	// libopus uses the band `start` (always 0 here — no custom modes) for all
-	// band-range arithmetic in the skip loop, intensity/dual-stereo decode, and
-	// the final bit distribution. `skipStart` (last dynalloc-boosted band) gates
-	// ONLY the skip-loop break condition `j <= skip_start`.
-	const start = 0
+	// libopus uses the band `start` for all band-range arithmetic in the skip
+	// loop, intensity/dual-stereo decode, and the final bit distribution.
+	// `skipStart` (last dynalloc-boosted band, >= start) gates ONLY the skip-loop
+	// break condition `j <= skip_start`. For CELT-only start==0; for hybrid start==17.
 	for {
 		j := codedBands - 1
 		if j <= skipStart {

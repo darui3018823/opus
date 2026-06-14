@@ -117,6 +117,7 @@ $decodePulses = $decodePulses.Replace("`r`n", "`n")
 $decodePulses = $decodePulses.Replace('#include "main.h"', "#include `"main.h`"`r`n#include `"silk_trace.h`"")
 $decodePulses = $decodePulses.Replace("    silk_decode_signs( psRangeDec, pulses, frame_length, signalType, quantOffsetType, sum_pulses );`n}",
 @"
+    oracle_silk_range("BEFORE_SIGNS", psRangeDec);
     silk_decode_signs( psRangeDec, pulses, frame_length, signalType, quantOffsetType, sum_pulses );
     if( oracle_trace_enabled ) {
         fprintf(stderr, "[SILK_PULSE_HEADER] rateLevel=%d iter=%d signalType=%d qoff=%d frame_length=%d\n",

@@ -118,5 +118,5 @@ func TestDecoderSampleCount(t *testing.T) {
 		t.Logf("  cc=%d: decoded=%d expected=%d diff=%d",
 			cc, byCC[cc], byCCExpected[cc], byCCExpected[cc]-byCC[cc])
 	}
-	fmt.Sprintf("done")
+	_ = fmt.Sprintf("done")
 }

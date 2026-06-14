@@ -366,5 +366,5 @@ func TestV03SILKStreamAnalysis(t *testing.T) {
 
 	// Let's also look at what happens if the 10ms config decode uses subframe-per-frame=1
 	// vs if we treat every decoded output as a single 20ms subframe
-	fmt.Sprintf("done") // prevent unused import
+	_ = fmt.Sprintf("done") // prevent unused import
 }

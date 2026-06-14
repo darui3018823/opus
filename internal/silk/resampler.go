@@ -214,20 +214,27 @@ func (s *Resampler) Process(in []int16) []int16 {
 	// Copy first part to delay buffer (delayBuf[0:inputDelay] holds prior tail).
 	copy(s.delayBuf[s.inputDelay:s.fsInKHz], in[:nSamples])
 
+	// The second chunk processes only `inLen - fsInKHz` samples (libopus
+	// silk_resampler), i.e. in[nSamples : inLen-inputDelay]. The final
+	// inputDelay samples are held back for the next call's delay buffer. When
+	// inputDelay==0 (e.g. 8 kHz->48 kHz) this is in[nSamples:inLen]; for 12/16
+	// kHz (inputDelay 4/7) the tail must be excluded or it is processed twice.
+	secondEnd := inLen - s.inputDelay
+
 	var out []int16
 	switch s.resamplerFunction {
 	case useResamplerUp2HQ:
 		out = s.up2HQ(out, s.delayBuf[:s.fsInKHz])
-		out = s.up2HQ(out, in[nSamples:inLen])
+		out = s.up2HQ(out, in[nSamples:secondEnd])
 	case useResamplerIIRFIR:
 		out = s.iirFIR(out, s.delayBuf[:s.fsInKHz])
-		out = s.iirFIR(out, in[nSamples:inLen])
+		out = s.iirFIR(out, in[nSamples:secondEnd])
 	case useResamplerDownFIR:
 		out = s.downFIR(out, s.delayBuf[:s.fsInKHz])
-		out = s.downFIR(out, in[nSamples:inLen])
+		out = s.downFIR(out, in[nSamples:secondEnd])
 	default:
 		out = append(out, s.delayBuf[:s.fsInKHz]...)
-		out = append(out, in[nSamples:inLen]...)
+		out = append(out, in[nSamples:secondEnd]...)
 	}
 
 	// Save the tail for the next call.

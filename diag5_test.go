@@ -124,5 +124,5 @@ func TestDecoderCode3Trace(t *testing.T) {
 
 	t.Logf("total: decoded=%d expected=%d ref=2031360", totalDecoded, totalExpected)
 	t.Logf("cc=3 mismatches: %d", mismatchCount)
-	fmt.Sprintf("done")
+	_ = fmt.Sprintf("done")
 }

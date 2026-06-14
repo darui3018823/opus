@@ -264,6 +264,7 @@ func UnquantizeCoarseEnergy(
 	prevLogE2 []float64,
 	intra bool,
 	numBands int,
+	start, end int,
 	lm int,
 	channels int,
 	totalBits int,
@@ -288,7 +289,7 @@ func UnquantizeCoarseEnergy(
 	quantLogE := make([]float64, numBands*channels)
 	prev := make([]float64, channels) // per-channel inter-band predictor
 
-	for i := 0; i < numBands; i++ {
+	for i := start; i < end; i++ {
 		pi := 2 * i
 		if pi > 40 {
 			pi = 40

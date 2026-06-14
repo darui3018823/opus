@@ -989,6 +989,34 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 // SILK is decoded from the front of the stream; the CELT decoder continues from
 // the same decoder. The resampled SILK signal and the CELT high band are summed
 // in the time domain (mirrors libopus opus_decode_frame's hybrid path).
+// crossfadeRedundancy blends the last 2.5 ms (F2_5 at the output rate) of the
+// hybrid output `out` with the second half of the 5 ms redundant CELT frame
+// `red`, using window² weights (libopus smooth_fade). Both buffers are
+// interleaved at d.channels; `red` holds 2*F2_5 samples per channel.
+func (d *Decoder) crossfadeRedundancy(out, red []float64, samplesPerFrame int) {
+	ch := d.channels
+	f25 := d.sampleRate / 400 // F2_5 at output rate (120 @ 48k)
+	frameSamplesPerCh := samplesPerFrame / ch
+	if frameSamplesPerCh < f25 || len(red) < 2*f25*ch {
+		return
+	}
+	win := celt.OverlapWindow48()
+	inc := 48000 / d.sampleRate
+	if inc < 1 {
+		inc = 1
+	}
+	base := (frameSamplesPerCh - f25) * ch // first interleaved sample of the tail
+	for i := 0; i < f25; i++ {
+		wi := win[i*inc]
+		w := wi * wi
+		for c := 0; c < ch; c++ {
+			o := base + i*ch + c
+			r := (f25 + i) * ch + c
+			out[o] = w*red[r] + (1.0-w)*out[o]
+		}
+	}
+}
+
 func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChannels int) ([]float64, error) {
 	const rateKHz = 16 // hybrid SILK layer is always wideband
 	ri := silkRateIdx(rateKHz)
@@ -1066,18 +1094,37 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		silkOut = padOrTrim(silkOut, samplesPerFrame)
 
 		// Hybrid redundancy flag (logp 12), decoded between SILK and CELT in
-		// libopus opus_decode_frame. It is almost always 0; consuming the symbol
-		// keeps the shared range decoder aligned for the CELT layer. (The rare
-		// redundant-frame reconstruction is not implemented.)
+		// libopus opus_decode_frame. When set, the packet carries a trailing 5 ms
+		// redundant CELT frame (full band) used to smooth SILK<->CELT transitions.
+		// We support the SILK->CELT case (celt_to_silk=0): the main CELT layer
+		// decodes from a length reduced by redundancy_bytes, then a reset CELT
+		// decoder decodes the redundant frame from the packet tail, whose state
+		// seeds the following CELT-only packet's coarse-energy prediction.
+		redundancy := false
+		celtToSilk := false
+		redundancyBytes := 0
+		celtLen := len(stream)
 		if dec.ECTell()+37 <= len(stream)*8 {
-			_ = dec.DecodeBitLogp(12)
+			redundancy = dec.DecodeBitLogp(12)
+		}
+		if redundancy {
+			celtToSilk = dec.DecodeBitLogp(1)
+			redundancyBytes = int(dec.DecodeUint(256)) + 2
+			celtLen = len(stream) - redundancyBytes
+			if celtLen < 0 || celtLen*8 < dec.ECTell() {
+				celtLen = len(stream)
+				redundancyBytes = 0
+				redundancy = false
+			} else {
+				dec.ShrinkStorage(redundancyBytes)
+			}
 		}
 
 		// CELT high-band layer continues from the same range decoder.
 		if d.lastCeltDec != nil && d.lastCeltDec != celtDec {
 			celtDec.CopyStateFrom(d.lastCeltDec)
 		}
-		celtPCM, cerr := celtDec.DecodeHybrid(dec, len(stream), celtStart, celtEnd)
+		celtPCM, cerr := celtDec.DecodeHybrid(dec, celtLen, celtStart, celtEnd)
 		if cerr == nil {
 			d.lastCeltDec = celtDec
 			if d.celtResampler != nil {
@@ -1094,6 +1141,24 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 					v = -1.0
 				}
 				silkOut[i] = v
+			}
+
+			// SILK->CELT redundancy: decode the trailing 5 ms (F5=240 @ 48k) CELT
+			// frame on a freshly reset decoder, crossfade the last 2.5 ms of this
+			// frame, and adopt its state so the next CELT-only packet predicts
+			// coarse energy from the right baseline (matches libopus).
+			if redundancy && !celtToSilk && redundancyBytes >= 2 && celtLen+redundancyBytes <= len(stream) {
+				if redDec, rerr := celt.NewDecoderEx(240, 48000, 21, celtActualCh); rerr == nil {
+					if redPCM, derr := redDec.Decode(stream[celtLen : celtLen+redundancyBytes]); derr == nil {
+						if d.celtResampler != nil {
+							redPCM = d.celtResampler.Process(redPCM)
+						}
+						redPCM = adjustChannels(redPCM, celtActualCh, d.channels)
+						d.crossfadeRedundancy(silkOut, redPCM, samplesPerFrame)
+						// Adopt the redundant frame's CELT state for continuity.
+						celtDec.CopyStateFrom(redDec)
+					}
+				}
 			}
 		}
 		allPCM = append(allPCM, silkOut...)

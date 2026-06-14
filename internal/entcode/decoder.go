@@ -100,6 +100,21 @@ func (dec *Decoder) GetPos() int        { return dec.pos }
 func (dec *Decoder) GetEndOffs() int    { return dec.endOffs }
 func (dec *Decoder) GetNendBits() uint  { return dec.nendBits }
 
+// ShrinkStorage reduces the decoder's effective buffer length by n bytes,
+// matching libopus `dec->storage -= n`. Raw bits (DecodeBits) are read from the
+// end of the buffer, so shrinking storage keeps the main range decoder from
+// reading into trailing bytes reserved for a redundant frame. Forward range
+// reads (pos) are unaffected as long as they have not yet reached the new end.
+func (dec *Decoder) ShrinkStorage(n int) {
+	if n <= 0 {
+		return
+	}
+	if n > len(dec.buf) {
+		n = len(dec.buf)
+	}
+	dec.buf = dec.buf[:len(dec.buf)-n]
+}
+
 // readByte reads one byte from the buffer, returning 0 past the end.
 func (dec *Decoder) readByte() byte {
 	if dec.pos < len(dec.buf) {

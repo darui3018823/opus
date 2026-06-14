@@ -191,6 +191,16 @@ func celtWindow(n int) []float32 {
 	return w
 }
 
+// OverlapWindow48 returns the 120-sample (2.5 ms @ 48 kHz) CELT overlap window
+// as float64, used for redundancy crossfades (libopus smooth_fade).
+func OverlapWindow48() []float64 {
+	w := make([]float64, 120)
+	for i := 0; i < 120; i++ {
+		w[i] = float64(Window120[i])
+	}
+	return w
+}
+
 // buildBandConfig creates a BandConfig from the first numBands entries of EBands48000.
 // BandStart and BandSizes are at LM=0 scale.
 func buildBandConfig(numBands int) *BandConfig {

@@ -82,13 +82,21 @@ libopus-compatible mode selection or packetization.
 The top-level decoder accepts the five Opus rates, pre-creates CELT decoders
 for bandwidth/frame/channel variants, and pre-creates SILK decoders for
 8/12/16 kHz packet rates. CELT configs are routed through the CELT path; SILK
-and hybrid configs are routed through the SILK packet path. Complete hybrid
-SILK+CELT reconstruction is not finished.
+configs through the SILK packet path; hybrid configs (12-15) through the
+combined SILK+CELT path. Hybrid SILK+CELT reconstruction is implemented (a
+single range decoder runs SILK, the hybrid redundancy flag, then the CELT high
+band; the two outputs are resampled and time-domain summed). Hybrid SILK->CELT
+**redundancy** (the trailing 5 ms redundant CELT frame, celt_to_silk=0) is also
+implemented: the main CELT layer decodes from a length reduced by
+redundancy_bytes, then a reset CELT decoder decodes the redundant frame from the
+packet tail, the last 2.5 ms is crossfaded, and the redundant frame's state
+seeds the next CELT-only packet. See `docs/CURRENT_IMPLEMENTATION.md` and the
+`project-hybrid-architecture` / `project-tv10-celt-stereo` memories.
 
-`go test ./...` is not green at the current snapshot. Known failures include
-root official-vector RMSE checks, root cgo/libopus reference RMSE checks,
-`internal/silk` synthesis oracle tests, and the `cmd_diag` duplicate-main build
-failure.
+`go test ./...` is not fully green at the current snapshot. The official RFC
+8251 vector suite is at **11/12 PASS** (only failing: testvector01 = heavy pure
+SILK, RMSE ~0.038). Other known failures: root cgo/libopus reference RMSE checks
+and the `cmd_diag` duplicate-main build failure (two files define `main`).
 
 ### Encoding data flow
 

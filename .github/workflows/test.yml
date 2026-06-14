@@ -1,0 +1,66 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Report toolchain / arch
+        run: |
+          go version
+          go env GOARCH GOOS
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: Download RFC 8251 test vectors
+        run: |
+          set -euo pipefail
+          mkdir -p testdata
+          curl -fSL -o /tmp/opus_testvectors.tar.gz \
+            https://opus-codec.org/testvectors/opus_testvectors-rfc8251.tar.gz
+          tar -xzf /tmp/opus_testvectors.tar.gz -C testdata/
+          if [ ! -f testdata/opus_newvectors/testvector01.bit ]; then
+            src="$(find testdata -name testvector01.bit | head -n1)"
+            if [ -n "$src" ]; then
+              mkdir -p testdata/opus_newvectors
+              cp "$(dirname "$src")"/* testdata/opus_newvectors/
+            fi
+          fi
+          ls testdata/opus_newvectors | head
+
+      - name: go test
+        run: go test -count=1 ./...
+
+      - name: Official RFC 8251 vectors (verbose)
+        run: go test -count=1 -v -run TestOfficialVectors .

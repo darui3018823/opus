@@ -1,0 +1,54 @@
+name: Bench
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: bench (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Report toolchain / arch
+        run: |
+          go version
+          go env GOARCH GOOS
+
+      # -run='^$' disables tests so only benchmarks execute. -benchtime is kept
+      # short so CI stays fast; this validates that benchmarks build and run.
+      - name: go test -bench
+        run: go test -run='^$' -bench=. -benchmem -benchtime=10x ./... | tee bench-${{ matrix.arch }}.txt
+
+      - name: Upload benchmark output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ matrix.arch }}
+          path: bench-${{ matrix.arch }}.txt
+          if-no-files-found: ignore

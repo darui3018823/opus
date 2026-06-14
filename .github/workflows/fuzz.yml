@@ -1,0 +1,60 @@
+name: Fuzz
+
+on:
+  schedule:
+    # Nightly at 04:00 UTC.
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      fuzztime:
+        description: "Per-target fuzz duration (Go duration, e.g. 120s, 5m)"
+        required: false
+        default: "120s"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }} (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [FuzzDecode, FuzzDecodeFloat]
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Report toolchain / arch
+        run: |
+          go version
+          go env GOARCH GOOS
+
+      - name: go test -fuzz=${{ matrix.target }}
+        run: |
+          go test -run='^$' \
+            -fuzz="^${{ matrix.target }}$" \
+            -fuzztime="${{ github.event.inputs.fuzztime || '120s' }}" .
+
+      - name: Upload crashers on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers-${{ matrix.target }}-${{ matrix.arch }}
+          path: testdata/fuzz/
+          if-no-files-found: ignore

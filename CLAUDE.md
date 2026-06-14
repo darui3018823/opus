@@ -11,8 +11,12 @@ when they disagree.
 ## Commands
 
 ```bash
-# Run all tests. Currently expected to fail; see docs/CURRENT_IMPLEMENTATION.md.
+# Run all tests. Library packages pass; official-vector and cgo tests need
+# extra data/toolchain (see docs/CURRENT_IMPLEMENTATION.md).
 go test ./...
+
+# Run the cgo/libopus reference comparison (needs gcc + libopus; PowerShell on Windows)
+go test -tags cgo -run TestCGORef .
 
 # Run tests with verbose output
 go test -v ./...
@@ -39,8 +43,9 @@ go vet ./...
 ```
 
 This repository is primarily a library, but it also contains diagnostic command
-packages under `cmd_diag*`. At the current snapshot, `cmd_diag` does not build
-because two files define `main`.
+packages under `cmd_diag*`. The former duplicate-`main` build failure is fixed:
+`toc_check.go` now lives in its own command package `cmd_diag/toccheck`, so
+`go build ./...` and `go vet ./...` are clean.
 
 ## Architecture
 
@@ -99,9 +104,12 @@ fullband stereo (configs 28-31); its residual was a code-3 multi-byte padding
 parse bug in `splitOpusFrames` (only one 0xFF continuation was handled), which
 fed the CELT decoder the wrong bytes on packets with a `41 ff ff ..` padding
 run, causing full-scale clipping. Fixed to loop per RFC 6716 §3.2.5 (each 0xFF
-count byte = 254 padding-data bytes + continuation). Remaining `go test ./...`
-non-green items: root cgo/libopus reference RMSE checks and the `cmd_diag`
-duplicate-main build failure (two files define `main`).
+count byte = 254 padding-data bytes + continuation). `go build ./...`,
+`go vet ./...`, and `go test ./...` are all green (the `cmd_diag` duplicate-main
+build failure is fixed). The cgo/libopus reference comparison `TestCGORef`
+(`go test -tags cgo`) also passes all 12 vectors against libopus 1.6.1
+(overall RMSE < 0.001). Note: official-vector and `.bit`-based diagnostic tests
+`t.Skip` when `testdata/` (git-ignored) is absent.
 
 ### Encoding data flow
 

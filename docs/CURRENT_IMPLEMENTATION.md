@@ -80,7 +80,8 @@ Current decoder limitations:
 - There is no public `DecodePLC(pcm, frameSize)` method; CELT PLC exists
   internally and is reached through `DecodeFEC`.
 - The decoder passes all 12 official RFC 8251 vectors (RMSE < 0.001). The
-  separate cgo/libopus reference RMSE comparison test still fails.
+  separate cgo/libopus reference comparison (`TestCGORef`, `go test -tags cgo`)
+  also passes all 12 vectors against libopus 1.6.1 (overall RMSE < 0.001).
 
 ## Internal Packages
 
@@ -166,8 +167,10 @@ The SILK package contains:
   encoder
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
-rates. Hybrid configs are routed through the SILK packet path in `opus.go`, but
-hybrid CELT high-band composition is not complete.
+rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single
+range decoder runs SILK, the hybrid redundancy flag, then the CELT high band,
+and the two outputs are resampled and time-domain summed. The hybrid SILK->CELT
+redundancy frame (celt_to_silk=0) is also handled.
 
 ## Test Status
 
@@ -177,14 +180,17 @@ Command checked:
 go test ./...
 ```
 
-Result on 2026-06-11: failing.
+Result on 2026-06-14: passing (`go build ./...`, `go vet ./...`, and
+`go test ./...` all exit 0).
 
-Passing package-level tests in that run:
+Passing package-level tests:
 
+- root package `opus` (including `TestOfficialVectors`, 12/12)
 - `internal/celt`
 - `internal/dsp`
 - `internal/entcode`
 - `internal/resampler`
+- `internal/silk`
 - `internal/testing`
 
 Official-vector status (update 2026-06-14): **all 12 RFC 8251 vectors PASS**
@@ -194,16 +200,19 @@ stereo; it was fixed by correcting the code-3 multi-byte padding parse in
 `splitOpusFrames` (RFC 6716 §3.2.5: each 0xFF count byte = 254 padding-data
 bytes plus a continuation).
 
-Remaining non-green items in `go test ./...`:
+Notes:
 
-- Root package cgo/libopus reference comparison fails RMSE thresholds. The local
-  run reported `libopus 1.6.1` from the cgo reference helper.
-- `cmd_diag` does not build because both `cmd_diag/main.go` and
-  `cmd_diag/toc_check.go` define `main`.
+- Official-vector and `.bit`-based diagnostic tests `t.Skip` when `testdata/`
+  (git-ignored) is absent; CI downloads `opus_testvectors-rfc8251.tar.gz` into
+  `testdata/opus_newvectors/` so they run for real.
+- The cgo/libopus reference comparison runs under `go test -tags cgo` and needs
+  a C toolchain plus libopus (reported `libopus 1.6.1` locally); it passes all
+  12 vectors.
+- The former `cmd_diag` duplicate-`main` build failure is fixed (`toc_check.go`
+  moved to `cmd_diag/toccheck`).
 
-The decoder now passes the full official Opus test-vector suite; the open items
-above are the cgo reference comparison and the `cmd_diag` build, not decoder
-correctness on the official vectors.
+The decoder passes the full official Opus test-vector suite and the libopus
+reference comparison.
 
 ## Known Gaps
 
@@ -212,16 +221,16 @@ correctness on the official vectors.
 - No public `DecodePLC(pcm, frameSize)` API matching the README examples.
 - No top-level SILK-only encoder selection.
 - No top-level hybrid encoder.
-- Hybrid decode routing exists, but complete SILK+CELT hybrid reconstruction is
-  not finished.
 - FEC decode is currently a PLC fallback, not packet FEC extraction.
 - Application mode, VBR, and some CTL-style constants are not wired to full
   libopus-compatible behavior.
-- Official vector and libopus reference parity remain open correctness work.
+- Decoder parity is achieved on the official vectors and the libopus reference;
+  the open correctness work is now on the encoder side (bit-exact CELT and the
+  SILK/hybrid encoder paths).
 
 ## Practical Use Today
 
-The codebase is best treated as an in-progress Pure Go Opus implementation with
-substantial CELT, SILK, range-coder, DSP, and resampler work already present.
-For production use or compatibility claims, first close the failing vector,
-oracle, and reference-comparison tests.
+The codebase is a Pure Go Opus implementation with a decoder that passes all 12
+official RFC 8251 vectors and the libopus 1.6.1 reference comparison. The
+encoder is still a simplified CELT-only path and is not yet bit-exact, so
+encode-side compatibility claims remain in progress.

@@ -29,21 +29,21 @@ func TestEncoderRoundTripAlignedSNR(t *testing.T) {
 				out[i] = s
 			}
 			return out
-		}, 15},
+		}, 30},
 		{"sine1k-mono", 1, func(n, ch int) []float64 {
 			out := make([]float64, frameSize*ch)
 			for i := 0; i < frameSize; i++ {
 				out[i] = 0.5 * math.Sin(2*math.Pi*1000*float64(n+i)/sampleRate)
 			}
 			return out
-		}, 15},
+		}, 30},
 		{"sine4k-mono", 1, func(n, ch int) []float64 {
 			out := make([]float64, frameSize*ch)
 			for i := 0; i < frameSize; i++ {
 				out[i] = 0.5 * math.Sin(2*math.Pi*4000*float64(n+i)/sampleRate)
 			}
 			return out
-		}, 15},
+		}, 24},
 		{"sine1k-stereo", 2, func(n, ch int) []float64 {
 			out := make([]float64, frameSize*ch)
 			for i := 0; i < frameSize; i++ {
@@ -52,7 +52,7 @@ func TestEncoderRoundTripAlignedSNR(t *testing.T) {
 				out[i*ch+1] = s
 			}
 			return out
-		}, 15},
+		}, 28},
 	}
 
 	for _, tc := range cases {

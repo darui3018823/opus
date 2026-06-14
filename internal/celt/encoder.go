@@ -64,6 +64,12 @@ type Encoder struct {
 	finalRange uint32
 	frameCount int
 
+	// Spreading-decision state (libopus st->tonal_average / st->spread_decision).
+	// tonal_average is the recursively-averaged tonality measure; lastSpread is
+	// the previous frame's decision, used for hysteresis.
+	tonalAverage int
+	lastSpread   int
+
 	// CVBR reservoir: accumulated bit surplus/deficit in Q8 bits. Positive means
 	// the encoder has used fewer bits than the target and can afford to spend
 	// more; negative means it has overspent. Clamped to [-maxReservoir, maxReservoir].
@@ -122,6 +128,9 @@ func NewEncoder(frameSize, sampleRate, channels int, config *EncoderConfig) (*En
 		bitrate:    config.Bitrate,
 		complexity: config.Complexity,
 		rateMode:   config.RateMode,
+		// libopus opus_custom_encoder_init defaults.
+		tonalAverage: 256,
+		lastSpread:   spreadNormal,
 	}
 	for c := 0; c < channels; c++ {
 		e.overlap[c] = make([]float64, overlap)
@@ -352,20 +361,29 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	tfEncode(enc, start, end, isTransient, tfRes, lm, 0, totalBits)
 	etr(enc, "tf_encode")
 
-	// Spread decision (SPREAD_NORMAL).
-	spread := 2
+	// Spread decision (tonality-based). Complexity 0 forces SPREAD_NONE; otherwise
+	// spreading_decision measures per-band tonality from the normalised spectrum.
+	spread := spreadNormal
+	if e.complexity == 0 {
+		spread = spreadNone
+	} else {
+		spread = spreadingDecision(X, frameLen, end, ch, M, &e.tonalAverage, e.lastSpread)
+	}
 	if enc.ECTell()+4 <= totalBits {
 		enc.EncodeIcdf(spread, spreadIcdf[:], 5)
 	}
+	e.lastSpread = spread
 	etr(enc, "spread")
 
-	// Dynamic allocation boosts (none).
-	offsets := make([]int, numBands)
+	// Dynamic allocation boosts (tonality/masking follower).
+	vbrOn := e.rateMode != RateModeCBR
+	constrainedVBR := e.rateMode == RateModeCVBR
+	offsets := dynallocAnalysis(logE, numBands, end, ch, lm, isTransient, vbrOn, constrainedVBR)
 	dynallocEncode(enc, offsets, numBands, start, end, lm, ch, totalBits)
 	etr(enc, "dynalloc")
 
-	// Allocation trim (neutral = 5).
-	allocTrim := 5
+	// Allocation trim (spectral tilt + stereo correlation).
+	allocTrim := allocTrimAnalysis(X, logE, numBands, end, lm, ch, frameLen, end, e.bitrate)
 	if enc.ECTell()+6 <= totalBits {
 		enc.EncodeIcdf(allocTrim, TrimICDF[:], 7)
 	}
@@ -579,6 +597,8 @@ func (e *Encoder) Reset() {
 	}
 	e.foldSeed = 0
 	e.frameCount = 0
+	e.tonalAverage = 256
+	e.lastSpread = spreadNormal
 	e.vbrOffset = 0
 	e.vbrCount = 0
 	e.vbrDriftComp = 0

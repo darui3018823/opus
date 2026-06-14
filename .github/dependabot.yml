@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # Keep GitHub Actions used by the workflows up to date (the main value here).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
+    labels: ["dependencies", "ci"]
+    commit-message:
+      prefix: "ci"
+
+  # Go modules: currently no dependencies, kept as insurance for the future.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      go:
+        patterns: ["*"]
+    labels: ["dependencies", "go"]
+    commit-message:
+      prefix: "deps"

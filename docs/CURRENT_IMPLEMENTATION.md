@@ -80,7 +80,7 @@ Current decoder limitations:
 - There is no public `DecodePLC(pcm, frameSize)` method; CELT PLC exists
   internally and is reached through `DecodeFEC`.
 - The decoder passes all 12 official RFC 8251 vectors (RMSE < 0.001). The
-  separate cgo/libopus reference comparison (`TestCGORef`, `go test -tags cgo`)
+  separate cgo/libopus reference comparison (`TestCGORef`, `go test -tags opusref`)
   also passes all 12 vectors against libopus 1.6.1 (overall RMSE < 0.001).
 
 ## Internal Packages
@@ -205,9 +205,10 @@ Notes:
 - Official-vector and `.bit`-based diagnostic tests `t.Skip` when `testdata/`
   (git-ignored) is absent; CI downloads `opus_testvectors-rfc8251.tar.gz` into
   `testdata/opus_newvectors/` so they run for real.
-- The cgo/libopus reference comparison runs under `go test -tags cgo` and needs
-  a C toolchain plus libopus (reported `libopus 1.6.1` locally); it passes all
-  12 vectors.
+- The cgo/libopus reference comparison runs under `go test -tags opusref` and
+  needs a C toolchain plus libopus (reported `libopus 1.6.1` locally); it passes
+  all 12 vectors. Normal builds use a `!opusref` stub so the codec stays
+  CGO-free.
 - The former `cmd_diag` duplicate-`main` build failure is fixed (`toc_check.go`
   moved to `cmd_diag/toccheck`).
 

@@ -1,4 +1,4 @@
-//go:build cgo
+//go:build opusref
 
 package opus_test
 
@@ -6,7 +6,7 @@ package opus_test
 // and our pure-Go implementation, then compares frame-by-frame.
 //
 // Run with:
-//   go test -tags cgo -run TestCGORef ./...
+//   go test -tags opusref -run TestCGORef ./...
 //
 // The test reports per-frame RMSE and an overall pass/fail for each vector.
 // It does NOT require the .dec reference files — it uses libopus as ground truth.

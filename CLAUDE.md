@@ -16,7 +16,7 @@ when they disagree.
 go test ./...
 
 # Run the cgo/libopus reference comparison (needs gcc + libopus; PowerShell on Windows)
-go test -tags cgo -run TestCGORef .
+go test -tags opusref -run TestCGORef .
 
 # Run tests with verbose output
 go test -v ./...
@@ -52,7 +52,8 @@ packages under `cmd_diag*`. The former duplicate-`main` build failure is fixed:
 This is a pure Go implementation of the Opus audio codec (RFC 6716), with no
 runtime CGO dependency in the codec implementation (module:
 `github.com/darui3018823/opus`). The `internal/cgoref` package is a
-`//go:build cgo` libopus wrapper used only for golden/reference comparisons.
+`//go:build opusref` libopus wrapper used only for golden/reference comparisons
+(a `!opusref` stub keeps the package empty for normal, CGO-free builds).
 
 ### Layer structure
 
@@ -107,7 +108,7 @@ run, causing full-scale clipping. Fixed to loop per RFC 6716 §3.2.5 (each 0xFF
 count byte = 254 padding-data bytes + continuation). `go build ./...`,
 `go vet ./...`, and `go test ./...` are all green (the `cmd_diag` duplicate-main
 build failure is fixed). The cgo/libopus reference comparison `TestCGORef`
-(`go test -tags cgo`) also passes all 12 vectors against libopus 1.6.1
+(`go test -tags opusref`) also passes all 12 vectors against libopus 1.6.1
 (overall RMSE < 0.001). Note: official-vector and `.bit`-based diagnostic tests
 `t.Skip` when `testdata/` (git-ignored) is absent.
 

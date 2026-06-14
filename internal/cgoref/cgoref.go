@@ -1,4 +1,4 @@
-//go:build cgo
+//go:build opusref
 
 // Package cgoref wraps libopus via CGO for golden-test comparisons.
 package cgoref

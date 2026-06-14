@@ -14,22 +14,75 @@ type Encoder struct {
 	rng uint32
 	rem int    // -1 means empty (no pending byte)
 	ext uint32 // number of pending 0xFF carry-chain bytes
+
+	// Raw end-of-packet bit buffer, mirroring libopus end_window/nend_bits.
+	// Raw bits (ec_enc_bits) are written to the END of the packet, LSB first,
+	// symmetric with the decoder's DecodeBits (readByteFromEnd). endBytes holds
+	// the tail bytes in tail order: endBytes[0] is the very last packet byte,
+	// endBytes[1] the second-last, etc.
+	endWindow uint32
+	nendBits  uint
+	endBytes  []byte
+	nbitsRaw  int // total raw bits emitted (for Tell)
+
+	// capacity is the target packet size; raw bits are placed at offset capacity
+	// (the absolute end) so a fixed-size packet keeps a zeroed gap between the
+	// forward range bytes and the trailing raw bytes, matching libopus storage.
+	capacity int
+
+	// Merge byte stashed by Flush: the leftover (<8) raw window bits that share
+	// the byte immediately before the raw tail (libopus buf[storage-end_offs-1]).
+	mergeBits uint32
+	mergeUsed int
 }
 
-// NewEncoder creates a new range encoder.
+// NewEncoder creates a new range encoder. capacity is the intended packet size
+// in bytes; it sets where end-of-packet raw bits are placed (the absolute end).
 func NewEncoder(capacity int) *Encoder {
 	return &Encoder{
-		buf: make([]byte, 0, capacity),
-		val: 0,
-		rng: CodeTop, // 0x80000000
-		rem: -1,
-		ext: 0,
+		buf:      make([]byte, 0, capacity),
+		val:      0,
+		rng:      CodeTop, // 0x80000000
+		rem:      -1,
+		ext:      0,
+		capacity: capacity,
 	}
 }
 
-// Bytes returns the encoded bytes. Call Flush first.
+// Bytes returns the encoded packet. Call Flush first.
+//
+// When no raw end-of-packet bits were written, this returns the minimal range-
+// coded front buffer (preserving the historical byte-length semantics relied on
+// by size-measuring tests). When raw bits exist, it assembles the libopus-style
+// layout: forward range bytes at the front, a zeroed gap, and the raw bytes at
+// the absolute end (so the decoder's DecodeBits reads them from the end). The
+// packet is sized to capacity when that leaves room, matching a fixed-size Opus
+// payload; otherwise it grows to fit.
 func (enc *Encoder) Bytes() []byte {
-	return enc.buf
+	tailLen := len(enc.endBytes)
+	if tailLen == 0 && enc.mergeUsed == 0 {
+		return enc.buf
+	}
+
+	frontLen := len(enc.buf)
+	mergeByte := 0
+	if enc.mergeUsed > 0 {
+		mergeByte = 1
+	}
+	minN := frontLen + tailLen + mergeByte
+	n := max(enc.capacity, minN)
+
+	out := make([]byte, n)
+	copy(out, enc.buf)
+	// Raw tail: endBytes[0] is the very last packet byte.
+	for i, b := range enc.endBytes {
+		out[n-1-i] = b
+	}
+	// Merge byte: leftover (<8) raw bits in the slot just before the tail.
+	if enc.mergeUsed > 0 {
+		out[n-tailLen-1] |= byte(enc.mergeBits)
+	}
+	return out
 }
 
 // Debug accessors for testing
@@ -38,14 +91,15 @@ func (enc *Encoder) GetRng() uint32 { return enc.rng }
 func (enc *Encoder) GetRem() int    { return enc.rem }
 func (enc *Encoder) GetExt() uint32 { return enc.ext }
 
-// Tell returns the number of range-coded bits used so far.
+// Tell returns the number of bits used so far, including end-of-packet raw bits
+// (mirrors libopus ec_tell, whose nbits_total counts raw bits via ec_enc_bits).
 func (enc *Encoder) Tell() int {
 	nbytes := len(enc.buf)
 	if enc.rem >= 0 {
 		nbytes++
 	}
 	nbytes += int(enc.ext)
-	return nbytes*8 + (32 - ILog(enc.rng))
+	return nbytes*8 + (32 - ILog(enc.rng)) + enc.nbitsRaw
 }
 
 // carryOut handles carry propagation - matches ec_enc_carry_out in libopus.
@@ -143,13 +197,37 @@ func (enc *Encoder) EncodeUint(val, ft uint32) {
 	}
 }
 
-// EncodeBits writes raw bits through the range coder as uniform bits.
-// In a full libopus implementation these go to the end of the packet,
-// but for range-coder-only usage we encode them uniformly.
-func (enc *Encoder) EncodeBits(val uint32, nbits uint) {
-	for i := int(nbits) - 1; i >= 0; i-- {
-		enc.EncodeBitLogp((val>>uint(i))&1 == 1, 1)
+// writeByteAtEnd appends one raw byte to the end-of-packet tail buffer.
+// Mirrors libopus ec_write_byte_at_end (writing buf[storage-(++end_offs)]).
+func (enc *Encoder) writeByteAtEnd(value byte) {
+	enc.endBytes = append(enc.endBytes, value)
+}
+
+// EncodeBits writes nbits raw bits to the END of the packet, LSB first.
+// Bit-exact with libopus ec_enc_bits (celt/entenc.c): symmetric with the
+// decoder's DecodeBits, which reads raw bits from the end of the packet.
+func (enc *Encoder) EncodeBits(fl uint32, nbits uint) {
+	if nbits == 0 {
+		return
 	}
+	window := enc.endWindow
+	used := int(enc.nendBits)
+	if used+int(nbits) > 32 {
+		// Flush whole bytes out of the window (do-while in libopus).
+		for {
+			enc.writeByteAtEnd(byte(window & SymMax))
+			window >>= SymBits
+			used -= SymBits
+			if used < SymBits {
+				break
+			}
+		}
+	}
+	window |= fl << uint(used)
+	used += int(nbits)
+	enc.endWindow = window
+	enc.nendBits = uint(used)
+	enc.nbitsRaw += int(nbits)
 }
 
 // EncodeBit encodes a single bit. prob is probability of false on a 0-32768 scale.
@@ -210,6 +288,21 @@ func (enc *Encoder) Flush() {
 		}
 		enc.rem = -1
 	}
+
+	// Flush whole bytes still held in the raw end-of-packet window, then stash
+	// the leftover (<8) bits as the merge byte that shares the slot immediately
+	// before the raw tail (libopus ec_enc_done: buf[storage-end_offs-1] |= win).
+	window := enc.endWindow
+	used := int(enc.nendBits)
+	for used >= SymBits {
+		enc.writeByteAtEnd(byte(window & SymMax))
+		window >>= SymBits
+		used -= SymBits
+	}
+	enc.mergeBits = window
+	enc.mergeUsed = used
+	enc.endWindow = 0
+	enc.nendBits = 0
 }
 
 // EncodeExact encodes a symbol given its exact cumulative frequency range.

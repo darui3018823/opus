@@ -2,6 +2,7 @@ package celt
 
 import (
 	"math"
+	"math/rand"
 	"testing"
 )
 
@@ -216,6 +217,133 @@ func TestCeltTransientRoundTrip(t *testing.T) {
 	t.Logf("pre-echo RMS before burst: short=%.6f long=%.6f (long/short=%.2fx)", shortPre, longPre, longPre/shortPre)
 	if shortPre >= longPre {
 		t.Errorf("short blocks did not reduce pre-echo: short=%.6f long=%.6f", shortPre, longPre)
+	}
+}
+
+// TestStereoAnalysisDecision checks the dual-stereo decision: highly correlated
+// channels (L==R) should pick joint mid/side (false), while decorrelated channels
+// should pick independent L/R coding (true).
+func TestStereoAnalysisDecision(t *testing.T) {
+	const frameLen = 800
+	const lm = 3
+	hi := int(EBands48000[13]) << lm // bands the analysis actually inspects
+
+	corr := make([]float64, 2*frameLen)
+	for j := 0; j < hi; j++ {
+		v := math.Sin(float64(j))
+		corr[j] = v
+		corr[frameLen+j] = v // L == R
+	}
+	if stereoAnalysis(corr, frameLen, lm) {
+		t.Errorf("correlated (L==R) channels: got dual_stereo=true, want false (mid/side)")
+	}
+
+	rng := rand.New(rand.NewSource(1))
+	decorr := make([]float64, 2*frameLen)
+	for j := 0; j < hi; j++ {
+		decorr[j] = rng.NormFloat64()
+		decorr[frameLen+j] = rng.NormFloat64() // independent
+	}
+	if !stereoAnalysis(decorr, frameLen, lm) {
+		t.Errorf("decorrelated channels: got dual_stereo=false, want true (independent L/R)")
+	}
+}
+
+// TestIntensityHysteresis checks the intensity-band decision: at a typical
+// 64 kbps stereo rate it should select an intermediate band (so high bands use
+// single-channel intensity coding), and the hysteresis must keep a previous
+// choice stable against a small rate change near the boundary.
+func TestIntensityHysteresis(t *testing.T) {
+	th := intensityThresholds[:]
+	hy := intensityHysteresis[:]
+	n := len(th)
+
+	// 64 kbps → val 64. thresholds[14]=62, thresholds[15]=67 → index 15.
+	got := hysteresisDecision(64, th, hy, n, 0)
+	if got != 15 {
+		t.Errorf("intensity at 64 kbps: got band %d, want 15", got)
+	}
+
+	// Just below the boundary back down to band 14 from prev=15: with hysteresis,
+	// val=63 (> thresholds[14]-hysteresis[14]=62-4=58) should stay at 15.
+	if got := hysteresisDecision(63, th, hy, n, 15); got != 15 {
+		t.Errorf("hysteresis from prev=15 at val=63: got %d, want 15 (sticky)", got)
+	}
+	// A large drop must overcome hysteresis and move down.
+	if got := hysteresisDecision(40, th, hy, n, 15); got >= 15 {
+		t.Errorf("large rate drop from prev=15 at val=40: got %d, want <15", got)
+	}
+}
+
+// TestCeltStereoDecisionRoundTrip drives the encoder with correlated (L==R),
+// anti-correlated (L==-R), and decorrelated stereo material so that both the
+// joint mid/side and the independent dual-stereo branches, plus intensity-stereo
+// high bands, are exercised. Each frame must decode with a matching final range
+// (encoder/decoder stay in sync) and reconstruct non-trivial audio.
+func TestCeltStereoDecisionRoundTrip(t *testing.T) {
+	const sr = 48000
+	const fs = 960
+
+	gens := map[string]func(n int) []float64{
+		"correlated": func(n int) []float64 {
+			out := make([]float64, fs*2)
+			for i := 0; i < fs; i++ {
+				s := 0.5 * math.Sin(2*math.Pi*1000*float64(n+i)/sr)
+				out[i*2], out[i*2+1] = s, s
+			}
+			return out
+		},
+		"anti-correlated": func(n int) []float64 {
+			out := make([]float64, fs*2)
+			for i := 0; i < fs; i++ {
+				s := 0.5 * math.Sin(2*math.Pi*1000*float64(n+i)/sr)
+				out[i*2], out[i*2+1] = s, -s
+			}
+			return out
+		},
+		"decorrelated": func(n int) []float64 {
+			out := make([]float64, fs*2)
+			for i := 0; i < fs; i++ {
+				out[i*2] = 0.5 * math.Sin(2*math.Pi*700*float64(n+i)/sr)
+				out[i*2+1] = 0.5 * math.Sin(2*math.Pi*1600*float64(n+i)/sr)
+			}
+			return out
+		},
+	}
+
+	for name, gen := range gens {
+		t.Run(name, func(t *testing.T) {
+			enc, err := NewEncoder(fs, sr, 2, DefaultEncoderConfig())
+			if err != nil {
+				t.Fatal(err)
+			}
+			dec, err := NewDecoder(fs, sr, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var peak float64
+			for f := 0; f < 6; f++ {
+				pkt, err := enc.Encode(gen(f * fs))
+				if err != nil {
+					t.Fatal(err)
+				}
+				out, err := dec.Decode(pkt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if er, dr := enc.FinalRange(), dec.LastFinalRange(); er != dr {
+					t.Fatalf("frame=%d range mismatch: enc=%08x dec=%08x", f, er, dr)
+				}
+				for _, v := range out {
+					if a := math.Abs(v); a > peak {
+						peak = a
+					}
+				}
+			}
+			if peak < 0.05 {
+				t.Errorf("decoded peak too small (%g): reconstruction collapsed", peak)
+			}
+		})
 	}
 }
 

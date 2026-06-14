@@ -76,6 +76,11 @@ type Encoder struct {
 	// is enabled while consecTransient < 2.
 	consecTransient int
 
+	// intensity is the previous frame's intensity-stereo starting band (libopus
+	// st->intensity), kept across frames so the hysteresis decision is stable.
+	// Zeroed by Reset, matching libopus OPUS_RESET_STATE.
+	intensity int
+
 	// CVBR reservoir: accumulated bit surplus/deficit in Q8 bits. Positive means
 	// the encoder has used fewer bits than the target and can afford to spend
 	// more; negative means it has overspent. Clamped to [-maxReservoir, maxReservoir].
@@ -448,8 +453,42 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 		bitsQ3 = 0
 	}
 
+	// Stereo coding decisions (C==2 only). Both are written into the stream by
+	// computeAllocationEncode and read back by the decoder, so any in-range choice
+	// round-trips; these heuristics only shape stereo quality.
 	encIntensity := end
 	encDualStereo := false
+	if ch == 2 {
+		// Dual stereo (independent L/R) vs joint mid/side, from the L/R-vs-M/S
+		// entropy proxy. LM>0 always here (20 ms frames), matching libopus' LM!=0
+		// guard for running this analysis.
+		encDualStereo = stereoAnalysis(X, frameLen, lm)
+
+		// Intensity-stereo starting band from the equivalent bitrate (libopus
+		// hysteresis_decision over equiv_rate in kbps). For our fixed-LM frames the
+		// (40*C+20)*((400>>LM)-50) correction term is zero (400>>LM == 50 at LM=3).
+		equivRate := targetBytes * 8 * 50
+		if shift := 3 - lm; shift > 0 {
+			equivRate >>= uint(shift)
+		} else if shift < 0 {
+			equivRate <<= uint(-shift)
+		}
+		if e.bitrate > 0 {
+			corr := (40*ch + 20) * ((400 >> uint(lm)) - 50)
+			if r := e.bitrate - corr; r < equivRate {
+				equivRate = r
+			}
+		}
+		e.intensity = hysteresisDecision(equivRate/1000, intensityThresholds[:],
+			intensityHysteresis[:], len(intensityThresholds), e.intensity)
+		encIntensity = e.intensity
+		if encIntensity < start {
+			encIntensity = start
+		}
+		if encIntensity > end {
+			encIntensity = end
+		}
+	}
 	pulses, eBits, finePriority, balance, intensity, codedBands, dualStereo :=
 		computeAllocationEncode(enc, encIntensity, encDualStereo,
 			numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets)
@@ -664,6 +703,7 @@ func (e *Encoder) Reset() {
 	e.tonalAverage = 256
 	e.lastSpread = spreadNormal
 	e.consecTransient = 0
+	e.intensity = 0
 	e.vbrOffset = 0
 	e.vbrCount = 0
 	e.vbrDriftComp = 0

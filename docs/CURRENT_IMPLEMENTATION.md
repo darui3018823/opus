@@ -141,9 +141,37 @@ as CELT-only fullband 20 ms.
   blocks cut pre-echo ~1.8× vs forced long blocks on an impulse-in-silence).
 - 12/12 official vectors unchanged; steady-sine aligned SNR unchanged (steady
   tones don't trigger detection).
+- Not yet done at 2-5b (see 2-5c below for the stereo decisions): real
+  `tf_analysis` (per-band tf_res RDO is still flat 0) and the complexity≥8 second
+  long-block MDCT for `bandLogE2`.
+
+#### Slice 2-5c: Stereo Decisions (intensity / dual_stereo) (Complete)
+- **Status:** Complete
+- Replaced the CELT encoder's fixed stereo parameters (intensity band = `end`,
+  i.e. intensity stereo disabled, and `dual_stereo = false`) with float ports of
+  the libopus stereo decisions (`internal/celt/celt_analysis.go`):
+  - `stereoAnalysis` (libopus `bands.c stereo_analysis`): chooses dual stereo
+    (independent L/R) vs joint mid/side from an L1-norm entropy proxy comparing
+    the L/R and M/S representations over the low bands.
+  - `hysteresisDecision` + `intensityThresholds`/`intensityHysteresis` (libopus
+    `celt_encoder.c`): picks the intensity-stereo starting band from the
+    equivalent bitrate in kbps, biased toward the previous frame's choice. The
+    encoder keeps the previous value in a new `intensity` state field (zeroed by
+    `Reset`, matching libopus `OPUS_RESET_STATE`).
+- These feed `computeAllocationEncode`, which writes both into the stream; the
+  decoder reads them unchanged, so enc/dec final-range symmetry is preserved (any
+  in-range choice round-trips). At the default 64 kbps stereo the intensity band
+  resolves to 15, so the high bands switch to single-channel coding.
+- Delay-aligned stereo SNR is unchanged-to-slightly-better (sine1k-stereo
+  34.7→35.3 dB); the tone sits below the intensity band so the freed high-band
+  bits don't cost quality.
+- Verification: `TestStereoAnalysisDecision` (L==R → mid/side, decorrelated →
+  dual), `TestIntensityHysteresis` (64 kbps → band 15, sticky near the
+  boundary), and `TestCeltStereoDecisionRoundTrip` (correlated/anti-correlated/
+  decorrelated stereo all decode with matching final range).
+- 12/12 official vectors unchanged; `go build/vet/test ./...` green.
 - Not yet done (future quality work): real `tf_analysis` (per-band tf_res RDO is
-  still flat 0), the complexity≥8 second long-block MDCT for `bandLogE2`, and
-  intensity/dual-stereo decisions.
+  still flat 0) and the complexity≥8 second long-block MDCT for `bandLogE2`.
 
 Current encoder limitations:
 

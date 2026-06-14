@@ -122,6 +122,75 @@ func transientAnalysis(bufs [][]float64, length, C int) bool {
 	return maskMetric > 200
 }
 
+// stereoAnalysis is the float port of libopus bands.c stereo_analysis. It chooses
+// between dual stereo (independent L/R coding) and joint mid/side coding by
+// comparing an L1-norm entropy proxy of the L/R representation against the M/S
+// representation over the low bands (0..12). X is the normalised spectrum with a
+// per-channel stride of frameLen, so the right channel begins at X[frameLen]. It
+// returns true when coding the channels independently (dual stereo) is expected
+// to be cheaper than mid/side.
+func stereoAnalysis(X []float64, frameLen, lm int) bool {
+	const epsilon = 1e-15
+	sumLR := epsilon
+	sumMS := epsilon
+	for i := 0; i < 13; i++ {
+		for j := int(EBands48000[i]) << uint(lm); j < int(EBands48000[i+1])<<uint(lm); j++ {
+			l := X[j]
+			r := X[frameLen+j]
+			m := l + r
+			s := l - r
+			sumLR += math.Abs(l) + math.Abs(r)
+			sumMS += math.Abs(m) + math.Abs(s)
+		}
+	}
+	sumMS *= 0.707107 // 1/sqrt(2): M/S are scaled by this in the codec
+	thetas := 13
+	// We don't need thetas for the lower bands with LM<=1.
+	if lm <= 1 {
+		thetas -= 8
+	}
+	w := int(EBands48000[13]) << uint(lm+1)
+	return float64(w+thetas)*sumMS > float64(w)*sumLR
+}
+
+// intensityThresholds and intensityHysteresis drive the intensity-stereo band
+// decision (libopus celt_encoder.c). The lookup value is the equivalent bitrate
+// in kbps; the result is the first band index that uses intensity (single-channel)
+// coding. The hysteresis biases the decision toward the previous value to avoid
+// chattering between frames.
+var intensityThresholds = [21]int{
+	/* 0  1  2  3   4   5   6   7   8   9  10  11  12  13  14  15  16  17  18   19   20 */
+	1, 2, 3, 4, 5, 6, 7, 8, 16, 24, 36, 44, 50, 56, 62, 67, 72, 79, 88, 106, 134,
+}
+var intensityHysteresis = [21]int{
+	1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 3, 3, 4, 5, 6, 8, 8, 8, 8,
+}
+
+// hysteresisDecision is the float port of libopus hysteresis_decision: it maps
+// val to an index over thresholds[], biased toward prev so the choice does not
+// flip on small fluctuations near a boundary.
+func hysteresisDecision(val int, thresholds, hysteresis []int, n, prev int) int {
+	i := 0
+	for ; i < n; i++ {
+		if val < thresholds[i] {
+			break
+		}
+	}
+	if i > prev && val < thresholds[prev]+hysteresis[prev] {
+		i = prev
+	}
+	if i < prev && prev > 0 && val > thresholds[prev-1]-hysteresis[prev-1] {
+		i = prev
+	}
+	if i > n-1 {
+		i = n - 1
+	}
+	if i < 0 {
+		i = 0
+	}
+	return i
+}
+
 // innerProdF returns the dot product of the first n elements of a and b.
 func innerProdF(a, b []float64, n int) float64 {
 	var s float64

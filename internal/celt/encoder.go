@@ -51,6 +51,7 @@ type Encoder struct {
 	bitrate    int
 	complexity int
 	rateMode   RateMode
+	dtx        bool // discontinuous transmission: minimal packets for silence
 
 	// Inter-frame coarse-energy predictor state (oldBandE), channel-major
 	// mean-subtracted log2-amplitude. Mirrors the decoder's prevEnergies.
@@ -74,6 +75,14 @@ type Encoder struct {
 // FinalRange returns the range coder rng after the most recent Encode (before
 // flush). For a correctly paired packet it equals the decoder's LastFinalRange.
 func (e *Encoder) FinalRange() uint32 { return e.finalRange }
+
+// silenceEnergyThreshold is the SIG-domain (×32768) summed band-energy below
+// which a frame is treated as digital silence. Pre-emphasised real audio yields
+// band energies many orders of magnitude above this (even at very low levels,
+// because of the ×32768 scaling), while a truly silent frame sums only the
+// per-band 1e-27 floors. The wide gap makes a fixed threshold safe against
+// false positives on quiet-but-real content.
+const silenceEnergyThreshold = 1e-2
 
 // EncoderConfig holds encoder configuration
 type EncoderConfig struct {
@@ -202,6 +211,21 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 				X[base+j] = coeffs[j] * inv
 			}
 		}
+	}
+
+	// --- Silence detection ---
+	// Sum the SIG-domain band energy (bandE holds sqrt(1e-27+Σcoeff²) per band).
+	// The analysis above has already advanced the overlap and pre-emphasis memory,
+	// so state continuity is preserved whether or not the frame is silent.
+	var frameEnergy float64
+	for c := 0; c < ch; c++ {
+		for i := start; i < end; i++ {
+			amp := bandE[c*nbEBands+i]
+			frameEnergy += amp * amp
+		}
+	}
+	if frameEnergy < silenceEnergyThreshold {
+		return e.encodeSilenceFrame(maxTargetBytes)
 	}
 
 	// --- VBR target computation ---
@@ -505,6 +529,43 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	return out, nil
 }
 
+// encodeSilenceFrame emits a CELT frame whose only bitstream content is the
+// silence flag (logp 15, set true). The decoder (decodeCELTRange) reads the flag,
+// advances its tell to the packet end so every later symbol's budget guard fails,
+// and forces all band energies to the -28 dB floor — reconstructing digital
+// silence. We mirror that state here: the inter-frame coarse-energy predictor
+// goes to the -28 floor and the fold seed/final range take the range value right
+// after the silence bit, matching the decoder's post-frame state exactly.
+//
+// Packet sizing: VBR/CVBR (and DTX) keep the minimal flushed packet; plain CBR
+// with DTX off pads to the full target so the constant-bitrate contract holds.
+func (e *Encoder) encodeSilenceFrame(maxTargetBytes int) ([]byte, error) {
+	enc := entcode.NewEncoder(maxTargetBytes)
+	enc.EncodeBitLogp(true, 15)
+
+	e.foldSeed = enc.GetRng()
+	e.finalRange = enc.GetRng()
+	for idx := range e.prevBandEnergies {
+		e.prevBandEnergies[idx] = -28.0
+	}
+	e.frameCount++
+
+	etr(enc, "silence(true)")
+	enc.Flush()
+	out := enc.Bytes()
+
+	padTo := 0
+	if e.rateMode == RateModeCBR && !e.dtx {
+		padTo = maxTargetBytes
+	}
+	if len(out) < padTo {
+		padded := make([]byte, padTo)
+		copy(padded, out)
+		out = padded
+	}
+	return out, nil
+}
+
 // Reset resets the encoder state.
 func (e *Encoder) Reset() {
 	for c := range e.overlap {
@@ -541,6 +602,14 @@ func (e *Encoder) SetComplexity(complexity int) {
 func (e *Encoder) SetRateMode(mode RateMode) {
 	e.rateMode = mode
 }
+
+// SetDTX enables or disables discontinuous transmission. When enabled, silent
+// frames are emitted as minimal packets even in CBR mode (otherwise CBR pads
+// silent frames to the target size to preserve the fixed-rate contract).
+func (e *Encoder) SetDTX(enabled bool) { e.dtx = enabled }
+
+// DTX reports whether discontinuous transmission is enabled.
+func (e *Encoder) DTX() bool { return e.dtx }
 
 // RateMode returns the current rate control mode.
 func (e *Encoder) GetRateMode() RateMode { return e.rateMode }

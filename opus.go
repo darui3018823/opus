@@ -32,6 +32,7 @@ type Encoder struct {
 	rateMode   celt.RateMode // CBR/VBR/CVBR
 	frameSize  int           // frame size in samples at sampleRate
 	padBytes   int           // code-3 padding-data bytes to append (0 = none)
+	dtx        bool          // discontinuous transmission: minimal silence packets
 
 	// Internal 48kHz frame size (always 960 for 20ms)
 	internalFrameSize int
@@ -184,8 +185,10 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 
 	// CBR packs frames of equal size with the most compact code; VBR/CVBR
 	// frames vary in size and need explicit length prefixes. Padding (when
-	// requested) forces a code-3 packet with the padding flag.
-	vbr := e.rateMode != celt.RateModeCBR
+	// requested) forces a code-3 packet with the padding flag. DTX may turn an
+	// otherwise-CBR run of frames into mixed sizes (silent frames shrink), so it
+	// also needs the variable-length packing path.
+	vbr := e.rateMode != celt.RateModeCBR || e.dtx
 	payload, code, err := packOpusFramesPadded(frames, vbr, e.padBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack %d frames: %w", nFrames, err)
@@ -286,6 +289,20 @@ func (e *Encoder) SetPacketPadding(n int) {
 	}
 	e.padBytes = n
 }
+
+// SetDTX enables or disables discontinuous transmission. When enabled, frames
+// the encoder detects as silent are emitted as minimal packets (a few bytes)
+// instead of being padded to the target size. This reduces bitrate during
+// silence. The decoder reconstructs such frames as digital silence. DTX is off
+// by default. The reduction is effective in any rate mode; in CBR it overrides
+// the fixed-size padding for silent frames only.
+func (e *Encoder) SetDTX(enabled bool) {
+	e.dtx = enabled
+	e.celtEncoder.SetDTX(enabled)
+}
+
+// DTX reports whether discontinuous transmission is enabled.
+func (e *Encoder) DTX() bool { return e.dtx }
 
 // SetApplication changes the application mode
 func (e *Encoder) SetApplication(application Application) {

@@ -24,6 +24,9 @@ Implemented public entry points:
 - `(*Encoder).SetBitrate(bitrate int) error`
 - `(*Encoder).SetComplexity(complexity int) error`
 - `(*Encoder).SetVBR(vbr bool)`
+- `(*Encoder).SetVBRConstraint(constrained bool)`
+- `(*Encoder).SetDTX(enabled bool)` / `(*Encoder).DTX() bool`
+- `(*Encoder).SetPacketPadding(n int)`
 - `(*Encoder).SetApplication(application Application)`
 - `(*Encoder).Reset() error`
 
@@ -59,6 +62,38 @@ as CELT-only fullband 20 ms.
 - Tests: `encodeOpusFrameLength`↔`parseOpusFrameLength` round-trip over 0..1275,
   `packOpusFrames`→`splitOpusFrames` identity across counts/size profiles, and
   end-to-end 40/60 ms encode→decode in both CBR and VBR.
+
+#### Slice 2-3: VBR Shrink Wiring + Code-3 Padding (Complete)
+- **Status:** Complete
+- Wired the CELT VBR/CVBR path through `entcode.Encoder.Shrink` (shrinking the
+  range coder to the activity-derived target before any symbols are written, so
+  the coarse-energy and allocation decisions stay budget-symmetric with the
+  decoder).
+- Added top-level code-3 packet padding: `encodePaddingCount`,
+  `packOpusFramesPadded`, and `(*Encoder).SetPacketPadding(n)`.
+
+#### Slice 2-4: Silence Detection / DTX (Complete)
+- **Status:** Complete
+- The CELT encoder now detects digital silence after analysis (summed SIG-domain
+  band energy below a fixed threshold) and emits a minimal silence frame: only
+  the logp-15 silence flag is written, mirroring the decoder's silence handling
+  (it advances the tell to the packet end so all later symbol guards fail and
+  forces the band energies to the -28 dB floor). The encoder updates its
+  inter-frame predictor to the -28 floor and seeds the fold/final range from the
+  range value right after the silence bit, keeping it bit-symmetric with the
+  decoder's post-frame state.
+- Silence-frame sizing: VBR/CVBR (and DTX) keep the minimal flushed packet
+  (~2-3 bytes); plain CBR with DTX off pads silent frames to the full target so
+  the constant-bitrate contract holds.
+- Added `(*Encoder).SetDTX(bool)` / `DTX()` at both the CELT and top-level
+  layers. With DTX enabled, silent frames are emitted as minimal packets even in
+  CBR, and multi-frame packing switches to the variable-length path (silent and
+  loud frames in one packet have different sizes).
+- Tests: `TestCeltSilenceRoundTrip` (enc/dec final-range symmetry + silent
+  reconstruction, mono+stereo), `TestCeltSilenceMinimalSize`,
+  `TestCeltSilenceCBRPaddedSize`, `TestEncoderDTXSilencePackets`,
+  `TestEncoderDTXOffCBRFixedSize`, `TestEncoderDTXMultiFrame`. 12/12 official
+  vectors unchanged.
 
 Current encoder limitations:
 

@@ -352,6 +352,15 @@ Notes:
   needs a C toolchain plus libopus (reported `libopus 1.6.1` locally); it passes
   all 12 vectors. Normal builds use a `!opusref` stub so the codec stays
   CGO-free.
+- The pure-Go **encoder** is also cross-validated against libopus under the same
+  tag: `TestCGOEncodeRef` encodes synthetic signals with our encoder and decodes
+  the packets with libopus 1.6.1, then measures delay-aligned SNR. libopus
+  reconstructs the encoder's output to within ~0.01 dB of our own decoder
+  (sine440 36.0, sine1k 39.0, sine4k 29.0, sine1k-stereo 35.3 dB), and
+  `TestCGOEncodeRefSilence` confirms silent input decodes to silence in libopus.
+  This shows the encoder emits genuinely standard-compliant Opus, not a stream
+  only our own decoder accepts. (Still not bit-exact against libopus's encoder,
+  which is not required.)
 - The former `cmd_diag` duplicate-`main` build failure is fixed (`toc_check.go`
   moved to `cmd_diag/toccheck`).
 

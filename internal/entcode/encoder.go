@@ -270,23 +270,22 @@ func (enc *Encoder) Flush() {
 		end = (enc.val + msk) &^ msk
 	}
 
-	// Output the needed bytes through the carry chain
+	// Output the needed bytes through the carry chain.
 	for l > 0 {
 		enc.carryOut(end >> CodeShift)
 		end = (end << SymBits) & (CodeTop - 1)
 		l -= SymBits
 	}
 
-	// Flush the buffered rem byte and any ext bytes
+	// Flush the buffered rem byte and any ext bytes via a final carry-out with
+	// no carry, exactly as libopus ec_enc_done does:
+	//     if(_this->rem>=0||_this->ext>0)ec_enc_carry_out(_this,0);
+	// This resolves pending ext (0xFF carry-chain) bytes to 0xFF — NOT 0x00 —
+	// when there is no trailing carry. Hardcoding 0x00 here corrupts the tail of
+	// any packet that ends with the range at the top of its interval (e.g. a
+	// single top-of-range symbol flushed to 0x00 instead of 0xFF, decoding to 0).
 	if enc.rem >= 0 || enc.ext > 0 {
-		if enc.rem >= 0 {
-			enc.buf = append(enc.buf, byte(enc.rem))
-		}
-		for enc.ext > 0 {
-			enc.buf = append(enc.buf, 0x00)
-			enc.ext--
-		}
-		enc.rem = -1
+		enc.carryOut(0)
 	}
 
 	// Flush whole bytes still held in the raw end-of-packet window, then stash

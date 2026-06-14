@@ -65,12 +65,15 @@ func (enc *Encoder) Bytes() []byte {
 	}
 
 	frontLen := len(enc.buf)
-	mergeByte := 0
-	if enc.mergeUsed > 0 {
-		mergeByte = 1
+	// The packet is the fixed capacity (libopus storage). The merge byte holds
+	// the leftover (<8) raw window bits and shares buf[storage-end_offs-1] — the
+	// byte just before the raw tail — which is also the last range-front byte when
+	// the packet is full, so it must NOT add a byte. Only grow past capacity when
+	// the range front and raw tail genuinely cannot coexist (real over-budget).
+	n := enc.capacity
+	if need := frontLen + tailLen; need > n {
+		n = need
 	}
-	minN := frontLen + tailLen + mergeByte
-	n := max(enc.capacity, minN)
 
 	out := make([]byte, n)
 	copy(out, enc.buf)
@@ -78,7 +81,8 @@ func (enc *Encoder) Bytes() []byte {
 	for i, b := range enc.endBytes {
 		out[n-1-i] = b
 	}
-	// Merge byte: leftover (<8) raw bits in the slot just before the tail.
+	// Merge byte: leftover (<8) raw bits OR'd into the slot just before the tail
+	// (shared with the last range-front byte when full).
 	if enc.mergeUsed > 0 {
 		out[n-tailLen-1] |= byte(enc.mergeBits)
 	}
@@ -100,6 +104,42 @@ func (enc *Encoder) Tell() int {
 	}
 	nbytes += int(enc.ext)
 	return nbytes*8 + (32 - ILog(enc.rng)) + enc.nbitsRaw
+}
+
+// ecNbitsTotal returns the libopus encoder nbits_total value. libopus tracks
+// nbits_total = (EC_CODE_BITS+1) + EC_SYM_BITS*(symbols shifted out) + raw bits.
+// The number of symbols shifted out equals the bytes committed to the range
+// stream (those in buf, the pending rem byte, and any buffered 0xFF ext bytes).
+func (enc *Encoder) ecNbitsTotal() int {
+	nbytes := len(enc.buf)
+	if enc.rem >= 0 {
+		nbytes++
+	}
+	nbytes += int(enc.ext)
+	return nbytes*8 + (CodeBits + 1) + enc.nbitsRaw
+}
+
+// ECTell returns bits consumed using the libopus ec_tell convention (== 1
+// immediately after init). Our internal Tell() reports ec_tell-1, so this is
+// Tell()+1, matching the decoder's ECTell(). Use this where porting libopus
+// guards verbatim so encoder and decoder budget decisions stay symmetric.
+func (enc *Encoder) ECTell() int { return enc.Tell() + 1 }
+
+// TellFrac returns bits used in 1/8-bit (Q3) resolution, bit-exact with
+// ec_tell_frac in libopus (celt/entcode.c). Symmetric with Decoder.TellFrac so
+// the shared CELT quant/allocation code computes identical budgets in both
+// directions.
+func (enc *Encoder) TellFrac() int {
+	correction := [8]uint32{35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535}
+	nbits := enc.ecNbitsTotal() << 3
+	l := ILog(enc.rng)
+	r := enc.rng >> uint(l-16)
+	b := (r >> 12) - 8
+	if r > correction[b] {
+		b++
+	}
+	l = (l << 3) + int(b)
+	return nbits - l
 }
 
 // carryOut handles carry propagation - matches ec_enc_carry_out in libopus.

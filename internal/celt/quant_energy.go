@@ -141,6 +141,13 @@ func lmClamp(lm int) int {
 //	totalBits — total bit budget for this packet (used to select coding path)
 //
 // Returns the quantised log2-amplitude energies to be stored as prevLogE for next frame.
+// QuantizeCoarseEnergy is the encoder counterpart of UnquantizeCoarseEnergy and
+// is symbol-for-symbol symmetric with it (channel-major [c*numBands+i] layout,
+// per-channel inter-band predictor, ECTell-based path selection). The intra/inter
+// flag is written by the caller (encoder.go), matching the decoder which reads it
+// before UnquantizeCoarseEnergy. logE holds the target mean-subtracted
+// log2-amplitudes; prevLogE supplies oldBandE. Returns the reconstructed energies
+// (identical to what the decoder produces) to store as next frame's prevLogE.
 func QuantizeCoarseEnergy(
 	enc *entcode.Encoder,
 	logE []float64,
@@ -148,6 +155,7 @@ func QuantizeCoarseEnergy(
 	prevLogE2 []float64,
 	intra bool,
 	numBands int,
+	start, end int,
 	lm int,
 	channels int,
 	totalBits int,
@@ -168,10 +176,10 @@ func QuantizeCoarseEnergy(
 
 	budget := totalBits // whole bits, matches libopus ec_tell() usage
 
-	quantLogE := make([]float64, numBands)
-	prev := 0.0
+	quantLogE := make([]float64, numBands*channels)
+	prev := make([]float64, channels)
 
-	for i := 0; i < numBands; i++ {
+	for i := start; i < end; i++ {
 		pi := 2 * i
 		if pi > 40 {
 			pi = 40 // IMIN(i, 20)*2
@@ -179,63 +187,60 @@ func QuantizeCoarseEnergy(
 		fs := uint32(probModel[pi]) << 7
 		decay := int(probModel[pi+1]) << 6
 
-		// Inter-frame prediction — matches libopus quant_coarse_energy_impl:
-		//   tmp = coef * MAX(-9, oldEBands[i]) + prev
-		oldE := prevLogE[i]
-		if oldE < -9.0 {
-			oldE = -9.0
-		}
-		predicted := coef*oldE + prev
+		for c := 0; c < channels; c++ {
+			idx := c*numBands + i
 
-		// Quantise residual (nearest integer) — same rounding as libopus floor(.5+f)
-		diff := logE[i] - predicted
-		qi := int(math.Floor(0.5 + diff))
+			// Inter-frame prediction — matches UnquantizeCoarseEnergy:
+			//   predicted = coef * MAX(-9, oldEBands[idx]) + prev[c]
+			oldE := prevLogE[idx]
+			if oldE < -9.0 {
+				oldE = -9.0
+			}
+			predicted := coef*oldE + prev[c]
 
-		// Pre-clamp when the bit budget is tight, matching libopus behaviour.
-		tell := enc.Tell()
-		bitsLeft := budget - tell - 3*channels*(numBands-i-1)
-		if i > 0 && bitsLeft < 30 {
-			if bitsLeft < 24 {
-				if qi > 1 {
+			// Quantise residual (nearest integer) — libopus floor(.5+f).
+			qi := int(math.Floor(0.5 + (logE[idx] - predicted)))
+
+			// Path selection mirrors the decoder exactly (ec_tell based).
+			tell := enc.ECTell()
+			bitsLeft := budget - tell - 3*channels*(end-i)
+			if i != start && bitsLeft < 30 {
+				if bitsLeft < 24 && qi > 1 {
 					qi = 1
 				}
-			}
-			if bitsLeft < 16 {
-				if qi < -1 {
+				if bitsLeft < 16 && qi < -1 {
 					qi = -1
 				}
 			}
-		}
 
-		// Choose coding path based on remaining bits (libopus quant_coarse_energy_impl).
-		bitsNow := budget - tell // remaining bits for this band
-		if bitsNow >= 15 {
-			enc.EncodeLaplace(&qi, fs, decay)
-		} else if bitsNow >= 2 {
-			if qi < -1 {
+			bitsNow := budget - tell
+			if bitsNow >= 15 {
+				enc.EncodeLaplace(&qi, fs, decay)
+			} else if bitsNow >= 2 {
+				if qi < -1 {
+					qi = -1
+				}
+				if qi > 1 {
+					qi = 1
+				}
+				enc.EncodeIcdf(encodeSmallEnergySym(qi), smallEnergyIcdf, 2)
+			} else if bitsNow >= 1 {
+				if qi > 0 {
+					qi = 0
+				}
+				enc.EncodeBitLogp(qi < 0, 1)
+			} else {
 				qi = -1
 			}
-			if qi > 1 {
-				qi = 1
-			}
-			enc.EncodeIcdf(encodeSmallEnergySym(qi), smallEnergyIcdf, 2)
-		} else if bitsNow >= 1 {
-			if qi > 0 {
-				qi = 0
-			}
-			enc.EncodeBitLogp(qi < 0, 1)
-		} else {
-			qi = -1
-		}
 
-		// Reconstruct mean-subtracted log2-amplitude.
-		quantLogE[i] = coef*oldE + prev + float64(qi)
-		if quantLogE[i] < -28.0 {
-			quantLogE[i] = -28.0
+			// Reconstruct exactly as UnquantizeCoarseEnergy (clamp to -28).
+			v := predicted + float64(qi)
+			if v < -28.0 {
+				v = -28.0
+			}
+			quantLogE[idx] = v
+			prev[c] += float64(qi) - beta*float64(qi)
 		}
-
-		// Update inter-band predictor accumulator
-		prev = prev + float64(qi) - beta*float64(qi)
 	}
 
 	return quantLogE

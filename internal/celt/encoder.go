@@ -2,30 +2,56 @@ package celt
 
 import (
 	"errors"
+	"fmt"
 	"math"
+	"os"
 
 	"github.com/darui3018823/opus/internal/dsp"
 	"github.com/darui3018823/opus/internal/entcode"
 )
 
-// Encoder is a CELT encoder instance
-type Encoder struct {
-	mode         *Mode
-	mdct         *dsp.MDCT
-	bandProc     *BandProcessor
-	transientDet *TransientDetector
-	overlap      [][]float64 // Overlap buffer per channel
+var encDebug = os.Getenv("OPUS_ENC_DEBUG") != ""
+var encTrace = os.Getenv("OPUS_ENC_TRACE") != ""
 
-	// Encoder configuration
-	bitrate    int  // Target bitrate in bits per second
-	complexity int  // Encoding complexity (0-10)
-	vbr        bool // Variable bitrate mode
-
-	// State — two-tap log-energy history for RFC 6716 §5.1.2
-	prevBandEnergies  []float64 // Previous frame log-energies (ln domain)
-	prevBandEnergies2 []float64 // Two-frames-ago log-energies (ln domain)
-	frameCount        int       // Counts frames for intra/inter mode decision
+func etr(enc *entcode.Encoder, label string) {
+	if encTrace {
+		fmt.Fprintf(os.Stderr, "[ENC %-12s] tell=%d tellf=%d rng=%08x\n",
+			label, enc.ECTell(), enc.TellFrac(), enc.GetRng())
+	}
 }
+
+// Encoder is a CELT encoder instance. Its output is decoded by the CELT decoder
+// in this package: the encode path is the structural mirror of decodeCELTRange,
+// emitting the same range-coder symbol sequence in the same order so that the
+// (RFC-conformant) decoder reconstructs the signal.
+type Encoder struct {
+	mode     *Mode
+	celtMode *dsp.CELTMode // forward (analysis) MDCT, N-point long block
+
+	// Per-channel streaming state.
+	overlap    [][]float64 // MDCT analysis overlap memory (Overlap samples each)
+	preemphMem []float64   // pre-emphasis filter memory (×32768 domain: 0.85*prev)
+
+	// Encoder configuration.
+	bitrate    int
+	complexity int
+	vbr        bool
+
+	// Inter-frame coarse-energy predictor state (oldBandE), channel-major
+	// mean-subtracted log2-amplitude. Mirrors the decoder's prevEnergies.
+	prevBandEnergies []float64
+	// foldSeed mirrors the decoder's lastFinalRange (the range value used to seed
+	// PVQ noise folding). Because the range register evolves identically in the
+	// encoder and decoder for the same symbols, storing enc.GetRng() before flush
+	// reproduces the decoder's lastFinalRange for the next frame.
+	foldSeed   uint32
+	finalRange uint32
+	frameCount int
+}
+
+// FinalRange returns the range coder rng after the most recent Encode (before
+// flush). For a correctly paired packet it equals the decoder's LastFinalRange.
+func (e *Encoder) FinalRange() uint32 { return e.finalRange }
 
 // EncoderConfig holds encoder configuration
 type EncoderConfig struct {
@@ -54,260 +80,306 @@ func NewEncoder(frameSize, sampleRate, channels int, config *EncoderConfig) (*En
 	}
 
 	mode := NewMode(frameSize, sampleRate, channels)
-
-	// MDCT size must be power of 2
-	mdctSize := 1
-	for mdctSize < frameSize {
-		mdctSize *= 2
-	}
-
-	mdct, err := dsp.NewMDCT(mdctSize)
-	if err != nil {
-		return nil, err
-	}
+	overlap := mode.Overlap
+	celtMode := dsp.NewCELTMode(frameSize, overlap, celtWindow(overlap))
 
 	e := &Encoder{
-		mode:         mode,
-		mdct:         mdct,
-		bandProc:     NewBandProcessor(mode),
-		transientDet: NewTransientDetector(mode),
-		overlap:      make([][]float64, channels),
-		bitrate:      config.Bitrate,
-		complexity:   config.Complexity,
-		vbr:          config.VBR,
+		mode:       mode,
+		celtMode:   celtMode,
+		overlap:    make([][]float64, channels),
+		preemphMem: make([]float64, channels),
+		bitrate:    config.Bitrate,
+		complexity: config.Complexity,
+		vbr:        config.VBR,
+	}
+	for c := 0; c < channels; c++ {
+		e.overlap[c] = make([]float64, overlap)
 	}
 
-	// Initialize overlap buffers
-	for i := 0; i < channels; i++ {
-		e.overlap[i] = make([]float64, mdctSize)
-	}
-
-	// Initialize energy history in log2-amplitude domain (matches libopus -28.0f).
-	e.prevBandEnergies = make([]float64, mode.Bands.NumBands)
-	e.prevBandEnergies2 = make([]float64, mode.Bands.NumBands)
-	for i := range e.prevBandEnergies {
-		e.prevBandEnergies[i] = -28.0
-		e.prevBandEnergies2[i] = -28.0
-	}
+	// oldBandE history is zeroed by libopus OPUS_RESET_STATE.
+	e.prevBandEnergies = make([]float64, channels*mode.Bands.NumBands)
 
 	return e, nil
 }
 
-// Encode encodes PCM samples to a CELT frame
+// targetBytes returns the fixed packet size (bytes) for this frame. The decoder
+// uses len(packet)*8 as its bit-allocation budget, so the encoder commits to this
+// size up front, runs the whole allocation against it, and pads the output to it.
+func (e *Encoder) targetBytes() int {
+	frameDuration := float64(e.mode.FrameSize) / float64(e.mode.SampleRate)
+	tb := int(float64(e.bitrate) * frameDuration / 8.0)
+	if tb < 2 {
+		tb = 2
+	}
+	if tb > 1275 {
+		tb = 1275
+	}
+	return tb
+}
+
+// Encode encodes one CELT frame (interleaved float64 PCM, FrameSize*Channels).
 func (e *Encoder) Encode(samples []float64) ([]byte, error) {
-	expectedSize := e.mode.FrameSize * e.mode.Channels
-	if len(samples) != expectedSize {
+	if len(samples) != e.mode.FrameSize*e.mode.Channels {
 		return nil, errors.New("celt: invalid input size")
 	}
 
-	// Detect transients (result used for future extensions)
-	monoSamples := e.convertToMono(samples)
-	_, _ = e.transientDet.Detect(monoSamples)
+	ch := e.mode.Channels
+	numBands := e.mode.Bands.NumBands
+	nbEBands := NumBands48000
+	lm := e.mode.LM
+	frameSize := e.mode.FrameSize
+	ov := e.mode.Overlap
+	start, end := 0, numBands
+	M := 1 << uint(lm)
+	frameLen := M * int(EBands48000[numBands])
 
-	// Encode each channel
-	allCoeffs := make([][]float64, e.mode.Channels)
-	allEnergies := make([][]float64, e.mode.Channels)
+	targetBytes := e.targetBytes()
+	totalBits := targetBytes * 8
+	enc := entcode.NewEncoder(targetBytes)
 
-	for ch := 0; ch < e.mode.Channels; ch++ {
-		// Extract channel samples
-		chSamples := e.extractChannel(samples, ch)
+	// --- Analysis: pre-emphasis, forward MDCT, band energy, normalisation ---
+	X := make([]float64, ch*frameLen)
+	// bandE holds per-band amplitude in libopus channel-major [c*nbEBands+i]
+	// layout (used by stereo intensity/split inside quant_all_bands).
+	bandE := make([]float64, 2*nbEBands)
+	logE := make([]float64, ch*numBands)
 
-		// Perform MDCT analysis
-		mdctSize := e.mdct.Size()
-
-		// Pad channel samples to mdctSize if necessary
-		mdctInput := make([]float64, mdctSize)
-		copySize := min(len(chSamples), mdctSize)
-		copy(mdctInput, chSamples[:copySize])
-
-		// Forward MDCT with overlap
-		coeffs, err := e.mdct.ForwardOverlap(mdctInput, e.overlap[ch])
-		if err != nil {
-			return nil, err
+	for c := 0; c < ch; c++ {
+		pe := make([]float64, frameSize)
+		mem := e.preemphMem[c]
+		for i := 0; i < frameSize; i++ {
+			var s float64
+			if ch == 1 {
+				s = samples[i]
+			} else {
+				s = samples[i*ch+c]
+			}
+			xin := s * 32768.0
+			pe[i] = xin - mem
+			mem = 0.85 * xin
 		}
-		allCoeffs[ch] = coeffs
+		e.preemphMem[c] = mem
 
-		// Compute band energies
-		bandEnergies := e.computeBandEnergies(coeffs)
-		allEnergies[ch] = bandEnergies
+		buf := make([]float64, frameSize+ov)
+		copy(buf[:ov], e.overlap[c])
+		copy(buf[ov:], pe)
+		coeffs := e.celtMode.CLTMDCTForward(buf)
+		copy(e.overlap[c], buf[frameSize:frameSize+ov])
+
+		base := c * frameLen
+		for i := 0; i < numBands; i++ {
+			lo := M * int(EBands48000[i])
+			hi := M * int(EBands48000[i+1])
+			sumsq := 1e-27
+			for j := lo; j < hi; j++ {
+				sumsq += coeffs[j] * coeffs[j]
+			}
+			amp := math.Sqrt(sumsq)
+			bandE[c*nbEBands+i] = amp
+			logE[c*numBands+i] = math.Log2(amp) - EMean(i)
+			inv := 1.0 / amp
+			for j := lo; j < hi; j++ {
+				X[base+j] = coeffs[j] * inv
+			}
+		}
 	}
 
-	// Use first channel energies for bit allocation
-	bandEnergies := allEnergies[0]
+	// === Header symbols, in decoder order (decodeCELTRange) ===
 
-	// Calculate target bits for this frame
-	frameDuration := float64(e.mode.FrameSize) / float64(e.mode.SampleRate)
-	targetBits := int(float64(e.bitrate) * frameDuration)
+	// Silence flag (logp 15) — first symbol. No silence detection yet.
+	if enc.ECTell()+1 <= totalBits {
+		enc.EncodeBitLogp(false, 15)
+	}
+	etr(enc, "silence")
 
-	// Perform bit allocation
-	bitAlloc := NewBitAllocation(e.mode, targetBits)
-	bitAlloc.Allocate(bandEnergies)
+	// Post-filter (CELT-only, start==0): signalled disabled.
+	if start == 0 && enc.ECTell()+16 <= totalBits {
+		enc.EncodeBitLogp(false, 1)
+	}
 
-	// Encode frame
-	enc := entcode.NewEncoder(targetBits / 8)
+	// isTransient (logp 3, LM>0) — long blocks only for now.
+	isTransient := false
+	if lm > 0 && enc.ECTell()+3 <= totalBits {
+		enc.EncodeBitLogp(isTransient, 3)
+	}
 
-	// Encode band energies using RFC 6716 §5.1.2 coarse energy coding.
-	// libopus stores energies as (log2(amplitude) - eMeans[band]) — mean-subtracted.
+	// intra/inter flag for coarse energy.
 	intra := e.frameCount == 0
-
-	// Write intra/inter bit to bitstream (RFC 6716 §5.1.2 / libopus quant_coarse_energy_impl).
-	// ec_enc_bit_logp(enc, intra, 3) — only if budget allows.
-	tell := enc.Tell()
-	if tell+3 <= targetBits {
+	if enc.ECTell()+3 <= totalBits {
 		enc.EncodeBitLogp(intra, 3)
 	}
-	logBandEnergies := make([]float64, e.mode.Bands.NumBands)
-	for i, en := range bandEnergies {
-		if en > 1e-60 {
-			logBandEnergies[i] = 0.5*math.Log2(en) - EMean(i)
-		} else {
-			logBandEnergies[i] = -28.0
-		}
+
+	etr(enc, "intra")
+
+	// Coarse band energies.
+	quantLogE := QuantizeCoarseEnergy(enc, logE, e.prevBandEnergies, nil,
+		intra, numBands, start, end, lm, ch, totalBits)
+	etr(enc, "coarse")
+
+	// Time-frequency allocation (flat tf_res=0).
+	tfRes := make([]int, numBands)
+	tfEncode(enc, start, end, isTransient, tfRes, lm, 0, totalBits)
+	etr(enc, "tf_encode")
+
+	// Spread decision (SPREAD_NORMAL).
+	spread := 2
+	if enc.ECTell()+4 <= totalBits {
+		enc.EncodeIcdf(spread, spreadIcdf[:], 5)
 	}
-	quantLogE := QuantizeCoarseEnergy(
-		enc,
-		logBandEnergies,
-		e.prevBandEnergies,
-		e.prevBandEnergies2,
-		intra,
-		e.mode.Bands.NumBands,
-		3, // lm=3 for 20ms frames
-		e.mode.Channels,
-		targetBits,
-	)
-	// Update two-tap energy state
-	copy(e.prevBandEnergies2, e.prevBandEnergies)
-	copy(e.prevBandEnergies, quantLogE)
+	etr(enc, "spread")
 
-	// Quantize and encode band coefficients
-	for i := 0; i < e.mode.Bands.NumBands; i++ {
-		// Extract band coefficients for first channel
-		bandStart := e.mode.Bands.BandStart[i]
-		bandSize := e.mode.Bands.BandSizes[i]
-		bandEnd := bandStart + bandSize
+	// Dynamic allocation boosts (none).
+	offsets := make([]int, numBands)
+	dynallocEncode(enc, offsets, numBands, start, end, lm, ch, totalBits)
+	etr(enc, "dynalloc")
 
-		if bandEnd > len(allCoeffs[0]) {
-			bandEnd = len(allCoeffs[0])
-		}
+	// Allocation trim (neutral = 5).
+	allocTrim := 5
+	if enc.ECTell()+6 <= totalBits {
+		enc.EncodeIcdf(allocTrim, TrimICDF[:], 7)
+	}
+	etr(enc, "alloc_trim")
 
-		bandCoeffs := allCoeffs[0][bandStart:bandEnd]
-
-		// Normalize band
-		_ = NormalizeBand(bandCoeffs)
-
-		// Get pulse count from bit allocation
-		pulses := bitAlloc.GetPulseCount(i)
-
-		// Encode using recursive PVQ splitting (RFC 6716 §4.3.4)
-		PVQEncode(enc, bandCoeffs, pulses)
-
-		// Encode fine energy
-		fineEnergy := bitAlloc.GetFineEnergy(i)
-		if fineEnergy > 0 {
-			enc.EncodeUint(uint32(fineEnergy), 4)
-		}
+	// === Bit allocation, fine energy, PVQ, anti-collapse, final fine ===
+	bitsQ3 := totalBits<<3 - enc.TellFrac() - 1
+	antiCollapseRsv := 0
+	if isTransient && lm >= 2 && bitsQ3 >= (lm+2)<<3 {
+		antiCollapseRsv = 1 << 3
+	}
+	bitsQ3 -= antiCollapseRsv
+	if bitsQ3 < 0 {
+		bitsQ3 = 0
 	}
 
-	// Flush encoder
-	enc.Flush()
+	encIntensity := end
+	encDualStereo := false
+	pulses, eBits, finePriority, balance, intensity, codedBands, dualStereo :=
+		computeAllocationEncode(enc, encIntensity, encDualStereo,
+			numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets)
 
+	if encDebug && e.frameCount == 10 {
+		fmt.Fprintf(os.Stderr, "[ENC] bitsQ3=%d codedBands=%d\n", bitsQ3, codedBands)
+		for i := start; i < end; i++ {
+			N := M * int(EBands48000[i+1]-EBands48000[i])
+			q := celtBits2PulsesQ3(i, lm, pulses[i])
+			fmt.Fprintf(os.Stderr, "[ENC] band %d N=%d bandE=%.4f pulsesQ3=%d K=%d eBits=%d\n",
+				i, N, bandE[i], pulses[i], getPulses(q), eBits[i])
+		}
+	}
+
+	// Fine energy — raw bits to packet end, FORWARD band order. Track the
+	// residual error so the final-fine pass and the next-frame predictor match
+	// what the decoder reconstructs.
+	fineError := make([]float64, ch*numBands)
+	for idx := range fineError {
+		fineError[idx] = logE[idx] - quantLogE[idx]
+	}
+	for i := start; i < end; i++ {
+		fb := eBits[i]
+		if fb <= 0 {
+			continue
+		}
+		frac := 1 << uint(fb)
+		for c := 0; c < ch; c++ {
+			idx := c*numBands + i
+			q2 := int(math.Floor((fineError[idx] + 0.5) * float64(frac)))
+			if q2 > frac-1 {
+				q2 = frac - 1
+			}
+			if q2 < 0 {
+				q2 = 0
+			}
+			enc.EncodeBits(uint32(q2), uint(fb))
+			offset := (float64(q2)+0.5)/float64(frac) - 0.5
+			quantLogE[idx] += offset
+			fineError[idx] -= offset
+		}
+	}
+
+	// PVQ for all bands.
+	var Y []float64
+	if ch == 2 {
+		Y = X[frameLen:]
+	}
+	collapse := make([]byte, numBands*ch)
+	totalBitsQ3 := totalBits<<3 - antiCollapseRsv
+	e.foldSeed = QuantAllBandsEncode(enc, bandE, start, end, X[:frameLen], Y, collapse,
+		pulses, isTransient, spread, dualStereo, intensity, tfRes,
+		totalBitsQ3, balance, lm, codedBands, e.foldSeed, false)
+
+	// Anti-collapse bit (raw) — disabled for now (only reserved on transients).
+	if antiCollapseRsv > 0 {
+		enc.EncodeBits(0, 1)
+	}
+
+	// Final fine energy — one extra bit per (band,channel) by priority.
+	bitsLeft := totalBits - enc.ECTell()
+	for prio := 0; prio < 2; prio++ {
+		for i := start; i < end && bitsLeft >= ch; i++ {
+			if eBits[i] >= MaxFineEnergy || finePriority[i] != prio {
+				continue
+			}
+			for c := 0; c < ch; c++ {
+				idx := c*numBands + i
+				q2 := 0
+				if fineError[idx] >= 0 {
+					q2 = 1
+				}
+				enc.EncodeBits(uint32(q2), 1)
+				offset := (float64(q2) - 0.5) * math.Exp2(float64(-eBits[i]-1))
+				quantLogE[idx] += offset
+				fineError[idx] -= offset
+				bitsLeft--
+			}
+		}
+	}
+
+	e.finalRange = enc.GetRng()
+
+	// Update the inter-frame predictor with the fine-corrected energies.
+	for idx := range quantLogE {
+		v := quantLogE[idx]
+		if v < -28.0 {
+			v = -28.0
+		}
+		e.prevBandEnergies[idx] = v
+	}
 	e.frameCount++
 
-	// Pad output to exactly targetBits/8 bytes so that the decoder can use
-	// len(packet)*8 as its bit budget and compute the same bit allocation.
-	encoded := enc.Bytes()
-	targetBytes := targetBits / 8
-	if targetBytes < 1 {
-		targetBytes = 1
-	}
-	if len(encoded) < targetBytes {
+	etr(enc, "final")
+	enc.Flush()
+	out := enc.Bytes()
+	if len(out) < targetBytes {
 		padded := make([]byte, targetBytes)
-		copy(padded, encoded)
-		encoded = padded
+		copy(padded, out)
+		out = padded
 	}
-
-	return encoded, nil
+	return out, nil
 }
 
-// convertToMono converts interleaved stereo to mono for analysis
-func (e *Encoder) convertToMono(samples []float64) []float64 {
-	if e.mode.Channels == 1 {
-		return samples
-	}
-
-	mono := make([]float64, len(samples)/2)
-	for i := 0; i < len(mono); i++ {
-		mono[i] = (samples[i*2] + samples[i*2+1]) * 0.5
-	}
-	return mono
-}
-
-// extractChannel extracts a single channel from interleaved samples
-func (e *Encoder) extractChannel(samples []float64, channel int) []float64 {
-	if e.mode.Channels == 1 {
-		return samples
-	}
-
-	result := make([]float64, len(samples)/e.mode.Channels)
-	for i := 0; i < len(result); i++ {
-		result[i] = samples[i*e.mode.Channels+channel]
-	}
-	return result
-}
-
-// computeBandEnergies computes energy for each frequency band
-func (e *Encoder) computeBandEnergies(coeffs []float64) []float64 {
-	energies := make([]float64, e.mode.Bands.NumBands)
-
-	for i := 0; i < e.mode.Bands.NumBands; i++ {
-		bandStart := e.mode.Bands.BandStart[i]
-		bandSize := e.mode.Bands.BandSizes[i]
-		bandEnd := bandStart + bandSize
-
-		if bandEnd > len(coeffs) {
-			bandEnd = len(coeffs)
-		}
-
-		energy := 0.0
-		for j := bandStart; j < bandEnd; j++ {
-			energy += coeffs[j] * coeffs[j]
-		}
-
-		energies[i] = energy
-	}
-
-	return energies
-}
-
-// Reset resets the encoder state
+// Reset resets the encoder state.
 func (e *Encoder) Reset() {
-	// Clear overlap buffers
-	for ch := 0; ch < e.mode.Channels; ch++ {
-		for i := range e.overlap[ch] {
-			e.overlap[ch][i] = 0
+	for c := range e.overlap {
+		for i := range e.overlap[c] {
+			e.overlap[c][i] = 0
 		}
+		e.preemphMem[c] = 0
 	}
-
-	// Reset energy history
 	for i := range e.prevBandEnergies {
-		e.prevBandEnergies[i] = -28.0
-		e.prevBandEnergies2[i] = -28.0
+		e.prevBandEnergies[i] = 0
 	}
-
+	e.foldSeed = 0
 	e.frameCount = 0
-
-	// Reset transient detector
-	e.transientDet.Reset()
 }
 
-// SetBitrate sets the target bitrate
+// SetBitrate sets the target bitrate.
 func (e *Encoder) SetBitrate(bitrate int) {
 	if bitrate > 0 {
 		e.bitrate = bitrate
 	}
 }
 
-// SetComplexity sets the encoding complexity
+// SetComplexity sets the encoding complexity.
 func (e *Encoder) SetComplexity(complexity int) {
 	if complexity >= 0 && complexity <= 10 {
 		e.complexity = complexity

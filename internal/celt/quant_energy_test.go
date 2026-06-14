@@ -63,7 +63,7 @@ func TestQuantizeCoarseEnergyRoundtrip(t *testing.T) {
 			const testBufBytes = 256
 			enc := entcode.NewEncoder(testBufBytes)
 			quantLogE := QuantizeCoarseEnergy(enc, logE, prevLogEEnc, prevLogE2Enc,
-				tt.intra, numBands, lm, channels, testBufBytes*8)
+				tt.intra, numBands, 0, numBands, lm, channels, testBufBytes*8)
 			enc.Flush()
 
 			// Decode with identical initial state
@@ -127,7 +127,7 @@ func TestQuantizeCoarseEnergyClampedRoundtrip(t *testing.T) {
 			const clamped512 = 512
 			enc := entcode.NewEncoder(clamped512)
 			quantLogE := QuantizeCoarseEnergy(enc, logE, prevLogEEnc, prevLogE2Enc,
-				intra, numBands, lm, channels, clamped512*8)
+				intra, numBands, 0, numBands, lm, channels, clamped512*8)
 			enc.Flush()
 
 			dec := entcode.NewDecoder(enc.Bytes())
@@ -169,7 +169,7 @@ func TestQuantizeCoarseEnergyInterFramePrediction(t *testing.T) {
 	// First frame — intra
 	const pred256 = 256
 	enc1 := entcode.NewEncoder(pred256)
-	q1 := QuantizeCoarseEnergy(enc1, logE, prevLogE, prevLogE2, true, numBands, lm, channels, pred256*8)
+	q1 := QuantizeCoarseEnergy(enc1, logE, prevLogE, prevLogE2, true, numBands, 0, numBands, lm, channels, pred256*8)
 	enc1.Flush()
 	copy(prevLogE2, prevLogE)
 	copy(prevLogE, q1)
@@ -178,7 +178,7 @@ func TestQuantizeCoarseEnergyInterFramePrediction(t *testing.T) {
 
 	// Second frame — inter (predictor has been primed)
 	enc2 := entcode.NewEncoder(pred256)
-	_ = QuantizeCoarseEnergy(enc2, logE, prevLogE, prevLogE2, false, numBands, lm, channels, pred256*8)
+	_ = QuantizeCoarseEnergy(enc2, logE, prevLogE, prevLogE2, false, numBands, 0, numBands, lm, channels, pred256*8)
 	enc2.Flush()
 
 	bitsInter := len(enc2.Bytes()) * 8

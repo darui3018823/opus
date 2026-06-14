@@ -27,6 +27,10 @@ const (
 // qabDebug enables per-band trace capture in QuantAllBands (test diagnostics).
 var qabDebug = false
 
+// qabRangeTrace prints per-band tellFrac/rng for both encode and decode so the
+// exact symbol where the two desync can be located.
+var qabRangeTrace = os.Getenv("OPUS_QAB_TRACE") != ""
+
 type qabBandTrace struct {
 	i, N, b, tellf int
 	rng            uint32
@@ -305,21 +309,87 @@ type bandCtx struct {
 	spread        int
 	tfChange      int
 	dec           *entcode.Decoder
+	enc           *entcode.Encoder // non-nil when encode==true
+	encode        bool
+	nbEBands      int       // for second-channel bandE indexing (stereo encode)
+	bandE         []float64 // band energies (channel-major), encode-side only
+	thetaRound    int
 	remainingBits int
-	bandE         []float64
 	seed          uint32
 	arch          int
 	disableInv    bool
 	avoidSplit    bool
 }
 
+// tellFrac returns ec_tell_frac on whichever entropy coder is active.
+func (ctx *bandCtx) tellFrac() int {
+	if ctx.encode {
+		return ctx.enc.TellFrac()
+	}
+	return ctx.dec.TellFrac()
+}
+
+// stereoIthetaF is the float port of libopus stereo_itheta (vq.c), returning the
+// pre-quantization angle in [0,16384]. For a mono split (stereo=false) X and Y
+// are the two halves; for a stereo band they are the L/R channels.
+func stereoIthetaF(X, Y []float64, stereo bool, n int) int {
+	Emid, Eside := 1e-15, 1e-15
+	if stereo {
+		for i := 0; i < n; i++ {
+			m := X[i] + Y[i]
+			s := X[i] - Y[i]
+			Emid += m * m
+			Eside += s * s
+		}
+	} else {
+		for i := 0; i < n; i++ {
+			Emid += X[i] * X[i]
+		}
+		for i := 0; i < n; i++ {
+			Eside += Y[i] * Y[i]
+		}
+	}
+	mid := math.Sqrt(Emid)
+	side := math.Sqrt(Eside)
+	return int(math.Floor(0.5 + 16384.0*0.63662*math.Atan2(side, mid)))
+}
+
+// intensityStereo collapses Y into X using the band's stereo energy ratio
+// (libopus bands.c intensity_stereo, float build).
+func intensityStereo(ctx *bandCtx, X, Y []float64, n int) {
+	left := ctx.bandE[ctx.i]
+	right := ctx.bandE[ctx.nbEBands+ctx.i]
+	norm := 1e-15 + math.Sqrt(1e-15+left*left+right*right)
+	a1 := left / norm
+	a2 := right / norm
+	for j := 0; j < n; j++ {
+		X[j] = a1*X[j] + a2*Y[j]
+	}
+}
+
+// stereoSplit rotates (X,Y) into the orthonormal mid/side basis
+// (libopus bands.c stereo_split, float build).
+func stereoSplit(X, Y []float64, n int) {
+	const c = 0.70710678
+	for j := 0; j < n; j++ {
+		l := c * X[j]
+		r := c * Y[j]
+		X[j] = l + r
+		Y[j] = r - l
+	}
+}
+
 type splitResult struct {
 	inv, imid, iside, delta, itheta, qalloc int
 }
 
-// computeTheta — decoder-only port of libopus compute_theta (bands.c).
+// computeTheta — shared encode/decode port of libopus compute_theta (bands.c).
+// When ctx.encode is set, the angle is derived from the signal (X,Y) and written
+// to ctx.enc; otherwise it is read from ctx.dec. The surrounding budget
+// accounting (qn, qalloc, *b) is identical in both directions.
 func computeTheta(ctx *bandCtx, X, Y []float64, n int, b *int, B, B0, lm int, stereo bool, fill *int) splitResult {
 	i := ctx.i
+	encode := ctx.encode
 	pulseCap := int(LogN400[i]) + lm*(1<<bitres)
 	off := pulseCap >> 1
 	if stereo && n == 2 {
@@ -331,50 +401,138 @@ func computeTheta(ctx *bandCtx, X, Y []float64, n int, b *int, B, B0, lm int, st
 	if stereo && i >= ctx.intensity {
 		qn = 1
 	}
-	tell := ctx.dec.TellFrac()
+
+	// Encoder: pick the raw angle (0..16384) from the signal energies.
+	ithetaRaw := 0
+	if encode {
+		ithetaRaw = stereoIthetaF(X, Y, stereo, n)
+	}
+
+	tell := ctx.tellFrac()
 	itheta := 0
 	inv := 0
 	if qn != 1 {
+		if encode {
+			if !stereo || ctx.thetaRound == 0 {
+				itheta = (ithetaRaw*qn + 8192) >> 14
+				if !stereo && ctx.avoidSplit && itheta > 0 && itheta < qn {
+					unquantized := itheta * 16384 / qn
+					imid := bitexactCos(int16(unquantized))
+					iside := bitexactCos(int16(16384 - unquantized))
+					delta := fracMul16((n-1)<<7, bitexactLog2Tan(iside, imid))
+					if delta > *b {
+						itheta = qn
+					} else if delta < -*b {
+						itheta = 0
+					}
+				}
+			} else {
+				bias := -32767 / qn
+				if ithetaRaw > 8192 {
+					bias = 32767 / qn
+				}
+				down := (ithetaRaw*qn + bias) >> 14
+				if down < 0 {
+					down = 0
+				}
+				if down > qn-1 {
+					down = qn - 1
+				}
+				if ctx.thetaRound < 0 {
+					itheta = down
+				} else {
+					itheta = down + 1
+				}
+			}
+		}
+
 		if stereo && n > 2 {
 			p0 := 3
 			x0 := qn / 2
 			ft := p0*(x0+1) + x0
-			fs := int(ctx.dec.Decode(uint32(ft)))
-			var x int
-			if fs < (x0+1)*p0 {
-				x = fs / p0
+			if encode {
+				x := itheta
+				var fl, fh int
+				if x <= x0 {
+					fl, fh = p0*x, p0*(x+1)
+				} else {
+					fl, fh = (x-1-x0)+(x0+1)*p0, (x-x0)+(x0+1)*p0
+				}
+				ctx.enc.Encode(uint32(fl), uint32(fh), uint32(ft))
 			} else {
-				x = x0 + 1 + (fs - (x0+1)*p0)
+				fs := int(ctx.dec.Decode(uint32(ft)))
+				var x int
+				if fs < (x0+1)*p0 {
+					x = fs / p0
+				} else {
+					x = x0 + 1 + (fs - (x0+1)*p0)
+				}
+				var fl, fh int
+				if x <= x0 {
+					fl, fh = p0*x, p0*(x+1)
+				} else {
+					fl, fh = (x-1-x0)+(x0+1)*p0, (x-x0)+(x0+1)*p0
+				}
+				ctx.dec.DecodeUpdate(uint32(fl), uint32(fh), uint32(ft))
+				itheta = x
 			}
-			var fl, fh int
-			if x <= x0 {
-				fl, fh = p0*x, p0*(x+1)
-			} else {
-				fl, fh = (x-1-x0)+(x0+1)*p0, (x-x0)+(x0+1)*p0
-			}
-			ctx.dec.DecodeUpdate(uint32(fl), uint32(fh), uint32(ft))
-			itheta = x
 		} else if B0 > 1 || stereo {
-			itheta = int(ctx.dec.DecodeUint(uint32(qn + 1)))
+			if encode {
+				ctx.enc.EncodeUint(uint32(itheta), uint32(qn+1))
+			} else {
+				itheta = int(ctx.dec.DecodeUint(uint32(qn + 1)))
+			}
 		} else {
 			ft := ((qn >> 1) + 1) * ((qn >> 1) + 1)
-			fm := int(ctx.dec.Decode(uint32(ft)))
-			var fl, fs int
-			if fm < (qn>>1)*((qn>>1)+1)>>1 {
-				itheta = (isqrt32(uint32(8*fm+1)) - 1) >> 1
-				fs = itheta + 1
-				fl = itheta * (itheta + 1) >> 1
+			if encode {
+				var fl, fs int
+				if itheta <= qn>>1 {
+					fs = itheta + 1
+					fl = itheta * (itheta + 1) >> 1
+				} else {
+					fs = qn + 1 - itheta
+					fl = ft - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1)
+				}
+				ctx.enc.Encode(uint32(fl), uint32(fl+fs), uint32(ft))
 			} else {
-				itheta = (2*(qn+1) - isqrt32(uint32(8*(ft-fm-1)+1))) >> 1
-				fs = qn + 1 - itheta
-				fl = ft - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1)
+				fm := int(ctx.dec.Decode(uint32(ft)))
+				var fl, fs int
+				if fm < (qn>>1)*((qn>>1)+1)>>1 {
+					itheta = (isqrt32(uint32(8*fm+1)) - 1) >> 1
+					fs = itheta + 1
+					fl = itheta * (itheta + 1) >> 1
+				} else {
+					itheta = (2*(qn+1) - isqrt32(uint32(8*(ft-fm-1)+1))) >> 1
+					fs = qn + 1 - itheta
+					fl = ft - ((qn + 1 - itheta) * (qn + 2 - itheta) >> 1)
+				}
+				ctx.dec.DecodeUpdate(uint32(fl), uint32(fl+fs), uint32(ft))
 			}
-			ctx.dec.DecodeUpdate(uint32(fl), uint32(fl+fs), uint32(ft))
 		}
 		itheta = itheta * 16384 / qn
+		if encode && stereo {
+			if itheta == 0 {
+				intensityStereo(ctx, X, Y, n)
+			} else {
+				stereoSplit(X, Y, n)
+			}
+		}
 	} else if stereo {
+		if encode {
+			inv = boolToInt(ithetaRaw > 8192 && !ctx.disableInv)
+			if inv != 0 {
+				for j := 0; j < n; j++ {
+					Y[j] = -Y[j]
+				}
+			}
+			intensityStereo(ctx, X, Y, n)
+		}
 		if *b > 2<<bitres && ctx.remainingBits > 2<<bitres {
-			inv = boolToInt(ctx.dec.DecodeBitLogp(2))
+			if encode {
+				ctx.enc.EncodeBitLogp(inv != 0, 2)
+			} else {
+				inv = boolToInt(ctx.dec.DecodeBitLogp(2))
+			}
 		} else {
 			inv = 0
 		}
@@ -383,7 +541,7 @@ func computeTheta(ctx *bandCtx, X, Y []float64, n int, b *int, B, B0, lm int, st
 		}
 		itheta = 0
 	}
-	qalloc := ctx.dec.TellFrac() - tell
+	qalloc := ctx.tellFrac() - tell
 	*b -= qalloc
 
 	var imid, iside, delta int
@@ -440,7 +598,14 @@ func quantBandN1(ctx *bandCtx, X, Y, lowbandOut []float64) uint {
 	for c := 0; c < chans; c++ {
 		sign := 0
 		if ctx.remainingBits >= 1<<bitres {
-			sign = int(ctx.dec.DecodeBits(1))
+			if ctx.encode {
+				if x[0] < 0 {
+					sign = 1
+				}
+				ctx.enc.EncodeBits(uint32(sign), 1)
+			} else {
+				sign = int(ctx.dec.DecodeBits(1))
+			}
 			ctx.remainingBits -= 1 << bitres
 		}
 		if sign != 0 {
@@ -538,7 +703,11 @@ func quantPartition(ctx *bandCtx, X []float64, n, b, B int, lowband []float64, l
 
 	if q != 0 {
 		K := getPulses(q)
-		cm = algUnquant(X, n, K, spread, B, ctx.dec, gain)
+		if ctx.encode {
+			cm = algQuant(X, n, K, spread, B, ctx.enc, gain)
+		} else {
+			cm = algUnquant(X, n, K, spread, B, ctx.dec, gain)
+		}
 	} else {
 		// fill the band with folded spectrum or noise
 		cmMask := uint((1 << uint(B)) - 1)
@@ -600,6 +769,9 @@ func quantBand(ctx *bandCtx, X []float64, n, b, B int, lowband []float64, lm int
 
 	bitInterleave := [16]int{0, 1, 1, 1, 2, 3, 3, 3, 2, 3, 3, 3, 2, 3, 3, 3}
 	for k := 0; k < recombine; k++ {
+		if ctx.encode {
+			haar1(X, n>>uint(k), 1<<uint(k))
+		}
 		if lowband != nil {
 			haar1(lowband, n>>uint(k), 1<<uint(k))
 		}
@@ -609,6 +781,9 @@ func quantBand(ctx *bandCtx, X []float64, n, b, B int, lowband []float64, lm int
 	nB <<= recombine
 
 	for (nB&1) == 0 && tfChange < 0 {
+		if ctx.encode {
+			haar1(X, nB, B)
+		}
 		if lowband != nil {
 			haar1(lowband, nB, B)
 		}
@@ -622,6 +797,9 @@ func quantBand(ctx *bandCtx, X []float64, n, b, B int, lowband []float64, lm int
 	nB0 := nB
 
 	if B0 > 1 {
+		if ctx.encode {
+			deinterleaveHadamard(X, nB>>uint(recombine), B0<<uint(recombine), longBlocks)
+		}
 		if lowband != nil {
 			deinterleaveHadamard(lowband, nB>>uint(recombine), B0<<uint(recombine), longBlocks)
 		}
@@ -668,6 +846,16 @@ func quantBandStereo(ctx *bandCtx, X, Y []float64, n, b, B int, lowband []float6
 		return quantBandN1(ctx, X, Y, lowbandOut)
 	}
 	origFill := fill
+	if ctx.encode {
+		const minStereoEnergy = 1e-10
+		if ctx.bandE[ctx.i] < minStereoEnergy || ctx.bandE[ctx.nbEBands+ctx.i] < minStereoEnergy {
+			if ctx.bandE[ctx.i] > ctx.bandE[ctx.nbEBands+ctx.i] {
+				copy(Y[:n], X[:n])
+			} else {
+				copy(X[:n], Y[:n])
+			}
+		}
+	}
 	sc := computeTheta(ctx, X, Y, n, &b, B, B, lm, true, &fill)
 	inv, imid, iside := sc.inv, sc.imid, sc.iside
 	delta, itheta, qalloc := sc.delta, sc.itheta, sc.qalloc
@@ -690,7 +878,14 @@ func quantBandStereo(ctx *bandCtx, X, Y []float64, n, b, B int, lowband []float6
 		}
 		sign := 0
 		if sbits != 0 {
-			sign = int(ctx.dec.DecodeBits(1))
+			if ctx.encode {
+				if x2[0]*y2[1]-x2[1]*y2[0] < 0 {
+					sign = 1
+				}
+				ctx.enc.EncodeBits(uint32(sign), 1)
+			} else {
+				sign = int(ctx.dec.DecodeBits(1))
+			}
 		}
 		signf := 1.0 - 2.0*float64(sign)
 		cm = quantBand(ctx, x2, n, mbits, B, lowband, lm, lowbandOut, 1.0, lowbandScratch, origFill)
@@ -804,6 +999,28 @@ func QuantAllBands(dec *entcode.Decoder, start, end int, X, Y []float64,
 	collapseMasks []byte, pulses []int, shortBlocks bool, spread int,
 	dualStereo bool, intensity int, tfRes []int, totalBitsQ3, balance, lm, codedBands int,
 	seed uint32, disableInv bool) uint32 {
+	return quantAllBandsImpl(false, nil, dec, nil, start, end, X, Y,
+		collapseMasks, pulses, shortBlocks, spread, dualStereo, intensity, tfRes,
+		totalBitsQ3, balance, lm, codedBands, seed, disableInv)
+}
+
+// QuantAllBandsEncode is the encoder-side entry point. bandE holds per-band
+// energies in channel-major layout (used by stereo intensity/split). It mirrors
+// QuantAllBands symbol-for-symbol so the existing decoder reconstructs X/Y.
+func QuantAllBandsEncode(enc *entcode.Encoder, bandE []float64, start, end int, X, Y []float64,
+	collapseMasks []byte, pulses []int, shortBlocks bool, spread int,
+	dualStereo bool, intensity int, tfRes []int, totalBitsQ3, balance, lm, codedBands int,
+	seed uint32, disableInv bool) uint32 {
+	return quantAllBandsImpl(true, enc, nil, bandE, start, end, X, Y,
+		collapseMasks, pulses, shortBlocks, spread, dualStereo, intensity, tfRes,
+		totalBitsQ3, balance, lm, codedBands, seed, disableInv)
+}
+
+func quantAllBandsImpl(encode bool, enc *entcode.Encoder, dec *entcode.Decoder, bandE []float64,
+	start, end int, X, Y []float64,
+	collapseMasks []byte, pulses []int, shortBlocks bool, spread int,
+	dualStereo bool, intensity int, tfRes []int, totalBitsQ3, balance, lm, codedBands int,
+	seed uint32, disableInv bool) uint32 {
 
 	eBands := EBands48000
 	nbEBands := NumBands48000
@@ -829,6 +1046,10 @@ func QuantAllBands(dec *entcode.Decoder, start, end int, X, Y []float64,
 		intensity:  intensity,
 		spread:     spread,
 		dec:        dec,
+		enc:        enc,
+		encode:     encode,
+		nbEBands:   nbEBands,
+		bandE:      bandE,
 		seed:       seed,
 		disableInv: disableInv,
 		avoidSplit: B > 1,
@@ -846,7 +1067,7 @@ func QuantAllBands(dec *entcode.Decoder, start, end int, X, Y []float64,
 			Yband = Y[M*int(eBands[i]):]
 		}
 		N := M*int(eBands[i+1]) - M*int(eBands[i])
-		tell := dec.TellFrac()
+		tell := ctx.tellFrac()
 		if i != start {
 			balance -= tell
 		}
@@ -948,7 +1169,21 @@ func QuantAllBands(dec *entcode.Decoder, start, end int, X, Y []float64,
 		}
 		collapseMasks[i*C+0] = byte(xcm)
 		collapseMasks[i*C+C-1] = byte(ycm)
-		if qabDebug {
+		if qabRangeTrace {
+			var rng uint32
+			if encode {
+				rng = enc.GetRng()
+			} else {
+				rng = dec.GetRng()
+			}
+			tag := "DEC"
+			if encode {
+				tag = "ENC"
+			}
+			fmt.Fprintf(os.Stderr, "[QAB %s] band=%d N=%d b=%d tellf=%d rng=%08x xcm=%d\n",
+				tag, i, N, b, ctx.tellFrac(), rng, xcm)
+		}
+		if qabDebug && dec != nil {
 			qabLog = append(qabLog, qabBandTrace{i: i, N: N, b: b, tellf: dec.TellFrac(), rng: dec.GetRng(), xcm: xcm})
 			fmt.Fprintf(os.Stderr, "[XB] band=%d N=%d", i, N)
 			for j := 0; j < N; j++ {

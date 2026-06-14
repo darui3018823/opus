@@ -175,10 +175,10 @@ func TestEncoderRoundTripBaseline(t *testing.T) {
 
 	signals := []rtSignal{
 		{name: "sine440-mono", channels: 1, gen: genSine(440, 0.5, 1)},
-		{name: "sine1k-stereo", channels: 2, gen: genSine(1000, 0.5, 2), knownUnstable: true},
+		{name: "sine1k-stereo", channels: 2, gen: genSine(1000, 0.5, 2)},
 		{name: "sine8k-mono", channels: 1, gen: genSine(8000, 0.4, 1)},
 		{
-			name: "multitone-stereo", channels: 2, knownUnstable: true,
+			name: "multitone-stereo", channels: 2,
 			gen: func(frame, frameSize, ch int) []float64 {
 				out := make([]float64, frameSize*ch)
 				base := frame * frameSize

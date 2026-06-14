@@ -30,10 +30,10 @@ jobs:
       # Surface the first data race with a full report and a non-zero exit.
       GORACE: halt_on_error=1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true

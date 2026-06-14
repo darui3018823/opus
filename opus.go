@@ -134,37 +134,81 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 }
 
 // encodeFloat is the internal encoding path shared by Encode and EncodeFloat.
+//
+// The encoder always emits 20 ms CELT-only fullband frames internally. When the
+// requested frameSize is an exact multiple (2..6) of the 20 ms base, the input
+// is split into that many consecutive 20 ms chunks, each is encoded into its own
+// CELT frame, and the frames are packed into a single multi-frame Opus packet
+// (RFC 6716 §3.2, count codes 1/2/3). Otherwise a single-frame (code 0) packet
+// is produced.
 func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
-	var celtInput []float64
+	// Generate the base TOC byte (CELT-only fullband 20 ms). The per-frame
+	// duration is always 20 ms; multi-frame packets express longer durations
+	// via the count code rather than a different config.
+	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, framing.BandwidthFullband, e.channels, framing.FrameSize20ms)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate TOC: %w", err)
+	}
 
+	// base = 20 ms in samples at the caller's sample rate.
+	base := e.frameSize
+	nFrames := 1
+	if base > 0 && frameSize > base && frameSize%base == 0 {
+		nFrames = frameSize / base
+	}
+
+	// Single-frame (code 0) fast path.
+	if nFrames == 1 {
+		compressed, err := e.encodeOneCELTFrame(pcm)
+		if err != nil {
+			return nil, err
+		}
+		return append([]byte{toc}, compressed...), nil
+	}
+
+	// Multi-frame: encode each 20 ms chunk continuously (the resampler and CELT
+	// encoder keep their inter-frame state across chunks) and pack the frames.
+	chunkLen := base * e.channels
+	frames := make([][]byte, 0, nFrames)
+	for k := 0; k < nFrames; k++ {
+		chunk := pcm[k*chunkLen : (k+1)*chunkLen]
+		f, err := e.encodeOneCELTFrame(chunk)
+		if err != nil {
+			return nil, err
+		}
+		frames = append(frames, f)
+	}
+
+	// CBR packs frames of equal size with the most compact code; VBR/CVBR
+	// frames vary in size and need explicit length prefixes.
+	vbr := e.rateMode != celt.RateModeCBR
+	payload, code, err := packOpusFrames(frames, vbr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack %d frames: %w", nFrames, err)
+	}
+	return append([]byte{toc | byte(code)}, payload...), nil
+}
+
+// encodeOneCELTFrame resamples one 20 ms PCM chunk (if needed) and encodes it
+// into a single CELT frame payload (no TOC byte).
+func (e *Encoder) encodeOneCELTFrame(pcm []float64) ([]byte, error) {
+	var celtInput []float64
 	if e.inputResampler != nil {
-		// Resample from sampleRate to 48kHz
+		// Resample from sampleRate to 48kHz.
 		resampled := e.inputResampler.Process(pcm)
-		// The resampled output should be approximately internalFrameSize * channels samples.
-		// Pad or trim to exact size for CELT.
+		// The resampled output should be approximately internalFrameSize *
+		// channels samples. Pad or trim to exact size for CELT.
 		targetLen := e.internalFrameSize * e.channels
 		celtInput = padOrTrim(resampled, targetLen)
 	} else {
 		celtInput = pcm
 	}
 
-	// Generate TOC byte using CELT-only fullband config for all rates
-	// (we always encode internally at 48kHz with CELT)
-	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, framing.BandwidthFullband, e.channels, framing.FrameSize20ms)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate TOC: %w", err)
-	}
-
-	// Encode using CELT at 48kHz
 	compressed, err := e.celtEncoder.Encode(celtInput)
 	if err != nil {
 		return nil, fmt.Errorf("CELT encoding failed: %w", err)
 	}
-
-	// Prepend TOC byte
-	packet := append([]byte{toc}, compressed...)
-
-	return packet, nil
+	return compressed, nil
 }
 
 // padOrTrim adjusts a slice to exactly targetLen, padding with zeros or trimming.
@@ -472,6 +516,102 @@ func parseOpusFrameLength(data []byte) (int, int, error) {
 		return 0, 0, fmt.Errorf("truncated extended length")
 	}
 	return int(data[1])*4 + n, 2, nil
+}
+
+// encodeOpusFrameLength encodes a single frame length using the RFC 6716 §3.2.1
+// 1-or-2-byte scheme. It is the exact inverse of parseOpusFrameLength.
+//
+// Values < 252 use one byte; values in [252, 1275] use two bytes b0,b1 where
+// length = b1*4 + b0 and b0 ∈ [252, 255].
+func encodeOpusFrameLength(n int) ([]byte, error) {
+	const maxLen = 255*4 + 255 // 1275
+	if n < 0 || n > maxLen {
+		return nil, fmt.Errorf("frame length %d out of range [0,%d]", n, maxLen)
+	}
+	if n < 252 {
+		return []byte{byte(n)}, nil
+	}
+	b0 := 252 + ((n - 252) & 3)
+	b1 := (n - b0) / 4
+	return []byte{byte(b0), byte(b1)}, nil
+}
+
+// packOpusFrames builds the frame portion of an Opus packet (everything after
+// the TOC byte) from the given per-frame payloads, choosing the most compact
+// RFC 6716 §3.2 count code. It returns the payload bytes and the count code to
+// OR into the TOC. It is the inverse of splitOpusFrames.
+//
+// vbr selects whether variable-size codes are allowed: when false (CBR) and all
+// frames are equal length, the compact equal-size codes (1 / 3-CBR) are used;
+// otherwise explicit length prefixes (codes 2 / 3-VBR) are emitted. Frames of
+// unequal length always force a VBR code regardless of the hint.
+func packOpusFrames(frames [][]byte, vbr bool) ([]byte, int, error) {
+	n := len(frames)
+	if n == 0 {
+		return nil, 0, fmt.Errorf("no frames to pack")
+	}
+	if n > 48 {
+		return nil, 0, fmt.Errorf("too many frames: %d (max 48)", n)
+	}
+
+	if n == 1 {
+		return frames[0], 0, nil
+	}
+
+	allEqual := true
+	for i := 1; i < n; i++ {
+		if len(frames[i]) != len(frames[0]) {
+			allEqual = false
+			break
+		}
+	}
+
+	if n == 2 {
+		if !vbr && allEqual {
+			// Code 1: two equal-size frames, no length prefix.
+			out := make([]byte, 0, len(frames[0])+len(frames[1]))
+			out = append(out, frames[0]...)
+			out = append(out, frames[1]...)
+			return out, 1, nil
+		}
+		// Code 2: explicit length of the first frame; second is the remainder.
+		lp, err := encodeOpusFrameLength(len(frames[0]))
+		if err != nil {
+			return nil, 0, err
+		}
+		out := make([]byte, 0, len(lp)+len(frames[0])+len(frames[1]))
+		out = append(out, lp...)
+		out = append(out, frames[0]...)
+		out = append(out, frames[1]...)
+		return out, 2, nil
+	}
+
+	// n >= 3: code 3.
+	if !vbr && allEqual {
+		// Code 3 CBR: frame-count byte (vbr=0, padding=0) then equal frames.
+		out := make([]byte, 0, 1+n*len(frames[0]))
+		out = append(out, byte(n)) // lower 6 bits = count
+		for _, f := range frames {
+			out = append(out, f...)
+		}
+		return out, 3, nil
+	}
+
+	// Code 3 VBR: frame-count byte with VBR flag, then the first n-1 frame
+	// lengths, then all frame payloads.
+	out := make([]byte, 0, 1+2*(n-1))
+	out = append(out, 0x80|byte(n)) // VBR flag | count
+	for i := 0; i < n-1; i++ {
+		lp, err := encodeOpusFrameLength(len(frames[i]))
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, lp...)
+	}
+	for _, f := range frames {
+		out = append(out, f...)
+	}
+	return out, 3, nil
 }
 
 // splitOpusFrames splits an Opus packet payload into individual frame payloads

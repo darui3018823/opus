@@ -45,7 +45,20 @@ as CELT-only fullband 20 ms.
 - Plumbed `SetVBR` and `SetVBRConstraint` via top-level `Encoder`.
 - Created comprehensive VBR packet size variance and roundtrip tests.
 
-#### Slice 2-2: Multi-frame Packets (Not Started)
+#### Slice 2-2: Multi-frame Packets (Complete)
+- **Status:** Complete
+- Added `packOpusFrames` (inverse of `splitOpusFrames`) and `encodeOpusFrameLength`
+  (inverse of `parseOpusFrameLength`), building RFC 6716 §3.2 count code 0/1/2/3
+  packets and choosing the most compact code (equal-size CBR → code 1 / 3-CBR;
+  variable sizes → code 2 / 3-VBR).
+- The top-level `Encoder` now packs multi-frame packets: a requested `frameSize`
+  that is an exact 2..6× multiple of the 20 ms base is split into that many
+  consecutive 20 ms CELT frames (resampler and CELT state stay continuous across
+  chunks) and packed into one packet, enabling 40 ms / 60 ms output. The TOC
+  per-frame config stays 20 ms; duration is expressed via the count code.
+- Tests: `encodeOpusFrameLength`↔`parseOpusFrameLength` round-trip over 0..1275,
+  `packOpusFrames`→`splitOpusFrames` identity across counts/size profiles, and
+  end-to-end 40/60 ms encode→decode in both CBR and VBR.
 
 Current encoder limitations:
 

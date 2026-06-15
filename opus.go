@@ -40,12 +40,15 @@ type Encoder struct {
 	// CELT encoder (always operates at 48kHz internally)
 	celtEncoder *celt.Encoder
 
-	// SILK encoder for the initial speech/low-bitrate mono path. This is only
-	// created when the input rate maps directly to a SILK-only Opus bandwidth.
-	silkEncoder *silk.Encoder
+	// SILK encoder for the speech/low-bitrate path. It operates at the packet's
+	// SILK internal rate (8/12/16 kHz); 24/48 kHz voice input is downsampled to
+	// 16 kHz before encoding.
+	silkEncoder    *silk.Encoder
+	silkSampleRate int
 
 	// Resampler for non-48kHz input rates
 	inputResampler *resampler.Resampler // inRate -> 48kHz
+	silkResampler  *resampler.Resampler // input sampleRate -> silkSampleRate
 
 	// Configuration
 	bitrate    int
@@ -136,14 +139,20 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 	enc.celtEncoder.SetComplexity(enc.complexity)
 	enc.celtEncoder.SetSignalType(signalTypeForApplication(application))
 
-	if channels == 1 {
-		if _, ok := nativeSilkFramingBandwidth(sampleRate); ok {
-			silkEnc, err := silk.NewEncoder(sampleRate, channels)
+	if silkRate, ok := silkEncodeSampleRate(sampleRate); ok {
+		silkEnc, err := silk.NewEncoder(silkRate, channels)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create SILK encoder: %w", err)
+		}
+		_ = silkEnc.SetComplexity(enc.complexity)
+		enc.silkEncoder = silkEnc
+		enc.silkSampleRate = silkRate
+		if silkRate != sampleRate {
+			r, err := resampler.NewResampler(sampleRate, silkRate, channels, resampler.QualityDefault)
 			if err != nil {
-				return nil, fmt.Errorf("failed to create SILK encoder: %w", err)
+				return nil, fmt.Errorf("failed to create SILK input resampler: %w", err)
 			}
-			_ = silkEnc.SetComplexity(enc.complexity)
-			enc.silkEncoder = silkEnc
+			enc.silkResampler = r
 		}
 	}
 
@@ -280,7 +289,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 }
 
 func (e *Encoder) shouldEncodeSILKOnly() bool {
-	if e.silkEncoder == nil || e.channels != 1 {
+	if e.silkEncoder == nil {
 		return false
 	}
 	if e.application == ApplicationRestrictedLowDelay {
@@ -298,13 +307,16 @@ func (e *Encoder) shouldEncodeSILKOnly() bool {
 	if e.bitrate > 40000 {
 		return false
 	}
-	nativeBW, ok := nativeSilkFramingBandwidth(e.sampleRate)
+	nativeBW, ok := nativeSilkFramingBandwidth(e.silkSampleRate)
 	if !ok {
 		return false
 	}
 	nativePublic := silkFramingBWToPublic(nativeBW)
-	if e.forcedBandwidth != BandwidthAuto && bandwidthRank(e.forcedBandwidth) < bandwidthRank(nativePublic) {
-		return false
+	if e.forcedBandwidth != BandwidthAuto {
+		forced := celtFramingBWToPublic(nyquistClampFramingBW(publicToCeltFramingBW(e.forcedBandwidth), e.sampleRate))
+		if forced != nativePublic {
+			return false
+		}
 	}
 	if bandwidthRank(e.maxBandwidth) < bandwidthRank(nativePublic) {
 		return false
@@ -313,12 +325,12 @@ func (e *Encoder) shouldEncodeSILKOnly() bool {
 }
 
 func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int) ([]byte, error) {
-	bw, ok := nativeSilkFramingBandwidth(e.sampleRate)
+	bw, ok := nativeSilkFramingBandwidth(e.silkSampleRate)
 	if !ok {
 		return nil, fmt.Errorf("SILK-only encoding not available for %d Hz", e.sampleRate)
 	}
 
-	groupSize, groups, err := silkPacketGroups(nFrames)
+	groupSize, groups, err := silkPacketGroupsForChannels(nFrames, e.channels)
 	if err != nil {
 		return nil, err
 	}
@@ -328,17 +340,24 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int) ([]byte, erro
 		return nil, fmt.Errorf("failed to generate SILK TOC: %w", err)
 	}
 
-	chunkLen := e.frameSize * e.channels
+	inputChunkLen := e.frameSize * e.channels
+	silkFrameSize := e.silkSampleRate * 20 / 1000
+	silkChunkLen := silkFrameSize * e.channels
 	streams := make([][]byte, 0, len(groups))
 	pos := 0
 	for _, group := range groups {
-		samples := group * chunkLen
-		stream, err := e.silkEncoder.EncodeMulti(pcm[pos:pos+samples], group)
+		inputSamples := group * inputChunkLen
+		silkPCM := pcm[pos : pos+inputSamples]
+		if e.silkResampler != nil {
+			silkPCM = e.silkResampler.Process(silkPCM)
+			silkPCM = padOrTrim(silkPCM, group*silkChunkLen)
+		}
+		stream, err := e.silkEncoder.EncodeMulti(silkPCM, group)
 		if err != nil {
 			return nil, fmt.Errorf("SILK encoding failed: %w", err)
 		}
 		streams = append(streams, stream)
-		pos += samples
+		pos += inputSamples
 	}
 	payload, code, err := packOpusFramesPadded(streams, true, e.padBytes)
 	if err != nil {
@@ -366,6 +385,18 @@ func silkPacketGroups(nFrames int) (groupSize int, groups []int, err error) {
 	}
 }
 
+func silkPacketGroupsForChannels(nFrames, channels int) (groupSize int, groups []int, err error) {
+	if channels == 2 {
+		switch nFrames {
+		case 3:
+			return 1, []int{1, 1, 1}, nil
+		case 6:
+			return 2, []int{2, 2, 2}, nil
+		}
+	}
+	return silkPacketGroups(nFrames)
+}
+
 func nativeSilkFramingBandwidth(sampleRate int) (int, bool) {
 	switch sampleRate {
 	case 8000:
@@ -374,6 +405,17 @@ func nativeSilkFramingBandwidth(sampleRate int) (int, bool) {
 		return framing.BandwidthMediumband, true
 	case 16000:
 		return framing.BandwidthWideband, true
+	default:
+		return 0, false
+	}
+}
+
+func silkEncodeSampleRate(sampleRate int) (int, bool) {
+	switch sampleRate {
+	case 8000, 12000, 16000:
+		return sampleRate, true
+	case 24000, 48000:
+		return 16000, true
 	default:
 		return 0, false
 	}
@@ -605,7 +647,7 @@ func (e *Encoder) SetBandwidth(bw int) error {
 // public Bandwidth* constant.
 func (e *Encoder) Bandwidth() int {
 	if e.shouldEncodeSILKOnly() {
-		bw, _ := nativeSilkFramingBandwidth(e.sampleRate)
+		bw, _ := nativeSilkFramingBandwidth(e.silkSampleRate)
 		return silkFramingBWToPublic(bw)
 	}
 	return celtFramingBWToPublic(e.selectCeltBandwidth())
@@ -663,6 +705,14 @@ func nyquistCeltBandwidth(sampleRate int) int {
 	default: // 48000
 		return framing.BandwidthFullband
 	}
+}
+
+func nyquistClampFramingBW(bw, sampleRate int) int {
+	nyq := nyquistCeltBandwidth(sampleRate)
+	if bw > nyq {
+		return nyq
+	}
+	return bw
 }
 
 // bitrateCeltBandwidth returns a coarse bandwidth ceiling for a target bitrate so
@@ -755,6 +805,9 @@ func (e *Encoder) Reset() error {
 	}
 	if e.inputResampler != nil {
 		e.inputResampler.Reset()
+	}
+	if e.silkResampler != nil {
+		e.silkResampler.Reset()
 	}
 	e.lastDetectedBW = -1
 	e.celtEncoder.SetBitrate(e.bitrate)

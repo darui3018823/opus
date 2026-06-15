@@ -25,11 +25,15 @@ func TestCGOEncodeRefSILKOnly(t *testing.T) {
 
 	cases := []struct {
 		rate       int
+		channels   int
 		configBase int
 	}{
-		{rate: 8000, configBase: 0},
-		{rate: 12000, configBase: 4},
-		{rate: 16000, configBase: 8},
+		{rate: 8000, channels: 1, configBase: 0},
+		{rate: 12000, channels: 1, configBase: 4},
+		{rate: 16000, channels: 1, configBase: 8},
+		{rate: 48000, channels: 1, configBase: 8},
+		{rate: 16000, channels: 2, configBase: 8},
+		{rate: 48000, channels: 2, configBase: 8},
 	}
 
 	for _, rt := range routes {
@@ -38,8 +42,8 @@ func TestCGOEncodeRefSILKOnly(t *testing.T) {
 			tc := tc
 			for _, packetMs := range []int{20, 40, 60} {
 				packetMs := packetMs
-				t.Run(rt.name+"/"+silkRefRateName(tc.rate)+"/"+silkRefPacketName(packetMs), func(t *testing.T) {
-					enc, err := opus.NewEncoder(tc.rate, 1, rt.app)
+				t.Run(rt.name+"/"+silkRefRateName(tc.rate)+"/"+silkRefChannelName(tc.channels)+"/"+silkRefPacketName(packetMs), func(t *testing.T) {
+					enc, err := opus.NewEncoder(tc.rate, tc.channels, rt.app)
 					if err != nil {
 						t.Fatalf("NewEncoder: %v", err)
 					}
@@ -50,11 +54,11 @@ func TestCGOEncodeRefSILKOnly(t *testing.T) {
 						t.Fatalf("SetBitrate: %v", err)
 					}
 
-					dec, err := opus.NewDecoder(tc.rate, 1)
+					dec, err := opus.NewDecoder(tc.rate, tc.channels)
 					if err != nil {
 						t.Fatalf("NewDecoder: %v", err)
 					}
-					ref, err := cgoref.NewDecoder(tc.rate, 1)
+					ref, err := cgoref.NewDecoder(tc.rate, tc.channels)
 					if err != nil {
 						t.Fatalf("cgoref.NewDecoder: %v", err)
 					}
@@ -62,12 +66,15 @@ func TestCGOEncodeRefSILKOnly(t *testing.T) {
 
 					frameSize := tc.rate * packetMs / 1000
 					wantCode := 0
+					if tc.channels == 2 && packetMs == 60 {
+						wantCode = 3
+					}
 					maxSPC := tc.rate * 120 / 1000
 					const nPackets = 10
 
 					var oursAll, refAll []float64
 					for p := 0; p < nPackets; p++ {
-						in := silkRefSpeechFrame(tc.rate, p*frameSize, frameSize)
+						in := silkRefSpeechFrame(tc.rate, p*frameSize, frameSize, tc.channels)
 						pkt, err := enc.EncodeFloat(in, frameSize)
 						if err != nil {
 							t.Fatalf("packet %d: EncodeFloat: %v", p, err)
@@ -79,12 +86,12 @@ func TestCGOEncodeRefSILKOnly(t *testing.T) {
 						config := int((pkt[0] >> 3) & 0x1f)
 						stereo := (pkt[0] & 0x04) != 0
 						code := int(pkt[0] & 0x03)
-						wantConfig := tc.configBase + silkRefDurationIndex(packetMs)
+						wantConfig := tc.configBase + silkRefDurationIndex(packetMs, tc.channels)
 						if config != wantConfig {
 							t.Fatalf("packet %d: TOC config=%d, want SILK-only %dms config %d (toc=0x%02x)", p, config, packetMs, wantConfig, pkt[0])
 						}
-						if stereo {
-							t.Fatalf("packet %d: TOC stereo bit set for mono SILK packet (toc=0x%02x)", p, pkt[0])
+						if stereo != (tc.channels == 2) {
+							t.Fatalf("packet %d: TOC stereo=%v, want %v (toc=0x%02x)", p, stereo, tc.channels == 2, pkt[0])
 						}
 						if code != wantCode {
 							t.Fatalf("packet %d: count code=%d, want %d for %d ms packet", p, code, wantCode, packetMs)
@@ -98,11 +105,12 @@ func TestCGOEncodeRefSILKOnly(t *testing.T) {
 						if err != nil {
 							t.Fatalf("packet %d: libopus decode (SILK packet non-conformant): %v", p, err)
 						}
-						if len(ours) != frameSize {
-							t.Fatalf("packet %d: decoder samples=%d, want %d", p, len(ours), frameSize)
+						wantSamples := frameSize * tc.channels
+						if len(ours) != wantSamples {
+							t.Fatalf("packet %d: decoder samples=%d, want %d", p, len(ours), wantSamples)
 						}
-						if len(refOut) != frameSize {
-							t.Fatalf("packet %d: libopus samples=%d, want %d", p, len(refOut), frameSize)
+						if len(refOut) != wantSamples {
+							t.Fatalf("packet %d: libopus samples=%d, want %d", p, len(refOut), wantSamples)
 						}
 
 						oursAll = append(oursAll, ours...)
@@ -124,8 +132,8 @@ func TestCGOEncodeRefSILKOnly(t *testing.T) {
 						t.Fatalf("decoder/libopus RMS ratio=%g outside coarse match range (decoder=%g libopus=%g)", ratio, oursRMS, refRMS)
 					}
 
-					snr, rmse, delay, scale := silkRefAlignedSNR(refAll, oursAll, tc.rate/100)
-					t.Logf("SILK %s %dHz %dms: decoder-vs-libopus alignedSNR=%.2fdB rmse=%.5f delay=%d scale=%.4f", rt.name, tc.rate, packetMs, snr, rmse, delay, scale)
+					snr, rmse, delay, scale := silkRefAlignedSNR(refAll, oursAll, tc.rate*tc.channels/100)
+					t.Logf("SILK %s %dHz ch=%d %dms: decoder-vs-libopus alignedSNR=%.2fdB rmse=%.5f delay=%d scale=%.4f", rt.name, tc.rate, tc.channels, packetMs, snr, rmse, delay, scale)
 					if snr < 10 || rmse > 0.18 {
 						t.Fatalf("decoder/libopus output mismatch: alignedSNR=%.2fdB rmse=%.5f delay=%d scale=%.4f", snr, rmse, delay, scale)
 					}
@@ -135,16 +143,22 @@ func TestCGOEncodeRefSILKOnly(t *testing.T) {
 	}
 }
 
-func silkRefSpeechFrame(rate, start, n int) []float64 {
-	out := make([]float64, n)
-	for i := range out {
+func silkRefSpeechFrame(rate, start, n, channels int) []float64 {
+	out := make([]float64, n*channels)
+	for i := 0; i < n; i++ {
 		t := float64(start+i) / float64(rate)
 		env := 0.55 + 0.35*math.Sin(2*math.Pi*3*t)
 		s := 0.32*math.Sin(2*math.Pi*180*t) +
 			0.12*math.Sin(2*math.Pi*360*t+0.4) +
 			0.06*math.Sin(2*math.Pi*720*t+0.9) +
 			0.025*math.Sin(2*math.Pi*1100*t+1.7)
-		out[i] = env * s
+		out[i*channels] = env * s
+		if channels == 2 {
+			r := 0.30*math.Sin(2*math.Pi*185*t+0.2) +
+				0.10*math.Sin(2*math.Pi*370*t+0.7) +
+				0.05*math.Sin(2*math.Pi*740*t+1.1)
+			out[i*channels+1] = env * r
+		}
 	}
 	return out
 }
@@ -217,9 +231,18 @@ func silkRefRateName(rate int) string {
 		return "8k"
 	case 12000:
 		return "12k"
+	case 48000:
+		return "48k"
 	default:
 		return "16k"
 	}
+}
+
+func silkRefChannelName(channels int) string {
+	if channels == 2 {
+		return "stereo"
+	}
+	return "mono"
 }
 
 func silkRefPacketName(ms int) string {
@@ -233,7 +256,10 @@ func silkRefPacketName(ms int) string {
 	}
 }
 
-func silkRefDurationIndex(ms int) int {
+func silkRefDurationIndex(ms, channels int) int {
+	if channels == 2 && ms == 60 {
+		return 1
+	}
 	switch ms {
 	case 20:
 		return 1

@@ -132,12 +132,13 @@ _ = packet
   エラーになります。
 - **エンコーダー帯域**: 信号内容に基づく自動検出、または
   `SetBandwidth` / `SetMaxBandwidth` による明示指定。NB/WB/SWB/FB に対応。
-- **エンコーダーモード選択**: 通常の音声・音楽、ステレオ、restricted-low-delay、
-  24/48 kHz 入力、40 kbps 超のビットレートでは CELT を使います。限定的な
-  SILK-only 経路は、8/12/16 kHz のモノラル音声で、`ApplicationVOIP` または
-  `SignalVoice` が有効、ビットレートが 40 kbps 以下、かつ `SetBandwidth` /
-  `SetMaxBandwidth` が native SILK 帯域未満に制限していない場合だけ選択されます。
-  `SignalMusic` は CELT を維持します。
+- **エンコーダーモード選択**: 通常の音声・音楽、restricted-low-delay、
+  40 kbps 超のビットレートでは CELT を使います。限定的な SILK-only 経路は、
+  モノラルまたはステレオの音声で、`ApplicationVOIP` または `SignalVoice` が有効、
+  ビットレートが 40 kbps 以下、かつ `SetBandwidth` / `SetMaxBandwidth` が選択
+  された SILK 帯域を許す場合に選択されます。8/12/16 kHz 入力は NB/MB/WB に対応し、
+  24/48 kHz の音声入力は WB SILK へダウンサンプリングされます。`SignalMusic` は
+  CELT を維持します。
 - **アプリケーションタイプ**（帯域しきい値や transient 判定を調整）:
   - `opus.ApplicationVOIP` — voice 向け、狭めの帯域しきい値
   - `opus.ApplicationAudio` — music/general 向け
@@ -276,9 +277,9 @@ GitHub Actions ワークフロー 4 本。いずれも **amd64（`ubuntu-latest`
 
 ## 制限事項
 
-- SILK-only エンコードはモノラル低ビットレート音声に限定されています。ステレオ
-  SILK、24/48 kHz 入力からの SILK ダウンサンプリング、ハイブリッドエンコードは
-  まだありません。
+- SILK-only エンコードは低ビットレート音声に限定されています。24/48 kHz 入力は
+  WB SILK へダウンサンプリングされるため、高域保持には今後のハイブリッド
+  エンコード対応が必要です。
 - エンコーダーは libopus とビット精度一致ではありませんが、準拠デコーダー
   （libopus を含む）がデコードできる標準 Opus パケットを出力します。
 - `DecodeFEC` は現状 PLC フォールバックで、パケット FEC 抽出ではありません。

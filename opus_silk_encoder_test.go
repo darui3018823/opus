@@ -118,6 +118,47 @@ func TestEncoderSILKOnlyVOIPMultiFrameRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEncoderSILKOnlyStereoMultiFrameRoundTrip(t *testing.T) {
+	const rate = 16000
+	base := rate * 20 / 1000
+
+	for _, mult := range []int{2, 3, 6} {
+		t.Run(multName(mult), func(t *testing.T) {
+			enc, err := NewEncoder(rate, 2, ApplicationVOIP)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(32000); err != nil {
+				t.Fatalf("SetBitrate: %v", err)
+			}
+
+			frameSize := base * mult
+			pkt, err := enc.Encode(generateSine(180, rate, 2, frameSize), frameSize)
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			if config := int(pkt[0] >> 3); config < 8 || config > 10 {
+				t.Fatalf("TOC config=%d, want SILK WB 20/40ms packetization", config)
+			}
+			if stereo := (pkt[0] & 0x04) != 0; !stereo {
+				t.Fatalf("TOC stereo bit not set for stereo SILK packet")
+			}
+
+			dec, err := NewDecoder(rate, 2)
+			if err != nil {
+				t.Fatalf("NewDecoder: %v", err)
+			}
+			decoded, err := dec.DecodeFloat(pkt)
+			if err != nil {
+				t.Fatalf("DecodeFloat: %v", err)
+			}
+			if want := frameSize * 2; len(decoded) != want {
+				t.Fatalf("decoded samples=%d, want %d", len(decoded), want)
+			}
+		})
+	}
+}
+
 func TestEncoderVOIPHighBitrateStaysCELT(t *testing.T) {
 	enc, err := NewEncoder(16000, 1, ApplicationVOIP)
 	if err != nil {
@@ -232,22 +273,34 @@ func TestEncoderSILKOnlyModeSelectionMatrix(t *testing.T) {
 			wantBW:   BandwidthWideband,
 		},
 		{
-			name:     "stereo_voice_stays_celt",
-			rate:     16000,
-			channels: 2,
-			app:      ApplicationVOIP,
-			bitrate:  24000,
-			wantSILK: false,
-			wantBW:   BandwidthWideband,
+			name:       "stereo_voice_selects_silk",
+			rate:       16000,
+			channels:   2,
+			app:        ApplicationVOIP,
+			bitrate:    24000,
+			wantSILK:   true,
+			wantBW:     BandwidthWideband,
+			wantConfig: 9,
 		},
 		{
-			name:     "non_native_48k_voice_stays_celt",
-			rate:     48000,
-			channels: 1,
-			app:      ApplicationVOIP,
-			bitrate:  24000,
-			wantSILK: false,
-			wantBW:   BandwidthWideband,
+			name:       "non_native_48k_voice_downsamples_to_silk",
+			rate:       48000,
+			channels:   1,
+			app:        ApplicationVOIP,
+			bitrate:    24000,
+			wantSILK:   true,
+			wantBW:     BandwidthWideband,
+			wantConfig: 9,
+		},
+		{
+			name:       "non_native_24k_voice_downsamples_to_silk",
+			rate:       24000,
+			channels:   1,
+			app:        ApplicationVOIP,
+			bitrate:    24000,
+			wantSILK:   true,
+			wantBW:     BandwidthWideband,
+			wantConfig: 9,
 		},
 		{
 			name:     "forced_bandwidth_below_native_stays_celt",
@@ -274,8 +327,8 @@ func TestEncoderSILKOnlyModeSelectionMatrix(t *testing.T) {
 			wantBW:   BandwidthNarrowband,
 		},
 		{
-			name:     "forced_native_bandwidth_keeps_silk",
-			rate:     16000,
+			name:     "forced_downsampled_native_bandwidth_keeps_silk",
+			rate:     48000,
 			channels: 1,
 			app:      ApplicationVOIP,
 			bitrate:  24000,
@@ -285,6 +338,18 @@ func TestEncoderSILKOnlyModeSelectionMatrix(t *testing.T) {
 			wantSILK:   true,
 			wantBW:     BandwidthWideband,
 			wantConfig: 9,
+		},
+		{
+			name:     "forced_fullband_48k_stays_celt",
+			rate:     48000,
+			channels: 1,
+			app:      ApplicationVOIP,
+			bitrate:  24000,
+			configure: func(enc *Encoder) error {
+				return enc.SetBandwidth(BandwidthFullband)
+			},
+			wantSILK: false,
+			wantBW:   BandwidthFullband,
 		},
 		{
 			name:     "max_native_bandwidth_keeps_silk",
@@ -339,6 +404,56 @@ func TestEncoderSILKOnlyModeSelectionMatrix(t *testing.T) {
 	}
 }
 
+func TestEncoderSILKOnlyDownsampledVoiceRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		rate     int
+		channels int
+	}{
+		{24000, 1},
+		{48000, 1},
+		{48000, 2},
+	} {
+		t.Run(rateName(tc.rate)+"/"+channelName(tc.channels), func(t *testing.T) {
+			enc, err := NewEncoder(tc.rate, tc.channels, ApplicationVOIP)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(24000); err != nil {
+				t.Fatalf("SetBitrate: %v", err)
+			}
+			if got := enc.Bandwidth(); got != BandwidthWideband {
+				t.Fatalf("Bandwidth()=%d, want wideband SILK", got)
+			}
+
+			frameSize := tc.rate * 20 / 1000
+			pcm := generateSine(220, tc.rate, tc.channels, frameSize)
+			pkt, err := enc.Encode(pcm, frameSize)
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			if config := int(pkt[0] >> 3); config != 9 {
+				t.Fatalf("TOC config=%d, want SILK WB 20ms config 9 (toc=0x%02x)", config, pkt[0])
+			}
+			if gotStereo := (pkt[0] & 0x04) != 0; gotStereo != (tc.channels == 2) {
+				t.Fatalf("TOC stereo=%v, want %v", gotStereo, tc.channels == 2)
+			}
+
+			dec, err := NewDecoder(tc.rate, tc.channels)
+			if err != nil {
+				t.Fatalf("NewDecoder: %v", err)
+			}
+			decoded, err := dec.DecodeFloat(pkt)
+			if err != nil {
+				t.Fatalf("DecodeFloat: %v", err)
+			}
+			want := frameSize * tc.channels
+			if len(decoded) != want {
+				t.Fatalf("decoded samples=%d, want %d", len(decoded), want)
+			}
+		})
+	}
+}
+
 func TestEncoderSILKOnlyVBRDTXAndPaddingStillSelectSILK(t *testing.T) {
 	const rate = 16000
 	frameSize := rate * 20 / 1000
@@ -373,9 +488,20 @@ func rateName(rate int) string {
 		return "8k"
 	case 12000:
 		return "12k"
+	case 24000:
+		return "24k"
+	case 48000:
+		return "48k"
 	default:
 		return "16k"
 	}
+}
+
+func channelName(channels int) string {
+	if channels == 2 {
+		return "stereo"
+	}
+	return "mono"
 }
 
 func multName(mult int) string {

@@ -12,22 +12,26 @@ source of truth.
 The public encoder has two encode paths:
 
 - General audio still uses the CELT encoder.
-- A narrow SILK-only path is available for mono low-bitrate speech when the
-  encoder is configured for `ApplicationVOIP` or `SignalVoice`, the input rate
-  is 8/12/16 kHz, and the target bitrate is at most 40 kbps.
+- A narrow SILK-only path is available for low-bitrate speech when the encoder
+  is configured for `ApplicationVOIP` or `SignalVoice` and the target bitrate is
+  at most 40 kbps. Native 8/12/16 kHz input maps to SILK NB/MB/WB, while 24/48
+  kHz input is downsampled to WB SILK. Mono and stereo SILK-only packets are
+  supported.
 
-The internal SILK encoder can write decoder-compatible mono 10 ms / 20 ms range
-streams, pack multiple SILK frames into one shared stream, encode structured
-pulses, make simple voiced pitch/LTP decisions, select input-adaptive NLSF
-indices, and run a first closed-loop NSQ-style pulse search with simple
-noise-shaping feedback. It is intentionally not a libopus-equivalent SILK
-encoder yet.
+The internal SILK encoder can write decoder-compatible mono and stereo 10 ms /
+20 ms range streams, pack multiple SILK frames into one shared stream, encode
+structured pulses, make simple voiced pitch/LTP decisions, select input-adaptive
+NLSF indices, and run a first closed-loop NSQ-style pulse search with simple
+noise-shaping feedback. Stereo uses conservative mid/side coding with zero
+stereo predictors. It is intentionally not a libopus-equivalent SILK encoder
+yet.
 
 ## Goals
 
 - Keep emitted packets standard Opus packets that both this decoder and libopus
   can decode.
-- Improve the limited mono SILK path before broadening mode coverage.
+- Improve the limited SILK path incrementally before broadening into hybrid
+  mode coverage.
 - Preserve the working CELT encoder path and official-vector decoder coverage.
 - Add tests before quality work when the next change needs objective comparison.
 
@@ -206,6 +210,18 @@ Exit criteria:
 
 ## Slice 11: 24/48 kHz Voice Input To SILK Downsampling
 
+Status: Complete (2026-06-15)
+
+Implemented:
+
+- The public encoder now creates a 16 kHz SILK encoder for 24/48 kHz input and
+  resamples low-bitrate voice input into that WB SILK layer before encoding.
+- 24/48 kHz VOIP or explicit `SignalVoice` packets at <=40 kbps emit SILK-only
+  WB TOC configs and decode back to the requested output sample rate.
+- Explicit forced bandwidths that cannot be represented by the WB SILK layer
+  keep the encoder on CELT; max-bandwidth caps below WB also keep CELT.
+- Added top-level round-trip and mode-selection tests for 24/48 kHz input.
+
 Purpose: make the SILK speech path useful for common 48 kHz microphone input.
 
 Scope:
@@ -231,6 +247,20 @@ Exit criteria:
 - Existing CELT cross-checks remain green.
 
 ## Slice 12: Stereo SILK
+
+Status: Complete (2026-06-15)
+
+Implemented:
+
+- The internal SILK encoder now writes stereo packets as mid/side SILK channel
+  streams using the decoder's existing stereo packet order.
+- Stereo predictor symbols are encoded conservatively as zero predictors; side
+  frames are always present, with `only_middle` coded false when the side VAD is
+  inactive.
+- The public SILK-only mode-selection path now allows stereo low-bitrate voice
+  where the selected SILK bandwidth is representable.
+- Added top-level mode-selection and round-trip coverage, including 48 kHz
+  stereo voice input downsampled to WB SILK.
 
 Purpose: extend SILK-only encode beyond mono without disturbing the mono path.
 

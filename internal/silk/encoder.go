@@ -29,6 +29,7 @@ type Encoder struct {
 	prevGainQ16    int32     // Previous synthesis gain, matching decoder state
 	lpcState       []int32   // Encoder-side LPC synthesis state, Q14
 	ltpState       []int32   // Encoder-side LTP output history, Q0
+	side           *Encoder  // side-channel encoder for stereo packets
 }
 
 type nlsfAnalysis struct {
@@ -72,7 +73,7 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		prevNLSF[i] = math.Pi * float64(i+1) / float64(lpcOrder+1)
 	}
 
-	return &Encoder{
+	enc := &Encoder{
 		sampleRate:     sampleRate,
 		frameSize:      frameSize,
 		frameMs:        frameMs,
@@ -93,7 +94,18 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		prevGainQ16:    65536,
 		lpcState:       make([]int32, silkMaxLPCOrder),
 		ltpState:       make([]int32, silkLTPMemLengthMs*(sampleRate/1000)),
-	}, nil
+	}
+	if channels == 2 {
+		side, err := NewEncoderWithFrameMs(sampleRate, 1, frameMs)
+		if err != nil {
+			return nil, err
+		}
+		side.complexity = enc.complexity
+		side.bitrate = enc.bitrate
+		enc.side = side
+	}
+
+	return enc, nil
 }
 
 // SetComplexity sets the computational complexity (0-10)
@@ -102,6 +114,9 @@ func (e *Encoder) SetComplexity(complexity int) error {
 		return fmt.Errorf("complexity must be between 0 and 10, got %d", complexity)
 	}
 	e.complexity = complexity
+	if e.side != nil {
+		return e.side.SetComplexity(complexity)
+	}
 	return nil
 }
 
@@ -111,6 +126,9 @@ func (e *Encoder) SetBitrate(bitrate int) error {
 		return fmt.Errorf("bitrate must be between 6000 and 40000 bps, got %d", bitrate)
 	}
 	e.bitrate = bitrate
+	if e.side != nil {
+		return e.side.SetBitrate(bitrate)
+	}
 	return nil
 }
 
@@ -125,9 +143,8 @@ func (e *Encoder) Encode(pcm []float64) ([]byte, error) {
 
 // EncodeMulti encodes n consecutive SILK frames into one shared range-coded
 // stream. This mirrors the SILK packet structure used by Opus: VAD flags for
-// all frames, one LBRR flag, then frame payloads in order. Stereo analysis is
-// not implemented yet; for stereo input this slice encodes the left channel as
-// a mono-compatible foundation for the later stereo slice.
+// all frames, LBRR flags, then frame payloads in order. Stereo input is encoded
+// as a conservative mid/side pair with zero stereo predictors.
 func (e *Encoder) EncodeMulti(pcm []float64, nFrames int) ([]byte, error) {
 	if nFrames < 1 {
 		return nil, fmt.Errorf("invalid frame count: %d", nFrames)
@@ -136,21 +153,17 @@ func (e *Encoder) EncodeMulti(pcm []float64, nFrames int) ([]byte, error) {
 	if len(pcm) != expected {
 		return nil, fmt.Errorf("invalid PCM length: got %d, expected %d", len(pcm), expected)
 	}
+	if e.channels == 2 {
+		return e.encodeMultiStereo(pcm, nFrames)
+	}
 
 	frames := make([][]float64, nFrames)
 	vadFlags := make([]bool, nFrames)
 	for frame := 0; frame < nFrames; frame++ {
 		start := frame * e.frameSize * e.channels
 		framePCM := pcm[start : start+e.frameSize*e.channels]
-		signal := framePCM
-		if e.channels == 2 {
-			signal = make([]float64, e.frameSize)
-			for i := 0; i < e.frameSize; i++ {
-				signal[i] = framePCM[i*2]
-			}
-		}
-		frames[frame] = signal
-		vadFlags[frame] = e.vad.Detect(signal)
+		frames[frame] = framePCM
+		vadFlags[frame] = e.vad.Detect(framePCM)
 	}
 
 	enc := entcode.NewEncoder(64)
@@ -164,6 +177,68 @@ func (e *Encoder) EncodeMulti(pcm []float64, nFrames int) ([]byte, error) {
 	}
 	enc.Flush()
 	return enc.Bytes(), nil
+}
+
+func (e *Encoder) encodeMultiStereo(pcm []float64, nFrames int) ([]byte, error) {
+	if e.side == nil {
+		return nil, fmt.Errorf("missing SILK side-channel encoder")
+	}
+
+	midFrames := make([][]float64, nFrames)
+	sideFrames := make([][]float64, nFrames)
+	vadFlags := [2][]bool{
+		make([]bool, nFrames),
+		make([]bool, nFrames),
+	}
+	for frame := 0; frame < nFrames; frame++ {
+		mid := make([]float64, e.frameSize)
+		side := make([]float64, e.frameSize)
+		base := frame * e.frameSize * 2
+		for i := 0; i < e.frameSize; i++ {
+			l := pcm[base+i*2]
+			r := pcm[base+i*2+1]
+			mid[i] = 0.5 * (l + r)
+			side[i] = 0.5 * (l - r)
+		}
+		midFrames[frame] = mid
+		sideFrames[frame] = side
+		vadFlags[0][frame] = e.vad.Detect(mid)
+		vadFlags[1][frame] = e.side.vad.Detect(side)
+	}
+
+	enc := entcode.NewEncoder(64)
+	for ch := 0; ch < 2; ch++ {
+		for _, active := range vadFlags[ch] {
+			enc.EncodeBitLogp(active, 1)
+		}
+		enc.EncodeBitLogp(false, 1) // No LBRR data in this encoder slice.
+	}
+
+	prevOnlyMiddle := false
+	for i := 0; i < nFrames; i++ {
+		encodeZeroStereoPred(enc)
+		onlyMiddle := false
+		if !vadFlags[1][i] {
+			onlyMiddle = true
+			enc.EncodeIcdf(1, silkStereoOnlyCodeMidICDF[:], 8)
+		}
+		e.encodeRangeFrame(enc, midFrames[i], vadFlags[0][i], i > 0)
+		if !onlyMiddle {
+			e.side.encodeRangeFrame(enc, sideFrames[i], vadFlags[1][i], i > 0 && !prevOnlyMiddle)
+		}
+		prevOnlyMiddle = onlyMiddle
+	}
+	enc.Flush()
+	return enc.Bytes(), nil
+}
+
+func encodeZeroStereoPred(enc *entcode.Encoder) {
+	// joint=12, ix0=1, ix1=2 decodes both predictors to zero.
+	enc.EncodeIcdf(12, silkStereoPredJointICDF[:], 8)
+	for i := 0; i < 2; i++ {
+		enc.EncodeIcdf(1, silkUniform3ICDF[:], 8)
+		enc.EncodeIcdf(2, silkUniform5ICDF[:], 8)
+	}
 }
 
 // encodeRangeFrame writes one structurally valid SILK frame. Slice 3 adds the
@@ -1427,6 +1502,7 @@ func (e *Encoder) Reset() {
 		e.prevNLSF[i] = math.Pi * float64(i+1) / float64(e.lpcOrder+1)
 	}
 	e.prevPitchLag = 100
+	e.prevLagIndex = 0
 	e.prevGains = []float64{1.0, 1.0, 1.0, 1.0}
 	e.prevGainIdx = 10
 	e.prevGainQ16 = 65536
@@ -1436,6 +1512,9 @@ func (e *Encoder) Reset() {
 	}
 	for i := range e.ltpState {
 		e.ltpState[i] = 0
+	}
+	if e.side != nil {
+		e.side.Reset()
 	}
 }
 

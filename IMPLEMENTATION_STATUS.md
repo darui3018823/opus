@@ -6,9 +6,10 @@ This document tracks gaps versus the Opus 1.3.1 specification, prioritizes imple
 > current public surface and verified — it passes all 12 official RFC 8251
 > vectors (RMSE < 0.001) and matches the libopus 1.6.1 reference frame-by-frame
 > (`TestCGORef`, `-tags opusref`). The **encoder** has a CELT quality pipeline
-> plus a limited mono low-bitrate SILK-only speech path that emits standard Opus
-> packets libopus can decode, but it is not bit-exact with libopus and does not
-> yet implement stereo SILK, 24/48 kHz SILK downsampling, or hybrid encode.
+> plus a limited low-bitrate SILK-only speech path that emits standard Opus
+> packets libopus can decode, including stereo and 24/48 kHz input downsampled
+> to WB SILK, but it is not bit-exact with libopus and does not yet implement
+> hybrid encode.
 > The remaining work below is primarily encoder mode coverage/bit-exactness,
 > true packet FEC/PLC API, and multistream/container support. See
 > [docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md) for the
@@ -17,11 +18,11 @@ This document tracks gaps versus the Opus 1.3.1 specification, prioritizes imple
 ## Current Coverage Snapshot
 - ✅ RFC6716 framing, TOC parsing, resampler, entropy coder.
 - ✅ **Decoder**: SILK / CELT / hybrid reconstruction; 12/12 official RFC 8251 vectors and libopus 1.6.1 parity. Official-vector automation is in-tree (`TestOfficialVectors`, `TestCGORef`).
-- ✅ **Encoder**: CELT quality pipeline with transient handling, TF analysis, allocation shaping, stereo/intensity decisions, bandwidth detection, VBR/CVBR, DTX, and multi-frame packetization, plus limited mono SILK-only speech encode for native 8/12/16 kHz low-bitrate voice. Output is standard Opus but not bit-exact with libopus.
-- ⚠️ Stereo SILK encode, 24/48 kHz SILK downsampling, hybrid encode, true packet FEC extraction, public PLC, multistream, surround, and Ogg Opus container APIs remain incomplete.
+- ✅ **Encoder**: CELT quality pipeline with transient handling, TF analysis, allocation shaping, stereo/intensity decisions, bandwidth detection, VBR/CVBR, DTX, and multi-frame packetization, plus limited SILK-only speech encode for low-bitrate voice, including stereo and 24/48 kHz input downsampled to WB SILK. Output is standard Opus but not bit-exact with libopus.
+- ⚠️ Hybrid encode, true packet FEC extraction, public PLC, multistream, surround, and Ogg Opus container APIs remain incomplete.
 
 ## Spec Gaps (prioritized)
-1. **SILK/hybrid encoder modes**: broaden the current limited mono SILK-only path and add hybrid packet generation.
+1. **SILK/hybrid encoder modes**: refine the current limited SILK-only path and add hybrid packet generation.
 2. **Encoder bit-exactness/quality parity**: close remaining gaps versus libopus encoder decisions where useful.
 3. **Packet loss concealment / FEC**: true packet FEC extraction and a public `DecodePLC`-style API.
 4. **Multistream/Surround**: mapping family 1/255 packing, channel coupling matrices, LFE handling.

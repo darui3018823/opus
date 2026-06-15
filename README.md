@@ -12,11 +12,11 @@ A pure-Go implementation of the [Opus audio codec](https://opus-codec.org/)
 (RFC 6716 / RFC 8251) with **no runtime CGO dependency**. The **decoder** passes
 all 12 official RFC 8251 test vectors (RMSE < 0.001) and matches the libopus
 1.6.1 reference frame-by-frame. The **encoder** implements the full CELT quality
-pipeline, plus a limited mono low-bitrate SILK-only speech path, and produces
+pipeline, plus a limited low-bitrate SILK-only speech path, and produces
 standard Opus packets that libopus decodes correctly — see [Status](#status).
 
 > Note: the encoder is not bit-exact with libopus. The CELT path is suitable for
-> speech and music in pure Go. The SILK path is intentionally limited to mono
+> speech and music in pure Go. The SILK path is intentionally limited to
 > low-bitrate speech, and hybrid encoding is not yet implemented.
 
 ## Status
@@ -24,7 +24,7 @@ standard Opus packets that libopus decodes correctly — see [Status](#status).
 | Area | State |
 |------|-------|
 | **Decoder** | ✅ Passes all 12 official RFC 8251 vectors (RMSE < 0.001); matches libopus 1.6.1 reference. SILK, CELT, and hybrid (SILK+CELT) modes are reconstructed, including hybrid SILK→CELT redundancy. |
-| **Encoder** | ✅ Full CELT quality pipeline (Phase 1+2) plus limited mono SILK-only speech encode for native 8/12/16 kHz low-bitrate voice. Emits standard Opus packets that libopus 1.6.1 decodes correctly. SNR: ~48 dB (440 Hz), ~47 dB (1 kHz), ~43 dB (stereo) at 64 kbps. **Not** bit-exact with libopus. Hybrid encode is not yet implemented. |
+| **Encoder** | ✅ Full CELT quality pipeline (Phase 1+2) plus limited SILK-only speech encode for low-bitrate voice, including stereo and 24/48 kHz input downsampled to WB SILK. Emits standard Opus packets that libopus 1.6.1 decodes correctly. SNR: ~48 dB (440 Hz), ~47 dB (1 kHz), ~43 dB (stereo) at 64 kbps. **Not** bit-exact with libopus. Hybrid encode is not yet implemented. |
 | **CGO** | None at runtime. A libopus wrapper exists only for reference tests, behind the `opusref` build tag. |
 | **CI** | `test`, `race`, `bench`, and `fuzz` workflows run on **amd64 and arm64**. |
 
@@ -134,11 +134,12 @@ _ = packet
 - **Encoder bandwidth**: automatic (signal-content-driven FFT detection) or
   manual (`SetBandwidth`/`SetMaxBandwidth`). Ranges: NB/WB/SWB/FB.
 - **Encoder mode selection**: CELT is the default for general audio, music,
-  stereo, restricted-low-delay, 24/48 kHz input, and bitrates above 40 kbps. The
-  limited SILK-only path is selected only for mono speech at 8/12/16 kHz when
-  `ApplicationVOIP` or `SignalVoice` is active, bitrate is at most 40 kbps, and
-  `SetBandwidth`/`SetMaxBandwidth` do not force/cap below that native SILK
-  bandwidth. `SignalMusic` keeps the encoder on CELT.
+  restricted-low-delay, and bitrates above 40 kbps. The limited SILK-only path
+  is selected for mono or stereo speech when `ApplicationVOIP` or `SignalVoice`
+  is active, bitrate is at most 40 kbps, and `SetBandwidth`/`SetMaxBandwidth`
+  allow the selected SILK bandwidth. Native 8/12/16 kHz input maps to NB/MB/WB;
+  24/48 kHz voice input is downsampled to WB SILK. `SignalMusic` keeps the
+  encoder on CELT.
 - **Application types** (drive bandwidth and transient-detection behaviour):
   - `opus.ApplicationVOIP` — narrower bandwidth tiers, eager short-block switching
   - `opus.ApplicationAudio` — music/general defaults
@@ -211,9 +212,10 @@ github.com/darui3018823/opus/
 **Decoding flow**: Opus packet → TOC parsed → CELT or SILK/hybrid path → range
 decoder + reconstruction → optional resample/channel adjust → PCM.
 
-**Encoding flow**: PCM → mode selection → either SILK-only mono speech encode or
-optional resample to 48 kHz and CELT encode (MDCT, band processing, PVQ) → range
-coder → TOC prepended → Opus packet.
+**Encoding flow**: PCM → mode selection → either SILK-only speech encode
+(resampling 24/48 kHz voice input to WB SILK when selected) or optional resample
+to 48 kHz and CELT encode (MDCT, band processing, PVQ) → range coder → TOC
+prepended → Opus packet.
 
 ## Building & Testing
 
@@ -277,8 +279,9 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
 
 ## Limitations
 
-- SILK-only encode is limited to mono low-bitrate speech. Stereo SILK, 24/48 kHz
-  input downsampling into SILK, and hybrid encode are not yet implemented.
+- SILK-only encode is limited to low-bitrate speech; 24/48 kHz input is
+  downsampled to WB SILK, so high-band preservation requires future hybrid
+  encode work.
 - The encoder is not bit-exact with libopus, but produces standards-conformant
   packets that any compliant decoder (including libopus) can decode.
 - VBR/CVBR and application/signal hints shape the CELT encoder heuristics, but

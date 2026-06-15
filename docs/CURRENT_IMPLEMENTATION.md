@@ -49,13 +49,14 @@ selected per the input sample rate, target bitrate, explicit bandwidth settings,
 and signal-content detector** (see Slice 2-6 and the post-2-6 notes below); it
 is no longer always fullband.
 
-As of SILK Encoder slice 6, the top-level encoder can also emit a limited
+As of SILK Encoder slice 7, the top-level encoder can also emit a limited
 SILK-only path for mono speech: `ApplicationVOIP` or an explicit voice signal
 hint, input rates that directly map to SILK-only Opus bandwidths (8 kHz NB,
 12 kHz MB, 16 kHz WB), and target bitrates up to 40 kbps. That path uses the
-internal SILK encoder, emits SILK-only 20 ms TOC configs, and represents 40-120
-ms packets with Opus count codes over one shared SILK range stream. Stereo,
-24/48 kHz SILK downsampling, and hybrid high-band encoding are still not wired.
+internal SILK encoder, emits SILK-only duration configs for 20/40/60 ms Opus
+frames, and packs longer supported durations as standard multiple Opus frame
+streams. Stereo, 24/48 kHz SILK downsampling, and hybrid high-band encoding are
+still not wired.
 
 Supported public encode packet durations are exact 20 ms multiples from 20 ms
 through 120 ms (`frameSize == base20ms * 1..6`). Unsupported frame sizes and
@@ -283,9 +284,9 @@ Accepted channel counts are mono and stereo.
 
 `DecodeFloat` parses the Opus TOC byte. Configs `< 16` go through the SILK or
 hybrid path; configs `>= 16` go through the CELT-only path. CELT count codes
-`0`, `1`, `2`, and `3` are split into per-frame payloads. SILK packet splitting
-has separate handling for shared SILK range streams. Packets whose decoded
-duration exceeds 120 ms are rejected as invalid.
+`0`, `1`, `2`, and `3` are split into per-frame payloads. SILK 40/60 ms TOC
+configs decode multiple 20 ms SILK subframes from each Opus frame stream.
+Packets whose decoded duration exceeds 120 ms are rejected as invalid.
 
 Current decoder limitations:
 
@@ -413,9 +414,12 @@ The SILK package contains:
   libopus-equivalent delayed-decision NSQ or noise-shaping analysis.
 - SILK Encoder slice 6 wires that internal mono encoder into the public Opus
   encoder for low-bitrate VOIP/voice packets at 8/12/16 kHz. It packs one shared
-  SILK range stream per Opus packet and uses count codes for 40-120 ms packet
-  durations. The public integration is intentionally narrow: no stereo SILK, no
-  24/48 kHz downsampling into SILK, and no hybrid mode.
+  SILK range stream for 20/40/60 ms single-Opus-frame packets and uses standard
+  Opus frame packing for longer supported durations. Slice 7 added libopus
+  decoder cross-checks for the public mono SILK encode path and fixed the
+  packetization so libopus accepts those packets. The public integration is
+  intentionally narrow: no stereo SILK, no 24/48 kHz downsampling into SILK, and
+  no hybrid mode.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single
@@ -469,6 +473,11 @@ Notes:
   This shows the encoder emits genuinely standard-compliant Opus, not a stream
   only our own decoder accepts. (Still not bit-exact against libopus's encoder,
   which is not required.)
+- `TestCGOEncodeRefSILKOnly` cross-checks the limited public mono SILK-only
+  encoder path with libopus for 8/12/16 kHz, VOIP and explicit voice routing,
+  and 20/40/60 ms packet durations. It verifies SILK-only TOC configs, decoded
+  duration, output length, bounded peaks/energy, and coarse decoder/libopus
+  reconstruction similarity.
 - The former `cmd_diag` duplicate-`main` build failure is fixed (`toc_check.go`
   moved to `cmd_diag/toccheck`).
 

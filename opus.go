@@ -311,20 +311,53 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int) ([]byte, erro
 	if !ok {
 		return nil, fmt.Errorf("SILK-only encoding not available for %d Hz", e.sampleRate)
 	}
-	toc, err := framing.GenerateTOCExt(framing.ModeSILKOnly, bw, e.channels, framing.FrameSize20ms)
+
+	groupSize, groups, err := silkPacketGroups(nFrames)
+	if err != nil {
+		return nil, err
+	}
+	tocFrameSize := groupSize * framing.FrameSize20ms
+	toc, err := framing.GenerateTOCExt(framing.ModeSILKOnly, bw, e.channels, tocFrameSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate SILK TOC: %w", err)
 	}
 
-	stream, err := e.silkEncoder.EncodeMulti(pcm, nFrames)
-	if err != nil {
-		return nil, fmt.Errorf("SILK encoding failed: %w", err)
+	chunkLen := e.frameSize * e.channels
+	streams := make([][]byte, 0, len(groups))
+	pos := 0
+	for _, group := range groups {
+		samples := group * chunkLen
+		stream, err := e.silkEncoder.EncodeMulti(pcm[pos:pos+samples], group)
+		if err != nil {
+			return nil, fmt.Errorf("SILK encoding failed: %w", err)
+		}
+		streams = append(streams, stream)
+		pos += samples
 	}
-	payload, code, err := packSILKStream(stream, nFrames, e.padBytes)
+	payload, code, err := packOpusFramesPadded(streams, true, e.padBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack SILK stream: %w", err)
 	}
 	return append([]byte{toc | byte(code)}, payload...), nil
+}
+
+func silkPacketGroups(nFrames int) (groupSize int, groups []int, err error) {
+	switch nFrames {
+	case 1:
+		return 1, []int{1}, nil
+	case 2:
+		return 2, []int{2}, nil
+	case 3:
+		return 3, []int{3}, nil
+	case 4:
+		return 2, []int{2, 2}, nil
+	case 5:
+		return 1, []int{1, 1, 1, 1, 1}, nil
+	case 6:
+		return 3, []int{3, 3}, nil
+	default:
+		return 0, nil, fmt.Errorf("invalid SILK frame count %d", nFrames)
+	}
 }
 
 func nativeSilkFramingBandwidth(sampleRate int) (int, bool) {
@@ -1123,35 +1156,6 @@ func packOpusFramesPadded(frames [][]byte, vbr bool, padBytes int) ([]byte, int,
 	return out, 3, nil
 }
 
-// packSILKStream packs one shared SILK range stream into an Opus packet payload.
-// Unlike CELT, multiple SILK Opus frames in the same packet are represented by a
-// single range-coded stream whose header contains the VAD flags for every SILK
-// frame. The Opus count code only communicates packet duration.
-func packSILKStream(stream []byte, frameCount int, padBytes int) ([]byte, int, error) {
-	if frameCount < 1 || frameCount > 6 {
-		return nil, 0, fmt.Errorf("invalid SILK frame count %d", frameCount)
-	}
-	if padBytes <= 0 {
-		if frameCount == 1 {
-			return stream, 0, nil
-		}
-		if frameCount == 2 {
-			return stream, 1, nil
-		}
-		out := make([]byte, 0, 1+len(stream))
-		out = append(out, byte(frameCount))
-		out = append(out, stream...)
-		return out, 3, nil
-	}
-
-	out := make([]byte, 0, 1+len(stream)+len(encodePaddingCount(padBytes))+padBytes)
-	out = append(out, 0x40|byte(frameCount))
-	out = append(out, encodePaddingCount(padBytes)...)
-	out = append(out, stream...)
-	out = append(out, make([]byte, padBytes)...)
-	return out, 3, nil
-}
-
 // splitOpusFrames splits an Opus packet payload into individual frame payloads
 // based on the count code (RFC 6716 §3.3).
 // countCode: 0=1 frame, 1=2 equal frames, 2=2 unequal frames, 3=arbitrary frames
@@ -1520,109 +1524,11 @@ func adjustChannels(data []float64, inputCh, outputCh int) []float64 {
 	return data
 }
 
-// splitSILKOpusFrames splits a SILK/Hybrid packet payload into per-Opus-frame SILK streams.
-// The framing follows RFC 6716 §3.2 for all count codes.
-// Returns the individual SILK range-coded streams (one per Opus frame).
-func splitSILKOpusFrames(payload []byte, countCode int) ([][]byte, error) {
-	// makeEmpty returns n empty byte slices.
-	makeEmpty := func(n int) [][]byte {
-		frames := make([][]byte, n)
-		for i := range frames {
-			frames[i] = []byte{}
-		}
-		return frames
-	}
-
-	switch countCode {
-	case 0:
-		// Single Opus frame: entire payload is one SILK range stream
-		return [][]byte{payload}, nil
-	case 1:
-		// Two equal Opus frames: for SILK, the entire payload is one SILK range stream
-		// encoding both frames sequentially (VAD bits for both frames precede both).
-		return [][]byte{payload}, nil
-	case 2:
-		// Two SILK Opus frames share one range-coded stream after the
-		// self-delimiting length header.
-		stream, _ := silkCode2Stream(payload)
-		return [][]byte{stream}, nil
-	case 3:
-		stream, _, err := silkCode3Stream(payload)
-		if err != nil {
-			return makeEmpty(1), err
-		}
-		return [][]byte{stream}, nil
-	default:
-		return [][]byte{payload}, nil
-	}
-}
-
-// silkCode3Stream strips the Opus code-3 frame-count and padding header, then
-// returns the single SILK range-coded stream and the signaled Opus frame count.
-// For SILK, the bytes after the code-3 header are one range-coded stream that
-// contains all Opus frames sequentially; the VBR bit does not introduce per-frame
-// SILK range streams.
-func silkCode3Stream(payload []byte) ([]byte, int, error) {
-	if len(payload) < 1 {
-		return nil, 0, fmt.Errorf("code 3: empty payload")
-	}
-
-	m := payload[0]
-	frameCount := int(m & 0x3F)
-	padding := (m & 0x40) != 0
-	payload = payload[1:]
-
-	if frameCount == 0 || frameCount > 48 {
-		return nil, 0, fmt.Errorf("code 3: invalid frame count %d", frameCount)
-	}
-
-	if padding {
-		padLen := 0
-		for {
-			if len(payload) < 1 {
-				return []byte{}, frameCount, nil
-			}
-			n := int(payload[0])
-			payload = payload[1:]
-			if n == 255 {
-				padLen += 254
-				continue
-			}
-			padLen += n
-			break
-		}
-		if padLen >= len(payload) {
-			return []byte{}, frameCount, nil
-		}
-		payload = payload[:len(payload)-padLen]
-	}
-
-	return payload, frameCount, nil
-}
-
-// silkCode2Stream strips the code-2 length prefix and returns the remaining
-// bytes as one SILK range-coded stream for the two signaled Opus frames.
-func silkCode2Stream(payload []byte) ([]byte, int) {
-	if len(payload) < 1 {
-		return []byte{}, 2
-	}
-	n1 := int(payload[0])
-	payload = payload[1:]
-	if n1 >= 252 {
-		if len(payload) < 1 {
-			return []byte{}, 2
-		}
-		payload = payload[1:]
-	}
-	return payload, 2
-}
-
 // decodeSILKPacket decodes a SILK or Hybrid-mode packet.
 //
-// For SILK code-0 and code-1: the ENTIRE payload is ONE SILK range-coded stream
-// encoding all Opus frames sequentially.
-// For SILK code-2: the payload after the length prefix is ONE SILK stream for both frames.
-// For SILK code-3: the payload after the M/padding header is ONE SILK stream for all frames.
+// For SILK, each Opus frame payload is one range-coded stream. A 40 ms or
+// 60 ms SILK TOC config stores multiple 20 ms SILK subframes inside that one
+// stream; Opus count codes store multiple such Opus frame streams.
 //
 // pktChannels is the number of channels in the packet (from TOC stereo bit).
 func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannels int) ([]float64, error) {
@@ -1648,46 +1554,14 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		info.dec.CopyPrimaryStateFrom(monoPeer.dec)
 	}
 
-	// For code-0 and code-1: entire payload is ONE SILK stream with all Opus frames.
-	// For code-3: strip only the Opus code-3 header/padding; the remaining
-	// bytes are still one SILK range-coded stream for all signaled Opus frames.
-	var silkStreams [][]byte
-	var nSilkFramesPerStream int
-
-	if countCode <= 1 {
-		// Code 0 or 1: one SILK range stream for all Opus frames
-		opusFrameCount := 1
-		if countCode == 1 {
-			opusFrameCount = 2
-		}
-		silkStreams = [][]byte{payload}
-		nSilkFramesPerStream = opusFrameCount * subframesPerOpusFrame
-	} else if countCode == 3 {
-		stream, opusFrameCount, err := silkCode3Stream(payload)
-		if err != nil {
-			return nil, err
-		}
-		silkStreams = [][]byte{stream}
-		nSilkFramesPerStream = opusFrameCount * subframesPerOpusFrame
-	} else if countCode == 2 {
-		stream, opusFrameCount := silkCode2Stream(payload)
-		silkStreams = [][]byte{stream}
-		nSilkFramesPerStream = opusFrameCount * subframesPerOpusFrame
-	} else {
-		var err error
-		silkStreams, err = splitSILKOpusFrames(payload, countCode)
-		if err != nil {
-			silkStreams = [][]byte{payload}
-		}
-		nSilkFramesPerStream = subframesPerOpusFrame
+	silkStreams, err := splitOpusFrames(payload, countCode)
+	if err != nil {
+		return nil, err
 	}
+	nSilkFramesPerStream := subframesPerOpusFrame
 
 	// Compute expected samples per stream at output rate
-	opusFrameCountPerStream := nSilkFramesPerStream / subframesPerOpusFrame
-	if opusFrameCountPerStream < 1 {
-		opusFrameCountPerStream = 1
-	}
-	samplesPerStream := (d.sampleRate * frameDurationMs * opusFrameCountPerStream / 1000) * d.channels
+	samplesPerStream := (d.sampleRate * frameDurationMs / 1000) * d.channels
 	if samplesPerStream < 1 {
 		samplesPerStream = (d.sampleRate * frameDurationMs / 1000) * d.channels
 	}

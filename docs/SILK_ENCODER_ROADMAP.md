@@ -39,6 +39,19 @@ libopus-equivalent SILK encoder yet.
 
 ## Slice 7: libopus Decoder Cross-check For SILK Encode
 
+Status: Complete (2026-06-15)
+
+Implemented:
+
+- Added `TestCGOEncodeRefSILKOnly` under the `opusref` build tag.
+- Covered mono 8/12/16 kHz, `ApplicationVOIP`, explicit `SignalVoice`, and
+  20/40/60 ms packet durations.
+- Verified SILK-only TOC configs, count codes, decoded duration, output length,
+  bounded peak/RMS behavior, and coarse aligned decoder-vs-libopus similarity.
+- Fixed public SILK-only packetization so 40/60 ms packets use SILK duration
+  configs and longer supported packets use standard multiple Opus frame streams
+  instead of a non-standard shared stream across count-code frames.
+
 Purpose: prove that the new SILK-only packets are not accepted only by the
 project's own decoder.
 

@@ -63,7 +63,7 @@ func TestEncoderSILKOnlyVOIPMultiFrameRoundTrip(t *testing.T) {
 	const rate = 8000
 	base := rate * 20 / 1000
 
-	for _, mult := range []int{2, 6} {
+	for _, mult := range []int{2, 3, 6} {
 		t.Run(multName(mult), func(t *testing.T) {
 			enc, err := NewEncoder(rate, 1, ApplicationVOIP)
 			if err != nil {
@@ -88,12 +88,16 @@ func TestEncoderSILKOnlyVOIPMultiFrameRoundTrip(t *testing.T) {
 			}
 
 			config := int(pkt[0] >> 3)
-			if config != 1 {
-				t.Fatalf("TOC config=%d, want SILK NB 20ms config 1", config)
+			wantConfig := 2
+			if mult == 3 || mult == 6 {
+				wantConfig = 3
 			}
-			wantCode := 1
-			if mult > 2 {
-				wantCode = 3
+			if config != wantConfig {
+				t.Fatalf("TOC config=%d, want SILK NB config %d", config, wantConfig)
+			}
+			wantCode := 0
+			if mult == 6 {
+				wantCode = 2
 			}
 			if code := int(pkt[0] & 0x03); code != wantCode {
 				t.Fatalf("count code=%d, want %d", code, wantCode)
@@ -145,8 +149,12 @@ func rateName(rate int) string {
 }
 
 func multName(mult int) string {
-	if mult == 2 {
+	switch mult {
+	case 2:
 		return "40ms"
+	case 3:
+		return "60ms"
+	default:
+		return "120ms"
 	}
-	return "120ms"
 }

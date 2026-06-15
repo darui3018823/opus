@@ -379,8 +379,13 @@ The SILK package contains:
 - NLSF codebooks and NLSF-to-LPC conversion
 - gain, pitch, LTP, pulse, shell, and stereo helper tables
 - LPC, pitch, NLSF, gain, and VAD helpers
-- a simplified SILK encoder used by internal tests, not by the top-level Opus
-  encoder
+- SILK Encoder slice 1 foundation: the internal encoder can create 10 ms or
+  20 ms mono range streams with the decoder-compatible SILK ordering (all VAD
+  flags, LBRR flag, then per-frame type/gain/NLSF/interp/seed/pulse symbols)
+  and can pack multiple SILK frames into one shared range stream. This slice
+  deliberately uses fixed NLSF residuals and zero excitation pulses; stereo
+  coding, voiced pitch/LTP coding, real excitation quantization, and top-level
+  Opus encoder integration are still future work.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single

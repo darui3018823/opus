@@ -175,9 +175,94 @@ func TestEncoderEncodeSilence(t *testing.T) {
 		t.Fatalf("Encode() error = %v", err)
 	}
 
-	// Verify minimal silence packet
-	if len(packet) != 1 || packet[0] != 0x00 {
-		t.Errorf("Silence not encoded as minimal packet, got %d bytes", len(packet))
+	if len(packet) == 0 {
+		t.Fatal("Encode() returned empty packet")
+	}
+
+	dec, err := NewDecoder(8000, 1)
+	if err != nil {
+		t.Fatalf("Failed to create decoder: %v", err)
+	}
+	tr := &decodeTrace{}
+	dec.trace = tr
+	if _, err := dec.Decode(packet); err != nil {
+		t.Fatalf("Decode() encoded silence error = %v", err)
+	}
+	if len(tr.VADFlags) != 1 || len(tr.VADFlags[0]) != 1 || tr.VADFlags[0][0] != 0 {
+		t.Fatalf("encoded silence VAD trace = %#v, want one inactive frame", tr.VADFlags)
+	}
+	if len(tr.LBRRFlags) != 1 || tr.LBRRFlags[0] != 0 {
+		t.Fatalf("encoded silence LBRR trace = %#v, want no LBRR", tr.LBRRFlags)
+	}
+	if len(tr.Frames) != 1 || tr.Frames[0].SignalType != SignalTypeInactive {
+		t.Fatalf("encoded silence frame trace = %#v, want inactive frame", tr.Frames)
+	}
+}
+
+func TestEncoderStructuredMonoRangeStream(t *testing.T) {
+	tests := []struct {
+		name     string
+		rate     int
+		frameMs  int
+		nFrames  int
+		wantSubf int
+	}{
+		{"NB 20ms single", 8000, 20, 1, 4},
+		{"MB 10ms multi", 12000, 10, 3, 2},
+		{"WB 20ms multi", 16000, 20, 3, 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			enc, err := NewEncoderWithFrameMs(tt.rate, 1, tt.frameMs)
+			if err != nil {
+				t.Fatalf("NewEncoderWithFrameMs() error = %v", err)
+			}
+			dec, err := NewDecoderWithFrameMs(tt.rate, 1, tt.frameMs)
+			if err != nil {
+				t.Fatalf("NewDecoderWithFrameMs() error = %v", err)
+			}
+
+			frameSize := tt.rate * tt.frameMs / 1000
+			pcm := make([]float64, frameSize*tt.nFrames)
+			packet, err := enc.EncodeMulti(pcm, tt.nFrames)
+			if err != nil {
+				t.Fatalf("EncodeMulti() error = %v", err)
+			}
+			if len(packet) < 2 {
+				t.Fatalf("EncodeMulti() packet length = %d, want range-coded stream", len(packet))
+			}
+
+			tr := &decodeTrace{}
+			dec.trace = tr
+			out, err := dec.DecodeMulti(packet, tt.nFrames)
+			if err != nil {
+				t.Fatalf("DecodeMulti() error = %v", err)
+			}
+			if len(out) != frameSize*tt.nFrames {
+				t.Fatalf("DecodeMulti() output length = %d, want %d", len(out), frameSize*tt.nFrames)
+			}
+			if len(tr.VADFlags) != 1 || len(tr.VADFlags[0]) != tt.nFrames {
+				t.Fatalf("VAD trace = %#v, want one %d-frame header", tr.VADFlags, tt.nFrames)
+			}
+			if len(tr.LBRRFlags) != 1 || tr.LBRRFlags[0] != 0 {
+				t.Fatalf("LBRR trace = %#v, want no LBRR", tr.LBRRFlags)
+			}
+			if len(tr.Frames) != tt.nFrames {
+				t.Fatalf("traced frames = %d, want %d", len(tr.Frames), tt.nFrames)
+			}
+			for i, fr := range tr.Frames {
+				if fr.SignalType != SignalTypeInactive {
+					t.Fatalf("frame %d signalType=%d, want inactive", i, fr.SignalType)
+				}
+				if len(fr.RawGainIndices) != tt.wantSubf {
+					t.Fatalf("frame %d gain indices=%d, want %d", i, len(fr.RawGainIndices), tt.wantSubf)
+				}
+				if len(fr.Pulses) != frameSize {
+					t.Fatalf("frame %d pulses=%d, want %d", i, len(fr.Pulses), frameSize)
+				}
+			}
+		})
 	}
 }
 

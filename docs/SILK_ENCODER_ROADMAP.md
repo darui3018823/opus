@@ -82,6 +82,20 @@ Exit criteria:
 
 ## Slice 8: SILK Quality Baseline And Regression Metrics
 
+Status: Complete (2026-06-15)
+
+Implemented:
+
+- Added deterministic synthetic mono fixtures for silence, unvoiced/noise-like
+  input, steady voiced tones, speech-like harmonics, and onset frames.
+- Added `TestSILKInternalQualityBaseline` for the internal SILK encoder and
+  `TestEncoderSILKOnlyQualityBaseline` for the public SILK-only path.
+- Logged packet size, decoded RMS/peak/clipping count, aligned SNR/RMSE,
+  delay/scale, and steady-pitch continuity metrics.
+- Added loose regression guards for silence output, packet duration, dead
+  decoded output, energy runaway, severe aligned-SNR drops, and steady-pitch
+  continuity without treating the current simple NSQ as final quality.
+
 Purpose: make future NSQ and analysis changes measurable.
 
 Scope:

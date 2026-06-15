@@ -419,7 +419,13 @@ The SILK package contains:
   decoder cross-checks for the public mono SILK encode path and fixed the
   packetization so libopus accepts those packets. The public integration is
   intentionally narrow: no stereo SILK, no 24/48 kHz downsampling into SILK, and
-  no hybrid mode.
+  no hybrid mode. Slice 8 adds deterministic quality/regression baselines for
+  the internal mono SILK encoder and the public SILK-only path, covering silence,
+  unvoiced/noise-like input, steady voiced tones, speech-like harmonics, and
+  onset frames. The tests log packet size, decoded energy, peak, clipping count,
+  aligned SNR/RMSE, and pitch continuity where useful, while guarding against
+  silence regressions, dead output, energy runaway, duration errors, and severe
+  quality drops.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single
@@ -478,6 +484,11 @@ Notes:
   and 20/40/60 ms packet durations. It verifies SILK-only TOC configs, decoded
   duration, output length, bounded peaks/energy, and coarse decoder/libopus
   reconstruction similarity.
+- `TestSILKInternalQualityBaseline` and `TestEncoderSILKOnlyQualityBaseline`
+  provide the Slice 8 SILK quality/regression baseline using deterministic
+  synthetic mono fixtures. They run in normal `go test ./...` and log packet
+  size, RMS/peak/clipping, aligned SNR/RMSE, delay/scale, and steady-pitch
+  continuity.
 - The former `cmd_diag` duplicate-`main` build failure is fixed (`toc_check.go`
   moved to `cmd_diag/toccheck`).
 

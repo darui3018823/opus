@@ -124,7 +124,7 @@ func TestTransientAnalysisDetection(t *testing.T) {
 		// 1 kHz tone, pre-emphasised ×32768 domain order of magnitude.
 		steady[i] = 8000 * math.Sin(2*math.Pi*1000*float64(i)/sr)
 	}
-	if transientAnalysis([][]float64{steady}, length, 1) {
+	if isT, _, _ := transientAnalysis([][]float64{steady}, length, 1); isT {
 		t.Errorf("steady tone misclassified as transient")
 	}
 
@@ -135,7 +135,7 @@ func TestTransientAnalysisDetection(t *testing.T) {
 			attack[i] = 12000 * math.Sin(2*math.Pi*1000*float64(i)/sr)
 		}
 	}
-	if !transientAnalysis([][]float64{attack}, length, 1) {
+	if isT, _, _ := transientAnalysis([][]float64{attack}, length, 1); !isT {
 		t.Errorf("sharp attack not detected as transient")
 	}
 }

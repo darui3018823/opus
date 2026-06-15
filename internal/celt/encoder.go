@@ -238,8 +238,10 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	// satisfied for every non-degenerate packet (the symbols before it cost only
 	// a couple of bits), so committing to short blocks here cannot desync.
 	isTransient := false
+	tfChan := 0
+	tfEstimate := 0.0
 	if lm > 0 && e.complexity >= 1 {
-		isTransient = transientAnalysis(bufs, frameSize+ov, ch)
+		isTransient, tfChan, tfEstimate = transientAnalysis(bufs, frameSize+ov, ch)
 	}
 
 	// Pass 2: forward MDCT (M interleaved short blocks on transients, else one
@@ -450,9 +452,31 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 		intra, numBands, start, end, lm, ch, totalBits)
 	etr(enc, "coarse")
 
-	// Time-frequency allocation (flat tf_res=0).
+	// Dynamic-allocation analysis (masking follower → per-band boosts and the
+	// per-band importance weights consumed by tf_analysis). Only the DECISIONS are
+	// computed here; the boost symbols are written later (dynallocEncode), after
+	// spread, to keep the bitstream in decoder order.
+	vbrOn := e.rateMode != RateModeCBR
+	constrainedVBR := e.rateMode == RateModeCVBR
+	offsets, importance := dynallocAnalysis(logE, logE2, numBands, end, ch, lm, isTransient, vbrOn, constrainedVBR)
+
+	// Time-frequency resolution. tf_analysis runs a Viterbi search over per-band
+	// L1 sparsity to pick tfRes[]/tf_select; libopus disables it (tf_res =
+	// isTransient) at very low bitrate or below complexity 2.
 	tfRes := make([]int, numBands)
-	tfEncode(enc, start, end, isTransient, tfRes, lm, 0, totalBits)
+	tfSelect := 0
+	if targetBytes >= 15*ch && e.complexity >= 2 {
+		lambda := 20480/targetBytes + 2
+		if lambda < 80 {
+			lambda = 80
+		}
+		tfSelect = tfAnalysis(end, isTransient, tfRes, lambda, X, frameLen, lm, tfChan, tfEstimate, importance)
+	} else if isTransient {
+		for i := start; i < end; i++ {
+			tfRes[i] = 1
+		}
+	}
+	tfEncode(enc, start, end, isTransient, tfRes, lm, tfSelect, totalBits)
 	etr(enc, "tf_encode")
 
 	// Spread decision (tonality-based). Complexity 0 forces SPREAD_NONE; otherwise
@@ -469,10 +493,7 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	e.lastSpread = spread
 	etr(enc, "spread")
 
-	// Dynamic allocation boosts (tonality/masking follower).
-	vbrOn := e.rateMode != RateModeCBR
-	constrainedVBR := e.rateMode == RateModeCVBR
-	offsets := dynallocAnalysis(logE, logE2, numBands, end, ch, lm, isTransient, vbrOn, constrainedVBR)
+	// Dynamic allocation boosts (decided above; written here in decoder order).
 	dynallocEncode(enc, offsets, numBands, start, end, lm, ch, totalBits)
 	etr(enc, "dynalloc")
 

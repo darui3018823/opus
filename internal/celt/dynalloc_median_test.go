@@ -69,10 +69,10 @@ func TestDynallocMedianFilterPinsFollower(t *testing.T) {
 
 	// vbr=true, constrainedVbr=false, isTransient=false → no follower halving.
 	logEa, logE2a := build(7.0) // shallow dip
-	offA := dynallocAnalysis(logEa, logE2a, numBands, end, C, lm, false, true, false)
+	offA, _ := dynallocAnalysis(logEa, logE2a, numBands, end, C, lm, false, true, false)
 
 	logEb, logE2b := build(0.0) // much deeper dip; same loud logE
-	offB := dynallocAnalysis(logEb, logE2b, numBands, end, C, lm, false, true, false)
+	offB, _ := dynallocAnalysis(logEb, logE2b, numBands, end, C, lm, false, true, false)
 
 	if offA[dip] <= 0 {
 		t.Fatalf("expected a positive boost at the dip band, got %d", offA[dip])

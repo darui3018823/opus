@@ -51,11 +51,17 @@ var transientInvTable = [128]int{
 // The absolute signal scale cancels in `norm`, so the ×32768 domain used here
 // matches libopus' threshold. The weak-transient/tone-detection refinements
 // (only used for low-bitrate hybrid) are omitted.
-func transientAnalysis(bufs [][]float64, length, C int) bool {
+//
+// It returns (isTransient, tfChan, tfEstimate): tfChan is the channel with the
+// strongest transient (the one tf_analysis later analyses), and tfEstimate is
+// the libopus VBR/tf-bias metric derived from the masking strength (used as the
+// l1_metric bias in tfAnalysis).
+func transientAnalysis(bufs [][]float64, length, C int) (bool, int, float64) {
 	const forwardDecay = 0.0625 // 6.7 dB/ms forward masking (CELT-only path)
 	const epsilon = 1e-15
 	len2 := length / 2
 	maskMetric := 0
+	tfChan := 0
 	tmp := make([]float64, length)
 
 	for c := 0; c < C; c++ {
@@ -117,9 +123,27 @@ func transientAnalysis(bufs [][]float64, length, C int) bool {
 		unmask = 64 * unmask * 4 / (6 * (len2 - 17))
 		if unmask > maskMetric {
 			maskMetric = unmask
+			tfChan = c
 		}
 	}
-	return maskMetric > 200
+	isTransient := maskMetric > 200
+
+	// tf_estimate: an arbitrary metric of transient strength, used to bias the
+	// l1_metric in tf_analysis toward good frequency resolution when the frame is
+	// not strongly transient. Float port of libopus transient_analysis tail.
+	tfMax := math.Sqrt(27.0*float64(maskMetric)) - 42.0
+	if tfMax < 0 {
+		tfMax = 0
+	}
+	if tfMax > 163 {
+		tfMax = 163
+	}
+	v := 0.0069*tfMax - 0.139
+	if v < 0 {
+		v = 0
+	}
+	tfEstimate := math.Sqrt(v)
+	return isTransient, tfChan, tfEstimate
 }
 
 // stereoAnalysis is the float port of libopus bands.c stereo_analysis. It chooses
@@ -328,8 +352,16 @@ func spreadingDecision(X []float64, frameLen, end, C, M int, average *int, lastD
 // dynalloc. The internal 2/3-budget break is dropped: dynallocEncode clamps the coded boost
 // against the real range-coder budget and the per-band cap, keeping the result
 // symmetric with the decoder.
-func dynallocAnalysis(logE, logE2 []float64, numBands, end, C, lm int, isTransient, vbr, constrainedVbr bool) []int {
+// It also returns importance[]: a per-band weight (libopus, ~13*2^maskingDepth)
+// consumed by tf_analysis to weigh how much each band's time-frequency decision
+// matters. Bands carrying more energy above the masking follower are weighted
+// more heavily; bands at or below the floor get the default weight of 13.
+func dynallocAnalysis(logE, logE2 []float64, numBands, end, C, lm int, isTransient, vbr, constrainedVbr bool) ([]int, []int) {
 	offsets := make([]int, numBands)
+	importance := make([]int, numBands)
+	for i := range importance {
+		importance[i] = 13
+	}
 	follower := make([]float64, C*numBands)
 	noiseFloor := make([]float64, numBands)
 	for i := 0; i < end; i++ {
@@ -383,6 +415,16 @@ func dynallocAnalysis(logE, logE2 []float64, numBands, end, C, lm int, isTransie
 			follower[i] = math.Max(0, logE[i]-follower[i])
 		}
 	}
+	// Per-band importance from the masking depth, BEFORE the halving/scaling that
+	// follows (libopus computes importance at exactly this point). 2^depth grows
+	// the weight for bands that stick out above the masking follower.
+	for i := 0; i < end; i++ {
+		d := follower[i]
+		if d > 4.0 {
+			d = 4.0
+		}
+		importance[i] = int(math.Floor(0.5 + 13.0*math.Exp2(d)))
+	}
 	if (!vbr || constrainedVbr) && !isTransient {
 		for i := 0; i < end; i++ {
 			follower[i] *= 0.5
@@ -410,7 +452,181 @@ func dynallocAnalysis(logE, logE2 []float64, numBands, end, C, lm int, isTransie
 		}
 		offsets[i] = boost
 	}
-	return offsets
+	return offsets, importance
+}
+
+// l1Metric is the float port of libopus celt_encoder.c l1_metric: the L1 norm of
+// the coefficients, biased upward by lm*bias*L1 so deeper (more time-resolved)
+// splits are slightly penalised when in doubt (preferring frequency resolution).
+func l1Metric(tmp []float64, n, lm int, bias float64) float64 {
+	var l1 float64
+	for i := 0; i < n; i++ {
+		l1 += math.Abs(tmp[i])
+	}
+	l1 += float64(lm) * bias * l1
+	return l1
+}
+
+func iabs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+func imin(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// tfAnalysis is the float port of libopus celt_encoder.c tf_analysis. For each
+// band it measures an L1 sparsity metric of the coefficients at several Haar
+// split depths (l1_metric after repeated haar1), picking the depth that best
+// concentrates energy; the per-band best level becomes a metric. A two-pass
+// Viterbi then chooses tf_res[] (the per-band 0/1 resolution decision, pre
+// tf_select mapping) and tf_select to minimise the total importance-weighted
+// distance to the realisable tf_select_table resolutions plus a per-switch cost
+// (lambda). tfRes[0..end) is filled on return and the chosen tf_select returned.
+//
+// X is the normalised spectrum, channel-major with per-channel stride n0; tfChan
+// selects the analysed channel. importance[] weights each band's contribution;
+// tfEstimate biases l1_metric toward frequency resolution at low transient energy.
+func tfAnalysis(end int, isTransient bool, tfRes []int, lambda int, X []float64, n0, lm, tfChan int, tfEstimate float64, importance []int) int {
+	isT := 0
+	if isTransient {
+		isT = 1
+	}
+	lambdaTerm := lambda
+	if isTransient {
+		lambdaTerm = 0 // (isTransient ? 0 : lambda) on the cost1 init
+	}
+	bias := 0.04 * math.Max(-0.25, 0.5-tfEstimate)
+
+	metric := make([]int, end)
+	path0 := make([]int, end)
+	path1 := make([]int, end)
+	maxN := (int(EBands48000[end]) - int(EBands48000[end-1])) << uint(lm)
+	tmp := make([]float64, maxN)
+	tmp1 := make([]float64, maxN)
+
+	for i := 0; i < end; i++ {
+		bw := int(EBands48000[i+1]) - int(EBands48000[i])
+		N := bw << uint(lm)
+		narrow := bw == 1
+		copy(tmp[:N], X[tfChan*n0+(int(EBands48000[i])<<uint(lm)):])
+
+		lmArg := 0
+		if isTransient {
+			lmArg = lm
+		}
+		L1 := l1Metric(tmp[:N], N, lmArg, bias)
+		bestL1 := L1
+		bestLevel := 0
+
+		// Check the -1 (one extra freq-resolution) case for transients.
+		if isTransient && !narrow {
+			copy(tmp1[:N], tmp[:N])
+			haar1(tmp1[:N], N>>uint(lm), 1<<uint(lm))
+			L1 = l1Metric(tmp1[:N], N, lm+1, bias)
+			if L1 < bestL1 {
+				bestL1 = L1
+				bestLevel = -1
+			}
+		}
+
+		kEnd := lm
+		if !isTransient && !narrow {
+			kEnd = lm + 1
+		}
+		for k := 0; k < kEnd; k++ {
+			var B int
+			if isTransient {
+				B = lm - k - 1
+			} else {
+				B = k + 1
+			}
+			haar1(tmp[:N], N>>uint(k), 1<<uint(k))
+			L1 = l1Metric(tmp[:N], N, B, bias)
+			if L1 < bestL1 {
+				bestL1 = L1
+				bestLevel = k + 1
+			}
+		}
+
+		// metric is in Q1 (×2) to allow a half-way point for narrow bands.
+		if isTransient {
+			metric[i] = 2 * bestLevel
+		} else {
+			metric[i] = -2 * bestLevel
+		}
+		if narrow && (metric[i] == 0 || metric[i] == -2*lm) {
+			metric[i]--
+		}
+	}
+
+	// Choose tf_select by evaluating the full Viterbi cost for both selectors.
+	tfSelect := 0
+	var selcost [2]int
+	for sel := 0; sel < 2; sel++ {
+		cost0 := importance[0] * iabs(metric[0]-2*tfSelectTable[lm][4*isT+2*sel+0])
+		cost1 := importance[0]*iabs(metric[0]-2*tfSelectTable[lm][4*isT+2*sel+1]) + lambdaTerm
+		for i := 1; i < end; i++ {
+			curr0 := imin(cost0, cost1+lambda)
+			curr1 := imin(cost0+lambda, cost1)
+			cost0 = curr0 + importance[i]*iabs(metric[i]-2*tfSelectTable[lm][4*isT+2*sel+0])
+			cost1 = curr1 + importance[i]*iabs(metric[i]-2*tfSelectTable[lm][4*isT+2*sel+1])
+		}
+		selcost[sel] = imin(cost0, cost1)
+	}
+	// Conservatively only allow tf_select=1 for transients.
+	if selcost[1] < selcost[0] && isTransient {
+		tfSelect = 1
+	}
+
+	// Viterbi forward pass with the chosen tf_select, recording back-pointers.
+	cost0 := importance[0] * iabs(metric[0]-2*tfSelectTable[lm][4*isT+2*tfSelect+0])
+	cost1 := importance[0]*iabs(metric[0]-2*tfSelectTable[lm][4*isT+2*tfSelect+1]) + lambdaTerm
+	for i := 1; i < end; i++ {
+		from0 := cost0
+		from1 := cost1 + lambda
+		var curr0 int
+		if from0 < from1 {
+			curr0 = from0
+			path0[i] = 0
+		} else {
+			curr0 = from1
+			path0[i] = 1
+		}
+
+		from0 = cost0 + lambda
+		from1 = cost1
+		var curr1 int
+		if from0 < from1 {
+			curr1 = from0
+			path1[i] = 0
+		} else {
+			curr1 = from1
+			path1[i] = 1
+		}
+		cost0 = curr0 + importance[i]*iabs(metric[i]-2*tfSelectTable[lm][4*isT+2*tfSelect+0])
+		cost1 = curr1 + importance[i]*iabs(metric[i]-2*tfSelectTable[lm][4*isT+2*tfSelect+1])
+	}
+	if cost0 < cost1 {
+		tfRes[end-1] = 0
+	} else {
+		tfRes[end-1] = 1
+	}
+	// Viterbi backward pass to resolve the path.
+	for i := end - 2; i >= 0; i-- {
+		if tfRes[i+1] == 1 {
+			tfRes[i] = path1[i+1]
+		} else {
+			tfRes[i] = path0[i+1]
+		}
+	}
+	return tfSelect
 }
 
 // allocTrimAnalysis is the float port of libopus alloc_trim_analysis. It returns

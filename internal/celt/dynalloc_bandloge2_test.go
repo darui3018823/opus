@@ -25,14 +25,14 @@ func TestDynallocUsesBandLogE2(t *testing.T) {
 	logE[10] = 6.0
 
 	// Baseline: bandLogE2 == bandLogE (the non-secondMdct / non-transient case).
-	off1 := dynallocAnalysis(logE, append([]float64(nil), logE...), numBands, end, C, lm, false, false, false)
+	off1, _ := dynallocAnalysis(logE, append([]float64(nil), logE...), numBands, end, C, lm, false, false, false)
 
 	// Now feed a bandLogE2 whose peak band is *lower* than bandLogE there, as a
 	// sharper long-block estimate might be. The follower at band 10 should drop,
 	// increasing the masking depth (logE[10]-follower) and hence the boost.
 	logE2 := append([]float64(nil), logE...)
 	logE2[10] = 0.0
-	off2 := dynallocAnalysis(logE, logE2, numBands, end, C, lm, false, false, false)
+	off2, _ := dynallocAnalysis(logE, logE2, numBands, end, C, lm, false, false, false)
 
 	if off2[10] <= off1[10] {
 		t.Fatalf("bandLogE2 not driving the follower: boost at peak band did not "+

@@ -224,8 +224,12 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	if e.shouldEncodeSILKOnly() {
 		return e.encodeSILKOnlyPacket(pcm, nFrames)
 	}
+	bw := -1
 	if e.shouldEncodeHybrid(nFrames) {
-		return e.encodeHybridPacket(pcm, nFrames)
+		bw = e.narrowAutoBandwidth(pcm, e.selectHybridBandwidth())
+		if bw == framing.BandwidthSuperwideband || bw == framing.BandwidthFullband {
+			return e.encodeHybridPacket(pcm, nFrames, bw)
+		}
 	}
 
 	// Select the coded bandwidth (NB/WB/SWB/FB) and limit the CELT encoder's
@@ -237,13 +241,8 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	// actual signal, so a source with no high-frequency energy is coded in a
 	// narrower band rather than wasting bits. The detection runs once over the whole
 	// input PCM, so every frame in a packet still shares the same bandwidth/config.
-	bw := e.selectCeltBandwidth()
-	if e.forcedBandwidth == BandwidthAuto {
-		det := detectSignalBandwidth(pcm, e.channels, e.sampleRate, e.lastDetectedBW)
-		e.lastDetectedBW = det
-		if det < bw {
-			bw = det
-		}
+	if bw < 0 {
+		bw = e.narrowAutoBandwidth(pcm, e.selectCeltBandwidth())
 	}
 	e.celtEncoder.SetEndBand(celtEndBandForFramingBW(bw))
 	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, bw, e.channels, framing.FrameSize20ms)
@@ -357,8 +356,19 @@ func (e *Encoder) selectHybridBandwidth() int {
 	return bw
 }
 
-func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames int) ([]byte, error) {
-	bw := e.selectHybridBandwidth()
+func (e *Encoder) narrowAutoBandwidth(pcm []float64, bw int) int {
+	if e.forcedBandwidth != BandwidthAuto {
+		return bw
+	}
+	det := detectSignalBandwidth(pcm, e.channels, e.sampleRate, e.lastDetectedBW)
+	e.lastDetectedBW = det
+	if det < bw {
+		return det
+	}
+	return bw
+}
+
+func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int) ([]byte, error) {
 	toc, err := framing.GenerateTOCExt(framing.ModeHybrid, bw, e.channels, framing.FrameSize20ms)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate hybrid TOC: %w", err)

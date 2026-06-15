@@ -331,7 +331,11 @@ func TestEncoderVoiceModeTransitionsStrict(t *testing.T) {
 			if err := step.configure(enc); err != nil {
 				t.Fatalf("configure: %v", err)
 			}
-			pkt, err := enc.EncodeFloat(strictSpeechLikeFrame(rate, channels, i*frameSize, frameSize), frameSize)
+			pcm := strictSpeechLikeFrame(rate, channels, i*frameSize, frameSize)
+			if step.wantMode == "hybrid" {
+				pcm = strictHybridWidebandFrame(rate, channels, i*frameSize, frameSize)
+			}
+			pkt, err := enc.EncodeFloat(pcm, frameSize)
 			if err != nil {
 				t.Fatalf("EncodeFloat: %v", err)
 			}
@@ -368,6 +372,15 @@ func TestEncoderHybridSelectionBoundariesStrict(t *testing.T) {
 			app:        ApplicationVOIP,
 			wantMode:   "hybrid",
 			wantConfig: 15,
+			wantBW:     BandwidthFullband,
+		},
+		{
+			name:       "48k-voip-lowband-auto-falls-back-celt",
+			rate:       48000,
+			channels:   1,
+			app:        ApplicationVOIP,
+			wantMode:   "celt",
+			wantConfig: 19,
 			wantBW:     BandwidthFullband,
 		},
 		{
@@ -451,7 +464,14 @@ func TestEncoderHybridSelectionBoundariesStrict(t *testing.T) {
 			}
 
 			frameSize := tc.rate * 20 / 1000
-			pkt, err := enc.EncodeFloat(strictSpeechLikeFrame(tc.rate, tc.channels, 0, frameSize), frameSize)
+			pcm := strictSpeechLikeFrame(tc.rate, tc.channels, 0, frameSize)
+			if tc.name == "48k-voip-lowband-auto-falls-back-celt" {
+				pcm = genTone(frameSize, 1000, float64(tc.rate))
+			}
+			if tc.wantMode == "hybrid" {
+				pcm = strictHybridWidebandFrame(tc.rate, tc.channels, 0, frameSize)
+			}
+			pkt, err := enc.EncodeFloat(pcm, frameSize)
 			if err != nil {
 				t.Fatalf("EncodeFloat: %v", err)
 			}
@@ -794,9 +814,9 @@ func TestEncoderHybridVoiceRoundTrip(t *testing.T) {
 			}
 
 			frameSize := tc.rate * tc.packetMs / 1000
-			pkt, err := enc.Encode(generateSine(220, tc.rate, tc.channels, frameSize), frameSize)
+			pkt, err := enc.EncodeFloat(strictHybridWidebandFrame(tc.rate, tc.channels, 0, frameSize), frameSize)
 			if err != nil {
-				t.Fatalf("Encode: %v", err)
+				t.Fatalf("EncodeFloat: %v", err)
 			}
 			config := int(pkt[0] >> 3)
 			if config != tc.wantConfig {
@@ -923,6 +943,24 @@ func strictSpeechLikeFrame(rate, channels, start, n int) []float64 {
 				0.11*math.Sin(2*math.Pi*366*t+0.7) +
 				0.06*math.Sin(2*math.Pi*732*t+1.0))
 			out[i*channels+1] = right
+		}
+	}
+	return out
+}
+
+func strictHybridWidebandFrame(rate, channels, start, n int) []float64 {
+	out := strictSpeechLikeFrame(rate, channels, start, n)
+	highFreq := 10000.0
+	if rate >= 48000 {
+		highFreq = 16000.0
+	}
+	for i := 0; i < n; i++ {
+		t := float64(start+i) / float64(rate)
+		left := 0.045 * math.Sin(2*math.Pi*highFreq*t+0.11)
+		out[i*channels] += left
+		if channels == 2 {
+			right := 0.04 * math.Sin(2*math.Pi*highFreq*t+0.73)
+			out[i*channels+1] += right
 		}
 	}
 	return out

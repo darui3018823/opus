@@ -561,6 +561,84 @@ func TestEncoderSimpleNSQResidualQuantization(t *testing.T) {
 	}
 }
 
+func TestEncoderClosedLoopNSQImprovesVoicedSynthesis(t *testing.T) {
+	const rate = 16000
+	enc, err := NewEncoder(rate, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder() error = %v", err)
+	}
+
+	signal := make([]float64, enc.frameSize)
+	for i := range signal {
+		tm := float64(i) / rate
+		signal[i] = 0.20 * (0.72*math.Sin(2*math.Pi*180*tm) +
+			0.22*math.Sin(2*math.Pi*360*tm+0.3) +
+			0.09*math.Sin(2*math.Pi*540*tm+0.7))
+	}
+
+	pitchLag, pitchGain := enc.analyzePitch(signal)
+	if pitchGain < 0.55 {
+		t.Fatalf("test signal pitch gain=%g, want voiced", pitchGain)
+	}
+	cb := getNLSFCB(enc.lpcOrder)
+	nlsf := enc.analyzeNLSF(signal, cb, SignalTypeVoiced)
+	gainIdx := enc.analysisGainIndex(signal)
+	gainIndices := []int{gainIdx, gainIdx, gainIdx, gainIdx}
+	pitchLags := []int{pitchLag, pitchLag, pitchLag, pitchLag}
+	ltpPerIdx, ltpGainIdx := selectLTPGain(pitchGain)
+	ltpCoeffsQ14 := make([][5]int16, enc.nSubframes)
+	for sf := range ltpCoeffsQ14 {
+		for k := 0; k < 5; k++ {
+			switch ltpPerIdx {
+			case 0:
+				ltpCoeffsQ14[sf][k] = int16(silkLTPGainVQ0[ltpGainIdx][k]) << 7
+			case 1:
+				ltpCoeffsQ14[sf][k] = int16(silkLTPGainVQ1[ltpGainIdx][k]) << 7
+			default:
+				ltpCoeffsQ14[sf][k] = int16(silkLTPGainVQ2[ltpGainIdx][k]) << 7
+			}
+		}
+	}
+
+	residualEnc, _ := NewEncoder(rate, 1)
+	excitation := residualEnc.analysisExcitation(signal, nlsf.lpcQ12, SignalTypeVoiced, pitchLag, pitchGain)
+	residualPulses := residualEnc.simpleNSQ(excitation, gainIndices, SignalTypeVoiced, 0, 0)
+
+	closedEnc, _ := NewEncoder(rate, 1)
+	closedPulses := closedEnc.closedLoopNSQ(signal, nlsf.lpcQ12, gainIndices,
+		SignalTypeVoiced, 0, 0, pitchLags, ltpCoeffsQ14, silkLTPScalesTable[0])
+
+	residualOut := synthesizeTestFrame(t, rate, residualPulses, gainIndices, nlsf.lpcQ12, pitchLags, ltpCoeffsQ14)
+	closedOut := synthesizeTestFrame(t, rate, closedPulses, gainIndices, nlsf.lpcQ12, pitchLags, ltpCoeffsQ14)
+	residualSNR, _, _, _ := silkAlignedSNR(signal, residualOut, enc.frameSize)
+	closedSNR, _, _, _ := silkAlignedSNR(signal, closedOut, enc.frameSize)
+	if closedSNR < residualSNR+0.5 {
+		t.Fatalf("closed-loop NSQ SNR %.2f dB, want at least 0.5 dB over residual-only %.2f dB", closedSNR, residualSNR)
+	}
+}
+
+func synthesizeTestFrame(t *testing.T, rate int, pulses []int16, gainIndices []int, lpcQ12 []int16, pitchLags []int, ltpCoeffsQ14 [][5]int16) []float64 {
+	t.Helper()
+	dec, err := NewDecoder(rate, 1)
+	if err != nil {
+		t.Fatalf("NewDecoder() error = %v", err)
+	}
+	gainsQ16 := make([]int32, len(gainIndices))
+	lpcCoeffsQ12 := make([][]int16, len(gainIndices))
+	for sf, idx := range gainIndices {
+		gainsQ16[sf] = silkGainDequantQ16(idx)
+		lpcCoeffsQ12[sf] = lpcQ12
+	}
+	outI16 := dec.synthesize(pulses, gainsQ16, lpcCoeffsQ12,
+		pitchLags, ltpCoeffsQ14, silkLTPScalesTable[0],
+		SignalTypeVoiced, 0, 0)
+	out := make([]float64, len(outI16))
+	for i, s := range outI16 {
+		out[i] = float64(s) / 32768.0
+	}
+	return out
+}
+
 // Test encoder with invalid PCM length
 func TestEncoderInvalidPCMLength(t *testing.T) {
 	enc, err := NewEncoder(8000, 1)

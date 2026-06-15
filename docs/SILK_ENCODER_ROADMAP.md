@@ -19,8 +19,9 @@ The public encoder has two encode paths:
 The internal SILK encoder can write decoder-compatible mono 10 ms / 20 ms range
 streams, pack multiple SILK frames into one shared stream, encode structured
 pulses, make simple voiced pitch/LTP decisions, select input-adaptive NLSF
-indices, and run a first simple residual quantizer. It is intentionally not a
-libopus-equivalent SILK encoder yet.
+indices, and run a first closed-loop NSQ-style pulse search with simple
+noise-shaping feedback. It is intentionally not a libopus-equivalent SILK
+encoder yet.
 
 ## Goals
 
@@ -122,6 +123,22 @@ Exit criteria:
 - Metrics provide a stable baseline for Slice 9.
 
 ## Slice 9: NSQ And Noise-shaping Improvement
+
+Status: Complete (2026-06-15)
+
+Implemented:
+
+- Added encoder-side LPC/LTP synthesis state so the pulse search can mirror the
+  decoder's synthesis loop across frames.
+- Replaced the public encode path's residual-only pulse quantization with a
+  closed-loop NSQ-style search over decoder-visible output error.
+- Mirrored the decoder's gain adjustment, seed sign flip, quantization offset,
+  LPC prediction, LTP prediction, and re-whitening behavior used by the current
+  mono encoder parameters.
+- Added a simple output-error feedback term as the first noise-shaping loop.
+- Kept the previous residual-only helper covered as a reference and added a
+  voiced synthesis comparison test proving the closed-loop path improves over
+  residual-only pulse choice for the deterministic voiced fixture.
 
 Purpose: move from simple residual quantization toward useful SILK speech
 quality.

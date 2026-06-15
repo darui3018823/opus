@@ -26,6 +26,9 @@ type Encoder struct {
 	prevSignalType int       // Previous SILK signal type
 	prevGains      []float64 // Previous subframe gains
 	prevGainIdx    int       // Previous absolute gain index, matching decoder state
+	prevGainQ16    int32     // Previous synthesis gain, matching decoder state
+	lpcState       []int32   // Encoder-side LPC synthesis state, Q14
+	ltpState       []int32   // Encoder-side LTP output history, Q0
 }
 
 type nlsfAnalysis struct {
@@ -87,6 +90,9 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		prevSignalType: SignalTypeUnvoiced,
 		prevGains:      []float64{1.0, 1.0, 1.0, 1.0},
 		prevGainIdx:    10,
+		prevGainQ16:    65536,
+		lpcState:       make([]int32, silkMaxLPCOrder),
+		ltpState:       make([]int32, silkLTPMemLengthMs*(sampleRate/1000)),
 	}, nil
 }
 
@@ -189,14 +195,20 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		enc.EncodeIcdf(nlsf.interpFactor, silkNLSFInterpFactorICDF[:], 8)
 	}
 
+	ltpCoeffsQ14 := make([][5]int16, e.nSubframes)
+	ltpScaleQ14 := silkLTPScalesTable[0]
 	if signalType == SignalTypeVoiced {
-		e.encodePitchAndLTP(enc, pitchLag, pitchGain, conditionalGain)
+		ltpCoeffsQ14, ltpScaleQ14 = e.encodePitchAndLTP(enc, pitchLag, pitchGain, conditionalGain)
 	}
 
 	seed := int32(0)
 	enc.EncodeIcdf(int(seed), silkUniform4ICDF[:], 8)
-	excitation := e.analysisExcitation(signal, nlsf.lpcQ12, signalType, pitchLag, pitchGain)
-	pulses := e.simpleNSQ(excitation, gainIndices, signalType, quantOffset, seed)
+	pitchLags := make([]int, e.nSubframes)
+	for sf := range pitchLags {
+		pitchLags[sf] = pitchLag
+	}
+	pulses := e.closedLoopNSQ(signal, nlsf.lpcQ12, gainIndices,
+		signalType, quantOffset, seed, pitchLags, ltpCoeffsQ14, ltpScaleQ14)
 	e.encodePulses(enc, pulses, signalType, quantOffset)
 
 	e.prevNLSF = nlsfQ15ToRadians(nlsf.nlsfQ15)
@@ -252,7 +264,7 @@ func (e *Encoder) analyzePitch(signal []float64) (int, float64) {
 	return bestLag, bestCorr
 }
 
-func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, pitchLag int, pitchGain float64, conditionalGain bool) {
+func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, pitchLag int, pitchGain float64, conditionalGain bool) ([][5]int16, int16) {
 	fsKHz := e.sampleRate / 1000
 	minLag := PitchEstMinLagMs * fsKHz
 	maxLag := PitchEstMaxLagMs * fsKHz
@@ -303,6 +315,20 @@ func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, pitchLag int, pitchGai
 
 	e.prevPitchLag = pitchLag
 	e.prevLagIndex = lagIndex
+	ltpCoeffsQ14 := make([][5]int16, e.nSubframes)
+	for sf := 0; sf < e.nSubframes; sf++ {
+		for k := 0; k < 5; k++ {
+			switch ltpPerIdx {
+			case 0:
+				ltpCoeffsQ14[sf][k] = int16(silkLTPGainVQ0[ltpGainIdx][k]) << 7
+			case 1:
+				ltpCoeffsQ14[sf][k] = int16(silkLTPGainVQ1[ltpGainIdx][k]) << 7
+			default:
+				ltpCoeffsQ14[sf][k] = int16(silkLTPGainVQ2[ltpGainIdx][k]) << 7
+			}
+		}
+	}
+	return ltpCoeffsQ14, silkLTPScalesTable[0]
 }
 
 func encodePitchLagLowBits(enc *entcode.Encoder, fsKHz, lagLowBits int) {
@@ -756,6 +782,172 @@ func (e *Encoder) simpleNSQ(excitation []float64, gainIndices []int, signalType,
 	return pulses
 }
 
+func (e *Encoder) closedLoopNSQ(
+	signal []float64,
+	lpcQ12 []int16,
+	gainIndices []int,
+	signalType, quantOffset int,
+	seed int32,
+	pitchLags []int,
+	ltpCoeffsQ14 [][5]int16,
+	ltpScaleQ14 int16,
+) []int16 {
+	pulses := make([]int16, e.frameSize)
+	if signalType == SignalTypeInactive || len(signal) == 0 {
+		e.updateSilentSynthesisState()
+		return pulses
+	}
+
+	uvIdx := 0
+	if signalType == SignalTypeVoiced {
+		uvIdx = 1
+	}
+	offsetQ14 := int32(silkQuantizationOffsetsQ10[uvIdx][quantOffset]) << 4
+	subframeLen := e.frameSize / e.nSubframes
+
+	ltpMemLen := len(e.ltpState)
+	sLTPQ15 := make([]int32, ltpMemLen+e.frameSize)
+	outBufQ0 := make([]int32, ltpMemLen+e.frameSize)
+	copy(outBufQ0, e.ltpState)
+	sLTPBufIdx := ltpMemLen
+
+	sLPCQ14 := make([]int32, silkMaxLPCOrder+subframeLen)
+	copy(sLPCQ14[:silkMaxLPCOrder], e.lpcState)
+	output := make([]int16, e.frameSize)
+	shapeErr := 0.0
+	shape := 0.30
+	pulseRatePenalty := 96.0 * float64(int64(1)<<20)
+	if signalType == SignalTypeVoiced {
+		shape = 0.50
+		pulseRatePenalty = 28.0 * float64(int64(1)<<20)
+	}
+
+	for sf := 0; sf < e.nSubframes; sf++ {
+		start := sf * subframeLen
+		gainIdx := gainIndices[clampInt(sf, 0, len(gainIndices)-1)]
+		gainQ16 := silkGainDequantQ16(gainIdx)
+		gainQ10 := gainQ16 >> 6
+		if gainQ10 <= 0 {
+			gainQ10 = 1
+		}
+		invGainQ31 := silkInverse32VarQ(gainQ16, 47)
+		gainAdjQ16 := int32(1 << 16)
+		if gainQ16 != e.prevGainQ16 {
+			gainAdjQ16 = silkDIV32VarQ(e.prevGainQ16, gainQ16, 16)
+			for i := 0; i < silkMaxLPCOrder; i++ {
+				sLPCQ14[i] = silkSMULWW(gainAdjQ16, sLPCQ14[i])
+			}
+		}
+		e.prevGainQ16 = gainQ16
+
+		lag := e.prevPitchLag
+		if sf < len(pitchLags) && pitchLags[sf] > 0 {
+			lag = pitchLags[sf]
+		}
+		if signalType == SignalTypeVoiced {
+			if sf == 0 {
+				startIdx := sLTPBufIdx - lag - e.lpcOrder - 2
+				if startIdx < 0 {
+					startIdx = 0
+				}
+				filterLen := sLTPBufIdx - startIdx
+				if filterLen > 0 {
+					sLTP := make([]int16, filterLen)
+					silkLPCAnalysisFilter(sLTP, outBufQ0[startIdx:startIdx+filterLen], lpcQ12, filterLen, e.lpcOrder)
+					invGainQ31 = silkSMULWB(invGainQ31, ltpScaleQ14) << 2
+					for i := 0; i < lag+2 && i < filterLen; i++ {
+						sLTPQ15[sLTPBufIdx-i-1] = silkSMULWB(invGainQ31, sLTP[filterLen-i-1])
+					}
+				}
+			} else if gainAdjQ16 != 1<<16 {
+				for i := 0; i < lag+2 && sLTPBufIdx-i-1 >= 0; i++ {
+					idx := sLTPBufIdx - i - 1
+					sLTPQ15[idx] = silkSMULWW(gainAdjQ16, sLTPQ15[idx])
+				}
+			}
+		}
+
+		for i := 0; i < subframeLen && start+i < e.frameSize && start+i < len(signal); i++ {
+			lpcPredQ10 := int32(e.lpcOrder >> 1)
+			for j := 0; j < e.lpcOrder; j++ {
+				lpcPredQ10 = silkSMLAWB(lpcPredQ10, sLPCQ14[silkMaxLPCOrder+i-j-1], lpcQ12[j])
+			}
+			predQ14 := silkLShiftSat32(lpcPredQ10, 4)
+
+			ltpPredQ14 := int32(0)
+			if signalType == SignalTypeVoiced {
+				ltpPredQ13 := int32(2)
+				var coeffs [5]int16
+				if sf < len(ltpCoeffsQ14) {
+					coeffs = ltpCoeffsQ14[sf]
+				}
+				for k := 0; k < 5; k++ {
+					ltpIdx := sLTPBufIdx - lag + 2 - k
+					if ltpIdx >= 0 && ltpIdx < len(sLTPQ15) {
+						ltpPredQ13 = silkSMLAWB(ltpPredQ13, sLTPQ15[ltpIdx], coeffs[k])
+					}
+				}
+				ltpPredQ14 = ltpPredQ13 << 1
+			}
+
+			target := signal[start+i] + shape*shapeErr
+			if target > 1.5 {
+				target = 1.5
+			} else if target < -1.5 {
+				target = -1.5
+			}
+			desiredQ14 := int32(math.Round(target * (float64(int64(1)<<39) / float64(gainQ10))))
+			desiredExcQ14 := desiredQ14 - predQ14 - ltpPredQ14
+
+			seed = 196314165*seed + 907633515
+			pulse := chooseNSQPulseShaped(desiredExcQ14, offsetQ14, seed < 0, pulseRatePenalty)
+			pulses[start+i] = pulse
+
+			excQ14 := decodedExcitationQ14(int(pulse), offsetQ14, seed < 0)
+			presQ14 := excQ14
+			if signalType == SignalTypeVoiced {
+				presQ14 += ltpPredQ14
+				sLTPQ15[sLTPBufIdx] = presQ14 << 1
+				sLTPBufIdx++
+			}
+			v := silkAddSat32(presQ14, predQ14)
+			sLPCQ14[silkMaxLPCOrder+i] = v
+			pxq := silkRShiftRound(int64(silkSMULWW(v, gainQ10)), 8)
+			output[start+i] = clamp16(pxq)
+
+			recon := float64(output[start+i]) / 32768.0
+			shapeErr = signal[start+i] - recon
+			seed += int32(pulse)
+		}
+
+		copy(sLPCQ14[:silkMaxLPCOrder], sLPCQ14[subframeLen:subframeLen+silkMaxLPCOrder])
+	}
+
+	copy(e.lpcState, sLPCQ14[:silkMaxLPCOrder])
+	if e.frameSize <= ltpMemLen {
+		mvLen := ltpMemLen - e.frameSize
+		copy(e.ltpState[:mvLen], e.ltpState[e.frameSize:])
+		for i := 0; i < e.frameSize; i++ {
+			e.ltpState[mvLen+i] = int32(output[i])
+		}
+	}
+	return pulses
+}
+
+func (e *Encoder) updateSilentSynthesisState() {
+	for i := range e.lpcState {
+		e.lpcState[i] = 0
+	}
+	if len(e.ltpState) == 0 || e.frameSize > len(e.ltpState) {
+		return
+	}
+	mvLen := len(e.ltpState) - e.frameSize
+	copy(e.ltpState[:mvLen], e.ltpState[e.frameSize:])
+	for i := mvLen; i < len(e.ltpState); i++ {
+		e.ltpState[i] = 0
+	}
+}
+
 func chooseNSQPulse(desiredQ14, offsetQ14 int32, flipSign bool) int16 {
 	rawTarget := desiredQ14
 	if flipSign {
@@ -774,6 +966,32 @@ func chooseNSQPulse(desiredQ14, offsetQ14 int32, flipSign bool) int16 {
 		}
 		if err < bestErr {
 			bestErr = err
+			bestPulse = candidate
+		}
+	}
+	return int16(bestPulse)
+}
+
+func chooseNSQPulseShaped(desiredQ14, offsetQ14 int32, flipSign bool, pulseRatePenalty float64) int16 {
+	rawTarget := desiredQ14
+	if flipSign {
+		rawTarget = -rawTarget
+	}
+	base := int(math.Round(float64(rawTarget-offsetQ14) / 16384.0))
+
+	bestPulse := 0
+	bestCost := math.Inf(1)
+	for p := base - 4; p <= base+4; p++ {
+		candidate := clampInt(p, -1024, 1024)
+		exc := decodedExcitationQ14(candidate, offsetQ14, flipSign)
+		err := float64(int64(exc) - int64(desiredQ14))
+		absPulse := math.Abs(float64(candidate))
+		cost := err*err + absPulse*absPulse*pulseRatePenalty
+		if candidate == 0 {
+			cost *= 0.98
+		}
+		if cost < bestCost {
+			bestCost = cost
 			bestPulse = candidate
 		}
 	}
@@ -1211,6 +1429,14 @@ func (e *Encoder) Reset() {
 	e.prevPitchLag = 100
 	e.prevGains = []float64{1.0, 1.0, 1.0, 1.0}
 	e.prevGainIdx = 10
+	e.prevGainQ16 = 65536
+	e.prevSignalType = SignalTypeUnvoiced
+	for i := range e.lpcState {
+		e.lpcState[i] = 0
+	}
+	for i := range e.ltpState {
+		e.ltpState[i] = 0
+	}
 }
 
 // computeEnergy computes signal energy

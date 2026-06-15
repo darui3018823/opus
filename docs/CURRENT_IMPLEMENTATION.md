@@ -409,9 +409,14 @@ The SILK package contains:
   NSQ/residual-quantization body: gain coding now returns the decoder-visible
   subframe gain indices, and LPC/LTP residual samples are quantized into SILK
   pulses using the same gain scale, quantization offset, seed sign flip, and
-  LSB-capable shell path that the decoder consumes. The analysis remains
-  intentionally simple: no LPC-to-NLSF root solve, no stereo coding, and no
-  libopus-equivalent delayed-decision NSQ or noise-shaping analysis.
+  LSB-capable shell path that the decoder consumes. Slice 9 replaces the public
+  encode path's residual-only pulse choice with a first closed-loop NSQ-style
+  synthesis search: the encoder now carries LPC/LTP synthesis state, mirrors the
+  decoder's gain, seed, LPC, LTP, quantization-offset, and gain-adjustment
+  semantics while selecting pulses, and feeds output error forward as a simple
+  noise-shaping term. This is still not a full libopus delayed-decision NSQ, and
+  the analysis remains intentionally simple: no LPC-to-NLSF root solve, no stereo
+  coding, and no full rate-controlled SILK NSQ.
 - SILK Encoder slice 6 wires that internal mono encoder into the public Opus
   encoder for low-bitrate VOIP/voice packets at 8/12/16 kHz. It packs one shared
   SILK range stream for 20/40/60 ms single-Opus-frame packets and uses standard

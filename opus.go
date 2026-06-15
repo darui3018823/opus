@@ -289,6 +289,18 @@ func padOrTrim(data []float64, targetLen int) []float64 {
 	return result
 }
 
+// Bitrate returns the current target bitrate in bits per second.
+func (e *Encoder) Bitrate() int { return e.bitrate }
+
+// Complexity returns the current complexity setting (0–10).
+func (e *Encoder) Complexity() int { return e.complexity }
+
+// VBR reports whether variable bitrate is enabled.
+func (e *Encoder) VBR() bool { return e.rateMode != celt.RateModeCBR }
+
+// Application returns the current application mode.
+func (e *Encoder) Application() Application { return e.application }
+
 // SetBitrate sets the target bitrate in bits per second
 func (e *Encoder) SetBitrate(bitrate int) error {
 	if bitrate < 6000 || bitrate > 510000 {

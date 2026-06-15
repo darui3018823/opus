@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-06-14
+Last reviewed: 2026-06-15
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -21,6 +21,10 @@ Implemented public entry points:
 - `NewEncoder(sampleRate, channels int, application Application) (*Encoder, error)`
 - `(*Encoder).Encode(pcm []int16, frameSize int) ([]byte, error)`
 - `(*Encoder).EncodeFloat(pcm []float64, frameSize int) ([]byte, error)`
+- `(*Encoder).Bitrate() int`
+- `(*Encoder).Complexity() int`
+- `(*Encoder).VBR() bool`
+- `(*Encoder).Application() Application`
 - `(*Encoder).SetBitrate(bitrate int) error`
 - `(*Encoder).SetComplexity(complexity int) error`
 - `(*Encoder).SetVBR(vbr bool)`
@@ -28,6 +32,8 @@ Implemented public entry points:
 - `(*Encoder).SetDTX(enabled bool)` / `(*Encoder).DTX() bool`
 - `(*Encoder).SetPacketPadding(n int)`
 - `(*Encoder).SetApplication(application Application)`
+- `(*Encoder).SetSignalType(signal SignalType)`
+- `(*Encoder).SignalType() SignalType`
 - `(*Encoder).SetMaxBandwidth(bw int) error`
 - `(*Encoder).SetBandwidth(bw int) error` / `(*Encoder).Bandwidth() int`
 - `(*Encoder).Reset() error`
@@ -39,8 +45,13 @@ The top-level encoder always creates an internal CELT encoder at 48 kHz and
 uses a 20 ms internal CELT frame (`960` samples per channel). Non-48 kHz input
 is resampled to 48 kHz before CELT encoding. The emitted TOC byte is CELT-only
 20 ms, with the **coded bandwidth selected per the input sample rate, target
-bitrate, and explicit bandwidth settings** (see Slice 2-6 below); it is no longer
-always fullband.
+bitrate, explicit bandwidth settings, and signal-content detector** (see Slice
+2-6 and the post-2-6 notes below); it is no longer always fullband.
+
+Supported public encode packet durations are exact 20 ms multiples from 20 ms
+through 120 ms (`frameSize == base20ms * 1..6`). Unsupported frame sizes and
+durations over the Opus 120 ms packet limit are rejected with
+`ErrUnsupportedFrameSize`.
 
 ### Phase 2: Production CELT Encoder (In Progress)
 
@@ -204,12 +215,35 @@ always fullband.
   bandwidth-limited stream: NB 46.7, WB 44.8, SWB 39.7, FB 39.0 dB).
 - 12/12 official vectors unchanged; `go build/vet/test ./...` green.
 
+#### Post-2-6: Signal-driven bandwidth, signal hints, and review fixes (Complete)
+- **Status:** Complete
+- Automatic bandwidth selection now narrows the config-driven ceiling using a
+  signal-content detector (`bandwidth_detect.go`): input PCM is downmixed,
+  Hann-windowed, FFT analysed, and mapped to NB/WB/SWB/FB by the highest active
+  bin above a -50 dB relative threshold. Narrowing uses hysteresis and never
+  widens beyond sample-rate/bitrate/manual caps.
+- `ApplicationVOIP` and `SignalVoice` use voice-oriented bitrate thresholds;
+  `ApplicationAudio`, `ApplicationRestrictedLowDelay`, and `SignalMusic` use
+  music/general thresholds. Public `SetSignalType` / `SignalType` expose this
+  content hint independently of `SetApplication`.
+- Public getters were added for encoder bitrate, complexity, VBR state, and
+  application mode.
+- v1.1.1 fixed library-review issues: stereo CELT/hybrid packets can be decoded
+  by mono decoders by using stereo CELT state and downmixing after decode; encode
+  and decode paths enforce the Opus 120 ms packet duration limit; `Decode`
+  returns `ErrBufferTooSmall` instead of silently truncating; `GetLastPacketDuration`
+  reports the actual decoded duration; mono SILK multi-frame LBRR side flags are
+  consumed to keep the range decoder aligned; CELT reset clears the final-range
+  folding seed; low-budget transient fallback recomputes long-block coefficients;
+  and raw-only entropy `EncodeBits` flushes correctly.
+
 Current encoder limitations:
 
-- `application` is stored but does not currently drive SILK/CELT/hybrid mode
-  selection.
-- `SetVBR` stores the setting but does not currently alter the CELT encoder
-  packetization path.
+- `application` and `SignalType` drive encoder heuristics, but do not select
+  SILK-only or hybrid modes.
+- VBR/CVBR affects CELT target sizing and packet sizes, but the rate controller
+  is still a simplified CELT-only implementation rather than libopus-equivalent
+  full mode/rate control.
 - `EncodeFloat` uses `float64`; there is no public `EncodeFloat32` method.
 - The public encoder does not expose a SILK-only or hybrid encoder path.
 - The CELT encoder path is functional but not verified as bit-exact against
@@ -239,7 +273,8 @@ Accepted channel counts are mono and stereo.
 `DecodeFloat` parses the Opus TOC byte. Configs `< 16` go through the SILK or
 hybrid path; configs `>= 16` go through the CELT-only path. CELT count codes
 `0`, `1`, `2`, and `3` are split into per-frame payloads. SILK packet splitting
-has separate handling for shared SILK range streams.
+has separate handling for shared SILK range streams. Packets whose decoded
+duration exceeds 120 ms are rejected as invalid.
 
 Current decoder limitations:
 
@@ -248,6 +283,9 @@ Current decoder limitations:
 - There is no public `DecodeFloat32` method.
 - There is no public `DecodePLC(pcm, frameSize)` method; CELT PLC exists
   internally and is reached through `DecodeFEC`.
+- `GetLastPacketDuration` reports the duration in output samples per channel of
+  the last successfully decoded packet; before any decode it reports the default
+  20 ms duration for the decoder sample rate.
 - The decoder passes all 12 official RFC 8251 vectors (RMSE < 0.001). The
   separate cgo/libopus reference comparison (`TestCGORef`, `go test -tags opusref`)
   also passes all 12 vectors against libopus 1.6.1 (overall RMSE < 0.001).
@@ -283,8 +321,9 @@ an end-window and are flushed LSB-first to the tail of the packet, symmetric wit
 the decoder's `DecodeBits`. `Bytes()` assembles the forward range bytes, a zeroed
 gap, and the raw tail at the absolute end; it still returns the minimal front
 buffer when no raw bits are used. `Tell()` now counts raw bits (matching
-`ec_tell`'s `nbits_total`). Round-trip guards: `TestEncodeBitsRawRoundtrip` and
-`TestEncodeUintLargeFtRoundtrip` (the `ec_enc_uint` ftb>UintBits split path).
+`ec_tell`'s `nbits_total`). Round-trip guards: `TestEncodeBitsRawRoundtrip`,
+`TestEncodeBitsRawOnlyRoundtrip`, and `TestEncodeUintLargeFtRoundtrip` (the
+`ec_enc_uint` ftb>UintBits split path).
 
 ### `internal/dsp`
 
@@ -324,9 +363,12 @@ comparison. The public Opus decoder copies CELT state between the pre-created
 decoder variants so one logical stream can switch frame size, bandwidth, or
 channel layout.
 
-The CELT encoder performs MDCT analysis, band energy computation, coarse energy
-coding, bit allocation, and PVQ encoding, but it is still a simplified path and
-is not documented as bit-exact.
+The CELT encoder performs MDCT analysis, transient/patch-transient decisions,
+TF analysis, band energy computation, coarse energy coding, bit allocation,
+dynamic allocation, stereo/intensity decisions, anti-collapse, final fine energy,
+and PVQ encoding. It emits standard CELT-only Opus packets and is cross-checked
+against libopus decoding, but it is not documented as bit-exact with libopus's
+encoder.
 
 ### `internal/silk`
 
@@ -354,8 +396,7 @@ Command checked:
 go test ./...
 ```
 
-Result on 2026-06-14: passing (`go build ./...`, `go vet ./...`, and
-`go test ./...` all exit 0).
+Result on 2026-06-15: passing (`go vet ./...` and `go test ./...` exit 0).
 
 Passing package-level tests:
 
@@ -387,7 +428,8 @@ Notes:
   tag: `TestCGOEncodeRef` encodes synthetic signals with our encoder and decodes
   the packets with libopus 1.6.1, then measures delay-aligned SNR. libopus
   reconstructs the encoder's output to within ~0.01 dB of our own decoder
-  (sine440 36.0, sine1k 39.0, sine4k 29.0, sine1k-stereo 35.3 dB), and
+  (about 48 dB for 440 Hz, 47 dB for 1 kHz, 39 dB for 4 kHz, and 43 dB for
+  stereo 1 kHz after signal-driven bandwidth detection), and
   `TestCGOEncodeRefSilence` confirms silent input decodes to silence in libopus.
   This shows the encoder emits genuinely standard-compliant Opus, not a stream
   only our own decoder accepts. (Still not bit-exact against libopus's encoder,
@@ -406,8 +448,8 @@ reference comparison.
 - No top-level SILK-only encoder selection.
 - No top-level hybrid encoder.
 - FEC decode is currently a PLC fallback, not packet FEC extraction.
-- Application mode, VBR, and some CTL-style constants are not wired to full
-  libopus-compatible behavior.
+- Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
+  to full libopus-compatible mode/rate-control behavior.
 - Decoder parity is achieved on the official vectors and the libopus reference;
   the open correctness work is now on the encoder side (bit-exact CELT and the
   SILK/hybrid encoder paths).
@@ -416,5 +458,6 @@ reference comparison.
 
 The codebase is a Pure Go Opus implementation with a decoder that passes all 12
 official RFC 8251 vectors and the libopus 1.6.1 reference comparison. The
-encoder is still a simplified CELT-only path and is not yet bit-exact, so
-encode-side compatibility claims remain in progress.
+encoder is a CELT-only path with the current quality pipeline, standard packet
+output, and libopus decode cross-checks. It is not bit-exact with libopus and
+does not yet provide SILK-only or hybrid encode modes.

@@ -2,9 +2,23 @@
 
 ## Overview
 
-This document tracks the implementation progress of the Pure Go Opus library and provides guidance for each development phase.
+This document is a historical roadmap plus forward-looking task list for the
+Pure Go Opus library. For exact current behavior, prefer
+[`docs/CURRENT_IMPLEMENTATION.md`](CURRENT_IMPLEMENTATION.md); it is generated
+from the code state and takes precedence when this roadmap lags.
 
-## Current Status: Phase 2 Foundation ✅ (updated for Opus 1.3.1 parity)
+## Current Status: v1.1.1 Snapshot
+
+- Decoder: complete for the current public API; passes all 12 official RFC 8251
+  vectors and the libopus 1.6.1 reference comparison.
+- Encoder: CELT-only quality pipeline with transient handling, TF analysis,
+  allocation shaping, stereo/intensity decisions, signal-driven bandwidth,
+  VBR/CVBR, DTX, and multi-frame packetization through 120 ms. The encoder emits
+  standard Opus packets that libopus decodes, but is not bit-exact and does not
+  implement SILK-only or hybrid encode modes.
+- Runtime CGO: none. CGO is used only by optional `opusref` reference tests.
+
+## Historical Milestones
 
 ### Completed Components
 
@@ -59,26 +73,31 @@ This document tracks the implementation progress of the Pure Go Opus library and
 - Test coverage: bit coding, roundtrip
 - ⚠️ Note: Symbol and uint encoding need refinement for full libopus compatibility
 
-### Remaining Phase 2 Tasks (Opus 1.3.1 focus)
+### Remaining Current Tasks
 
-**Range Coder Parity** 🔄 (Highest Priority)
-- Make symbol/uint ICDF paths bit-exact with libopus 1.3.1.
-- Add regression vectors comparing encoded bitstreams to reference.
+**SILK/hybrid encoder integration** 🔄
+- Add top-level mode selection and packet generation for SILK-only and hybrid
+  encode paths.
 
-**Polyphase Resampler** 🔄
-- Complete up/down paths for all Opus sample rates (8/12/16/24/48 kHz).
-- Validate aliasing/response; add table-driven tests.
+**FEC/PLC API parity** 🔄
+- Implement true packet FEC extraction and expose a public PLC API.
 
-**Test Vectors & Compliance Harness** 🔄
-- Integrate official 1.3.1 test vectors (CELT/SILK/hybrid) across frame sizes (2.5–60 ms, then 120 ms).
-- Automate matrix for sample rate × channels × application × frame size; include TOC edge cases.
-- Add corrupted-frame and padding tests; fuzz decoder/parser.
+**Multistream/container support** 🔄
+- Add multistream/surround mapping and Ogg Opus container APIs.
 
-**Compatibility Table & API Shims** 🔄
+**Encoder parity and tuning** 🔄
+- Continue quality and bit-exactness-oriented CELT refinements where useful.
+
+**Compatibility table & API shims** 🔄
 - Document/publicize API/behavior deltas vs libopus/opusfile/layeh.com/gopus.
 - Add automated assertions for a selected subset.
 
 ## Phase 3: CELT Implementation (Next)
+
+> Historical detail: CELT decoder/encoder work described in this section has
+> largely been implemented. Keep this section as background for how the work was
+> originally decomposed; use the v1.1.1 snapshot above and
+> `CURRENT_IMPLEMENTATION.md` for current status.
 
 ### Part 1: CELT Decoder (Weeks 3-4)
 
@@ -306,14 +325,14 @@ For each major component:
 
 ## Current Focus
 
-**Immediate priorities (Phase 2 completion)**:
-1. ✅ FFT, MDCT, windows complete
-2. 🔄 Implement polyphase resampler
-3. 🔄 Refine range coder
-4. ✅ Comprehensive testing
-5. 📝 Document algorithms
+**Immediate priorities after v1.1.1**:
+1. 🔄 SILK-only and hybrid encoder integration.
+2. 🔄 True FEC decode and public PLC API design.
+3. 🔄 Multistream/surround and Ogg Opus container APIs.
+4. 🔄 Encoder parity/quality refinements against libopus.
+5. 📝 Keep README and `CURRENT_IMPLEMENTATION.md` aligned with releases.
 
-**Next milestone**: Begin CELT decoder implementation (Phase 3)
+**Next milestone**: choose and scope the SILK/hybrid encoder phase.
 
 ## Notes
 
@@ -325,5 +344,5 @@ For each major component:
 
 ---
 
-Last Updated: 2026-01-02
-Status: Phase 2 Foundation (75% complete)
+Last Updated: 2026-06-15
+Status: v1.1.1 shipped; decoder parity complete, CELT-only encoder quality pipeline complete for current scope.

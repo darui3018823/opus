@@ -111,10 +111,13 @@ _ = packet
 //   packet, err := enc.EncodeFloat(make([]float64, 960*2), 960)
 
 // Bandwidth is detected automatically from signal content; override if needed:
-//   enc.SetBandwidth(opus.BandwidthWB)   // force wideband
-//   enc.SetBandwidth(opus.BandwidthAuto) // restore auto
+//   enc.SetBandwidth(opus.BandwidthWideband) // force wideband
+//   enc.SetBandwidth(opus.BandwidthAuto)     // restore auto
 
-// 40 ms or 60 ms packets (multi-frame):
+// Optional content hint independent of Application:
+//   enc.SetSignalType(opus.SignalVoice)
+
+// Multi-frame packets use exact 20 ms multiples up to 120 ms:
 //   packet, err := enc.Encode(pcm1920, 1920) // 40 ms
 ```
 
@@ -126,13 +129,17 @@ _ = packet
 - **Channels**: mono and stereo.
 - **Decoder frame sizes**: all Opus durations (2.5/5/10/20/40/60 ms), selected
   per packet by the TOC byte.
-- **Encoder frame sizes**: 20 ms, 40 ms, 60 ms (multi-frame, RFC 6716 §3.2).
+- **Encoder frame sizes**: exact 20 ms multiples from 20 ms through 120 ms
+  (multi-frame, RFC 6716 §3.2). Other sizes are rejected.
 - **Encoder bandwidth**: automatic (signal-content-driven FFT detection) or
   manual (`SetBandwidth`/`SetMaxBandwidth`). Ranges: NB/WB/SWB/FB.
 - **Application types** (drive bandwidth and transient-detection behaviour):
   - `opus.ApplicationVOIP` — narrower bandwidth tiers, eager short-block switching
   - `opus.ApplicationAudio` — music/general defaults
   - `opus.ApplicationRestrictedLowDelay`
+- **Signal hints**: `opus.SignalAuto`, `opus.SignalVoice`, and
+  `opus.SignalMusic` can tune encoder heuristics without changing the Opus
+  bitstream format.
 
 ## Public API
 
@@ -144,14 +151,21 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error)
 func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error)
 
+func (e *Encoder) Bitrate() int
+func (e *Encoder) Complexity() int
+func (e *Encoder) VBR() bool
+func (e *Encoder) Application() Application
+
 func (e *Encoder) SetBitrate(bitrate int) error       // 6000–510000 bps
 func (e *Encoder) SetComplexity(complexity int) error  // 0–10
 func (e *Encoder) SetVBR(vbr bool)
 func (e *Encoder) SetVBRConstraint(constrained bool)   // true = CVBR
 func (e *Encoder) SetApplication(application Application)
-func (e *Encoder) SetBandwidth(bw Bandwidth)           // Auto/NB/WB/SWB/FB
-func (e *Encoder) SetMaxBandwidth(bw Bandwidth)
-func (e *Encoder) Bandwidth() Bandwidth
+func (e *Encoder) SetSignalType(signal SignalType)
+func (e *Encoder) SignalType() SignalType
+func (e *Encoder) SetBandwidth(bw int) error           // Auto/NB/WB/SWB/FB
+func (e *Encoder) SetMaxBandwidth(bw int) error
+func (e *Encoder) Bandwidth() int
 func (e *Encoder) SetDTX(dtx bool)
 func (e *Encoder) SetPacketPadding(n int)
 func (e *Encoder) Reset() error
@@ -260,6 +274,8 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
   are not yet encoded; all output is CELT regardless of the application setting.
 - The encoder is not bit-exact with libopus, but produces standards-conformant
   packets that any compliant decoder (including libopus) can decode.
+- VBR/CVBR and application/signal hints shape the CELT encoder heuristics, but
+  do not provide full libopus-equivalent mode/rate-control behavior.
 - `DecodeFEC` is currently a PLC fallback, not packet FEC extraction.
 - No multistream, surround, or Ogg Opus container API.
 

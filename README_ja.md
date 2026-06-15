@@ -11,19 +11,18 @@
 [Opus オーディオコーデック](https://opus-codec.org/)（RFC 6716 / RFC 8251）の
 **ランタイム CGO 依存なし**の Pure Go 実装です。**デコーダー**は公式 RFC 8251
 テストベクター 12 個すべてに合格し（RMSE < 0.001）、libopus 1.6.1 リファレンスと
-フレーム単位で一致します。**エンコーダー**はまだ簡易な CELT-only 実装で、
-ビット精度一致には未到達です（[ステータス](#ステータス)参照）。
+フレーム単位で一致します。**エンコーダー**は CELT quality pipeline を実装し、
+libopus でデコード可能な標準 Opus パケットを出力します（[ステータス](#ステータス)参照）。
 
-> 補足: 本プロジェクトは「デコーダー完成・エンコーダー開発中」です。Go から実際の
-> Opus ストリームをデコードする用途に適していますが、エンコード側は libopus の
-> ビット精度ドロップイン代替には**まだなっていません**。
+> 補足: エンコーダーは CELT-only で、libopus のエンコーダーとはビット精度一致
+> しません。SILK-only / ハイブリッドのエンコード経路はまだありません。
 
 ## ステータス
 
 | 領域 | 状態 |
 |------|------|
 | **デコーダー** | ✅ 公式 RFC 8251 ベクター 12/12 合格（RMSE < 0.001）。libopus 1.6.1 と一致。SILK / CELT / ハイブリッド（SILK+CELT）を再構成済み（ハイブリッド SILK→CELT redundancy 含む）。 |
-| **エンコーダー** | 🚧 簡易 CELT-only・フルバンド・20ms パケット。動作はするが libopus とビット精度一致**ではない**。`application`/VBR は保持するがフルなモード選択は未連動。 |
+| **エンコーダー** | ✅ CELT quality pipeline（Phase 1+2）。libopus 1.6.1 がデコードできる標準 Opus パケットを出力。64 kbps の目安 SNR: 440 Hz 約 48 dB、1 kHz 約 47 dB、ステレオ約 43 dB。libopus とはビット精度一致**ではない**。SILK/hybrid エンコード経路は未実装。 |
 | **CGO** | ランタイム依存なし。libopus ラッパーは参照テスト専用で `opusref` ビルドタグ下にのみ存在。 |
 | **CI** | `test` / `race` / `bench` / `fuzz` を **amd64・arm64** で実行。 |
 
@@ -87,10 +86,6 @@ _ = samples
 
 ### エンコード
 
-> エンコーダーは現状 CELT-only・フルバンド・20ms パケットを出力し、libopus とは
-> ビット精度一致ではありません。相互運用が必須の用途ではなく、ラウンドトリップや
-> 実験用途で利用してください。
-
 ```go
 enc, err := opus.NewEncoder(48000, 2, opus.ApplicationAudio)
 if err != nil {
@@ -98,6 +93,7 @@ if err != nil {
 }
 enc.SetBitrate(128000)
 enc.SetComplexity(10)
+enc.SetVBR(true) // 可変ビットレート（既定は CBR）
 
 // 20ms フレーム = 48kHz で 1ch あたり 960 サンプル（インターリーブステレオ）
 pcm := make([]int16, 960*2)
@@ -111,6 +107,16 @@ _ = packet
 
 // float64 入力も可能:
 //   packet, err := enc.EncodeFloat(make([]float64, 960*2), 960)
+
+// 帯域は信号内容から自動検出される。必要なら明示指定できる:
+//   enc.SetBandwidth(opus.BandwidthWideband) // wideband に固定
+//   enc.SetBandwidth(opus.BandwidthAuto)     // 自動選択へ戻す
+
+// Application とは独立した信号種別ヒント:
+//   enc.SetSignalType(opus.SignalVoice)
+
+// 20ms の整数倍、最大 120ms まで multi-frame packet として出力可能:
+//   packet, err := enc.Encode(pcm1920, 1920) // 40ms
 ```
 
 ## サポート設定
@@ -120,11 +126,16 @@ _ = packet
 - **チャンネル**: モノラル・ステレオ。
 - **デコーダーのフレームサイズ**: 全 Opus 長（2.5/5/10/20/40/60 ms）を TOC バイトに
   従いパケット単位で選択。
-- **エンコーダーのフレームサイズ**: 20ms（48kHz で 1ch あたり 960 サンプル）。
-- **アプリケーションタイプ**（エンコーダーは保持。フルなモード選択は開発中）:
-  - `opus.ApplicationVOIP`
-  - `opus.ApplicationAudio`
+- **エンコーダーのフレームサイズ**: 20ms の整数倍（20ms〜120ms）。それ以外は
+  エラーになります。
+- **エンコーダー帯域**: 信号内容に基づく自動検出、または
+  `SetBandwidth` / `SetMaxBandwidth` による明示指定。NB/WB/SWB/FB に対応。
+- **アプリケーションタイプ**（帯域しきい値や transient 判定を調整）:
+  - `opus.ApplicationVOIP` — voice 向け、狭めの帯域しきい値
+  - `opus.ApplicationAudio` — music/general 向け
   - `opus.ApplicationRestrictedLowDelay`
+- **信号種別ヒント**: `opus.SignalAuto` / `opus.SignalVoice` /
+  `opus.SignalMusic`。ビットストリーム形式は変えず、エンコーダーの判断だけを調整します。
 
 ## 公開 API
 
@@ -136,10 +147,24 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error)
 func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error)
 
+func (e *Encoder) Bitrate() int
+func (e *Encoder) Complexity() int
+func (e *Encoder) VBR() bool
+func (e *Encoder) Application() Application
+
 func (e *Encoder) SetBitrate(bitrate int) error       // 6000–510000 bps
 func (e *Encoder) SetComplexity(complexity int) error // 0–10
 func (e *Encoder) SetVBR(vbr bool)
+func (e *Encoder) SetVBRConstraint(constrained bool)  // true = CVBR
 func (e *Encoder) SetApplication(application Application)
+func (e *Encoder) SetSignalType(signal SignalType)
+func (e *Encoder) SignalType() SignalType
+func (e *Encoder) SetBandwidth(bw int) error          // Auto/NB/WB/SWB/FB
+func (e *Encoder) SetMaxBandwidth(bw int) error
+func (e *Encoder) Bandwidth() int
+func (e *Encoder) SetDTX(dtx bool)
+func (e *Encoder) DTX() bool
+func (e *Encoder) SetPacketPadding(n int)
 func (e *Encoder) Reset() error
 ```
 
@@ -242,12 +267,13 @@ GitHub Actions ワークフロー 4 本。いずれも **amd64（`ubuntu-latest`
 
 ## 制限事項
 
-- エンコーダーは簡易 CELT-only でビット精度一致ではなく、SILK-only / ハイブリッド
-  エンコード経路はありません。
+- エンコーダーは CELT-only です。SILK-only / ハイブリッドのエンコード経路はありません。
+- エンコーダーは libopus とビット精度一致ではありませんが、準拠デコーダー
+  （libopus を含む）がデコードできる標準 Opus パケットを出力します。
 - `DecodeFEC` は現状 PLC フォールバックで、パケット FEC 抽出ではありません。
 - マルチストリーム・サラウンド・Ogg Opus コンテナ API はありません。
-- `application`・VBR や一部 CTL 相当の設定は保持されますが、フルな libopus 互換動作
-  には未連動です。
+- VBR/CVBR と application/signal hint は CELT エンコーダーの判断を調整しますが、
+  libopus と同等の完全なモード選択・レート制御ではありません。
 
 ## コントリビューション
 

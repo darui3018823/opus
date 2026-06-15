@@ -1,5 +1,10 @@
 # Phase 1: Detailed Architectural Analysis and Design
 
+> Historical design note: this document captures the initial architecture and
+> implementation plan. It is useful background, but it is not the current status
+> source. For the v1.1.1 code-derived implementation snapshot, see
+> [`CURRENT_IMPLEMENTATION.md`](CURRENT_IMPLEMENTATION.md).
+
 ## Executive Summary
 
 This document provides a comprehensive architectural analysis for implementing a Pure Go Opus codec, based on in-depth study of libopus internals, existing Go implementations, and careful consideration of implementation strategies.

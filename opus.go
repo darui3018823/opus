@@ -301,9 +301,7 @@ func (e *Encoder) shouldEncodeSILKOnly() bool {
 	// SILK encode support is intentionally narrow: only speech intent may enter
 	// it. ApplicationVOIP derives voice intent by default, SignalVoice can opt
 	// other applications in, and SignalMusic explicitly keeps the packet on CELT.
-	signal := e.celtEncoder.SignalTypeHint()
-	voiceIntent := signal == SignalVoice || (signal == SignalAuto && e.application == ApplicationVOIP)
-	if !voiceIntent {
+	if !e.hasVoiceIntent() {
 		return false
 	}
 	if e.bitrate > 40000 {
@@ -320,7 +318,7 @@ func (e *Encoder) shouldEncodeSILKOnly() bool {
 			return false
 		}
 	}
-	if bandwidthRank(e.maxBandwidth) < bandwidthRank(nativePublic) {
+	if e.forcedBandwidth == BandwidthAuto && bandwidthRank(e.maxBandwidth) < bandwidthRank(nativePublic) {
 		return false
 	}
 	return true
@@ -336,13 +334,16 @@ func (e *Encoder) shouldEncodeHybrid(nFrames int) bool {
 	if e.application == ApplicationRestrictedLowDelay {
 		return false
 	}
-	signal := e.celtEncoder.SignalTypeHint()
-	voiceIntent := signal == SignalVoice || (signal == SignalAuto && e.application == ApplicationVOIP)
-	if !voiceIntent || e.bitrate <= 40000 {
+	if !e.hasVoiceIntent() || e.bitrate <= 40000 {
 		return false
 	}
 	bw := e.selectHybridBandwidth()
 	return bw == framing.BandwidthSuperwideband || bw == framing.BandwidthFullband
+}
+
+func (e *Encoder) hasVoiceIntent() bool {
+	signal := e.celtEncoder.SignalTypeHint()
+	return signal == SignalVoice || (signal == SignalAuto && e.application == ApplicationVOIP)
 }
 
 func (e *Encoder) selectHybridBandwidth() int {

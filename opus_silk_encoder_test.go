@@ -396,6 +396,21 @@ func TestEncoderHybridSelectionBoundariesStrict(t *testing.T) {
 			wantBW:     BandwidthSuperWideband,
 		},
 		{
+			name:     "48k-voip-forced-swb-ignores-max-wideband",
+			rate:     48000,
+			channels: 1,
+			app:      ApplicationVOIP,
+			configure: func(e *Encoder) error {
+				if err := e.SetMaxBandwidth(BandwidthWideband); err != nil {
+					return err
+				}
+				return e.SetBandwidth(BandwidthSuperWideband)
+			},
+			wantMode:   "hybrid",
+			wantConfig: 13,
+			wantBW:     BandwidthSuperWideband,
+		},
+		{
 			name:     "24k-voip-forced-fullband-clamps-swb-hybrid",
 			rate:     24000,
 			channels: 1,
@@ -641,6 +656,22 @@ func TestEncoderSILKOnlyModeSelectionMatrix(t *testing.T) {
 			app:      ApplicationVOIP,
 			bitrate:  24000,
 			configure: func(enc *Encoder) error {
+				return enc.SetBandwidth(BandwidthWideband)
+			},
+			wantSILK:   true,
+			wantBW:     BandwidthWideband,
+			wantConfig: 9,
+		},
+		{
+			name:     "forced_native_bandwidth_ignores_lower_max",
+			rate:     48000,
+			channels: 1,
+			app:      ApplicationVOIP,
+			bitrate:  24000,
+			configure: func(enc *Encoder) error {
+				if err := enc.SetMaxBandwidth(BandwidthNarrowband); err != nil {
+					return err
+				}
 				return enc.SetBandwidth(BandwidthWideband)
 			},
 			wantSILK:   true,

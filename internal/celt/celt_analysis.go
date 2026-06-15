@@ -191,6 +191,53 @@ func hysteresisDecision(val int, thresholds, hysteresis []int, n, prev int) int 
 	return i
 }
 
+// medianOf3 returns the median of x[0..2] (libopus median_of_3).
+func medianOf3(x []float64) float64 {
+	var t0, t1 float64
+	if x[0] > x[1] {
+		t0, t1 = x[1], x[0]
+	} else {
+		t0, t1 = x[0], x[1]
+	}
+	t2 := x[2]
+	if t1 < t2 {
+		return t1
+	} else if t0 < t2 {
+		return t2
+	}
+	return t0
+}
+
+// medianOf5 returns the median of x[0..4] (libopus median_of_5).
+func medianOf5(x []float64) float64 {
+	t2 := x[2]
+	var t0, t1, t3, t4 float64
+	if x[0] > x[1] {
+		t0, t1 = x[1], x[0]
+	} else {
+		t0, t1 = x[0], x[1]
+	}
+	if x[3] > x[4] {
+		t3, t4 = x[4], x[3]
+	} else {
+		t3, t4 = x[3], x[4]
+	}
+	if t0 > t3 {
+		t0, t3 = t3, t0
+		t1, t4 = t4, t1
+	}
+	if t2 > t1 {
+		if t1 < t3 {
+			return math.Min(t2, t3)
+		}
+		return math.Min(t4, t1)
+	}
+	if t2 < t3 {
+		return math.Min(t1, t3)
+	}
+	return math.Min(t2, t4)
+}
+
 // innerProdF returns the dot product of the first n elements of a and b.
 func innerProdF(a, b []float64, n int) float64 {
 	var s float64
@@ -275,8 +322,10 @@ func spreadingDecision(X []float64, frameLen, end, C, M int, average *int, lastD
 // (on non-transient frames the caller passes logE2==logE). The per-band masking
 // follower is built from logE2, while the final masking depth (how far each band
 // sticks out above the follower) is measured against logE — exactly as libopus
-// uses bandLogE3(=bandLogE2) for the follower and bandLogE for the depth. The
-// internal 2/3-budget break is dropped: dynallocEncode clamps the coded boost
+// uses bandLogE3(=bandLogE2) for the follower and bandLogE for the depth. A
+// median filter over logE2 raises the follower toward the local median (less a
+// 1 dB offset) so a single loud bin in an otherwise quiet band does not trigger
+// dynalloc. The internal 2/3-budget break is dropped: dynallocEncode clamps the coded boost
 // against the real range-coder budget and the per-band cap, keeping the result
 // symmetric with the decoder.
 func dynallocAnalysis(logE, logE2 []float64, numBands, end, C, lm int, isTransient, vbr, constrainedVbr bool) []int {
@@ -300,6 +349,23 @@ func dynallocAnalysis(logE, logE2 []float64, numBands, end, C, lm int, isTransie
 		}
 		for i := last - 1; i >= 0; i-- {
 			f[i] = math.Min(f[i], math.Min(f[i+1]+2.0, logE2[c*numBands+i]))
+		}
+		// Combine with a median filter to avoid dynalloc triggering when a
+		// single bin within a band is loud but the band overall is not. The
+		// follower is raised toward the local median of logE2 (less a 1 dB
+		// offset that keeps the filter conservative). libopus dynalloc_analysis.
+		const medianOffset = 1.0
+		le := logE2[c*numBands : c*numBands+numBands]
+		if end >= 3 {
+			for i := 2; i < end-2; i++ {
+				f[i] = math.Max(f[i], medianOf5(le[i-2:i+3])-medianOffset)
+			}
+			tmp := medianOf3(le[0:3]) - medianOffset
+			f[0] = math.Max(f[0], tmp)
+			f[1] = math.Max(f[1], tmp)
+			tmp = medianOf3(le[end-3:end]) - medianOffset
+			f[end-2] = math.Max(f[end-2], tmp)
+			f[end-1] = math.Max(f[end-1], tmp)
 		}
 		for i := 0; i < end; i++ {
 			f[i] = math.Max(f[i], noiseFloor[i])

@@ -278,9 +278,11 @@ func TestEncoderStructuredPulseEncoding(t *testing.T) {
 
 	frameSize := 8000 / 50
 	signal := make([]float64, frameSize)
+	seed := uint32(1)
 	for i := range signal {
-		ti := float64(i) / 8000.0
-		signal[i] = 2.0*math.Sin(2*math.Pi*200*ti) + 0.7*math.Sin(2*math.Pi*600*ti)
+		seed = 1664525*seed + 1013904223
+		v := float64(int32(seed)) / float64(1<<31)
+		signal[i] = 1.5 * v
 	}
 
 	var packet []byte
@@ -356,6 +358,74 @@ func TestEncoderStructuredPulseEncoding(t *testing.T) {
 	}
 	if nonZeroExc == 0 {
 		t.Fatal("decoded excitation is all zero")
+	}
+}
+
+func TestEncoderVoicedPitchLTPEncoding(t *testing.T) {
+	enc, err := NewEncoder(8000, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder() error = %v", err)
+	}
+	dec, err := NewDecoder(8000, 1)
+	if err != nil {
+		t.Fatalf("NewDecoder() error = %v", err)
+	}
+
+	frameSize := 8000 / 50
+	signal := make([]float64, frameSize)
+	for i := range signal {
+		ti := float64(i) / 8000.0
+		signal[i] = 2.0*math.Sin(2*math.Pi*200*ti) + 0.4*math.Sin(2*math.Pi*400*ti)
+	}
+
+	var packet []byte
+	for attempt := 0; attempt < VADHistorySize+3; attempt++ {
+		packet, err = enc.Encode(signal)
+		if err != nil {
+			t.Fatalf("Encode() error = %v", err)
+		}
+	}
+
+	tr := &decodeTrace{}
+	dec.trace = tr
+	if _, err := dec.Decode(packet); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if len(tr.Frames) != 1 {
+		t.Fatalf("traced frames = %d, want 1", len(tr.Frames))
+	}
+	fr := tr.Frames[0]
+	if fr.SignalType != SignalTypeVoiced {
+		t.Fatalf("signalType=%d, want voiced speech frame", fr.SignalType)
+	}
+	if len(fr.PitchLags) != 4 {
+		t.Fatalf("pitch lags len=%d, want 4", len(fr.PitchLags))
+	}
+	for sf, lag := range fr.PitchLags {
+		if lag < 38 || lag > 42 {
+			t.Fatalf("pitch lag[%d]=%d, want near 40 samples for 200 Hz", sf, lag)
+		}
+	}
+	if len(fr.LTPCoefQ14) != 20 {
+		t.Fatalf("LTP coeff len=%d, want 20", len(fr.LTPCoefQ14))
+	}
+	nonZeroLTP := 0
+	for _, c := range fr.LTPCoefQ14 {
+		if c != 0 {
+			nonZeroLTP++
+		}
+	}
+	if nonZeroLTP == 0 {
+		t.Fatal("voiced frame decoded all-zero LTP coefficients")
+	}
+	nonZeroPulses := 0
+	for _, p := range fr.Pulses {
+		if p != 0 {
+			nonZeroPulses++
+		}
+	}
+	if nonZeroPulses == 0 {
+		t.Fatal("voiced frame decoded all-zero residual pulses")
 	}
 }
 

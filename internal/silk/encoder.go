@@ -9,21 +9,23 @@ import (
 
 // Encoder represents a SILK encoder instance
 type Encoder struct {
-	sampleRate   int       // Sample rate (8000, 12000, 16000, 24000)
-	frameSize    int       // Frame size in samples
-	frameMs      int       // Frame duration in milliseconds (10 or 20)
-	nSubframes   int       // Number of SILK subframes in one frame
-	channels     int       // Number of channels (1 or 2)
-	lpcOrder     int       // LPC order based on bandwidth
-	complexity   int       // Complexity (0-10)
-	bitrate      int       // Target bitrate in bps
-	vad          *VAD      // Voice activity detector
-	prevEnergy   float64   // Previous frame energy for smoothing
-	prevLPC      []float64 // Previous LPC coefficients
-	prevNLSF     []float64 // Previous NLSF
-	prevPitchLag int       // Previous pitch lag
-	prevGains    []float64 // Previous subframe gains
-	prevGainIdx  int       // Previous absolute gain index, matching decoder state
+	sampleRate     int       // Sample rate (8000, 12000, 16000, 24000)
+	frameSize      int       // Frame size in samples
+	frameMs        int       // Frame duration in milliseconds (10 or 20)
+	nSubframes     int       // Number of SILK subframes in one frame
+	channels       int       // Number of channels (1 or 2)
+	lpcOrder       int       // LPC order based on bandwidth
+	complexity     int       // Complexity (0-10)
+	bitrate        int       // Target bitrate in bps
+	vad            *VAD      // Voice activity detector
+	prevEnergy     float64   // Previous frame energy for smoothing
+	prevLPC        []float64 // Previous LPC coefficients
+	prevNLSF       []float64 // Previous NLSF
+	prevPitchLag   int       // Previous pitch lag
+	prevLagIndex   int       // Previous entropy-coded pitch lag index
+	prevSignalType int       // Previous SILK signal type
+	prevGains      []float64 // Previous subframe gains
+	prevGainIdx    int       // Previous absolute gain index, matching decoder state
 }
 
 // NewEncoder creates a new 20 ms SILK encoder.
@@ -60,21 +62,23 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 	}
 
 	return &Encoder{
-		sampleRate:   sampleRate,
-		frameSize:    frameSize,
-		frameMs:      frameMs,
-		nSubframes:   nSubframes,
-		channels:     channels,
-		lpcOrder:     lpcOrder,
-		complexity:   5,
-		bitrate:      sampleRate * channels * 16 / 8,
-		vad:          NewVAD(),
-		prevEnergy:   1.0,
-		prevLPC:      make([]float64, lpcOrder),
-		prevNLSF:     prevNLSF,
-		prevPitchLag: 100,
-		prevGains:    []float64{1.0, 1.0, 1.0, 1.0},
-		prevGainIdx:  10,
+		sampleRate:     sampleRate,
+		frameSize:      frameSize,
+		frameMs:        frameMs,
+		nSubframes:     nSubframes,
+		channels:       channels,
+		lpcOrder:       lpcOrder,
+		complexity:     5,
+		bitrate:        sampleRate * channels * 16 / 8,
+		vad:            NewVAD(),
+		prevEnergy:     1.0,
+		prevLPC:        make([]float64, lpcOrder),
+		prevNLSF:       prevNLSF,
+		prevPitchLag:   100,
+		prevLagIndex:   0,
+		prevSignalType: SignalTypeUnvoiced,
+		prevGains:      []float64{1.0, 1.0, 1.0, 1.0},
+		prevGainIdx:    10,
 	}, nil
 }
 
@@ -148,13 +152,19 @@ func (e *Encoder) EncodeMulti(pcm []float64, nFrames int) ([]byte, error) {
 	return enc.Bytes(), nil
 }
 
-// encodeRangeFrame writes one structurally valid SILK frame. It still uses
-// fixed NLSF residuals, but the excitation is now shell/sign coded from the
-// input signal so the pulse stream exercises the decoder's SILK pulse grammar.
+// encodeRangeFrame writes one structurally valid SILK frame. Slice 3 adds the
+// first voiced path: simple pitch/LTP decisions are encoded before the seed,
+// and pulse coding is driven from a short-term residual instead of raw samples.
 func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadActive, conditionalGain bool) {
 	signalType := SignalTypeInactive
+	pitchLag := e.prevPitchLag
+	pitchGain := 0.0
 	if vadActive {
 		signalType = SignalTypeUnvoiced
+		pitchLag, pitchGain = e.analyzePitch(signal)
+		if pitchGain >= 0.55 {
+			signalType = SignalTypeVoiced
+		}
 	}
 	quantOffset := 0
 
@@ -171,11 +181,217 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		enc.EncodeIcdf(4, silkNLSFInterpFactorICDF[:], 8) // No interpolation.
 	}
 
+	if signalType == SignalTypeVoiced {
+		e.encodePitchAndLTP(enc, pitchLag, pitchGain, conditionalGain)
+	}
+
 	enc.EncodeIcdf(0, silkUniform4ICDF[:], 8) // Seed.
-	e.encodePulses(enc, signal, signalType, quantOffset)
+	excitation := e.analysisExcitation(signal, cb, cb1Idx, signalType, pitchLag, pitchGain)
+	e.encodePulses(enc, excitation, signalType, quantOffset)
 
 	e.prevGainIdx = gainIdx
 	e.prevEnergy = computeEnergy(signal)
+	e.prevSignalType = signalType
+}
+
+func (e *Encoder) analyzePitch(signal []float64) (int, float64) {
+	fsKHz := e.sampleRate / 1000
+	minLag := PitchEstMinLagMs * fsKHz
+	maxLag := PitchEstMaxLagMs * fsKHz
+	if len(signal) <= minLag {
+		return e.prevPitchLag, 0
+	}
+	if maxLag >= len(signal) {
+		maxLag = len(signal) - 1
+	}
+
+	energy := 0.0
+	for _, v := range signal {
+		energy += v * v
+	}
+	if energy <= 1e-12 {
+		return e.prevPitchLag, 0
+	}
+
+	bestLag := minLag
+	bestCorr := 0.0
+	for lag := minLag; lag <= maxLag; lag++ {
+		corr, lagEnergy := 0.0, 0.0
+		for i := lag; i < len(signal); i++ {
+			corr += signal[i] * signal[i-lag]
+			lagEnergy += signal[i-lag] * signal[i-lag]
+		}
+		if lagEnergy <= 1e-12 {
+			continue
+		}
+		norm := corr / math.Sqrt(energy*lagEnergy)
+		if norm > bestCorr {
+			bestCorr = norm
+			bestLag = lag
+		}
+	}
+	if bestCorr < 0 {
+		bestCorr = 0
+	}
+	if bestCorr > 1 {
+		bestCorr = 1
+	}
+	return bestLag, bestCorr
+}
+
+func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, pitchLag int, pitchGain float64, conditionalGain bool) {
+	fsKHz := e.sampleRate / 1000
+	minLag := PitchEstMinLagMs * fsKHz
+	maxLag := PitchEstMaxLagMs * fsKHz
+	if pitchLag < minLag {
+		pitchLag = minLag
+	}
+	if pitchLag > maxLag {
+		pitchLag = maxLag
+	}
+
+	lagOffset := pitchLag - minLag
+	step := fsKHz >> 1
+	if step < 1 {
+		step = 1
+	}
+	lagIndex := lagOffset / step
+	lagLowBits := lagOffset % step
+	if lagIndex < 0 {
+		lagIndex = 0
+	}
+	if lagIndex >= len(silkPitchLagICDF) {
+		lagIndex = len(silkPitchLagICDF) - 1
+		lagLowBits = step - 1
+	}
+
+	if conditionalGain && e.prevSignalType == SignalTypeVoiced {
+		enc.EncodeIcdf(0, silkPitchDeltaICDF[:], 8) // Force absolute lag coding.
+	}
+	enc.EncodeIcdf(lagIndex, silkPitchLagICDF[:], 8)
+	encodePitchLagLowBits(enc, fsKHz, lagLowBits)
+	encodeFlatPitchContour(enc, fsKHz, e.nSubframes)
+
+	ltpPerIdx, ltpGainIdx := selectLTPGain(pitchGain)
+	enc.EncodeIcdf(ltpPerIdx, silkLTPPerIndexICDF[:], 8)
+	for sf := 0; sf < e.nSubframes; sf++ {
+		switch ltpPerIdx {
+		case 0:
+			enc.EncodeIcdf(ltpGainIdx, silkLTPGainICDF0[:], 8)
+		case 1:
+			enc.EncodeIcdf(ltpGainIdx, silkLTPGainICDF1[:], 8)
+		default:
+			enc.EncodeIcdf(ltpGainIdx, silkLTPGainICDF2[:], 8)
+		}
+	}
+	if !conditionalGain {
+		enc.EncodeIcdf(0, silkLTPScaleICDF[:], 8)
+	}
+
+	e.prevPitchLag = pitchLag
+	e.prevLagIndex = lagIndex
+}
+
+func encodePitchLagLowBits(enc *entcode.Encoder, fsKHz, lagLowBits int) {
+	switch fsKHz {
+	case 8:
+		enc.EncodeIcdf(clampInt(lagLowBits, 0, 3), silkUniform4ICDF[:], 8)
+	case 12:
+		enc.EncodeIcdf(clampInt(lagLowBits, 0, 5), silkUniform6ICDF[:], 8)
+	default:
+		enc.EncodeIcdf(clampInt(lagLowBits, 0, 7), silkUniform8ICDF[:], 8)
+	}
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func encodeFlatPitchContour(enc *entcode.Encoder, fsKHz, nSubframes int) {
+	switch {
+	case fsKHz == 8 && nSubframes == 4:
+		enc.EncodeIcdf(0, silkPitchContourNBICDF[:], 8)
+	case fsKHz == 8:
+		enc.EncodeIcdf(0, silkPitchContour10msNBICDF[:], 8)
+	case nSubframes == 4:
+		enc.EncodeIcdf(0, silkPitchContourICDF[:], 8)
+	default:
+		enc.EncodeIcdf(0, silkPitchContour10msICDF[:], 8)
+	}
+}
+
+func selectLTPGain(pitchGain float64) (int, int) {
+	target := pitchGain * 128.0
+	bestPer, bestIdx := 0, 0
+	bestErr := math.Inf(1)
+	consider := func(perIdx, gainIdx int, taps [5]int8) {
+		err := 0.0
+		for k, tap := range taps {
+			want := 0.0
+			if k == 2 {
+				want = target
+			}
+			diff := float64(tap) - want
+			err += diff * diff
+		}
+		if err < bestErr {
+			bestErr = err
+			bestPer = perIdx
+			bestIdx = gainIdx
+		}
+	}
+	for i, taps := range silkLTPGainVQ0 {
+		consider(0, i, taps)
+	}
+	for i, taps := range silkLTPGainVQ1 {
+		consider(1, i, taps)
+	}
+	for i, taps := range silkLTPGainVQ2 {
+		consider(2, i, taps)
+	}
+	return bestPer, bestIdx
+}
+
+func (e *Encoder) analysisExcitation(signal []float64, cb *nlsfCBParams, cb1Idx, signalType, pitchLag int, pitchGain float64) []float64 {
+	if signalType == SignalTypeInactive {
+		return make([]float64, len(signal))
+	}
+
+	nlsfQ15 := make([]int16, e.lpcOrder)
+	for i := 0; i < e.lpcOrder; i++ {
+		nlsfQ15[i] = int16(int32(cb.cb1Q8[cb1Idx*e.lpcOrder+i]) << 7)
+	}
+	silkNLSFStabilize(nlsfQ15, cb.deltaMinQ15, e.lpcOrder)
+	lpcQ12 := nlsfToLPCLibopus(nlsfQ15, e.lpcOrder)
+
+	residual := make([]float64, len(signal))
+	for i := range signal {
+		pred := 0.0
+		for j := 0; j < e.lpcOrder && j < i; j++ {
+			pred += float64(lpcQ12[j]) / 4096.0 * signal[i-j-1]
+		}
+		residual[i] = signal[i] - pred
+	}
+	if signalType != SignalTypeVoiced || pitchGain <= 0 || pitchLag <= 0 {
+		return residual
+	}
+
+	excitation := make([]float64, len(residual))
+	copy(excitation, residual)
+	ltpGain := pitchGain
+	if ltpGain > 0.8 {
+		ltpGain = 0.8
+	}
+	for i := pitchLag; i < len(excitation); i++ {
+		excitation[i] -= ltpGain * residual[i-pitchLag]
+	}
+	return excitation
 }
 
 func (e *Encoder) encodeTypeOffset(enc *entcode.Encoder, vadActive bool, signalType, quantOffset int) {

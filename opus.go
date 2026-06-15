@@ -21,7 +21,7 @@ type SignalType = celt.SignalType
 const (
 	// SignalAuto lets the encoder derive a hint from the Application setting
 	// (VOIP → voice, Audio/RestrictedLowDelay → music). This is the default.
-	SignalAuto  SignalType = celt.SignalUnknown
+	SignalAuto SignalType = celt.SignalUnknown
 	// SignalVoice marks speech-leaning content. The encoder uses narrower
 	// bandwidth tiers (matching ApplicationVOIP) and switches to short blocks
 	// more eagerly on plosive onsets.
@@ -108,8 +108,8 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		channels:          channels,
 		application:       application,
 		celtEncoder:       celtEnc,
-		bitrate:           64000,           // Default bitrate
-		complexity:        5,               // Default complexity
+		bitrate:           64000,            // Default bitrate
+		complexity:        5,                // Default complexity
 		rateMode:          celt.RateModeCBR, // Default CBR (backward compatible)
 		frameSize:         frameSize,
 		maxBandwidth:      BandwidthFullband,
@@ -154,6 +154,9 @@ func signalTypeForApplication(application Application) celt.SignalType {
 // frameSize is the number of samples per channel (at the encoder's sample rate)
 // Returns compressed Opus packet
 func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
+	if _, err := e.validateFrameSize(frameSize); err != nil {
+		return nil, err
+	}
 	expectedSize := frameSize * e.channels
 	if len(pcm) < expectedSize {
 		return nil, fmt.Errorf("insufficient PCM data: got %d, need %d", len(pcm), expectedSize)
@@ -173,6 +176,9 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 // pcm contains interleaved float64 samples in range [-1.0, 1.0]
 // frameSize is the number of samples per channel (at the encoder's sample rate)
 func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
+	if _, err := e.validateFrameSize(frameSize); err != nil {
+		return nil, err
+	}
 	expectedSize := frameSize * e.channels
 	if len(pcm) < expectedSize {
 		return nil, fmt.Errorf("insufficient PCM data: got %d, need %d", len(pcm), expectedSize)
@@ -190,6 +196,11 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 // (RFC 6716 §3.2, count codes 1/2/3). Otherwise a single-frame (code 0) packet
 // is produced.
 func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
+	nFrames, err := e.validateFrameSize(frameSize)
+	if err != nil {
+		return nil, err
+	}
+
 	// Select the coded bandwidth (NB/WB/SWB/FB) and limit the CELT encoder's
 	// coded bands to match, then generate the base TOC byte for that bandwidth.
 	// The per-frame duration is always 20 ms; multi-frame packets express longer
@@ -215,10 +226,6 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 
 	// base = 20 ms in samples at the caller's sample rate.
 	base := e.frameSize
-	nFrames := 1
-	if base > 0 && frameSize > base && frameSize%base == 0 {
-		nFrames = frameSize / base
-	}
 
 	// Single-frame, no padding: compact code-0 packet (TOC + payload).
 	if nFrames == 1 && e.padBytes <= 0 {
@@ -255,6 +262,18 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("failed to pack %d frames: %w", nFrames, err)
 	}
 	return append([]byte{toc | byte(code)}, payload...), nil
+}
+
+func (e *Encoder) validateFrameSize(frameSize int) (int, error) {
+	base := e.frameSize
+	if base <= 0 || frameSize <= 0 || frameSize%base != 0 {
+		return 0, fmt.Errorf("%w: frameSize %d is not a 20 ms multiple at %d Hz", ErrUnsupportedFrameSize, frameSize, e.sampleRate)
+	}
+	nFrames := frameSize / base
+	if nFrames < 1 || nFrames > 6 {
+		return 0, fmt.Errorf("%w: packet duration %d ms exceeds Opus maximum 120 ms", ErrUnsupportedFrameSize, nFrames*20)
+	}
+	return nFrames, nil
 }
 
 // encodeOneCELTFrame resamples one 20 ms PCM chunk (if needed) and encodes it
@@ -463,7 +482,7 @@ func (e *Encoder) selectCeltBandwidth() int {
 	if cap := publicToCeltFramingBW(e.maxBandwidth); cap < bw {
 		bw = cap
 	}
-	if br := bitrateCeltBandwidth(e.bitrate, e.application); br < bw {
+	if br := bitrateCeltBandwidth(e.bitrate, e.application, e.celtEncoder.SignalTypeHint()); br < bw {
 		bw = br
 	}
 	return bw
@@ -496,8 +515,9 @@ func nyquistCeltBandwidth(sampleRate int) int {
 // a higher bitrate is available, because speech energy is concentrated at low
 // frequencies and the extra bits are better spent on the speech range. The audio
 // and restricted-low-delay applications use the (wider) music thresholds.
-func bitrateCeltBandwidth(bitrate, application int) int {
-	if application == ApplicationVOIP {
+func bitrateCeltBandwidth(bitrate, application int, signal SignalType) int {
+	voice := signal == SignalVoice || (signal == SignalAuto && application == ApplicationVOIP)
+	if voice {
 		switch {
 		case bitrate < 20000:
 			return framing.BandwidthNarrowband
@@ -572,6 +592,7 @@ func (e *Encoder) Reset() error {
 	if e.inputResampler != nil {
 		e.inputResampler.Reset()
 	}
+	e.lastDetectedBW = -1
 	e.celtEncoder.SetBitrate(e.bitrate)
 	e.celtEncoder.SetComplexity(e.complexity)
 	return nil
@@ -632,8 +653,9 @@ type Decoder struct {
 	// Resampler for non-48kHz CELT output rates
 	celtResampler *resampler.Resampler // 48kHz -> outRate
 
-	frameSize         int // frame size in samples at sampleRate
-	internalFrameSize int // always 960 (20ms at 48kHz)
+	frameSize          int // frame size in samples at sampleRate
+	internalFrameSize  int // always 960 (20ms at 48kHz)
+	lastPacketDuration int // samples per channel decoded by the last packet
 }
 
 // silkRateIdx maps a SILK rate in kHz to an index 0-2.
@@ -698,9 +720,6 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 		for lm := 0; lm < 4; lm++ {
 			fs := celtLMFrameSize[lm]
 			for ch := 1; ch <= 2; ch++ {
-				if ch > channels && channels != 2 {
-					continue // only create stereo decoder when output is stereo
-				}
 				d, err := celt.NewDecoderEx(fs, 48000, numBands, ch)
 				if err != nil {
 					return nil, fmt.Errorf("failed to create CELT decoder (bw=%d lm=%d ch=%d): %w", bw, lm, ch, err)
@@ -774,10 +793,9 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 		return 0, err
 	}
 
-	// Clamp to buffer size
 	n := len(floatPCM)
 	if n > len(pcm) {
-		n = len(pcm)
+		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), n)
 	}
 
 	// Convert float64 to int16
@@ -1094,6 +1112,44 @@ func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
 	}
 }
 
+func opusFrameCount(payload []byte, countCode int) (int, error) {
+	switch countCode {
+	case 0:
+		return 1, nil
+	case 1, 2:
+		return 2, nil
+	case 3:
+		if len(payload) < 1 {
+			return 0, fmt.Errorf("code 3: empty payload")
+		}
+		frameCount := int(payload[0] & 0x3F)
+		if frameCount == 0 || frameCount > 48 {
+			return 0, fmt.Errorf("code 3: invalid frame count %d", frameCount)
+		}
+		return frameCount, nil
+	default:
+		return 0, fmt.Errorf("unknown count code %d", countCode)
+	}
+}
+
+func packetDurationSamples(config, frameCount, sampleRate int) (int, error) {
+	if frameCount < 1 {
+		return 0, fmt.Errorf("%w: invalid frame count %d", ErrInvalidPacket, frameCount)
+	}
+	var perFrame int
+	if config < 16 {
+		perFrame = sampleRate * silkConfigFrameMs(config) / 1000
+	} else {
+		perFrame = celtFrameSamples(config, sampleRate)
+	}
+	total := perFrame * frameCount
+	maxDuration := sampleRate * 120 / 1000
+	if total > maxDuration {
+		return 0, fmt.Errorf("%w: packet duration %d samples exceeds Opus maximum %d", ErrInvalidPacket, total, maxDuration)
+	}
+	return total, nil
+}
+
 // silkConfigRateKHz returns the SILK internal rate in kHz for a given config.
 // Config 0-3: NB (8kHz), 4-7: MB (12kHz), 8-11: WB (16kHz), 12-15: Hybrid (16kHz SILK layer).
 func silkConfigRateKHz(config int) int {
@@ -1165,6 +1221,14 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 	config, stereo, countCode := framing.ParseTOC(toc)
 
 	payload := data[1:]
+	frameCount, err := opusFrameCount(payload, countCode)
+	if err != nil {
+		return nil, err
+	}
+	duration, err := packetDurationSamples(config, frameCount, d.sampleRate)
+	if err != nil {
+		return nil, err
+	}
 
 	if config < 16 {
 		pktChannels := 1
@@ -1173,10 +1237,18 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 		}
 		if config >= 12 {
 			// Hybrid mode: SILK low band + CELT high band sharing one stream.
-			return d.decodeHybridPacket(payload, countCode, config, pktChannels)
+			out, err := d.decodeHybridPacket(payload, countCode, config, pktChannels)
+			if err == nil {
+				d.lastPacketDuration = duration
+			}
+			return out, err
 		}
 		// SILK-only mode.
-		return d.decodeSILKPacket(payload, countCode, config, pktChannels)
+		out, err := d.decodeSILKPacket(payload, countCode, config, pktChannels)
+		if err == nil {
+			d.lastPacketDuration = duration
+		}
+		return out, err
 	}
 
 	// CELT-only mode: split payload into individual frame payloads and decode each
@@ -1232,6 +1304,7 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 		allPCM = append(allPCM, pcm...)
 	}
 
+	d.lastPacketDuration = duration
 	return allPCM, nil
 }
 
@@ -1345,8 +1418,8 @@ func silkCode3Stream(payload []byte) ([]byte, int, error) {
 	padding := (m & 0x40) != 0
 	payload = payload[1:]
 
-	if frameCount == 0 {
-		frameCount = 1
+	if frameCount == 0 || frameCount > 48 {
+		return nil, 0, fmt.Errorf("code 3: invalid frame count %d", frameCount)
 	}
 
 	if padding {
@@ -1544,7 +1617,7 @@ func (d *Decoder) crossfadeRedundancy(out, red []float64, samplesPerFrame int) {
 		w := wi * wi
 		for c := 0; c < ch; c++ {
 			o := base + i*ch + c
-			r := (f25 + i) * ch + c
+			r := (f25+i)*ch + c
 			out[o] = w*red[r] + (1.0-w)*out[o]
 		}
 	}
@@ -1911,6 +1984,7 @@ func (d *Decoder) Reset() error {
 	d.silkRSInKHz[1] = 0
 	d.silkSMid = 0
 	d.prevSilkInternalCh = 0
+	d.lastPacketDuration = d.frameSize
 	if d.celtResampler != nil {
 		d.celtResampler.Reset()
 	}
@@ -1920,5 +1994,8 @@ func (d *Decoder) Reset() error {
 
 // GetLastPacketDuration returns the duration of the last decoded packet in samples
 func (d *Decoder) GetLastPacketDuration() int {
+	if d.lastPacketDuration > 0 {
+		return d.lastPacketDuration
+	}
 	return d.frameSize
 }

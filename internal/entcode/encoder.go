@@ -322,8 +322,8 @@ func (enc *Encoder) EncodeBit(bit bool, prob uint16) {
 // sequence that the decoder's init + normalize will reconstruct as a
 // value within the final [val, val+rng) interval.
 func (enc *Encoder) Flush() {
-	// If nothing was encoded, nothing to output
-	if enc.rem < 0 && enc.ext == 0 && enc.val == 0 && enc.rng == CodeTop {
+	// If nothing was encoded, nothing to output.
+	if enc.rem < 0 && enc.ext == 0 && enc.val == 0 && enc.rng == CodeTop && enc.nbitsRaw == 0 {
 		return
 	}
 

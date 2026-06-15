@@ -453,6 +453,13 @@ func (d *Decoder) decodeMultiMonoEC(dec *entcode.Decoder, nFrames int) ([]float6
 			d.trace.LBRRFlags = append(d.trace.LBRRFlags, 0)
 		}
 	}
+	if lbrrFlag && nFrames > 1 {
+		if nFrames == 2 {
+			_ = dec.DecodeIcdf(silkLBRRFlags2ICDF[:], 8)
+		} else {
+			_ = dec.DecodeIcdf(silkLBRRFlags3ICDF[:], 8)
+		}
+	}
 
 	// Decode each frame sequentially
 	var allPCM []float64

@@ -264,7 +264,7 @@ func TestCGOEncodeRefHybrid(t *testing.T) {
 			maxSPC := tc.rate * 120 / 1000
 			var oursAll, refAll []float64
 			for p := 0; p < 8; p++ {
-				in := silkRefSpeechFrame(tc.rate, p*frameSize, frameSize, tc.channels)
+				in := silkRefHybridFrame(tc.rate, p*frameSize, frameSize, tc.channels)
 				pkt, err := enc.EncodeFloat(in, frameSize)
 				if err != nil {
 					t.Fatalf("packet %d: EncodeFloat: %v", p, err)
@@ -347,7 +347,7 @@ func TestCGOEncodeRefHybridMultiFrameStrict(t *testing.T) {
 				defer ref.Close()
 
 				frameSize := tc.rate * packetMs / 1000
-				pkt, err := enc.EncodeFloat(silkRefSpeechFrame(tc.rate, 0, frameSize, tc.channels), frameSize)
+				pkt, err := enc.EncodeFloat(silkRefHybridFrame(tc.rate, 0, frameSize, tc.channels), frameSize)
 				if err != nil {
 					t.Fatalf("EncodeFloat: %v", err)
 				}
@@ -396,6 +396,22 @@ func silkRefSpeechFrame(rate, start, n, channels int) []float64 {
 				0.10*math.Sin(2*math.Pi*370*t+0.7) +
 				0.05*math.Sin(2*math.Pi*740*t+1.1)
 			out[i*channels+1] = env * r
+		}
+	}
+	return out
+}
+
+func silkRefHybridFrame(rate, start, n, channels int) []float64 {
+	out := silkRefSpeechFrame(rate, start, n, channels)
+	highFreq := 10000.0
+	if rate >= 48000 {
+		highFreq = 16000.0
+	}
+	for i := 0; i < n; i++ {
+		t := float64(start+i) / float64(rate)
+		out[i*channels] += 0.045 * math.Sin(2*math.Pi*highFreq*t+0.11)
+		if channels == 2 {
+			out[i*channels+1] += 0.04 * math.Sin(2*math.Pi*highFreq*t+0.73)
 		}
 	}
 	return out

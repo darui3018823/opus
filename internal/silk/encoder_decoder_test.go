@@ -341,8 +341,17 @@ func TestEncoderStructuredPulseEncoding(t *testing.T) {
 		if absSum > 0 {
 			nonZeroBlocks++
 		}
-		if got := fr.SumPulses[block] & 0x1F; got != absSum {
-			t.Fatalf("block %d sumPulses=%d, abs pulse sum=%d", block, got, absSum)
+		nLShifts := fr.SumPulses[block] >> 5
+		shellSum := 0
+		for _, pulse := range fr.Pulses[start:end] {
+			absPulse := int(pulse)
+			if absPulse < 0 {
+				absPulse = -absPulse
+			}
+			shellSum += absPulse >> nLShifts
+		}
+		if got := fr.SumPulses[block] & 0x1F; got != shellSum {
+			t.Fatalf("block %d sumPulses=%d, shifted abs pulse sum=%d (nLShifts=%d)", block, got, shellSum, nLShifts)
 		}
 	}
 	if nonZeroBlocks == 0 {
@@ -495,6 +504,60 @@ func TestEncoderAdaptiveNLSFEncoding(t *testing.T) {
 		if gotQ15[i] != analysis.nlsfQ15[i] {
 			t.Fatalf("decoded NLSF_Q15[%d]=%d, want %d", i, gotQ15[i], analysis.nlsfQ15[i])
 		}
+	}
+}
+
+func TestEncoderSimpleNSQResidualQuantization(t *testing.T) {
+	enc, err := NewEncoder(8000, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder() error = %v", err)
+	}
+
+	residual := make([]float64, enc.frameSize)
+	for i := range residual {
+		tm := float64(i) / 8000.0
+		residual[i] = 0.35*math.Sin(2*math.Pi*220*tm) + 0.12*math.Sin(2*math.Pi*880*tm)
+	}
+
+	gainIndices := []int{22, 22, 22, 22}
+	pulses := enc.simpleNSQ(residual, gainIndices, SignalTypeUnvoiced, 0, 0)
+	if len(pulses) != enc.frameSize {
+		t.Fatalf("simpleNSQ pulses len=%d, want %d", len(pulses), enc.frameSize)
+	}
+
+	nonZero, maxAbs := 0, 0
+	seed := int32(0)
+	offsetQ14 := int32(silkQuantizationOffsetsQ10[0][0]) << 4
+	gainQ10 := silkGainDequantQ16(gainIndices[0]) >> 6
+	signalEnergy, quantErrEnergy := 0.0, 0.0
+	for i, pulse := range pulses {
+		if pulse != 0 {
+			nonZero++
+		}
+		absPulse := int(pulse)
+		if absPulse < 0 {
+			absPulse = -absPulse
+		}
+		if absPulse > maxAbs {
+			maxAbs = absPulse
+		}
+
+		seed = 196314165*seed + 907633515
+		reconQ14 := decodedExcitationQ14(int(pulse), offsetQ14, seed < 0)
+		recon := float64(reconQ14) * float64(gainQ10) / float64(int64(1)<<39)
+		diff := residual[i] - recon
+		signalEnergy += residual[i] * residual[i]
+		quantErrEnergy += diff * diff
+		seed += int32(pulse)
+	}
+	if nonZero == 0 {
+		t.Fatal("simpleNSQ produced all-zero pulses for active residual")
+	}
+	if maxAbs <= 4 {
+		t.Fatalf("simpleNSQ max abs pulse=%d, want gain-scaled residual quantization beyond old 4-pulse cap", maxAbs)
+	}
+	if quantErrEnergy >= signalEnergy {
+		t.Fatalf("simpleNSQ quantization error=%g, want below zero-excitation error=%g", quantErrEnergy, signalEnergy)
 	}
 }
 

@@ -379,7 +379,7 @@ The SILK package contains:
 - NLSF codebooks and NLSF-to-LPC conversion
 - gain, pitch, LTP, pulse, shell, and stereo helper tables
 - LPC, pitch, NLSF, gain, and VAD helpers
-- SILK Encoder slice 1/2/3/4 foundation: the internal encoder can create 10 ms or
+- SILK Encoder slice 1/2/3/4/5 foundation: the internal encoder can create 10 ms or
   20 ms mono range streams with the decoder-compatible SILK ordering (all VAD
   flags, LBRR flag, then per-frame type/gain/NLSF/interp/seed/pulse symbols)
   and can pack multiple SILK frames into one shared range stream. Slice 2
@@ -393,10 +393,14 @@ The SILK package contains:
   short-term/LTP residual rather than raw samples. Slice 4 replaced the fixed
   NLSF payload with input-adaptive stage-1 selection and bounded stage-2
   residual indices, chosen by decoder-compatible LPC residual energy and
-  verified by range encode/decode trace symmetry. The analysis remains
+  verified by range encode/decode trace symmetry. Slice 5 adds the first simple
+  NSQ/residual-quantization body: gain coding now returns the decoder-visible
+  subframe gain indices, and LPC/LTP residual samples are quantized into SILK
+  pulses using the same gain scale, quantization offset, seed sign flip, and
+  LSB-capable shell path that the decoder consumes. The analysis remains
   intentionally simple: no LPC-to-NLSF root solve, no stereo coding, no
-  libopus-equivalent residual quantization/noise shaping, and no top-level Opus
-  encoder integration yet.
+  libopus-equivalent delayed-decision NSQ or noise-shaping analysis, and no
+  top-level Opus encoder integration yet.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single

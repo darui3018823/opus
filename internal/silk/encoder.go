@@ -179,7 +179,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	e.encodeTypeOffset(enc, vadActive, signalType, quantOffset)
 
 	gainIdx := e.analysisGainIndex(signal)
-	e.encodeGains(enc, signalType, gainIdx, conditionalGain)
+	gainIndices := e.encodeGains(enc, signalType, gainIdx, conditionalGain)
 
 	cb := getNLSFCB(e.lpcOrder)
 	nlsf := e.analyzeNLSF(signal, cb, signalType)
@@ -193,12 +193,16 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		e.encodePitchAndLTP(enc, pitchLag, pitchGain, conditionalGain)
 	}
 
-	enc.EncodeIcdf(0, silkUniform4ICDF[:], 8) // Seed.
+	seed := int32(0)
+	enc.EncodeIcdf(int(seed), silkUniform4ICDF[:], 8)
 	excitation := e.analysisExcitation(signal, nlsf.lpcQ12, signalType, pitchLag, pitchGain)
-	e.encodePulses(enc, excitation, signalType, quantOffset)
+	pulses := e.simpleNSQ(excitation, gainIndices, signalType, quantOffset, seed)
+	e.encodePulses(enc, pulses, signalType, quantOffset)
 
 	e.prevNLSF = nlsfQ15ToRadians(nlsf.nlsfQ15)
-	e.prevGainIdx = gainIdx
+	if len(gainIndices) > 0 {
+		e.prevGainIdx = gainIndices[len(gainIndices)-1]
+	}
 	e.prevEnergy = computeEnergy(signal)
 	e.prevSignalType = signalType
 }
@@ -435,10 +439,11 @@ func (e *Encoder) analysisGainIndex(signal []float64) int {
 	return idx
 }
 
-func (e *Encoder) encodeGains(enc *entcode.Encoder, signalType, targetIdx int, conditional bool) {
+func (e *Encoder) encodeGains(enc *entcode.Encoder, signalType, targetIdx int, conditional bool) []int {
+	absIndices := make([]int, e.nSubframes)
 	prevIdx := e.prevGainIdx
 	if conditional {
-		e.encodeGainDelta(enc, prevIdx, targetIdx)
+		targetIdx = e.encodeGainDelta(enc, prevIdx, targetIdx)
 	} else {
 		if targetIdx < prevIdx-16 {
 			targetIdx = prevIdx - 16
@@ -453,13 +458,16 @@ func (e *Encoder) encodeGains(enc *entcode.Encoder, signalType, targetIdx int, c
 		enc.EncodeIcdf(gainMSB, silkGainICDF[signalType][:], 8)
 		enc.EncodeIcdf(gainLSB, silkUniform8ICDF[:], 8)
 	}
+	absIndices[0] = targetIdx
 
 	for sf := 1; sf < e.nSubframes; sf++ {
-		e.encodeGainDelta(enc, targetIdx, targetIdx)
+		targetIdx = e.encodeGainDelta(enc, targetIdx, targetIdx)
+		absIndices[sf] = targetIdx
 	}
+	return absIndices
 }
 
-func (e *Encoder) encodeGainDelta(enc *entcode.Encoder, prevIdx, targetIdx int) {
+func (e *Encoder) encodeGainDelta(enc *entcode.Encoder, prevIdx, targetIdx int) int {
 	delta := targetIdx - prevIdx
 	if delta < MinDeltaGainQuant {
 		delta = MinDeltaGainQuant
@@ -468,6 +476,20 @@ func (e *Encoder) encodeGainDelta(enc *entcode.Encoder, prevIdx, targetIdx int) 
 		delta = MaxDeltaGainQuant
 	}
 	enc.EncodeIcdf(delta-MinDeltaGainQuant, silkDeltaGainICDF[:], 8)
+
+	dblStepThresh := 2*MaxDeltaGainQuant - NLevelsQGain + prevIdx
+	if delta > dblStepThresh {
+		prevIdx += 2*delta - dblStepThresh
+	} else {
+		prevIdx += delta
+	}
+	if prevIdx < 0 {
+		prevIdx = 0
+	}
+	if prevIdx >= NLevelsQGain {
+		prevIdx = NLevelsQGain - 1
+	}
+	return prevIdx
 }
 
 func (e *Encoder) defaultNLSFIndex(signalType int, cb *nlsfCBParams) int {
@@ -662,8 +684,7 @@ type pulseBlock struct {
 	nLShifts int
 }
 
-func (e *Encoder) encodePulses(enc *entcode.Encoder, signal []float64, signalType, quantOffset int) {
-	pulses := e.quantizeExcitationPulses(signal, signalType)
+func (e *Encoder) encodePulses(enc *entcode.Encoder, pulses []int16, signalType, quantOffset int) {
 	blocks := makePulseBlocks(pulses, e.frameSize)
 
 	row := signalType >> 1
@@ -687,78 +708,90 @@ func (e *Encoder) encodePulses(enc *entcode.Encoder, signal []float64, signalTyp
 	encodePulseSigns(enc, blocks, signalType, quantOffset)
 }
 
-func (e *Encoder) quantizeExcitationPulses(signal []float64, signalType int) []int16 {
+func (e *Encoder) simpleNSQ(excitation []float64, gainIndices []int, signalType, quantOffset int, seed int32) []int16 {
 	pulses := make([]int16, e.frameSize)
-	if signalType == SignalTypeInactive || len(signal) == 0 {
+	if signalType == SignalTypeInactive || len(excitation) == 0 {
 		return pulses
 	}
 
-	for blockStart := 0; blockStart < e.frameSize; blockStart += shellCodecFrameLength {
-		end := blockStart + shellCodecFrameLength
-		if end > e.frameSize {
-			end = e.frameSize
-		}
+	uvIdx := 0
+	if signalType == SignalTypeVoiced {
+		uvIdx = 1
+	}
+	offsetQ14 := int32(silkQuantizationOffsetsQ10[uvIdx][quantOffset]) << 4
+	subframeLen := e.frameSize / e.nSubframes
+	shape := 0.35
+	if signalType == SignalTypeVoiced {
+		shape = 0.45
+	}
 
-		maxAbs := 0.0
-		for i := blockStart; i < end; i++ {
-			if a := math.Abs(signal[i]); a > maxAbs {
-				maxAbs = a
-			}
+	err := 0.0
+	for i := 0; i < e.frameSize && i < len(excitation); i++ {
+		sf := i / subframeLen
+		if sf >= len(gainIndices) {
+			sf = len(gainIndices) - 1
 		}
-		if maxAbs <= 1e-9 {
+		gainQ10 := silkGainDequantQ16(gainIndices[sf]) >> 6
+		if gainQ10 <= 0 {
 			continue
 		}
 
-		sum := 0
-		for i := blockStart; i < end; i++ {
-			normalized := math.Abs(signal[i]) / maxAbs
-			if normalized < 0.18 {
-				continue
-			}
-			q := int(math.Round(normalized * 3.0))
-			if q < 1 {
-				q = 1
-			}
-			if q > 4 {
-				q = 4
-			}
-			if signal[i] < 0 {
-				q = -q
-			}
-			pulses[i] = int16(q)
-			if q < 0 {
-				sum -= q
-			} else {
-				sum += q
-			}
+		target := excitation[i] + shape*err
+		if target > 2.0 {
+			target = 2.0
+		} else if target < -2.0 {
+			target = -2.0
 		}
 
-		for sum > 16 {
-			best := -1
-			bestAbs := int16(0)
-			for i := blockStart; i < end; i++ {
-				a := pulses[i]
-				if a < 0 {
-					a = -a
-				}
-				if a > bestAbs {
-					bestAbs = a
-					best = i
-				}
-			}
-			if best < 0 || bestAbs == 0 {
-				break
-			}
-			if pulses[best] < 0 {
-				pulses[best]++
-			} else {
-				pulses[best]--
-			}
-			sum--
+		desiredQ14 := int32(math.Round(target * (float64(int64(1)<<39) / float64(gainQ10))))
+		seed = 196314165*seed + 907633515
+		pulse := chooseNSQPulse(desiredQ14, offsetQ14, seed < 0)
+		pulses[i] = pulse
+
+		reconQ14 := decodedExcitationQ14(int(pulse), offsetQ14, seed < 0)
+		recon := float64(reconQ14) * float64(gainQ10) / float64(int64(1)<<39)
+		err = target - recon
+		seed += int32(pulse)
+	}
+	return pulses
+}
+
+func chooseNSQPulse(desiredQ14, offsetQ14 int32, flipSign bool) int16 {
+	rawTarget := desiredQ14
+	if flipSign {
+		rawTarget = -rawTarget
+	}
+	base := int(math.Round(float64(rawTarget-offsetQ14) / 16384.0))
+
+	bestPulse := 0
+	bestErr := int64(1<<63 - 1)
+	for p := base - 3; p <= base+3; p++ {
+		candidate := clampInt(p, -1024, 1024)
+		exc := decodedExcitationQ14(candidate, offsetQ14, flipSign)
+		err := int64(exc) - int64(desiredQ14)
+		if err < 0 {
+			err = -err
+		}
+		if err < bestErr {
+			bestErr = err
+			bestPulse = candidate
 		}
 	}
+	return int16(bestPulse)
+}
 
-	return pulses
+func decodedExcitationQ14(pulse int, offsetQ14 int32, flipSign bool) int32 {
+	exc := int32(pulse) << 14
+	if exc > 0 {
+		exc -= 80 << 4
+	} else if exc < 0 {
+		exc += 80 << 4
+	}
+	exc += offsetQ14
+	if flipSign {
+		exc = -exc
+	}
+	return exc
 }
 
 func makePulseBlocks(pulses []int16, frameSize int) []pulseBlock {

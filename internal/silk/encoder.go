@@ -271,7 +271,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	if vadActive {
 		signalType = SignalTypeUnvoiced
 		pitchLag, pitchGain = e.analyzePitch(signal)
-		if pitchGain >= 0.55 {
+		if pitchGain >= 0.85 {
 			signalType = SignalTypeVoiced
 		}
 	}
@@ -279,8 +279,8 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 
 	e.encodeTypeOffset(enc, vadActive, signalType, quantOffset)
 
-	gainIdx := e.analysisGainIndex(signal)
-	gainIndices := e.encodeGains(enc, signalType, gainIdx, conditionalGain)
+	gainTargets := e.analysisGainIndices(signal)
+	gainIndices := e.encodeGains(enc, signalType, gainTargets, conditionalGain)
 
 	cb := getNLSFCB(e.lpcOrder)
 	nlsf := e.analyzeNLSF(signal, cb, signalType)
@@ -336,15 +336,18 @@ func (e *Encoder) analyzePitch(signal []float64) (int, float64) {
 	bestLag := minLag
 	bestCorr := 0.0
 	for lag := minLag; lag <= maxLag; lag++ {
-		corr, lagEnergy := 0.0, 0.0
+		corr, currentEnergy, lagEnergy := 0.0, 0.0, 0.0
 		for i := lag; i < len(signal); i++ {
-			corr += signal[i] * signal[i-lag]
-			lagEnergy += signal[i-lag] * signal[i-lag]
+			current := signal[i]
+			delayed := signal[i-lag]
+			corr += current * delayed
+			currentEnergy += current * current
+			lagEnergy += delayed * delayed
 		}
-		if lagEnergy <= 1e-12 {
+		if currentEnergy <= 1e-12 || lagEnergy <= 1e-12 {
 			continue
 		}
-		norm := corr / math.Sqrt(energy*lagEnergy)
+		norm := corr / math.Sqrt(currentEnergy*lagEnergy)
 		if norm > bestCorr {
 			bestCorr = norm
 			bestLag = lag
@@ -546,6 +549,39 @@ func (e *Encoder) encodeTypeOffset(enc *entcode.Encoder, vadActive bool, signalT
 
 func (e *Encoder) analysisGainIndex(signal []float64) int {
 	energy := computeEnergy(signal)
+	return analysisGainIndexFromEnergy(energy)
+}
+
+func (e *Encoder) analysisGainIndices(signal []float64) []int {
+	targets := make([]int, e.nSubframes)
+	if len(signal) == 0 {
+		for i := range targets {
+			targets[i] = 10
+		}
+		return targets
+	}
+
+	frameTarget := e.analysisGainIndex(signal)
+	subframeLen := e.frameSize / e.nSubframes
+	for sf := range targets {
+		start := sf * subframeLen
+		end := start + subframeLen
+		if start >= len(signal) {
+			targets[sf] = frameTarget
+			continue
+		}
+		if end > len(signal) {
+			end = len(signal)
+		}
+		targets[sf] = analysisGainIndexFromEnergy(computeEnergy(signal[start:end]))
+		if targets[sf] > frameTarget {
+			targets[sf] = frameTarget
+		}
+	}
+	return targets
+}
+
+func analysisGainIndexFromEnergy(energy float64) int {
 	if energy <= 1e-12 {
 		return 10
 	}
@@ -560,9 +596,10 @@ func (e *Encoder) analysisGainIndex(signal []float64) int {
 	return idx
 }
 
-func (e *Encoder) encodeGains(enc *entcode.Encoder, signalType, targetIdx int, conditional bool) []int {
+func (e *Encoder) encodeGains(enc *entcode.Encoder, signalType int, targetIndices []int, conditional bool) []int {
 	absIndices := make([]int, e.nSubframes)
 	prevIdx := e.prevGainIdx
+	targetIdx := gainTargetAt(targetIndices, 0)
 	if conditional {
 		targetIdx = e.encodeGainDelta(enc, prevIdx, targetIdx)
 	} else {
@@ -582,10 +619,23 @@ func (e *Encoder) encodeGains(enc *entcode.Encoder, signalType, targetIdx int, c
 	absIndices[0] = targetIdx
 
 	for sf := 1; sf < e.nSubframes; sf++ {
-		targetIdx = e.encodeGainDelta(enc, targetIdx, targetIdx)
+		targetIdx = e.encodeGainDelta(enc, targetIdx, gainTargetAt(targetIndices, sf))
 		absIndices[sf] = targetIdx
 	}
 	return absIndices
+}
+
+func gainTargetAt(targetIndices []int, sf int) int {
+	if len(targetIndices) == 0 {
+		return 10
+	}
+	if sf < 0 {
+		sf = 0
+	}
+	if sf >= len(targetIndices) {
+		sf = len(targetIndices) - 1
+	}
+	return clampInt(targetIndices[sf], 0, NLevelsQGain-1)
 }
 
 func (e *Encoder) encodeGainDelta(enc *entcode.Encoder, prevIdx, targetIdx int) int {

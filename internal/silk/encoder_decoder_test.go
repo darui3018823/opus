@@ -617,6 +617,75 @@ func TestEncoderClosedLoopNSQImprovesVoicedSynthesis(t *testing.T) {
 	}
 }
 
+func TestEncoderSubframeGainAnalysisTracksEnvelope(t *testing.T) {
+	const rate = 16000
+	enc, err := NewEncoder(rate, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder() error = %v", err)
+	}
+
+	signal := make([]float64, enc.frameSize)
+	subframeLen := enc.frameSize / enc.nSubframes
+	amps := []float64{0.14, 0.24, 0.42, 0.68}
+	for i := range signal {
+		sf := i / subframeLen
+		tm := float64(i) / rate
+		signal[i] = amps[sf] * (0.72*math.Sin(2*math.Pi*180*tm) +
+			0.22*math.Sin(2*math.Pi*360*tm+0.3) +
+			0.09*math.Sin(2*math.Pi*540*tm+0.7))
+	}
+
+	adaptive := enc.analysisGainIndices(signal)
+	if len(adaptive) != enc.nSubframes {
+		t.Fatalf("analysisGainIndices len=%d, want %d", len(adaptive), enc.nSubframes)
+	}
+	if adaptive[len(adaptive)-1] <= adaptive[0] {
+		t.Fatalf("adaptive gains=%v, want higher gain for louder trailing subframes", adaptive)
+	}
+	for sf := 1; sf < len(adaptive); sf++ {
+		if adaptive[sf] < adaptive[sf-1] {
+			t.Fatalf("adaptive gains=%v, want nondecreasing envelope across subframes", adaptive)
+		}
+	}
+
+	frameTarget := enc.analysisGainIndex(signal)
+	foundFinerSubframe := false
+	for sf, idx := range adaptive {
+		if idx > frameTarget {
+			t.Fatalf("adaptive gain[%d]=%d exceeds frame target %d", sf, idx, frameTarget)
+		}
+		if idx < frameTarget {
+			foundFinerSubframe = true
+		}
+	}
+	if !foundFinerSubframe {
+		t.Fatalf("adaptive gains=%v, want at least one quieter subframe below frame target %d", adaptive, frameTarget)
+	}
+}
+
+func TestEncoderPitchAnalysisUsesOverlapEnergy(t *testing.T) {
+	const rate = 16000
+	enc, err := NewEncoder(rate, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder() error = %v", err)
+	}
+
+	signal := make([]float64, enc.frameSize)
+	for i := range signal {
+		tm := float64(i) / rate
+		signal[i] = 0.24 * (0.85*math.Sin(2*math.Pi*80*tm) +
+			0.10*math.Sin(2*math.Pi*160*tm+0.2))
+	}
+
+	lag, gain := enc.analyzePitch(signal)
+	if lag < 195 || lag > 205 {
+		t.Fatalf("pitch lag=%d, want near 200 samples for 80 Hz", lag)
+	}
+	if gain < 0.85 {
+		t.Fatalf("pitch gain=%g, want strong correlation from overlap-normalized analysis", gain)
+	}
+}
+
 func synthesizeTestFrame(t *testing.T, rate int, pulses []int16, gainIndices []int, lpcQ12 []int16, pitchLags []int, ltpCoeffsQ14 [][5]int16) []float64 {
 	t.Helper()
 	dec, err := NewDecoder(rate, 1)

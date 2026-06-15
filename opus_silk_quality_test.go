@@ -30,6 +30,34 @@ type opusSILKQualityMetrics struct {
 	pitchMaxDelta  float64
 }
 
+type opusSILKStereoQualitySignal struct {
+	name          string
+	gen           func(rate, start, n int) []float64
+	silent        bool
+	minChannelSNR float64
+	minSideRMS    float64
+	minOutCorr    float64
+	maxOutCorr    float64
+}
+
+type opusSILKStereoQualityMetrics struct {
+	avgPacketBytes  float64
+	outLeftRMS      float64
+	outRightRMS     float64
+	outMidRMS       float64
+	outSideRMS      float64
+	outPeak         float64
+	clipCount       int
+	leftSNR         float64
+	rightSNR        float64
+	leftDelay       int
+	rightDelay      int
+	inCorr          float64
+	outCorr         float64
+	inSideMidRatio  float64
+	outSideMidRatio float64
+}
+
 func TestEncoderSILKOnlyQualityBaseline(t *testing.T) {
 	for _, rate := range []int{8000, 12000, 16000} {
 		rate := rate
@@ -86,6 +114,73 @@ func TestEncoderSILKOnlyQualityBaseline(t *testing.T) {
 					t.Logf("%s/%s: packet=%.1fB outRMS=%.5f peak=%.4f clips=%d alignedSNR=%.2fdB rmse=%.5f delay=%d scale=%.4f pitchMean=%.1f pitchMaxDelta=%.1f",
 						rateName(rate), sig.name, m.avgPacketBytes, m.outRMS, m.outPeak, m.clipCount, m.alignedSNR, m.alignedRMSE, m.delay, m.scale, m.pitchMean, m.pitchMaxDelta)
 					assertOpusSILKQuality(t, sig, m)
+				})
+			}
+		})
+	}
+}
+
+func TestEncoderSILKOnlyStereoQualityBaseline(t *testing.T) {
+	for _, rate := range []int{16000, 48000} {
+		rate := rate
+		t.Run(rateName(rate), func(t *testing.T) {
+			frameSize := rate * 20 / 1000
+			for _, sig := range opusSILKStereoQualitySignals() {
+				sig := sig
+				t.Run(sig.name, func(t *testing.T) {
+					enc, err := NewEncoder(rate, 2, ApplicationVOIP)
+					if err != nil {
+						t.Fatalf("NewEncoder: %v", err)
+					}
+					if err := enc.SetBitrate(32000); err != nil {
+						t.Fatalf("SetBitrate: %v", err)
+					}
+					dec, err := NewDecoder(rate, 2)
+					if err != nil {
+						t.Fatalf("NewDecoder: %v", err)
+					}
+
+					var in, out []float64
+					var totalPacketBytes int
+					for frame := 0; frame < opusSILKQualityFrames; frame++ {
+						pcm := sig.gen(rate, frame*frameSize, frameSize)
+						pkt, err := enc.EncodeFloat(pcm, frameSize)
+						if err != nil {
+							t.Fatalf("frame %d: EncodeFloat: %v", frame, err)
+						}
+						if len(pkt) < 2 {
+							t.Fatalf("frame %d: packet too short: %d bytes", frame, len(pkt))
+						}
+						if config := int(pkt[0] >> 3); config != 9 {
+							t.Fatalf("frame %d: TOC config=%d, want SILK-only WB 20ms config 9", frame, config)
+						}
+						if stereo := (pkt[0] & 0x04) != 0; !stereo {
+							t.Fatalf("frame %d: TOC stereo bit not set", frame)
+						}
+						if code := int(pkt[0] & 0x03); code != 0 {
+							t.Fatalf("frame %d: count code=%d, want 0 for 20ms SILK packet", frame, code)
+						}
+						decoded, err := dec.DecodeFloat(pkt)
+						if err != nil {
+							t.Fatalf("frame %d: DecodeFloat: %v", frame, err)
+						}
+						if len(decoded) != frameSize*2 {
+							t.Fatalf("frame %d: decoded samples=%d, want %d", frame, len(decoded), frameSize*2)
+						}
+						if got := dec.GetLastPacketDuration(); got != frameSize {
+							t.Fatalf("frame %d: last packet duration=%d, want %d", frame, got, frameSize)
+						}
+						totalPacketBytes += len(pkt)
+						in = append(in, pcm...)
+						out = append(out, decoded...)
+					}
+
+					m := measureOpusSILKStereoQuality(in, out, frameSize, totalPacketBytes)
+					t.Logf("%s/%s: packet=%.1fB L/R RMS=%.5f/%.5f mid/side RMS=%.5f/%.5f peak=%.4f clips=%d L/R SNR=%.2f/%.2fdB delay=%d/%d corr=%.3f->%.3f sideMid=%.3f->%.3f",
+						rateName(rate), sig.name, m.avgPacketBytes, m.outLeftRMS, m.outRightRMS, m.outMidRMS, m.outSideRMS,
+						m.outPeak, m.clipCount, m.leftSNR, m.rightSNR, m.leftDelay, m.rightDelay, m.inCorr, m.outCorr,
+						m.inSideMidRatio, m.outSideMidRatio)
+					assertOpusSILKStereoQuality(t, sig, m)
 				})
 			}
 		})
@@ -161,15 +256,71 @@ func opusSILKQualitySignals() []opusSILKQualitySignal {
 	}
 }
 
+func opusSILKStereoQualitySignals() []opusSILKStereoQualitySignal {
+	return []opusSILKStereoQualitySignal{
+		{
+			name:   "silence",
+			silent: true,
+			gen: func(rate, start, n int) []float64 {
+				return make([]float64, n*2)
+			},
+		},
+		{
+			name:          "correlated-voiced",
+			minChannelSNR: 4,
+			minOutCorr:    0.45,
+			maxOutCorr:    1.0,
+			gen: func(rate, start, n int) []float64 {
+				out := make([]float64, n*2)
+				for i := 0; i < n; i++ {
+					tm := float64(start+i) / float64(rate)
+					base := opusSILKHarmonicSample(tm, 170, 0.20)
+					wide := 0.035 * math.Sin(2*math.Pi*430*tm+0.6)
+					out[i*2] = base + wide
+					out[i*2+1] = 0.92*base - 0.55*wide
+				}
+				return out
+			},
+		},
+		{
+			name:          "wide-speech-like",
+			minChannelSNR: 0,
+			minSideRMS:    0.012,
+			minOutCorr:    -0.25,
+			maxOutCorr:    0.95,
+			gen: func(rate, start, n int) []float64 {
+				out := make([]float64, n*2)
+				for i := 0; i < n; i++ {
+					tm := float64(start+i) / float64(rate)
+					env := 0.18 + 0.08*math.Sin(2*math.Pi*2.3*tm+0.25)
+					leftF0 := 145 + 18*math.Sin(2*math.Pi*1.4*tm)
+					rightF0 := 188 + 15*math.Sin(2*math.Pi*1.8*tm+0.4)
+					out[i*2] = env * (0.62*math.Sin(2*math.Pi*leftF0*tm) +
+						0.23*math.Sin(2*math.Pi*2*leftF0*tm+0.35) +
+						0.10*math.Sin(2*math.Pi*3*leftF0*tm+0.80))
+					out[i*2+1] = env * (0.58*math.Sin(2*math.Pi*rightF0*tm+0.7) +
+						0.22*math.Sin(2*math.Pi*2*rightF0*tm+1.00) +
+						0.10*math.Sin(2*math.Pi*3*rightF0*tm+1.55))
+				}
+				return out
+			},
+		},
+	}
+}
+
 func opusSILKHarmonicFrame(rate, start, n int, f0, amp float64) []float64 {
 	out := make([]float64, n)
 	for i := range out {
 		tm := float64(start+i) / float64(rate)
-		out[i] = amp * (0.72*math.Sin(2*math.Pi*f0*tm) +
-			0.22*math.Sin(2*math.Pi*2*f0*tm+0.3) +
-			0.09*math.Sin(2*math.Pi*3*f0*tm+0.7))
+		out[i] = opusSILKHarmonicSample(tm, f0, amp)
 	}
 	return out
+}
+
+func opusSILKHarmonicSample(tm, f0, amp float64) float64 {
+	return amp * (0.72*math.Sin(2*math.Pi*f0*tm) +
+		0.22*math.Sin(2*math.Pi*2*f0*tm+0.3) +
+		0.09*math.Sin(2*math.Pi*3*f0*tm+0.7))
 }
 
 func measureOpusSILKQuality(in, out []float64, frameSize, totalPacketBytes int, pitchTracked bool) opusSILKQualityMetrics {
@@ -181,6 +332,29 @@ func measureOpusSILKQuality(in, out []float64, frameSize, totalPacketBytes int, 
 	if pitchTracked {
 		m.pitchMean, m.pitchMaxDelta = opusSILKPitchContinuity(out, frameSize, rateIndependentMinLag(frameSize), rateIndependentMaxLag(frameSize))
 	}
+	return m
+}
+
+func measureOpusSILKStereoQuality(in, out []float64, frameSize, totalPacketBytes int) opusSILKStereoQualityMetrics {
+	inL, inR := opusSILKSplitStereo(in)
+	outL, outR := opusSILKSplitStereo(out)
+	inMid, inSide := opusSILKMidSide(inL, inR)
+	outMid, outSide := opusSILKMidSide(outL, outR)
+
+	m := opusSILKStereoQualityMetrics{
+		avgPacketBytes: float64(totalPacketBytes) / opusSILKQualityFrames,
+		inCorr:         opusSILKCorrelation(inL, inR),
+		outCorr:        opusSILKCorrelation(outL, outR),
+	}
+	m.outLeftRMS, _, _ = opusSILKQualityStats(outL)
+	m.outRightRMS, _, _ = opusSILKQualityStats(outR)
+	m.outMidRMS, _, _ = opusSILKQualityStats(outMid)
+	m.outSideRMS, _, _ = opusSILKQualityStats(outSide)
+	_, m.outPeak, m.clipCount = opusSILKQualityStats(out)
+	m.leftSNR, _, m.leftDelay, _ = opusSILKAlignedSNR(inL, outL, frameSize)
+	m.rightSNR, _, m.rightDelay, _ = opusSILKAlignedSNR(inR, outR, frameSize)
+	m.inSideMidRatio = opusSILKEnergyRatio(inSide, inMid)
+	m.outSideMidRatio = opusSILKEnergyRatio(outSide, outMid)
 	return m
 }
 
@@ -217,6 +391,47 @@ func assertOpusSILKQuality(t *testing.T, sig opusSILKQualitySignal, m opusSILKQu
 	}
 }
 
+func assertOpusSILKStereoQuality(t *testing.T, sig opusSILKStereoQualitySignal, m opusSILKStereoQualityMetrics) {
+	t.Helper()
+	for _, v := range []float64{m.outLeftRMS, m.outRightRMS, m.outMidRMS, m.outSideRMS, m.outPeak} {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			t.Fatalf("%s: non-finite stereo metric: %g", sig.name, v)
+		}
+	}
+	if m.outPeak > 1.25 {
+		t.Fatalf("%s: decoded peak %.4f indicates runaway synthesis", sig.name, m.outPeak)
+	}
+	if sig.silent {
+		if m.outLeftRMS > 0.015 || m.outRightRMS > 0.015 || m.outSideRMS > 0.015 {
+			t.Fatalf("%s: decoded stereo silence too loud: L=%.5f R=%.5f side=%.5f", sig.name, m.outLeftRMS, m.outRightRMS, m.outSideRMS)
+		}
+		return
+	}
+	values := []float64{
+		m.leftSNR, m.rightSNR, m.inCorr, m.outCorr, m.inSideMidRatio, m.outSideMidRatio,
+	}
+	for _, v := range values {
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			t.Fatalf("%s: non-finite stereo metric: %g", sig.name, v)
+		}
+	}
+	if m.outLeftRMS < 0.002 || m.outRightRMS < 0.002 {
+		t.Fatalf("%s: decoded channel collapsed: L=%.6f R=%.6f", sig.name, m.outLeftRMS, m.outRightRMS)
+	}
+	if m.outLeftRMS > 0.9 || m.outRightRMS > 0.9 {
+		t.Fatalf("%s: decoded channel energy exploded: L=%.6f R=%.6f", sig.name, m.outLeftRMS, m.outRightRMS)
+	}
+	if sig.minSideRMS > 0 && m.outSideRMS < sig.minSideRMS {
+		t.Fatalf("%s: decoded side channel collapsed: side RMS %.6f below %.6f", sig.name, m.outSideRMS, sig.minSideRMS)
+	}
+	if m.leftSNR < sig.minChannelSNR || m.rightSNR < sig.minChannelSNR {
+		t.Fatalf("%s: channel SNR below %.2fdB: L=%.2f R=%.2f", sig.name, sig.minChannelSNR, m.leftSNR, m.rightSNR)
+	}
+	if m.outCorr < sig.minOutCorr || m.outCorr > sig.maxOutCorr {
+		t.Fatalf("%s: output L/R correlation %.3f outside [%.3f, %.3f] (input %.3f)", sig.name, m.outCorr, sig.minOutCorr, sig.maxOutCorr, m.inCorr)
+	}
+}
+
 func opusSILKQualityStats(x []float64) (rms, peak float64, clipCount int) {
 	for _, v := range x {
 		rms += v * v
@@ -232,6 +447,62 @@ func opusSILKQualityStats(x []float64) (rms, peak float64, clipCount int) {
 		rms = math.Sqrt(rms / float64(len(x)))
 	}
 	return rms, peak, clipCount
+}
+
+func opusSILKSplitStereo(x []float64) (left, right []float64) {
+	left = make([]float64, len(x)/2)
+	right = make([]float64, len(x)/2)
+	for i := range left {
+		left[i] = x[i*2]
+		right[i] = x[i*2+1]
+	}
+	return left, right
+}
+
+func opusSILKMidSide(left, right []float64) (mid, side []float64) {
+	n := len(left)
+	if len(right) < n {
+		n = len(right)
+	}
+	mid = make([]float64, n)
+	side = make([]float64, n)
+	for i := 0; i < n; i++ {
+		mid[i] = 0.5 * (left[i] + right[i])
+		side[i] = 0.5 * (left[i] - right[i])
+	}
+	return mid, side
+}
+
+func opusSILKCorrelation(a, b []float64) float64 {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	var ab, a2, b2 float64
+	for i := 0; i < n; i++ {
+		ab += a[i] * b[i]
+		a2 += a[i] * a[i]
+		b2 += b[i] * b[i]
+	}
+	if a2 == 0 && b2 == 0 {
+		return 1
+	}
+	if a2 == 0 || b2 == 0 {
+		return 0
+	}
+	return ab / math.Sqrt(a2*b2)
+}
+
+func opusSILKEnergyRatio(num, den []float64) float64 {
+	numRMS, _, _ := opusSILKQualityStats(num)
+	denRMS, _, _ := opusSILKQualityStats(den)
+	if denRMS == 0 {
+		if numRMS == 0 {
+			return 0
+		}
+		return math.Inf(1)
+	}
+	return numRMS / denRMS
 }
 
 func opusSILKAlignedSNR(ref, out []float64, maxDelay int) (snr, rmse float64, delay int, scale float64) {

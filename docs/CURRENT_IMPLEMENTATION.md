@@ -443,10 +443,13 @@ The SILK package contains:
   deterministic quality/regression baselines for
   the internal mono SILK encoder and the public SILK-only path, covering silence,
   unvoiced/noise-like input, steady voiced tones, speech-like harmonics, and
-  onset frames. The tests log packet size, decoded energy, peak, clipping count,
-  aligned SNR/RMSE, and pitch continuity where useful, while guarding against
-  silence regressions, dead output, energy runaway, duration errors, and severe
-  quality drops. Slice 10 hardens the public mode/rate boundary with tests for
+  onset frames. The public SILK-only baseline also covers stereo 16 kHz and
+  48 kHz voice paths with channel-level SNR, L/R RMS, mid/side RMS, and
+  correlation guards. The tests log packet size, decoded energy, peak, clipping
+  count, aligned SNR/RMSE, and pitch continuity where useful, while guarding
+  against silence regressions, dead output, energy runaway, duration errors,
+  side-channel collapse, and severe quality drops. Slice 10 hardens the public
+  mode/rate boundary with tests for
   the 40 kbps SILK limit, application and signal hints, pre-Slice-11/12
   channel/input-rate exclusions, forced/max bandwidth interaction, and
   VBR/DTX/padding interaction.
@@ -512,11 +515,12 @@ Notes:
   voice input and stereo SILK round trips.
 - `TestCGOEncodeRefHybrid` cross-checks the initial public hybrid encoder path
   with libopus for 24 kHz SWB mono and 48 kHz FB mono/stereo voice packets.
-- `TestSILKInternalQualityBaseline` and `TestEncoderSILKOnlyQualityBaseline`
-  provide the Slice 8 SILK quality/regression baseline using deterministic
-  synthetic mono fixtures. They run in normal `go test ./...` and log packet
-  size, RMS/peak/clipping, aligned SNR/RMSE, delay/scale, and steady-pitch
-  continuity.
+- `TestSILKInternalQualityBaseline`, `TestEncoderSILKOnlyQualityBaseline`, and
+  `TestEncoderSILKOnlyStereoQualityBaseline` provide the Slice 8 SILK
+  quality/regression baseline using deterministic synthetic fixtures. They run
+  in normal `go test ./...` and log packet size, RMS/peak/clipping, aligned
+  SNR/RMSE, delay/scale, steady-pitch continuity, and stereo L/R correlation plus
+  mid/side energy where useful.
 - `TestEncoderSILKOnlyModeSelectionMatrix` and
   `TestEncoderSILKOnlyVBRDTXAndPaddingStillSelectSILK` cover the Slice 10 public
   mode/rate selection boundary for supported SILK-only cases and CELT fallbacks.

@@ -196,10 +196,7 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 // (RFC 6716 §3.2, count codes 1/2/3). Otherwise a single-frame (code 0) packet
 // is produced.
 func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
-	nFrames, err := e.validateFrameSize(frameSize)
-	if err != nil {
-		return nil, err
-	}
+	nFrames := frameSize / e.frameSize
 
 	// Select the coded bandwidth (NB/WB/SWB/FB) and limit the CELT encoder's
 	// coded bands to match, then generate the base TOC byte for that bandwidth.

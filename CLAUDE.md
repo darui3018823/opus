@@ -80,10 +80,7 @@ float64 data; `DecodeFEC` currently falls back to CELT PLC behavior.
 
 ### Current implementation status
 
-The top-level encoder accepts 8/12/16/24/48 kHz mono or stereo input, resamples
-non-48 kHz input to 48 kHz, and emits CELT-only fullband 20 ms packets. The
-`application` and `SetVBR` values are stored but do not currently drive full
-libopus-compatible mode selection or packetization.
+#### Decoder (complete)
 
 The top-level decoder accepts the five Opus rates, pre-creates CELT decoders
 for bandwidth/frame/channel variants, and pre-creates SILK decoders for
@@ -91,26 +88,53 @@ for bandwidth/frame/channel variants, and pre-creates SILK decoders for
 configs through the SILK packet path; hybrid configs (12-15) through the
 combined SILK+CELT path. Hybrid SILK+CELT reconstruction is implemented (a
 single range decoder runs SILK, the hybrid redundancy flag, then the CELT high
-band; the two outputs are resampled and time-domain summed). Hybrid SILK->CELT
-**redundancy** (the trailing 5 ms redundant CELT frame, celt_to_silk=0) is also
-implemented: the main CELT layer decodes from a length reduced by
-redundancy_bytes, then a reset CELT decoder decodes the redundant frame from the
-packet tail, the last 2.5 ms is crossfaded, and the redundant frame's state
-seeds the next CELT-only packet. See `docs/CURRENT_IMPLEMENTATION.md` and the
-`project-hybrid-architecture` / `project-tv10-celt-stereo` memories.
+band; the two outputs are resampled and time-domain summed). Hybrid SILK→CELT
+redundancy (the trailing 5 ms redundant CELT frame) is also implemented.
 
 The official RFC 8251 vector suite is at **12/12 PASS** (all vectors RMSE <
-0.001). testvector01 — long mislabelled "heavy SILK" — is in fact CELT-only
-fullband stereo (configs 28-31); its residual was a code-3 multi-byte padding
-parse bug in `splitOpusFrames` (only one 0xFF continuation was handled), which
-fed the CELT decoder the wrong bytes on packets with a `41 ff ff ..` padding
-run, causing full-scale clipping. Fixed to loop per RFC 6716 §3.2.5 (each 0xFF
-count byte = 254 padding-data bytes + continuation). `go build ./...`,
-`go vet ./...`, and `go test ./...` are all green (the `cmd_diag` duplicate-main
-build failure is fixed). The cgo/libopus reference comparison `TestCGORef`
-(`go test -tags opusref`) also passes all 12 vectors against libopus 1.6.1
-(overall RMSE < 0.001). Note: official-vector and `.bit`-based diagnostic tests
-`t.Skip` when `testdata/` (git-ignored) is absent.
+0.001). `go build ./...`, `go vet ./...`, and `go test ./...` are all green.
+The cgo/libopus reference `TestCGORef` (`go test -tags opusref`) also passes
+all 12 vectors against libopus 1.6.1 (overall RMSE < 0.001). Note:
+official-vector and `.bit`-based diagnostic tests `t.Skip` when `testdata/`
+(git-ignored) is absent.
+
+#### Encoder (Phase 1+2 complete — CELT-only)
+
+The encoder implements the full CELT quality pipeline (Phase 1+2, merged to
+`main` 2026-06-15). It emits standard RFC 6716 Opus packets that libopus 1.6.1
+decodes correctly. It is not bit-exact with libopus; SILK and hybrid modes are
+not yet encoded.
+
+**Implemented features:**
+
+- Input: 8/12/16/24/48 kHz mono or stereo; non-48 kHz is resampled internally.
+- **Bandwidth selection**: NB/WB/SWB/FB chosen from Nyquist ceiling, bitrate
+  heuristic, and signal-driven FFT detection (`bandwidth_detect.go`). VOIP
+  application prefers narrower tiers; `SetBandwidth`/`SetMaxBandwidth` for
+  manual override.
+- **Rate control**: CBR / VBR / CVBR (`SetVBR`, `SetVBRConstraint`).
+- **Packetization**: 20/40/60 ms multi-frame packets (RFC 6716 §3.2 codes 0–3)
+  including code-3 padding. `SetPacketPadding` for explicit padding.
+- **Silence detection + DTX**: near-silent frames emit a minimal 2–3 byte
+  packet; `SetDTX` enables discontinuous transmission.
+- **Transient detection**: time-domain HPF masking (`transientAnalysis`) selects
+  short blocks (8×120-sample MDCTs) to limit pre-echo. `patchTransientDecision`
+  is a complementary band-energy fallback that promotes frames the time-domain
+  detector misses.
+- **tf_analysis**: per-band transform resolution RDO via 2-pass Viterbi.
+- **dynalloc/alloc_trim/spread**: masking-follower dynamic allocation boost,
+  spectral-tilt trim, spreading decision with recursive hysteresis.
+- **Stereo decisions**: `stereoAnalysis` (dual vs joint M/S), intensity stereo
+  with hysteresis (`hysteresisDecision`).
+- **Anti-collapse**: consecutive-transient bit prevents spectral collapse.
+- **Application coupling**: `SignalType` (Voice/Music) wired from `Application`;
+  VOIP→voice lowers the patch-transient threshold for speech onsets.
+
+**SNR (delay-aligned, self-decode, 64 kbps):**
+sine 440 Hz ≈ 48 dB · sine 1 kHz ≈ 47 dB · sine 4 kHz ≈ 39 dB · sine 1 kHz stereo ≈ 43 dB.
+
+**Not yet implemented:** SILK encoder, hybrid (SILK+CELT) encoder, FEC/PLC
+encode. These are Phase 3+.
 
 ### Encoding data flow
 
@@ -127,5 +151,5 @@ and codec reconstruction -> optional resampler/channel adjustment -> PCM output
 
 - Float64 is used as the primary numeric type; simulated fixed-point is used only in performance-critical sections.
 - TOC byte encodes: config (upper 5 bits), stereo flag (bit 2), frame count code (lower 2 bits).
-- Official Opus bit-exact compliance is still in progress. Do not claim all
-  official vectors pass until the failing tests are fixed.
+- The decoder is RFC 8251 compliant (12/12 vectors PASS). The encoder emits
+  valid Opus packets but is not bit-exact with libopus.

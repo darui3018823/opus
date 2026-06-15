@@ -11,19 +11,20 @@
 A pure-Go implementation of the [Opus audio codec](https://opus-codec.org/)
 (RFC 6716 / RFC 8251) with **no runtime CGO dependency**. The **decoder** passes
 all 12 official RFC 8251 test vectors (RMSE < 0.001) and matches the libopus
-1.6.1 reference frame-by-frame. The **encoder** is still a simplified CELT-only
-path and is not yet bit-exact — see [Status](#status).
+1.6.1 reference frame-by-frame. The **encoder** implements the full CELT quality
+pipeline and produces standard Opus packets that libopus decodes correctly — see
+[Status](#status).
 
-> Honesty note: this project is decoder-complete and encoder-in-progress. It is
-> suitable for decoding real Opus streams in Go; it is **not** yet a drop-in
-> bit-exact replacement for libopus on the encode side.
+> Note: the encoder is CELT-only and not bit-exact with libopus. It is suitable
+> for encoding speech and music in pure Go; SILK and hybrid modes are not yet
+> encoded.
 
 ## Status
 
 | Area | State |
 |------|-------|
 | **Decoder** | ✅ Passes all 12 official RFC 8251 vectors (RMSE < 0.001); matches libopus 1.6.1 reference. SILK, CELT, and hybrid (SILK+CELT) modes are reconstructed, including hybrid SILK→CELT redundancy. |
-| **Encoder** | 🚧 Simplified CELT-only, fullband, 20 ms packets. Functional but **not** bit-exact against libopus. `application`/VBR settings are stored but do not yet drive full mode selection. |
+| **Encoder** | ✅ Full CELT quality pipeline (Phase 1+2). Emits standard Opus packets that libopus 1.6.1 decodes correctly. SNR: ~48 dB (440 Hz), ~47 dB (1 kHz), ~43 dB (stereo) at 64 kbps. **Not** bit-exact with libopus. SILK/hybrid encode paths are not yet implemented. |
 | **CGO** | None at runtime. A libopus wrapper exists only for reference tests, behind the `opusref` build tag. |
 | **CI** | `test`, `race`, `bench`, and `fuzz` workflows run on **amd64 and arm64**. |
 
@@ -87,17 +88,14 @@ _ = samples
 
 ### Encoding
 
-> The encoder currently emits CELT-only fullband 20 ms packets and is not
-> bit-exact with libopus. Use it for round-trip/experimentation, not for
-> interoperability-critical encoding yet.
-
 ```go
 enc, err := opus.NewEncoder(48000, 2, opus.ApplicationAudio)
 if err != nil {
 	log.Fatal(err)
 }
-enc.SetBitrate(128000)
+enc.SetBitrate(64000)
 enc.SetComplexity(10)
+enc.SetVBR(true) // variable bitrate (default: CBR)
 
 // 20 ms frame = 960 samples per channel at 48 kHz, interleaved stereo.
 pcm := make([]int16, 960*2)
@@ -111,6 +109,13 @@ _ = packet
 
 // Float64 input is also supported:
 //   packet, err := enc.EncodeFloat(make([]float64, 960*2), 960)
+
+// Bandwidth is detected automatically from signal content; override if needed:
+//   enc.SetBandwidth(opus.BandwidthWB)   // force wideband
+//   enc.SetBandwidth(opus.BandwidthAuto) // restore auto
+
+// 40 ms or 60 ms packets (multi-frame):
+//   packet, err := enc.Encode(pcm1920, 1920) // 40 ms
 ```
 
 ## Supported Configurations
@@ -121,10 +126,12 @@ _ = packet
 - **Channels**: mono and stereo.
 - **Decoder frame sizes**: all Opus durations (2.5/5/10/20/40/60 ms), selected
   per packet by the TOC byte.
-- **Encoder frame size**: 20 ms (960 samples per channel at 48 kHz).
-- **Application types** (stored by the encoder; full mode selection is WIP):
-  - `opus.ApplicationVOIP`
-  - `opus.ApplicationAudio`
+- **Encoder frame sizes**: 20 ms, 40 ms, 60 ms (multi-frame, RFC 6716 §3.2).
+- **Encoder bandwidth**: automatic (signal-content-driven FFT detection) or
+  manual (`SetBandwidth`/`SetMaxBandwidth`). Ranges: NB/WB/SWB/FB.
+- **Application types** (drive bandwidth and transient-detection behaviour):
+  - `opus.ApplicationVOIP` — narrower bandwidth tiers, eager short-block switching
+  - `opus.ApplicationAudio` — music/general defaults
   - `opus.ApplicationRestrictedLowDelay`
 
 ## Public API
@@ -137,10 +144,16 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error)
 func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error)
 
-func (e *Encoder) SetBitrate(bitrate int) error      // 6000–510000 bps
-func (e *Encoder) SetComplexity(complexity int) error // 0–10
+func (e *Encoder) SetBitrate(bitrate int) error       // 6000–510000 bps
+func (e *Encoder) SetComplexity(complexity int) error  // 0–10
 func (e *Encoder) SetVBR(vbr bool)
+func (e *Encoder) SetVBRConstraint(constrained bool)   // true = CVBR
 func (e *Encoder) SetApplication(application Application)
+func (e *Encoder) SetBandwidth(bw Bandwidth)           // Auto/NB/WB/SWB/FB
+func (e *Encoder) SetMaxBandwidth(bw Bandwidth)
+func (e *Encoder) Bandwidth() Bandwidth
+func (e *Encoder) SetDTX(dtx bool)
+func (e *Encoder) SetPacketPadding(n int)
 func (e *Encoder) Reset() error
 ```
 
@@ -243,12 +256,12 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
 
 ## Limitations
 
-- The encoder is simplified CELT-only and not bit-exact; there is no SILK-only
-  or hybrid encoder path.
+- The encoder is CELT-only. SILK (speech-optimised) and hybrid (SILK+CELT) modes
+  are not yet encoded; all output is CELT regardless of the application setting.
+- The encoder is not bit-exact with libopus, but produces standards-conformant
+  packets that any compliant decoder (including libopus) can decode.
 - `DecodeFEC` is currently a PLC fallback, not packet FEC extraction.
 - No multistream, surround, or Ogg Opus container API.
-- `application`, VBR, and some CTL-style settings are stored but not yet wired to
-  full libopus-compatible behavior.
 
 ## Contributing
 

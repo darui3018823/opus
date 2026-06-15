@@ -58,17 +58,23 @@ That path uses the internal SILK encoder, emits SILK-only duration configs for
 20/40/60 ms Opus frames, and packs longer supported durations as standard
 multiple Opus frame streams. Explicit `SignalMusic`, restricted-low-delay,
 bitrates above 40 kbps, a forced bandwidth that cannot be represented by the
-selected SILK layer, or a max-bandwidth cap below the SILK bandwidth keep the
-encoder out of the SILK-only path. DTX, VBR/CVBR, and packet padding do not by
-themselves opt the packet out of the supported SILK-only path.
+selected SILK layer, or, while bandwidth selection is automatic, a max-bandwidth
+cap below the SILK bandwidth keep the encoder out of the SILK-only path. An
+explicit forced bandwidth takes precedence over the max-bandwidth cap. DTX,
+VBR/CVBR, and packet padding do not by themselves opt the packet out of the
+supported SILK-only path.
 
 As of SILK Encoder slice 13, high-bitrate 24/48 kHz voice input can emit hybrid
 packets. The encoder writes a 16 kHz SILK low band and CELT high band into one
 shared range stream in decoder-compatible order (`SILK -> hybrid redundancy flag
 -> CELT start=17`), with redundancy disabled. 24 kHz voice emits SWB hybrid
 config 13; 48 kHz voice emits FB hybrid config 15 when the selected bandwidth is
-fullband. Hybrid is currently limited to 20 ms Opus frames, optionally packed as
-standard multi-frame packets for longer public frame sizes.
+fullband. Automatic signal-content bandwidth narrowing runs before hybrid mode
+selection; if the analysed signal narrows below SWB, the encoder falls back to a
+CELT-only packet using that narrower bandwidth. Explicit forced bandwidths still
+take precedence over max-bandwidth caps. Hybrid is currently limited to 20 ms
+Opus frames, optionally packed as standard multi-frame packets for longer public
+frame sizes.
 
 Supported public encode packet durations are exact 20 ms multiples from 20 ms
 through 120 ms (`frameSize == base20ms * 1..6`). Unsupported frame sizes and
@@ -225,10 +231,10 @@ durations over the Opus 120 ms packet limit are rejected with
     12 kHz rounds up to WB rather than dropping 4–6 kHz), 24 kHz → SWB, 48 kHz → FB.
   - Bitrate ceiling (heuristic, conservative; default 64 kbps stays FB):
     <16 kbps → NB, <28 → WB, <44 → SWB, else FB.
-- New public API: `SetMaxBandwidth(bw)` (caps auto-selection), `SetBandwidth(bw)`
-  (forces a bandwidth, still clamped to Nyquist; `BandwidthAuto` returns to auto),
-  and `Bandwidth()` (reports the current choice). A new `BandwidthAuto` constant
-  was added.
+- New public API: `SetMaxBandwidth(bw)` (caps automatic selection only),
+  `SetBandwidth(bw)` (forces a bandwidth, still clamped to Nyquist;
+  `BandwidthAuto` returns to auto), and `Bandwidth()` (reports the current
+  config-driven choice). A new `BandwidthAuto` constant was added.
 - Verification: `TestBandwidthSelection` (Nyquist/cap/force/bitrate logic),
   `TestBandwidthRoundTrip` (each forced bandwidth emits the right config and
   decodes a 1 kHz tone back: NB 47, WB 45, SWB 40, FB 39 dB aligned SNR),
@@ -248,6 +254,13 @@ durations over the Opus 120 ms packet limit are rejected with
   `ApplicationAudio`, `ApplicationRestrictedLowDelay`, and `SignalMusic` use
   music/general thresholds. Public `SetSignalType` / `SignalType` expose this
   content hint independently of `SetApplication`.
+- The same automatic bandwidth narrowing is applied before hybrid selection, so
+  low-bandwidth 24/48 kHz voice input does not enter hybrid solely because the
+  sample rate and target bitrate would otherwise allow it.
+- Mode-selection precedence now matches the public bandwidth controls:
+  `SetBandwidth` is an explicit force and is not further restricted by a
+  previously configured `SetMaxBandwidth` cap; the max cap applies only after
+  returning to `BandwidthAuto`.
 - Public getters were added for encoder bitrate, complexity, VBR state, and
   application mode.
 - v1.1.1 fixed library-review issues: stereo CELT/hybrid packets can be decoded
@@ -462,10 +475,12 @@ redundancy frame (celt_to_silk=0) is also handled.
 
 ## Test Status
 
-Command checked:
+Commands checked:
 
 ```bash
+go vet ./...
 go test ./...
+go test -tags opusref ./...
 ```
 
 Result on 2026-06-16: passing (`go vet ./...`, `go test ./...`, and
@@ -514,7 +529,8 @@ Notes:
   reconstruction similarity. Normal tests now also cover 24/48 kHz downsampled
   voice input and stereo SILK round trips.
 - `TestCGOEncodeRefHybrid` cross-checks the initial public hybrid encoder path
-  with libopus for 24 kHz SWB mono and 48 kHz FB mono/stereo voice packets.
+  with libopus for 24 kHz SWB mono and 48 kHz FB mono/stereo voice packets using
+  broadband fixtures so the signal-driven narrowing still permits hybrid.
 - `TestSILKInternalQualityBaseline`, `TestEncoderSILKOnlyQualityBaseline`, and
   `TestEncoderSILKOnlyStereoQualityBaseline` provide the Slice 8 SILK
   quality/regression baseline using deterministic synthetic fixtures. They run
@@ -523,7 +539,11 @@ Notes:
   mid/side energy where useful.
 - `TestEncoderSILKOnlyModeSelectionMatrix` and
   `TestEncoderSILKOnlyVBRDTXAndPaddingStillSelectSILK` cover the Slice 10 public
-  mode/rate selection boundary for supported SILK-only cases and CELT fallbacks.
+  mode/rate selection boundary for supported SILK-only cases and CELT fallbacks,
+  including the forced-bandwidth-over-max-bandwidth precedence.
+- `TestEncoderHybridSelectionBoundariesStrict` covers the initial hybrid
+  selection boundary, including low-bandwidth auto fallback to CELT and forced
+  bandwidth overriding a lower max-bandwidth cap.
 - The former `cmd_diag` duplicate-`main` build failure is fixed (`toc_check.go`
   moved to `cmd_diag/toccheck`).
 

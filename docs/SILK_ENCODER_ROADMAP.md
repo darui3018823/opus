@@ -297,9 +297,15 @@ Implemented:
 - Wired top-level high-bitrate 24/48 kHz voice mode selection to hybrid packets:
   24 kHz emits SWB hybrid config 13, and 48 kHz emits FB hybrid config 15 when
   bandwidth selection allows fullband.
+- Hybrid selection now applies the signal-driven auto-bandwidth detector before
+  accepting the hybrid route; low-bandwidth 24/48 kHz voice falls back to
+  CELT-only instead of forcing a SWB/FB hybrid packet.
+- Tightened bandwidth-control precedence around the limited SILK/hybrid mode
+  selection: `SetBandwidth` is an explicit force, and a lower `SetMaxBandwidth`
+  cap applies only while selection is automatic.
 - Left hybrid redundancy disabled for this first slice.
 - Added normal round-trip tests for 20 ms and multi-frame hybrid packets and an
-  `opusref` libopus decoder cross-check for hybrid packets.
+  `opusref` libopus decoder cross-check for broadband hybrid packets.
 
 Purpose: add Opus hybrid encode after the SILK low band is robust enough to be a
 useful base layer.
@@ -314,6 +320,8 @@ Scope:
   needed.
 - Add internal final-range/trace symmetry checks where practical.
 - Add this decoder and libopus decoder cross-checks.
+- Keep the narrow public mode-selection policy documented and tested rather than
+  implying full libopus mode/rate-control parity.
 
 Out of scope:
 

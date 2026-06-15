@@ -40,6 +40,12 @@ type Encoder struct {
 	maxBandwidth    int
 	forcedBandwidth int
 
+	// lastDetectedBW is the framing bandwidth chosen by the signal-driven detector
+	// on the previous auto-selection packet (negative = no history). It seeds the
+	// detector's hysteresis so the per-packet decision does not flap near a tier
+	// boundary. Only updated while bandwidth is automatic (forcedBandwidth==Auto).
+	lastDetectedBW int
+
 	// Internal 48kHz frame size (always 960 for 20ms)
 	internalFrameSize int
 }
@@ -91,6 +97,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		frameSize:         frameSize,
 		maxBandwidth:      BandwidthFullband,
 		forcedBandwidth:   BandwidthAuto,
+		lastDetectedBW:    -1, // no detection history yet
 		internalFrameSize: internalFrameSize,
 	}
 
@@ -155,10 +162,20 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	// Select the coded bandwidth (NB/WB/SWB/FB) and limit the CELT encoder's
 	// coded bands to match, then generate the base TOC byte for that bandwidth.
 	// The per-frame duration is always 20 ms; multi-frame packets express longer
-	// durations via the count code rather than a different config. Selection is
-	// config-driven (sample rate, bitrate, explicit settings), not signal-driven,
-	// so every frame in a packet shares the same bandwidth/config.
+	// durations via the count code rather than a different config. The config-driven
+	// ceiling (sample rate, bitrate, explicit settings) is the widest bandwidth
+	// allowed; when selection is automatic it is further narrowed by analysing the
+	// actual signal, so a source with no high-frequency energy is coded in a
+	// narrower band rather than wasting bits. The detection runs once over the whole
+	// input PCM, so every frame in a packet still shares the same bandwidth/config.
 	bw := e.selectCeltBandwidth()
+	if e.forcedBandwidth == BandwidthAuto {
+		det := detectSignalBandwidth(pcm, e.channels, e.sampleRate, e.lastDetectedBW)
+		e.lastDetectedBW = det
+		if det < bw {
+			bw = det
+		}
+	}
 	e.celtEncoder.SetEndBand(celtEndBandForFramingBW(bw))
 	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, bw, e.channels, framing.FrameSize20ms)
 	if err != nil {

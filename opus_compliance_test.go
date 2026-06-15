@@ -189,6 +189,12 @@ func TestTOCByte(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewEncoder: %v", err)
 		}
+		// Force fullband so this test exercises the Nyquist ceiling and stereo bit
+		// deterministically. Under automatic selection a 440 Hz tone would be
+		// narrowed by signal-driven detection (covered by TestDetect* tests).
+		if err := enc.SetBandwidth(BandwidthFullband); err != nil {
+			t.Fatalf("SetBandwidth: %v", err)
+		}
 
 		pcm := generateSine(440.0, 48000, tc.channels, 960)
 		encoded, err := enc.Encode(pcm, 960)
@@ -237,6 +243,12 @@ func TestTOCByteMultiRate(t *testing.T) {
 		enc, err := NewEncoder(tc.rate, 1, ApplicationAudio)
 		if err != nil {
 			t.Fatalf("NewEncoder(%d): %v", tc.rate, err)
+		}
+		// Force fullband (clamped to each rate's Nyquist limit) so this test checks
+		// the Nyquist ceiling itself. Automatic selection would narrow the 200 Hz
+		// tone via signal-driven detection (covered by TestDetect* tests).
+		if err := enc.SetBandwidth(BandwidthFullband); err != nil {
+			t.Fatalf("SetBandwidth(%d): %v", tc.rate, err)
 		}
 
 		frameSize := (tc.rate * 20) / 1000

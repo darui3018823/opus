@@ -268,11 +268,18 @@ func spreadingDecision(X []float64, frameLen, end, C, M int, average *int, lastD
 
 // dynallocAnalysis is the float port of libopus dynalloc_analysis. It returns
 // per-band boost counts (offsets[]) in the units consumed by dynallocEncode
-// (the libopus "boost" integer). logE is the mean-subtracted log2-amplitude band
-// energy laid out channel-major [c*numBands+i]. The internal 2/3-budget break is
-// dropped: dynallocEncode clamps the coded boost against the real range-coder
-// budget and the per-band cap, keeping the result symmetric with the decoder.
-func dynallocAnalysis(logE []float64, numBands, end, C, lm int, isTransient, vbr, constrainedVbr bool) []int {
+// (the libopus "boost" integer). logE and logE2 are mean-subtracted
+// log2-amplitude band energies laid out channel-major [c*numBands+i]: logE is
+// bandLogE (from the actual, possibly short-block, MDCT) and logE2 is bandLogE2,
+// a long-block estimate that on transient frames has better frequency resolution
+// (on non-transient frames the caller passes logE2==logE). The per-band masking
+// follower is built from logE2, while the final masking depth (how far each band
+// sticks out above the follower) is measured against logE — exactly as libopus
+// uses bandLogE3(=bandLogE2) for the follower and bandLogE for the depth. The
+// internal 2/3-budget break is dropped: dynallocEncode clamps the coded boost
+// against the real range-coder budget and the per-band cap, keeping the result
+// symmetric with the decoder.
+func dynallocAnalysis(logE, logE2 []float64, numBands, end, C, lm int, isTransient, vbr, constrainedVbr bool) []int {
 	offsets := make([]int, numBands)
 	follower := make([]float64, C*numBands)
 	noiseFloor := make([]float64, numBands)
@@ -284,15 +291,15 @@ func dynallocAnalysis(logE []float64, numBands, end, C, lm int, isTransient, vbr
 	for c := 0; c < C; c++ {
 		f := follower[c*numBands : c*numBands+numBands]
 		last := 0
-		f[0] = logE[c*numBands]
+		f[0] = logE2[c*numBands]
 		for i := 1; i < end; i++ {
-			if logE[c*numBands+i] > logE[c*numBands+i-1]+0.5 {
+			if logE2[c*numBands+i] > logE2[c*numBands+i-1]+0.5 {
 				last = i
 			}
-			f[i] = math.Min(f[i-1]+1.5, logE[c*numBands+i])
+			f[i] = math.Min(f[i-1]+1.5, logE2[c*numBands+i])
 		}
 		for i := last - 1; i >= 0; i-- {
-			f[i] = math.Min(f[i], math.Min(f[i+1]+2.0, logE[c*numBands+i]))
+			f[i] = math.Min(f[i], math.Min(f[i+1]+2.0, logE2[c*numBands+i]))
 		}
 		for i := 0; i < end; i++ {
 			f[i] = math.Max(f[i], noiseFloor[i])

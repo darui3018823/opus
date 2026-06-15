@@ -244,6 +244,16 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 
 	// Pass 2: forward MDCT (M interleaved short blocks on transients, else one
 	// long block), band energy, and per-band normalisation.
+	//
+	// logE2 (bandLogE2) is a second set of band log energies fed to the dynalloc
+	// masking follower. On transient frames at complexity>=8 (secondMdct) it comes
+	// from a full-length (long-block) MDCT of the same analysis buffer, giving the
+	// follower the long block's superior frequency resolution while the actual
+	// per-band energy (logE/bandE, used for normalisation and coarse energy) stays
+	// short-block. Off transients (or below complexity 8) the long block IS the
+	// actual MDCT, so logE2==logE — matching libopus' OPUS_COPY fallback.
+	logE2 := make([]float64, ch*numBands)
+	secondMdct := isTransient && e.complexity >= 8
 	nBase := e.mode.NBase
 	for c := 0; c < ch; c++ {
 		buf := bufs[c]
@@ -278,6 +288,28 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 			inv := 1.0 / amp
 			for j := lo; j < hi; j++ {
 				X[base+j] = coeffs[j] * inv
+			}
+		}
+
+		if secondMdct {
+			// Long-block MDCT for bandLogE2. CLTMDCTForward is a pure function of
+			// its input, so this does not disturb the overlap state already
+			// advanced above. The +LM/2 term compensates the short-vs-long MDCT
+			// amplitude scaling (verified by TestMDCTShortLongScaleOffset).
+			longCoeffs := e.celtMode.CLTMDCTForward(buf)
+			corr := 0.5 * float64(lm)
+			for i := 0; i < numBands; i++ {
+				lo := M * int(EBands48000[i])
+				hi := M * int(EBands48000[i+1])
+				sumsq := 1e-27
+				for j := lo; j < hi; j++ {
+					sumsq += longCoeffs[j] * longCoeffs[j]
+				}
+				logE2[c*numBands+i] = math.Log2(math.Sqrt(sumsq)) - EMean(i) + corr
+			}
+		} else {
+			for i := 0; i < numBands; i++ {
+				logE2[c*numBands+i] = logE[c*numBands+i]
 			}
 		}
 	}
@@ -440,7 +472,7 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	// Dynamic allocation boosts (tonality/masking follower).
 	vbrOn := e.rateMode != RateModeCBR
 	constrainedVBR := e.rateMode == RateModeCVBR
-	offsets := dynallocAnalysis(logE, numBands, end, ch, lm, isTransient, vbrOn, constrainedVBR)
+	offsets := dynallocAnalysis(logE, logE2, numBands, end, ch, lm, isTransient, vbrOn, constrainedVBR)
 	dynallocEncode(enc, offsets, numBands, start, end, lm, ch, totalBits)
 	etr(enc, "dynalloc")
 

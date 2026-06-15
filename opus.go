@@ -14,6 +14,23 @@ import (
 // Application specifies the encoding mode (use constants from package)
 type Application = int
 
+// SignalType is a content hint that lets the encoder tune heuristics for the
+// dominant signal type without changing the bitstream format.
+type SignalType = celt.SignalType
+
+const (
+	// SignalAuto lets the encoder derive a hint from the Application setting
+	// (VOIP → voice, Audio/RestrictedLowDelay → music). This is the default.
+	SignalAuto  SignalType = celt.SignalUnknown
+	// SignalVoice marks speech-leaning content. The encoder uses narrower
+	// bandwidth tiers (matching ApplicationVOIP) and switches to short blocks
+	// more eagerly on plosive onsets.
+	SignalVoice SignalType = celt.SignalVoice
+	// SignalMusic marks music or general audio content, applying wider
+	// bandwidth tiers and standard transient sensitivity.
+	SignalMusic SignalType = celt.SignalMusic
+)
+
 // Encoder represents an Opus encoder instance
 type Encoder struct {
 	sampleRate  int
@@ -354,6 +371,20 @@ func (e *Encoder) DTX() bool { return e.dtx }
 func (e *Encoder) SetApplication(application Application) {
 	e.application = application
 	e.celtEncoder.SetSignalType(signalTypeForApplication(application))
+}
+
+// SetSignalType overrides the content hint used by encoder heuristics.
+// SignalAuto (the default) re-derives the hint from the current Application
+// setting (VOIP → voice, otherwise music). Calling this with SignalVoice or
+// SignalMusic pins the hint regardless of the Application value; a subsequent
+// SetApplication call will overwrite it again.
+func (e *Encoder) SetSignalType(s SignalType) {
+	e.celtEncoder.SetSignalType(s)
+}
+
+// SignalType reports the current content hint.
+func (e *Encoder) SignalType() SignalType {
+	return e.celtEncoder.SignalTypeHint()
 }
 
 // SetMaxBandwidth caps the automatically selected coded bandwidth. bw must be one

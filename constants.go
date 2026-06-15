@@ -102,13 +102,6 @@ const (
 	ResetStateRequest           = 4028
 )
 
-// Signal types
-const (
-	SignalAuto  = -1000
-	SignalVoice = 3001
-	SignalMusic = 3002
-)
-
 // Complexity (0-10)
 const (
 	ComplexityMin     = 0

@@ -642,6 +642,7 @@ func (d *Decoder) Reset() {
 		d.prevLogE[i] = -28.0
 		d.prevLogE2[i] = -28.0
 	}
+	d.lastFinalRange = 0
 
 	// Reset post-filters
 	for _, pf := range d.postFilter {

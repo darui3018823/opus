@@ -502,7 +502,11 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	if lm > 0 && enc.ECTell()+3 <= totalBits {
 		enc.EncodeBitLogp(isTransient, 3)
 	} else {
-		isTransient = false
+		if isTransient {
+			isTransient = false
+			computeSpectrum(false)
+			copy(logE2, logE)
+		}
 	}
 
 	// intra/inter flag for coarse energy.

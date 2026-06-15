@@ -1,6 +1,9 @@
 package opus
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestEncoderSILKOnlyVOIPLowBitrateRoundTrip(t *testing.T) {
 	cases := []struct {
@@ -159,6 +162,80 @@ func TestEncoderSILKOnlyStereoMultiFrameRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEncoderSILKOnlyAllSupportedDurationsStrict(t *testing.T) {
+	cases := []struct {
+		rate       int
+		channels   int
+		configBase int
+	}{
+		{rate: 8000, channels: 1, configBase: 0},
+		{rate: 12000, channels: 1, configBase: 4},
+		{rate: 16000, channels: 1, configBase: 8},
+		{rate: 16000, channels: 2, configBase: 8},
+		{rate: 48000, channels: 1, configBase: 8},
+		{rate: 48000, channels: 2, configBase: 8},
+	}
+
+	for _, tc := range cases {
+		t.Run(rateName(tc.rate)+"/"+channelName(tc.channels), func(t *testing.T) {
+			enc, err := NewEncoder(tc.rate, tc.channels, ApplicationVOIP)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(24000); err != nil {
+				t.Fatalf("SetBitrate: %v", err)
+			}
+			dec, err := NewDecoder(tc.rate, tc.channels)
+			if err != nil {
+				t.Fatalf("NewDecoder: %v", err)
+			}
+
+			base := tc.rate * 20 / 1000
+			for mult := 1; mult <= 6; mult++ {
+				frameSize := base * mult
+				pcm := strictSpeechLikeFrame(tc.rate, tc.channels, mult*frameSize, frameSize)
+				pkt, err := enc.EncodeFloat(pcm, frameSize)
+				if err != nil {
+					t.Fatalf("%dms: EncodeFloat: %v", mult*20, err)
+				}
+				if len(pkt) < 2 {
+					t.Fatalf("%dms: packet too short: %d bytes", mult*20, len(pkt))
+				}
+
+				config := int(pkt[0] >> 3)
+				wantConfig := tc.configBase + strictSILKDurationIndex(mult, tc.channels)
+				if config != wantConfig {
+					t.Fatalf("%dms: TOC config=%d, want SILK config %d (toc=0x%02x)", mult*20, config, wantConfig, pkt[0])
+				}
+				if gotStereo := (pkt[0] & 0x04) != 0; gotStereo != (tc.channels == 2) {
+					t.Fatalf("%dms: TOC stereo=%v, want %v", mult*20, gotStereo, tc.channels == 2)
+				}
+				if code := int(pkt[0] & 0x03); code != strictSILKCountCode(mult, tc.channels) {
+					t.Fatalf("%dms: count code=%d, want %d", mult*20, code, strictSILKCountCode(mult, tc.channels))
+				}
+
+				decoded, err := dec.DecodeFloat(pkt)
+				if err != nil {
+					t.Fatalf("%dms: DecodeFloat: %v", mult*20, err)
+				}
+				if want := frameSize * tc.channels; len(decoded) != want {
+					t.Fatalf("%dms: decoded samples=%d, want %d", mult*20, len(decoded), want)
+				}
+				if got := dec.GetLastPacketDuration(); got != frameSize {
+					t.Fatalf("%dms: last packet duration=%d, want %d", mult*20, got, frameSize)
+				}
+				rms, peak := strictSignalStats(decoded)
+				if rms < 1e-5 {
+					t.Fatalf("%dms: decoded output collapsed: RMS=%g", mult*20, rms)
+				}
+				if peak > 1.25 {
+					t.Fatalf("%dms: decoded peak runaway: peak=%g", mult*20, peak)
+				}
+			}
+		})
+	}
+}
+
 func TestEncoderVOIPHighBitrateStaysCELT(t *testing.T) {
 	enc, err := NewEncoder(16000, 1, ApplicationVOIP)
 	if err != nil {
@@ -175,6 +252,217 @@ func TestEncoderVOIPHighBitrateStaysCELT(t *testing.T) {
 	}
 	if config := int(pkt[0] >> 3); config < 16 {
 		t.Fatalf("TOC config=%d, want CELT-only config at high bitrate", config)
+	}
+}
+
+func TestEncoderVoiceModeTransitionsStrict(t *testing.T) {
+	const rate = 48000
+	const channels = 1
+	frameSize := rate * 20 / 1000
+
+	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	dec, err := NewDecoder(rate, channels)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+
+	steps := []struct {
+		name      string
+		configure func(*Encoder) error
+		wantMode  string
+	}{
+		{
+			name: "low-bitrate-voip-silk",
+			configure: func(e *Encoder) error {
+				return e.SetBitrate(24000)
+			},
+			wantMode: "silk",
+		},
+		{
+			name: "high-bitrate-voip-hybrid",
+			configure: func(e *Encoder) error {
+				return e.SetBitrate(64000)
+			},
+			wantMode: "hybrid",
+		},
+		{
+			name: "music-hint-celt",
+			configure: func(e *Encoder) error {
+				e.SetSignalType(SignalMusic)
+				return nil
+			},
+			wantMode: "celt",
+		},
+		{
+			name: "voice-hint-low-bitrate-back-to-silk",
+			configure: func(e *Encoder) error {
+				e.SetSignalType(SignalVoice)
+				return e.SetBitrate(24000)
+			},
+			wantMode: "silk",
+		},
+		{
+			name: "restricted-low-delay-forces-celt",
+			configure: func(e *Encoder) error {
+				e.SetApplication(ApplicationRestrictedLowDelay)
+				e.SetSignalType(SignalVoice)
+				return nil
+			},
+			wantMode: "celt",
+		},
+		{
+			name: "voip-after-reset-returns-to-silk",
+			configure: func(e *Encoder) error {
+				e.SetApplication(ApplicationVOIP)
+				if err := e.SetBitrate(24000); err != nil {
+					return err
+				}
+				return e.Reset()
+			},
+			wantMode: "silk",
+		},
+	}
+
+	for i, step := range steps {
+		t.Run(step.name, func(t *testing.T) {
+			if err := step.configure(enc); err != nil {
+				t.Fatalf("configure: %v", err)
+			}
+			pkt, err := enc.EncodeFloat(strictSpeechLikeFrame(rate, channels, i*frameSize, frameSize), frameSize)
+			if err != nil {
+				t.Fatalf("EncodeFloat: %v", err)
+			}
+			config := int(pkt[0] >> 3)
+			if got := strictOpusMode(config); got != step.wantMode {
+				t.Fatalf("TOC config=%d mode=%s, want %s", config, got, step.wantMode)
+			}
+			decoded, err := dec.DecodeFloat(pkt)
+			if err != nil {
+				t.Fatalf("DecodeFloat: %v", err)
+			}
+			if len(decoded) != frameSize*channels {
+				t.Fatalf("decoded samples=%d, want %d", len(decoded), frameSize*channels)
+			}
+		})
+	}
+}
+
+func TestEncoderHybridSelectionBoundariesStrict(t *testing.T) {
+	cases := []struct {
+		name       string
+		rate       int
+		channels   int
+		app        Application
+		configure  func(*Encoder) error
+		wantMode   string
+		wantConfig int
+		wantBW     int
+	}{
+		{
+			name:       "48k-voip-fullband-hybrid",
+			rate:       48000,
+			channels:   1,
+			app:        ApplicationVOIP,
+			wantMode:   "hybrid",
+			wantConfig: 15,
+			wantBW:     BandwidthFullband,
+		},
+		{
+			name:     "48k-voip-forced-swb-hybrid",
+			rate:     48000,
+			channels: 1,
+			app:      ApplicationVOIP,
+			configure: func(e *Encoder) error {
+				return e.SetBandwidth(BandwidthSuperWideband)
+			},
+			wantMode:   "hybrid",
+			wantConfig: 13,
+			wantBW:     BandwidthSuperWideband,
+		},
+		{
+			name:     "24k-voip-forced-fullband-clamps-swb-hybrid",
+			rate:     24000,
+			channels: 1,
+			app:      ApplicationVOIP,
+			configure: func(e *Encoder) error {
+				return e.SetBandwidth(BandwidthFullband)
+			},
+			wantMode:   "hybrid",
+			wantConfig: 13,
+			wantBW:     BandwidthSuperWideband,
+		},
+		{
+			name:     "48k-voice-with-max-wideband-falls-back-celt",
+			rate:     48000,
+			channels: 1,
+			app:      ApplicationVOIP,
+			configure: func(e *Encoder) error {
+				return e.SetMaxBandwidth(BandwidthWideband)
+			},
+			wantMode: "celt",
+			wantBW:   BandwidthWideband,
+		},
+		{
+			name:     "audio-with-voice-hint-can-hybrid",
+			rate:     48000,
+			channels: 2,
+			app:      ApplicationAudio,
+			configure: func(e *Encoder) error {
+				e.SetSignalType(SignalVoice)
+				return nil
+			},
+			wantMode:   "hybrid",
+			wantConfig: 15,
+			wantBW:     BandwidthFullband,
+		},
+		{
+			name:     "voip-with-music-hint-stays-celt",
+			rate:     48000,
+			channels: 1,
+			app:      ApplicationVOIP,
+			configure: func(e *Encoder) error {
+				e.SetSignalType(SignalMusic)
+				return nil
+			},
+			wantMode: "celt",
+			wantBW:   BandwidthFullband,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			enc, err := NewEncoder(tc.rate, tc.channels, tc.app)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(64000); err != nil {
+				t.Fatalf("SetBitrate: %v", err)
+			}
+			if tc.configure != nil {
+				if err := tc.configure(enc); err != nil {
+					t.Fatalf("configure: %v", err)
+				}
+			}
+			if got := enc.Bandwidth(); got != tc.wantBW {
+				t.Fatalf("Bandwidth()=%d, want %d", got, tc.wantBW)
+			}
+
+			frameSize := tc.rate * 20 / 1000
+			pkt, err := enc.EncodeFloat(strictSpeechLikeFrame(tc.rate, tc.channels, 0, frameSize), frameSize)
+			if err != nil {
+				t.Fatalf("EncodeFloat: %v", err)
+			}
+			config := int(pkt[0] >> 3)
+			if got := strictOpusMode(config); got != tc.wantMode {
+				t.Fatalf("TOC config=%d mode=%s, want %s", config, got, tc.wantMode)
+			}
+			if tc.wantConfig != 0 && config != tc.wantConfig {
+				t.Fatalf("TOC config=%d, want %d", config, tc.wantConfig)
+			}
+		})
 	}
 }
 
@@ -568,4 +856,87 @@ func multName(mult int) string {
 	default:
 		return "120ms"
 	}
+}
+
+func strictSILKDurationIndex(mult, channels int) int {
+	if channels == 2 {
+		switch mult {
+		case 3:
+			return 1
+		case 6:
+			return 2
+		}
+	}
+	switch mult {
+	case 2, 4:
+		return 2
+	case 3, 6:
+		return 3
+	default:
+		return 1
+	}
+}
+
+func strictSILKCountCode(mult, channels int) int {
+	if channels == 2 {
+		switch mult {
+		case 1, 2:
+			return 0
+		case 4:
+			return 2
+		default:
+			return 3
+		}
+	}
+	switch mult {
+	case 1, 2, 3:
+		return 0
+	case 4, 6:
+		return 2
+	default:
+		return 3
+	}
+}
+
+func strictOpusMode(config int) string {
+	switch {
+	case config < 12:
+		return "silk"
+	case config < 16:
+		return "hybrid"
+	default:
+		return "celt"
+	}
+}
+
+func strictSpeechLikeFrame(rate, channels, start, n int) []float64 {
+	out := make([]float64, n*channels)
+	for i := 0; i < n; i++ {
+		t := float64(start+i) / float64(rate)
+		env := 0.42 + 0.18*math.Sin(2*math.Pi*2.7*t+0.3)
+		left := env * (0.34*math.Sin(2*math.Pi*175*t) +
+			0.13*math.Sin(2*math.Pi*350*t+0.4) +
+			0.07*math.Sin(2*math.Pi*700*t+0.8))
+		out[i*channels] = left
+		if channels == 2 {
+			right := env * (0.31*math.Sin(2*math.Pi*183*t+0.2) +
+				0.11*math.Sin(2*math.Pi*366*t+0.7) +
+				0.06*math.Sin(2*math.Pi*732*t+1.0))
+			out[i*channels+1] = right
+		}
+	}
+	return out
+}
+
+func strictSignalStats(x []float64) (rms, peak float64) {
+	for _, v := range x {
+		rms += v * v
+		if a := math.Abs(v); a > peak {
+			peak = a
+		}
+	}
+	if len(x) > 0 {
+		rms = math.Sqrt(rms / float64(len(x)))
+	}
+	return rms, peak
 }

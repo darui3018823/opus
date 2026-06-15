@@ -143,6 +143,88 @@ func TestCGOEncodeRefSILKOnly(t *testing.T) {
 	}
 }
 
+func TestCGOEncodeRefSILKOnlyExtendedDurationsStrict(t *testing.T) {
+	t.Logf("libopus version: %s", cgoref.Version())
+
+	cases := []struct {
+		name       string
+		rate       int
+		channels   int
+		configBase int
+	}{
+		{name: "16k-mono", rate: 16000, channels: 1, configBase: 8},
+		{name: "48k-stereo", rate: 48000, channels: 2, configBase: 8},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		for _, packetMs := range []int{80, 100, 120} {
+			packetMs := packetMs
+			t.Run(tc.name+"/"+silkRefPacketName(packetMs), func(t *testing.T) {
+				enc, err := opus.NewEncoder(tc.rate, tc.channels, opus.ApplicationVOIP)
+				if err != nil {
+					t.Fatalf("NewEncoder: %v", err)
+				}
+				if err := enc.SetBitrate(24000); err != nil {
+					t.Fatalf("SetBitrate: %v", err)
+				}
+				dec, err := opus.NewDecoder(tc.rate, tc.channels)
+				if err != nil {
+					t.Fatalf("NewDecoder: %v", err)
+				}
+				ref, err := cgoref.NewDecoder(tc.rate, tc.channels)
+				if err != nil {
+					t.Fatalf("cgoref.NewDecoder: %v", err)
+				}
+				defer ref.Close()
+
+				frameSize := tc.rate * packetMs / 1000
+				pkt, err := enc.EncodeFloat(silkRefSpeechFrame(tc.rate, 0, frameSize, tc.channels), frameSize)
+				if err != nil {
+					t.Fatalf("EncodeFloat: %v", err)
+				}
+
+				config := int((pkt[0] >> 3) & 0x1f)
+				wantConfig := tc.configBase + silkRefExtendedDurationIndex(packetMs, tc.channels)
+				if config != wantConfig {
+					t.Fatalf("TOC config=%d, want SILK-only %dms grouping config %d (toc=0x%02x)", config, packetMs, wantConfig, pkt[0])
+				}
+				if code := int(pkt[0] & 0x03); code != silkRefExtendedCountCode(packetMs, tc.channels) {
+					t.Fatalf("count code=%d, want %d for %dms packet", code, silkRefExtendedCountCode(packetMs, tc.channels), packetMs)
+				}
+
+				ours, err := dec.DecodeFloat(pkt)
+				if err != nil {
+					t.Fatalf("DecodeFloat: %v", err)
+				}
+				refOut, err := ref.DecodeFloat(pkt, tc.rate*120/1000)
+				if err != nil {
+					t.Fatalf("libopus decode (extended SILK packet non-conformant): %v", err)
+				}
+				wantSamples := frameSize * tc.channels
+				if len(ours) != wantSamples {
+					t.Fatalf("decoder samples=%d, want %d", len(ours), wantSamples)
+				}
+				if len(refOut) != wantSamples {
+					t.Fatalf("libopus samples=%d, want %d", len(refOut), wantSamples)
+				}
+				oursRMS, oursPeak := silkRefStats(ours)
+				refVals := make([]float64, len(refOut))
+				for i, v := range refOut {
+					refVals[i] = float64(v)
+				}
+				refRMS, refPeak := silkRefStats(refVals)
+				if oursRMS < 1e-5 || refRMS < 1e-5 {
+					t.Fatalf("decoded output collapsed: decoder RMS=%g libopus RMS=%g", oursRMS, refRMS)
+				}
+				if oursPeak > 1.5 || refPeak > 1.5 {
+					t.Fatalf("decoded peak too large: decoder=%g libopus=%g", oursPeak, refPeak)
+				}
+			})
+		}
+	}
+}
+
 func TestCGOEncodeRefHybrid(t *testing.T) {
 	t.Logf("libopus version: %s", cgoref.Version())
 
@@ -229,6 +311,73 @@ func TestCGOEncodeRefHybrid(t *testing.T) {
 				t.Fatalf("decoder/libopus RMS ratio=%g outside coarse match range (decoder=%g libopus=%g)", ratio, oursRMS, refRMS)
 			}
 		})
+	}
+}
+
+func TestCGOEncodeRefHybridMultiFrameStrict(t *testing.T) {
+	t.Logf("libopus version: %s", cgoref.Version())
+
+	cases := []struct {
+		name     string
+		rate     int
+		channels int
+		bitrate  int
+		config   int
+	}{
+		{name: "swb-24k-mono", rate: 24000, channels: 1, bitrate: 64000, config: 13},
+		{name: "fb-48k-stereo", rate: 48000, channels: 2, bitrate: 96000, config: 15},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		for _, packetMs := range []int{40, 60, 120} {
+			packetMs := packetMs
+			t.Run(tc.name+"/"+silkRefPacketName(packetMs), func(t *testing.T) {
+				enc, err := opus.NewEncoder(tc.rate, tc.channels, opus.ApplicationVOIP)
+				if err != nil {
+					t.Fatalf("NewEncoder: %v", err)
+				}
+				if err := enc.SetBitrate(tc.bitrate); err != nil {
+					t.Fatalf("SetBitrate: %v", err)
+				}
+				ref, err := cgoref.NewDecoder(tc.rate, tc.channels)
+				if err != nil {
+					t.Fatalf("cgoref.NewDecoder: %v", err)
+				}
+				defer ref.Close()
+
+				frameSize := tc.rate * packetMs / 1000
+				pkt, err := enc.EncodeFloat(silkRefSpeechFrame(tc.rate, 0, frameSize, tc.channels), frameSize)
+				if err != nil {
+					t.Fatalf("EncodeFloat: %v", err)
+				}
+				config := int((pkt[0] >> 3) & 0x1f)
+				if config != tc.config {
+					t.Fatalf("TOC config=%d, want hybrid config %d (toc=0x%02x)", config, tc.config, pkt[0])
+				}
+				if code := int(pkt[0] & 0x03); code != silkRefHybridCountCode(packetMs) {
+					t.Fatalf("count code=%d, want %d for %dms hybrid packet", code, silkRefHybridCountCode(packetMs), packetMs)
+				}
+				refOut, err := ref.DecodeFloat(pkt, tc.rate*120/1000)
+				if err != nil {
+					t.Fatalf("libopus decode (hybrid multi-frame packet non-conformant): %v", err)
+				}
+				if wantSamples := frameSize * tc.channels; len(refOut) != wantSamples {
+					t.Fatalf("libopus samples=%d, want %d", len(refOut), wantSamples)
+				}
+				refVals := make([]float64, len(refOut))
+				for i, v := range refOut {
+					refVals[i] = float64(v)
+				}
+				rms, peak := silkRefStats(refVals)
+				if rms < 1e-5 {
+					t.Fatalf("libopus decoded output collapsed: RMS=%g", rms)
+				}
+				if peak > 1.5 {
+					t.Fatalf("libopus decoded peak too large: peak=%g", peak)
+				}
+			})
+		}
 	}
 }
 
@@ -340,6 +489,12 @@ func silkRefPacketName(ms int) string {
 		return "20ms"
 	case 40:
 		return "40ms"
+	case 80:
+		return "80ms"
+	case 100:
+		return "100ms"
+	case 120:
+		return "120ms"
 	default:
 		return "60ms"
 	}
@@ -357,4 +512,42 @@ func silkRefDurationIndex(ms, channels int) int {
 	default:
 		return 3
 	}
+}
+
+func silkRefExtendedDurationIndex(ms, channels int) int {
+	if channels == 2 && ms == 120 {
+		return 2
+	}
+	switch ms {
+	case 80:
+		return 2
+	case 100:
+		return 1
+	default:
+		return 3
+	}
+}
+
+func silkRefExtendedCountCode(ms, channels int) int {
+	if channels == 2 {
+		switch ms {
+		case 80:
+			return 2
+		default:
+			return 3
+		}
+	}
+	switch ms {
+	case 80, 120:
+		return 2
+	default:
+		return 3
+	}
+}
+
+func silkRefHybridCountCode(ms int) int {
+	if ms == 40 {
+		return 1
+	}
+	return 3
 }

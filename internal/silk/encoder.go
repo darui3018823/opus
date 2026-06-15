@@ -148,9 +148,9 @@ func (e *Encoder) EncodeMulti(pcm []float64, nFrames int) ([]byte, error) {
 	return enc.Bytes(), nil
 }
 
-// encodeRangeFrame writes one structurally valid SILK frame. It deliberately
-// uses fixed NLSF residuals and zero excitation pulses; later encoder slices can
-// replace those decisions without changing the surrounding stream grammar.
+// encodeRangeFrame writes one structurally valid SILK frame. It still uses
+// fixed NLSF residuals, but the excitation is now shell/sign coded from the
+// input signal so the pulse stream exercises the decoder's SILK pulse grammar.
 func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadActive, conditionalGain bool) {
 	signalType := SignalTypeInactive
 	if vadActive {
@@ -172,7 +172,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	}
 
 	enc.EncodeIcdf(0, silkUniform4ICDF[:], 8) // Seed.
-	e.encodeZeroPulses(enc, signalType, quantOffset)
+	e.encodePulses(enc, signal, signalType, quantOffset)
 
 	e.prevGainIdx = gainIdx
 	e.prevEnergy = computeEnergy(signal)
@@ -282,19 +282,297 @@ func (e *Encoder) encodeNLSF(enc *entcode.Encoder, cb *nlsfCBParams, signalType,
 	}
 }
 
-func (e *Encoder) encodeZeroPulses(enc *entcode.Encoder, signalType, quantOffset int) {
+type pulseBlock struct {
+	pulses   [shellCodecFrameLength]int16
+	shellAbs [shellCodecFrameLength]int
+	sum      int
+	nLShifts int
+}
+
+func (e *Encoder) encodePulses(enc *entcode.Encoder, signal []float64, signalType, quantOffset int) {
+	pulses := e.quantizeExcitationPulses(signal, signalType)
+	blocks := makePulseBlocks(pulses, e.frameSize)
+
 	row := signalType >> 1
 	if row > 1 {
 		row = 1
 	}
-	enc.EncodeIcdf(0, silkRateLevelsICDF[row][:], 8)
+	rateLevelIdx := selectPulseRateLevel(row, blocks)
+	enc.EncodeIcdf(rateLevelIdx, silkRateLevelsICDF[row][:], 8)
 
-	iter := e.frameSize >> log2ShellCodecFrameLen
-	if iter*shellCodecFrameLength < e.frameSize {
+	for i := range blocks {
+		encodePulseBlockSum(enc, rateLevelIdx, blocks[i])
+	}
+	for i := range blocks {
+		if blocks[i].sum > 0 {
+			encodeShellBlock(enc, blocks[i].shellAbs)
+		}
+	}
+	for i := range blocks {
+		encodePulseLSBs(enc, blocks[i])
+	}
+	encodePulseSigns(enc, blocks, signalType, quantOffset)
+}
+
+func (e *Encoder) quantizeExcitationPulses(signal []float64, signalType int) []int16 {
+	pulses := make([]int16, e.frameSize)
+	if signalType == SignalTypeInactive || len(signal) == 0 {
+		return pulses
+	}
+
+	for blockStart := 0; blockStart < e.frameSize; blockStart += shellCodecFrameLength {
+		end := blockStart + shellCodecFrameLength
+		if end > e.frameSize {
+			end = e.frameSize
+		}
+
+		maxAbs := 0.0
+		for i := blockStart; i < end; i++ {
+			if a := math.Abs(signal[i]); a > maxAbs {
+				maxAbs = a
+			}
+		}
+		if maxAbs <= 1e-9 {
+			continue
+		}
+
+		sum := 0
+		for i := blockStart; i < end; i++ {
+			normalized := math.Abs(signal[i]) / maxAbs
+			if normalized < 0.18 {
+				continue
+			}
+			q := int(math.Round(normalized * 3.0))
+			if q < 1 {
+				q = 1
+			}
+			if q > 4 {
+				q = 4
+			}
+			if signal[i] < 0 {
+				q = -q
+			}
+			pulses[i] = int16(q)
+			if q < 0 {
+				sum -= q
+			} else {
+				sum += q
+			}
+		}
+
+		for sum > 16 {
+			best := -1
+			bestAbs := int16(0)
+			for i := blockStart; i < end; i++ {
+				a := pulses[i]
+				if a < 0 {
+					a = -a
+				}
+				if a > bestAbs {
+					bestAbs = a
+					best = i
+				}
+			}
+			if best < 0 || bestAbs == 0 {
+				break
+			}
+			if pulses[best] < 0 {
+				pulses[best]++
+			} else {
+				pulses[best]--
+			}
+			sum--
+		}
+	}
+
+	return pulses
+}
+
+func makePulseBlocks(pulses []int16, frameSize int) []pulseBlock {
+	iter := frameSize >> log2ShellCodecFrameLen
+	if iter*shellCodecFrameLength < frameSize {
 		iter++
 	}
-	for i := 0; i < iter; i++ {
-		enc.EncodeIcdf(0, silkPulsesPerBlockICDF[0][:], 8)
+
+	blocks := make([]pulseBlock, iter)
+	for blockIdx := range blocks {
+		blockStart := blockIdx * shellCodecFrameLength
+		for i := 0; i < shellCodecFrameLength; i++ {
+			pos := blockStart + i
+			if pos >= len(pulses) {
+				continue
+			}
+			p := pulses[pos]
+			blocks[blockIdx].pulses[i] = p
+			if p < 0 {
+				blocks[blockIdx].shellAbs[i] = int(-p)
+			} else {
+				blocks[blockIdx].shellAbs[i] = int(p)
+			}
+		}
+
+		for {
+			sum := 0
+			for _, p := range blocks[blockIdx].shellAbs {
+				sum += p
+			}
+			if sum <= silkMaxPulses {
+				blocks[blockIdx].sum = sum
+				break
+			}
+			blocks[blockIdx].nLShifts++
+			for i := range blocks[blockIdx].shellAbs {
+				blocks[blockIdx].shellAbs[i] >>= 1
+			}
+		}
+	}
+	return blocks
+}
+
+func selectPulseRateLevel(row int, blocks []pulseBlock) int {
+	bestLevel := 0
+	bestCost := math.Inf(1)
+	for rateLevelIdx := 0; rateLevelIdx < nRateLevels-1; rateLevelIdx++ {
+		cost := icdfCost(silkRateLevelsICDF[row][:], rateLevelIdx)
+		for _, block := range blocks {
+			if block.nLShifts == 0 {
+				cost += icdfCost(silkPulsesPerBlockICDF[rateLevelIdx][:], block.sum)
+				continue
+			}
+			cost += icdfCost(silkPulsesPerBlockICDF[rateLevelIdx][:], silkMaxPulses+1)
+			for shift := 1; shift < block.nLShifts; shift++ {
+				cost += icdfCost(silkPulsesPerBlockICDF[nRateLevels-1][:], silkMaxPulses+1)
+			}
+			offset := 0
+			if block.nLShifts == 10 {
+				offset = 1
+			}
+			cost += icdfCost(silkPulsesPerBlockICDF[nRateLevels-1][offset:], block.sum)
+		}
+		if cost < bestCost {
+			bestCost = cost
+			bestLevel = rateLevelIdx
+		}
+	}
+	return bestLevel
+}
+
+func icdfCost(icdf []uint8, symbol int) float64 {
+	if symbol < 0 || symbol >= len(icdf) {
+		return math.Inf(1)
+	}
+	var freq int
+	if symbol == 0 {
+		freq = 256 - int(icdf[0])
+	} else {
+		freq = int(icdf[symbol-1]) - int(icdf[symbol])
+	}
+	if freq <= 0 {
+		return math.Inf(1)
+	}
+	return -math.Log2(float64(freq) / 256.0)
+}
+
+func encodePulseBlockSum(enc *entcode.Encoder, rateLevelIdx int, block pulseBlock) {
+	if block.nLShifts == 0 {
+		enc.EncodeIcdf(block.sum, silkPulsesPerBlockICDF[rateLevelIdx][:], 8)
+		return
+	}
+
+	enc.EncodeIcdf(silkMaxPulses+1, silkPulsesPerBlockICDF[rateLevelIdx][:], 8)
+	for shift := 1; shift < block.nLShifts; shift++ {
+		enc.EncodeIcdf(silkMaxPulses+1, silkPulsesPerBlockICDF[nRateLevels-1][:], 8)
+	}
+	offset := 0
+	if block.nLShifts == 10 {
+		offset = 1
+	}
+	enc.EncodeIcdf(block.sum, silkPulsesPerBlockICDF[nRateLevels-1][offset:], 8)
+}
+
+func encodeShellBlock(enc *entcode.Encoder, absPulses [shellCodecFrameLength]int) {
+	splitEncode := func(first, total int, table []uint8) {
+		if total <= 0 {
+			return
+		}
+		off := int(silkShellCodeTableOffsets[total])
+		enc.EncodeIcdf(first, table[off:off+total+1], 8)
+	}
+
+	var p1 [8]int
+	var p2 [4]int
+	var p3 [2]int
+	for i := 0; i < 8; i++ {
+		p1[i] = absPulses[2*i] + absPulses[2*i+1]
+	}
+	for i := 0; i < 4; i++ {
+		p2[i] = p1[2*i] + p1[2*i+1]
+	}
+	for i := 0; i < 2; i++ {
+		p3[i] = p2[2*i] + p2[2*i+1]
+	}
+
+	splitEncode(p3[0], p3[0]+p3[1], silkShellCodeTable3[:])
+	splitEncode(p2[0], p3[0], silkShellCodeTable2[:])
+	splitEncode(p1[0], p2[0], silkShellCodeTable1[:])
+	splitEncode(absPulses[0], p1[0], silkShellCodeTable0[:])
+	splitEncode(absPulses[2], p1[1], silkShellCodeTable0[:])
+	splitEncode(p1[2], p2[1], silkShellCodeTable1[:])
+	splitEncode(absPulses[4], p1[2], silkShellCodeTable0[:])
+	splitEncode(absPulses[6], p1[3], silkShellCodeTable0[:])
+	splitEncode(p2[2], p3[1], silkShellCodeTable2[:])
+	splitEncode(p1[4], p2[2], silkShellCodeTable1[:])
+	splitEncode(absPulses[8], p1[4], silkShellCodeTable0[:])
+	splitEncode(absPulses[10], p1[5], silkShellCodeTable0[:])
+	splitEncode(p1[6], p2[3], silkShellCodeTable1[:])
+	splitEncode(absPulses[12], p1[6], silkShellCodeTable0[:])
+	splitEncode(absPulses[14], p1[7], silkShellCodeTable0[:])
+}
+
+func encodePulseLSBs(enc *entcode.Encoder, block pulseBlock) {
+	if block.nLShifts == 0 {
+		return
+	}
+	for _, p := range block.pulses {
+		absQ := int(p)
+		if absQ < 0 {
+			absQ = -absQ
+		}
+		for bit := block.nLShifts - 1; bit >= 0; bit-- {
+			enc.EncodeIcdf((absQ>>bit)&1, silkLSBICDFDec[:], 8)
+		}
+	}
+}
+
+func encodePulseSigns(enc *entcode.Encoder, blocks []pulseBlock, signalType, quantOffset int) {
+	signRow := signalType*2 + quantOffset
+	if signRow < 0 {
+		signRow = 0
+	}
+	if signRow > 5 {
+		signRow = 5
+	}
+
+	for _, block := range blocks {
+		p := block.sum & 0x1F
+		if p == 0 {
+			continue
+		}
+		col := p
+		if col > 6 {
+			col = 6
+		}
+		icdf2 := [2]uint8{silkSignICDF[signRow][col], 0}
+		for _, pulse := range block.pulses {
+			if pulse == 0 {
+				continue
+			}
+			symbol := 1
+			if pulse < 0 {
+				symbol = 0
+			}
+			enc.EncodeIcdf(symbol, icdf2[:], 8)
+		}
 	}
 }
 

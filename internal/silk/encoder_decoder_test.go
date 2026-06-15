@@ -266,6 +266,99 @@ func TestEncoderStructuredMonoRangeStream(t *testing.T) {
 	}
 }
 
+func TestEncoderStructuredPulseEncoding(t *testing.T) {
+	enc, err := NewEncoder(8000, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder() error = %v", err)
+	}
+	dec, err := NewDecoder(8000, 1)
+	if err != nil {
+		t.Fatalf("NewDecoder() error = %v", err)
+	}
+
+	frameSize := 8000 / 50
+	signal := make([]float64, frameSize)
+	for i := range signal {
+		ti := float64(i) / 8000.0
+		signal[i] = 2.0*math.Sin(2*math.Pi*200*ti) + 0.7*math.Sin(2*math.Pi*600*ti)
+	}
+
+	var packet []byte
+	for attempt := 0; attempt < VADHistorySize+2; attempt++ {
+		packet, err = enc.Encode(signal)
+		if err != nil {
+			t.Fatalf("Encode() error = %v", err)
+		}
+	}
+
+	tr := &decodeTrace{}
+	dec.trace = tr
+	if _, err := dec.Decode(packet); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	if len(tr.Frames) != 1 {
+		t.Fatalf("traced frames = %d, want 1", len(tr.Frames))
+	}
+	fr := tr.Frames[0]
+	if fr.SignalType != SignalTypeUnvoiced {
+		t.Fatalf("signalType=%d, want unvoiced speech frame", fr.SignalType)
+	}
+	if fr.RateLevelIdx < 0 || fr.RateLevelIdx >= nRateLevels-1 {
+		t.Fatalf("rateLevelIdx=%d, want encoder-selected SILK rate level", fr.RateLevelIdx)
+	}
+
+	iter := frameSize >> log2ShellCodecFrameLen
+	if iter*shellCodecFrameLength < frameSize {
+		iter++
+	}
+	if len(fr.SumPulses) != iter {
+		t.Fatalf("sumPulses len=%d, want %d", len(fr.SumPulses), iter)
+	}
+
+	nonZeroBlocks := 0
+	positive, negative := 0, 0
+	for block := 0; block < iter; block++ {
+		start := block * shellCodecFrameLength
+		end := start + shellCodecFrameLength
+		if end > len(fr.Pulses) {
+			end = len(fr.Pulses)
+		}
+		absSum := 0
+		for _, pulse := range fr.Pulses[start:end] {
+			switch {
+			case pulse > 0:
+				positive++
+				absSum += int(pulse)
+			case pulse < 0:
+				negative++
+				absSum += int(-pulse)
+			}
+		}
+		if absSum > 0 {
+			nonZeroBlocks++
+		}
+		if got := fr.SumPulses[block] & 0x1F; got != absSum {
+			t.Fatalf("block %d sumPulses=%d, abs pulse sum=%d", block, got, absSum)
+		}
+	}
+	if nonZeroBlocks == 0 {
+		t.Fatal("decoded pulse stream has no non-zero shell blocks")
+	}
+	if positive == 0 || negative == 0 {
+		t.Fatalf("decoded pulse signs positive=%d negative=%d, want both signs", positive, negative)
+	}
+
+	nonZeroExc := 0
+	for _, exc := range fr.ExcQ14 {
+		if exc != 0 {
+			nonZeroExc++
+		}
+	}
+	if nonZeroExc == 0 {
+		t.Fatal("decoded excitation is all zero")
+	}
+}
+
 // Test encoder with invalid PCM length
 func TestEncoderInvalidPCMLength(t *testing.T) {
 	enc, err := NewEncoder(8000, 1)

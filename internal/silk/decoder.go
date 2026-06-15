@@ -259,6 +259,7 @@ type frameTrace struct {
 	LTPCoefQ14      []int16 // flattened nSubframes*5
 	LTPScaleQ14     int16
 	Seed            int32
+	RateLevelIdx    int
 	SumPulses       []int
 	Pulses          []int16
 	ExcQ14          []int32
@@ -1543,6 +1544,11 @@ func (d *Decoder) decodePulses(dec *entcode.Decoder, signalType, quantOffset, fr
 		d.lastTellBeforeSigns = dec.ECTell()
 	}
 	d.decodeSigns(dec, pulses, alignedLen, signalType, quantOffset, sumPulses)
+	if d.trace != nil && len(d.trace.Frames) > 0 {
+		tf := &d.trace.Frames[len(d.trace.Frames)-1]
+		tf.RateLevelIdx = rateLevelIdx
+		tf.SumPulses = append([]int(nil), sumPulses...)
+	}
 	return pulses[:frameLen]
 }
 

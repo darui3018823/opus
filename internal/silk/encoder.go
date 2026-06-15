@@ -28,6 +28,14 @@ type Encoder struct {
 	prevGainIdx    int       // Previous absolute gain index, matching decoder state
 }
 
+type nlsfAnalysis struct {
+	cb1Idx       int
+	rawIdx       []int
+	nlsfQ15      []int16
+	lpcQ12       []int16
+	interpFactor int
+}
+
 // NewEncoder creates a new 20 ms SILK encoder.
 func NewEncoder(sampleRate, channels int) (*Encoder, error) {
 	return NewEncoderWithFrameMs(sampleRate, channels, 20)
@@ -174,11 +182,11 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	e.encodeGains(enc, signalType, gainIdx, conditionalGain)
 
 	cb := getNLSFCB(e.lpcOrder)
-	cb1Idx := e.defaultNLSFIndex(signalType, cb)
-	e.encodeNLSF(enc, cb, signalType, cb1Idx)
+	nlsf := e.analyzeNLSF(signal, cb, signalType)
+	e.encodeNLSF(enc, cb, signalType, nlsf)
 
 	if e.nSubframes == 4 {
-		enc.EncodeIcdf(4, silkNLSFInterpFactorICDF[:], 8) // No interpolation.
+		enc.EncodeIcdf(nlsf.interpFactor, silkNLSFInterpFactorICDF[:], 8)
 	}
 
 	if signalType == SignalTypeVoiced {
@@ -186,9 +194,10 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	}
 
 	enc.EncodeIcdf(0, silkUniform4ICDF[:], 8) // Seed.
-	excitation := e.analysisExcitation(signal, cb, cb1Idx, signalType, pitchLag, pitchGain)
+	excitation := e.analysisExcitation(signal, nlsf.lpcQ12, signalType, pitchLag, pitchGain)
 	e.encodePulses(enc, excitation, signalType, quantOffset)
 
+	e.prevNLSF = nlsfQ15ToRadians(nlsf.nlsfQ15)
 	e.prevGainIdx = gainIdx
 	e.prevEnergy = computeEnergy(signal)
 	e.prevSignalType = signalType
@@ -358,17 +367,10 @@ func selectLTPGain(pitchGain float64) (int, int) {
 	return bestPer, bestIdx
 }
 
-func (e *Encoder) analysisExcitation(signal []float64, cb *nlsfCBParams, cb1Idx, signalType, pitchLag int, pitchGain float64) []float64 {
+func (e *Encoder) analysisExcitation(signal []float64, lpcQ12 []int16, signalType, pitchLag int, pitchGain float64) []float64 {
 	if signalType == SignalTypeInactive {
 		return make([]float64, len(signal))
 	}
-
-	nlsfQ15 := make([]int16, e.lpcOrder)
-	for i := 0; i < e.lpcOrder; i++ {
-		nlsfQ15[i] = int16(int32(cb.cb1Q8[cb1Idx*e.lpcOrder+i]) << 7)
-	}
-	silkNLSFStabilize(nlsfQ15, cb.deltaMinQ15, e.lpcOrder)
-	lpcQ12 := nlsfToLPCLibopus(nlsfQ15, e.lpcOrder)
 
 	residual := make([]float64, len(signal))
 	for i := range signal {
@@ -478,13 +480,161 @@ func (e *Encoder) defaultNLSFIndex(signalType int, cb *nlsfCBParams) int {
 	return 10
 }
 
-func (e *Encoder) encodeNLSF(enc *entcode.Encoder, cb *nlsfCBParams, signalType, cb1Idx int) {
+func (e *Encoder) analyzeNLSF(signal []float64, cb *nlsfCBParams, signalType int) nlsfAnalysis {
+	rawIdx := make([]int, cb.order)
+	cb1Idx := e.defaultNLSFIndex(signalType, cb)
+	if signalType != SignalTypeInactive {
+		cb1Idx = bestNLSFStage1(signal, cb)
+		rawIdx = refineNLSFResidual(signal, cb, cb1Idx)
+	}
+
+	nlsfQ15 := reconstructNLSFQ15(cb, cb1Idx, rawIdx)
+	lpcQ12 := nlsfToLPCLibopus(nlsfQ15, cb.order)
+	return nlsfAnalysis{
+		cb1Idx:       cb1Idx,
+		rawIdx:       rawIdx,
+		nlsfQ15:      nlsfQ15,
+		lpcQ12:       lpcQ12,
+		interpFactor: 4,
+	}
+}
+
+func bestNLSFStage1(signal []float64, cb *nlsfCBParams) int {
+	bestIdx := 0
+	bestCost := math.Inf(1)
+	rawIdx := make([]int, cb.order)
+	for idx := 0; idx < cb.nEntries; idx++ {
+		nlsfQ15 := reconstructNLSFQ15(cb, idx, rawIdx)
+		lpcQ12 := nlsfToLPCLibopus(nlsfQ15, cb.order)
+		cost := lpcResidualEnergy(signal, lpcQ12)
+		if cost < bestCost {
+			bestCost = cost
+			bestIdx = idx
+		}
+	}
+	return bestIdx
+}
+
+func refineNLSFResidual(signal []float64, cb *nlsfCBParams, cb1Idx int) []int {
+	rawIdx := make([]int, cb.order)
+	bestCost := lpcResidualEnergy(signal, nlsfToLPCLibopus(reconstructNLSFQ15(cb, cb1Idx, rawIdx), cb.order))
+
+	for pass := 0; pass < 2; pass++ {
+		improved := false
+		for i := 0; i < cb.order; i++ {
+			bestVal := rawIdx[i]
+			for _, candidate := range []int{-3, -2, -1, 0, 1, 2, 3} {
+				if candidate == rawIdx[i] {
+					continue
+				}
+				trial := append([]int(nil), rawIdx...)
+				trial[i] = candidate
+				nlsfQ15 := reconstructNLSFQ15(cb, cb1Idx, trial)
+				cost := lpcResidualEnergy(signal, nlsfToLPCLibopus(nlsfQ15, cb.order))
+				if cost < bestCost {
+					bestCost = cost
+					bestVal = candidate
+				}
+			}
+			if bestVal != rawIdx[i] {
+				rawIdx[i] = bestVal
+				improved = true
+			}
+		}
+		if !improved {
+			break
+		}
+	}
+	return rawIdx
+}
+
+func reconstructNLSFQ15(cb *nlsfCBParams, cb1Idx int, rawIdx []int) []int16 {
 	if cb1Idx < 0 {
 		cb1Idx = 0
 	}
 	if cb1Idx >= cb.nEntries {
 		cb1Idx = cb.nEntries - 1
 	}
+
+	const nlsfQuantLevelAdjQ10 = int32(102)
+	quantStepSizeQ16 := int32(11796)
+	if cb.order == 16 {
+		quantStepSizeQ16 = 9830
+	}
+
+	predQ8 := make([]uint8, cb.order)
+	ecSelBase := cb1Idx * (cb.order / 2)
+	for i := 0; i < cb.order; i += 2 {
+		entry := cb.cb2Select[ecSelBase+i/2]
+		predQ8[i] = cb.predQ8[i+int((entry&1))*int(cb.order-1)]
+		predQ8[i+1] = cb.predQ8[i+int((entry>>4)&1)*int(cb.order-1)+1]
+	}
+
+	resQ10 := make([]int32, cb.order)
+	outQ10 := int32(0)
+	for i := cb.order - 1; i >= 0; i-- {
+		idx := 0
+		if i < len(rawIdx) {
+			idx = clampInt(rawIdx[i], -4, 4)
+		}
+		predQ10 := (outQ10 * int32(predQ8[i])) >> 8
+		outQ10 = int32(idx) << 10
+		if outQ10 > 0 {
+			outQ10 -= nlsfQuantLevelAdjQ10
+		} else if outQ10 < 0 {
+			outQ10 += nlsfQuantLevelAdjQ10
+		}
+		outQ10 = predQ10 + int32((int64(outQ10)*int64(quantStepSizeQ16))>>16)
+		resQ10[i] = outQ10
+	}
+
+	nlsfQ15 := make([]int16, cb.order)
+	for i := 0; i < cb.order; i++ {
+		cb1Val := int32(cb.cb1Q8[cb1Idx*cb.order+i])
+		wghtQ9 := int32(cb.cb1WghtQ9[cb1Idx*cb.order+i])
+		div := int32(0)
+		if wghtQ9 != 0 {
+			div = (resQ10[i] << 14) / wghtQ9
+		}
+		tmp := div + (cb1Val << 7)
+		if tmp < 0 {
+			tmp = 0
+		}
+		if tmp > 32767 {
+			tmp = 32767
+		}
+		nlsfQ15[i] = int16(tmp)
+	}
+	silkNLSFStabilize(nlsfQ15, cb.deltaMinQ15, cb.order)
+	return nlsfQ15
+}
+
+func lpcResidualEnergy(signal []float64, lpcQ12 []int16) float64 {
+	if len(signal) == 0 {
+		return 0
+	}
+	energy := 0.0
+	for i := range signal {
+		pred := 0.0
+		for j := 0; j < len(lpcQ12) && j < i; j++ {
+			pred += float64(lpcQ12[j]) / 4096.0 * signal[i-j-1]
+		}
+		err := signal[i] - pred
+		energy += err * err
+	}
+	return energy / float64(len(signal))
+}
+
+func nlsfQ15ToRadians(nlsfQ15 []int16) []float64 {
+	out := make([]float64, len(nlsfQ15))
+	for i, v := range nlsfQ15 {
+		out[i] = float64(v) / 32768.0 * math.Pi
+	}
+	return out
+}
+
+func (e *Encoder) encodeNLSF(enc *entcode.Encoder, cb *nlsfCBParams, signalType int, analysis nlsfAnalysis) {
+	cb1Idx := clampInt(analysis.cb1Idx, 0, cb.nEntries-1)
 	offset := (signalType >> 1) * cb.nEntries
 	enc.EncodeIcdf(cb1Idx, cb.cb1ICDF[offset:offset+cb.nEntries], 8)
 
@@ -493,9 +643,16 @@ func (e *Encoder) encodeNLSF(enc *entcode.Encoder, cb *nlsfCBParams, signalType,
 		entry := cb.cb2Select[ecSelBase+i/2]
 		ecIx0 := ((int(entry) >> 1) & 7) * 9
 		ecIx1 := ((int(entry) >> 5) & 7) * 9
-		enc.EncodeIcdf(4, cb.cb2ICDF[ecIx0:ecIx0+9], 8)
-		enc.EncodeIcdf(4, cb.cb2ICDF[ecIx1:ecIx1+9], 8)
+		enc.EncodeIcdf(nlsfSymbol(analysis.rawIdx, i), cb.cb2ICDF[ecIx0:ecIx0+9], 8)
+		enc.EncodeIcdf(nlsfSymbol(analysis.rawIdx, i+1), cb.cb2ICDF[ecIx1:ecIx1+9], 8)
 	}
+}
+
+func nlsfSymbol(rawIdx []int, i int) int {
+	if i >= len(rawIdx) {
+		return 4
+	}
+	return clampInt(rawIdx[i], -3, 3) + 4
 }
 
 type pulseBlock struct {

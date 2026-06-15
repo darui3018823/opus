@@ -379,7 +379,7 @@ The SILK package contains:
 - NLSF codebooks and NLSF-to-LPC conversion
 - gain, pitch, LTP, pulse, shell, and stereo helper tables
 - LPC, pitch, NLSF, gain, and VAD helpers
-- SILK Encoder slice 1/2/3 foundation: the internal encoder can create 10 ms or
+- SILK Encoder slice 1/2/3/4 foundation: the internal encoder can create 10 ms or
   20 ms mono range streams with the decoder-compatible SILK ordering (all VAD
   flags, LBRR flag, then per-frame type/gain/NLSF/interp/seed/pulse symbols)
   and can pack multiple SILK frames into one shared range stream. Slice 2
@@ -390,8 +390,11 @@ The SILK package contains:
   active frames can be classified as voiced using normalized pitch correlation,
   encode absolute pitch lag, flat pitch contour, LTP codebook gains, and LTP
   scale in the decoder-compatible order, and drive pulse coding from a
-  short-term/LTP residual rather than raw samples. The analysis remains
-  intentionally simple: fixed NLSF residuals, no stereo coding, no
+  short-term/LTP residual rather than raw samples. Slice 4 replaced the fixed
+  NLSF payload with input-adaptive stage-1 selection and bounded stage-2
+  residual indices, chosen by decoder-compatible LPC residual energy and
+  verified by range encode/decode trace symmetry. The analysis remains
+  intentionally simple: no LPC-to-NLSF root solve, no stereo coding, no
   libopus-equivalent residual quantization/noise shaping, and no top-level Opus
   encoder integration yet.
 

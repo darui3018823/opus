@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"math"
 	"testing"
+
+	"github.com/darui3018823/opus/internal/entcode"
 )
 
 // Test encoder creation
@@ -426,6 +428,73 @@ func TestEncoderVoicedPitchLTPEncoding(t *testing.T) {
 	}
 	if nonZeroPulses == 0 {
 		t.Fatal("voiced frame decoded all-zero residual pulses")
+	}
+}
+
+func TestEncoderAdaptiveNLSFEncoding(t *testing.T) {
+	enc, err := NewEncoder(8000, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder() error = %v", err)
+	}
+
+	frameSize := 8000 / 50
+	signal := make([]float64, frameSize)
+	for i := range signal {
+		t := float64(i) / 8000.0
+		signal[i] = 1.2*math.Sin(2*math.Pi*700*t) + 0.7*math.Sin(2*math.Pi*1500*t)
+		if i%9 == 0 {
+			signal[i] += 0.25
+		}
+	}
+
+	cb := getNLSFCB(enc.lpcOrder)
+	analysis := enc.analyzeNLSF(signal, cb, SignalTypeUnvoiced)
+
+	fixedRaw := make([]int, cb.order)
+	fixedIdx := enc.defaultNLSFIndex(SignalTypeUnvoiced, cb)
+	fixedLPC := nlsfToLPCLibopus(reconstructNLSFQ15(cb, fixedIdx, fixedRaw), cb.order)
+	if got, fixed := lpcResidualEnergy(signal, analysis.lpcQ12), lpcResidualEnergy(signal, fixedLPC); got > fixed+1e-12 {
+		t.Fatalf("adaptive NLSF residual energy=%g, fixed default=%g", got, fixed)
+	}
+	if analysis.cb1Idx == fixedIdx {
+		allZero := true
+		for _, idx := range analysis.rawIdx {
+			if idx != 0 {
+				allZero = false
+				break
+			}
+		}
+		if allZero {
+			t.Fatalf("adaptive NLSF stayed at fixed cb1=%d with zero residuals", fixedIdx)
+		}
+	}
+
+	rangeEnc := entcode.NewEncoder(64)
+	enc.encodeNLSF(rangeEnc, cb, SignalTypeUnvoiced, analysis)
+	rangeEnc.Flush()
+
+	dec, err := NewDecoder(8000, 1)
+	if err != nil {
+		t.Fatalf("NewDecoder() error = %v", err)
+	}
+	rangeDec := entcode.NewDecoder(rangeEnc.Bytes())
+	gotQ15, gotIndices, err := dec.decodeNLSF(rangeDec, cb, SignalTypeUnvoiced)
+	if err != nil {
+		t.Fatalf("decodeNLSF() error = %v", err)
+	}
+	if gotIndices[0] != analysis.cb1Idx {
+		t.Fatalf("decoded cb1 index=%d, want %d", gotIndices[0], analysis.cb1Idx)
+	}
+	for i := 0; i < cb.order; i++ {
+		want := clampInt(analysis.rawIdx[i], -3, 3)
+		if gotIndices[i+1] != want {
+			t.Fatalf("decoded raw NLSF index[%d]=%d, want %d", i, gotIndices[i+1], want)
+		}
+	}
+	for i := range gotQ15 {
+		if gotQ15[i] != analysis.nlsfQ15[i] {
+			t.Fatalf("decoded NLSF_Q15[%d]=%d, want %d", i, gotQ15[i], analysis.nlsfQ15[i])
+		}
 	}
 }
 

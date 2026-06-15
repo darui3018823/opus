@@ -286,7 +286,13 @@ func (e *Encoder) shouldEncodeSILKOnly() bool {
 	if e.application == ApplicationRestrictedLowDelay {
 		return false
 	}
-	if e.application != ApplicationVOIP && e.celtEncoder.SignalTypeHint() != SignalVoice {
+
+	// SILK encode support is intentionally narrow: only speech intent may enter
+	// it. ApplicationVOIP derives voice intent by default, SignalVoice can opt
+	// other applications in, and SignalMusic explicitly keeps the packet on CELT.
+	signal := e.celtEncoder.SignalTypeHint()
+	voiceIntent := signal == SignalVoice || (signal == SignalAuto && e.application == ApplicationVOIP)
+	if !voiceIntent {
 		return false
 	}
 	if e.bitrate > 40000 {

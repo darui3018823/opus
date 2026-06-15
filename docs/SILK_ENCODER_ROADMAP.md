@@ -167,6 +167,22 @@ Exit criteria:
 
 ## Slice 10: Mode And Rate Selection Polish
 
+Status: Complete (2026-06-15)
+
+Implemented:
+
+- Hardened the top-level SILK-only decision boundary: mono native 8/12/16 kHz
+  speech, bitrate <= 40 kbps, non-restricted-low-delay, and no forced/max
+  bandwidth below the native SILK bandwidth.
+- Made explicit `SignalMusic` keep even a VOIP encoder on CELT; `SignalVoice`
+  remains the explicit opt-in for non-VOIP applications, and `SignalAuto`
+  follows the application default.
+- Added packet-TOC tests for the 40 kbps boundary, application/signal
+  interaction, stereo and 48 kHz CELT fallbacks, forced/max bandwidth
+  interaction, and VBR/DTX/padding interaction.
+- Updated public docs to describe the limited SILK-only speech path without
+  requiring readers to inspect the encoder code.
+
 Purpose: make public SILK selection predictable and documented.
 
 Scope:

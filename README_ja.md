@@ -11,18 +11,20 @@
 [Opus オーディオコーデック](https://opus-codec.org/)（RFC 6716 / RFC 8251）の
 **ランタイム CGO 依存なし**の Pure Go 実装です。**デコーダー**は公式 RFC 8251
 テストベクター 12 個すべてに合格し（RMSE < 0.001）、libopus 1.6.1 リファレンスと
-フレーム単位で一致します。**エンコーダー**は CELT quality pipeline を実装し、
-libopus でデコード可能な標準 Opus パケットを出力します（[ステータス](#ステータス)参照）。
+フレーム単位で一致します。**エンコーダー**は CELT quality pipeline と、限定的な
+モノラル低ビットレート SILK-only 音声経路を実装し、libopus でデコード可能な
+標準 Opus パケットを出力します（[ステータス](#ステータス)参照）。
 
-> 補足: エンコーダーは CELT-only で、libopus のエンコーダーとはビット精度一致
-> しません。SILK-only / ハイブリッドのエンコード経路はまだありません。
+> 補足: エンコーダーは libopus のエンコーダーとはビット精度一致しません。
+> CELT 経路は Pure Go での音声・音楽エンコードに利用できます。SILK 経路は
+> モノラル低ビットレート音声に限定され、ハイブリッドエンコードは未実装です。
 
 ## ステータス
 
 | 領域 | 状態 |
 |------|------|
 | **デコーダー** | ✅ 公式 RFC 8251 ベクター 12/12 合格（RMSE < 0.001）。libopus 1.6.1 と一致。SILK / CELT / ハイブリッド（SILK+CELT）を再構成済み（ハイブリッド SILK→CELT redundancy 含む）。 |
-| **エンコーダー** | ✅ CELT quality pipeline（Phase 1+2）。libopus 1.6.1 がデコードできる標準 Opus パケットを出力。64 kbps の目安 SNR: 440 Hz 約 48 dB、1 kHz 約 47 dB、ステレオ約 43 dB。libopus とはビット精度一致**ではない**。SILK/hybrid エンコード経路は未実装。 |
+| **エンコーダー** | ✅ CELT quality pipeline（Phase 1+2）と、native 8/12/16 kHz の低ビットレート音声向け限定モノラル SILK-only エンコード。libopus 1.6.1 がデコードできる標準 Opus パケットを出力。64 kbps の目安 SNR: 440 Hz 約 48 dB、1 kHz 約 47 dB、ステレオ約 43 dB。libopus とはビット精度一致**ではない**。ハイブリッドエンコードは未実装。 |
 | **CGO** | ランタイム依存なし。libopus ラッパーは参照テスト専用で `opusref` ビルドタグ下にのみ存在。 |
 | **CI** | `test` / `race` / `bench` / `fuzz` を **amd64・arm64** で実行。 |
 
@@ -130,6 +132,12 @@ _ = packet
   エラーになります。
 - **エンコーダー帯域**: 信号内容に基づく自動検出、または
   `SetBandwidth` / `SetMaxBandwidth` による明示指定。NB/WB/SWB/FB に対応。
+- **エンコーダーモード選択**: 通常の音声・音楽、ステレオ、restricted-low-delay、
+  24/48 kHz 入力、40 kbps 超のビットレートでは CELT を使います。限定的な
+  SILK-only 経路は、8/12/16 kHz のモノラル音声で、`ApplicationVOIP` または
+  `SignalVoice` が有効、ビットレートが 40 kbps 以下、かつ `SetBandwidth` /
+  `SetMaxBandwidth` が native SILK 帯域未満に制限していない場合だけ選択されます。
+  `SignalMusic` は CELT を維持します。
 - **アプリケーションタイプ**（帯域しきい値や transient 判定を調整）:
   - `opus.ApplicationVOIP` — voice 向け、狭めの帯域しきい値
   - `opus.ApplicationAudio` — music/general 向け
@@ -202,8 +210,9 @@ github.com/darui3018823/opus/
 **デコードフロー**: Opus パケット → TOC 解析 → CELT または SILK/ハイブリッド経路 →
 レンジデコード + 再構成 → 必要に応じてリサンプル/チャンネル調整 → PCM。
 
-**エンコードフロー**: PCM → 必要なら 48kHz へリサンプル → CELT エンコーダー（MDCT、
-バンド処理、PVQ）→ レンジコーダー → TOC 付加 → Opus パケット。
+**エンコードフロー**: PCM → モード選択 → SILK-only モノラル音声エンコード、または
+必要なら 48kHz へリサンプルして CELT エンコード（MDCT、バンド処理、PVQ）→
+レンジコーダー → TOC 付加 → Opus パケット。
 
 ## ビルドとテスト
 
@@ -267,7 +276,9 @@ GitHub Actions ワークフロー 4 本。いずれも **amd64（`ubuntu-latest`
 
 ## 制限事項
 
-- エンコーダーは CELT-only です。SILK-only / ハイブリッドのエンコード経路はありません。
+- SILK-only エンコードはモノラル低ビットレート音声に限定されています。ステレオ
+  SILK、24/48 kHz 入力からの SILK ダウンサンプリング、ハイブリッドエンコードは
+  まだありません。
 - エンコーダーは libopus とビット精度一致ではありませんが、準拠デコーダー
   （libopus を含む）がデコードできる標準 Opus パケットを出力します。
 - `DecodeFEC` は現状 PLC フォールバックで、パケット FEC 抽出ではありません。

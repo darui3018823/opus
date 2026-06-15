@@ -42,11 +42,20 @@ Accepted sample rates are `8000`, `12000`, `16000`, `24000`, and `48000`.
 Accepted channel counts are mono and stereo.
 
 The top-level encoder always creates an internal CELT encoder at 48 kHz and
-uses a 20 ms internal CELT frame (`960` samples per channel). Non-48 kHz input
-is resampled to 48 kHz before CELT encoding. The emitted TOC byte is CELT-only
-20 ms, with the **coded bandwidth selected per the input sample rate, target
-bitrate, explicit bandwidth settings, and signal-content detector** (see Slice
-2-6 and the post-2-6 notes below); it is no longer always fullband.
+uses a 20 ms internal CELT frame (`960` samples per channel) for the general
+audio path. Non-48 kHz CELT input is resampled to 48 kHz before CELT encoding.
+The CELT emitted TOC byte is CELT-only 20 ms, with the **coded bandwidth
+selected per the input sample rate, target bitrate, explicit bandwidth settings,
+and signal-content detector** (see Slice 2-6 and the post-2-6 notes below); it
+is no longer always fullband.
+
+As of SILK Encoder slice 6, the top-level encoder can also emit a limited
+SILK-only path for mono speech: `ApplicationVOIP` or an explicit voice signal
+hint, input rates that directly map to SILK-only Opus bandwidths (8 kHz NB,
+12 kHz MB, 16 kHz WB), and target bitrates up to 40 kbps. That path uses the
+internal SILK encoder, emits SILK-only 20 ms TOC configs, and represents 40-120
+ms packets with Opus count codes over one shared SILK range stream. Stereo,
+24/48 kHz SILK downsampling, and hybrid high-band encoding are still not wired.
 
 Supported public encode packet durations are exact 20 ms multiples from 20 ms
 through 120 ms (`frameSize == base20ms * 1..6`). Unsupported frame sizes and
@@ -239,13 +248,15 @@ durations over the Opus 120 ms packet limit are rejected with
 
 Current encoder limitations:
 
-- `application` and `SignalType` drive encoder heuristics, but do not select
-  SILK-only or hybrid modes.
+- `application` and `SignalType` drive encoder heuristics and can select the
+  limited mono low-bitrate SILK-only path, but do not yet select stereo SILK,
+  resampled SILK, or hybrid modes.
 - VBR/CVBR affects CELT target sizing and packet sizes, but the rate controller
   is still a simplified CELT-only implementation rather than libopus-equivalent
   full mode/rate control.
 - `EncodeFloat` uses `float64`; there is no public `EncodeFloat32` method.
-- The public encoder does not expose a SILK-only or hybrid encoder path.
+- The public encoder exposes only a limited mono, low-bitrate SILK-only speech
+  path; it does not yet expose full SILK mode selection or a hybrid encoder path.
 - The CELT encoder path is functional but not verified as bit-exact against
   libopus.
 
@@ -398,9 +409,13 @@ The SILK package contains:
   subframe gain indices, and LPC/LTP residual samples are quantized into SILK
   pulses using the same gain scale, quantization offset, seed sign flip, and
   LSB-capable shell path that the decoder consumes. The analysis remains
-  intentionally simple: no LPC-to-NLSF root solve, no stereo coding, no
-  libopus-equivalent delayed-decision NSQ or noise-shaping analysis, and no
-  top-level Opus encoder integration yet.
+  intentionally simple: no LPC-to-NLSF root solve, no stereo coding, and no
+  libopus-equivalent delayed-decision NSQ or noise-shaping analysis.
+- SILK Encoder slice 6 wires that internal mono encoder into the public Opus
+  encoder for low-bitrate VOIP/voice packets at 8/12/16 kHz. It packs one shared
+  SILK range stream per Opus packet and uses count codes for 40-120 ms packet
+  durations. The public integration is intentionally narrow: no stereo SILK, no
+  24/48 kHz downsampling into SILK, and no hybrid mode.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single
@@ -465,7 +480,8 @@ reference comparison.
 - No public multistream, surround, or Ogg Opus container API.
 - No public float32 encode/decode API.
 - No public `DecodePLC(pcm, frameSize)` API matching the README examples.
-- No top-level SILK-only encoder selection.
+- Top-level SILK-only encoder selection exists only for mono low-bitrate
+  VOIP/voice at 8/12/16 kHz.
 - No top-level hybrid encoder.
 - FEC decode is currently a PLC fallback, not packet FEC extraction.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
@@ -478,6 +494,7 @@ reference comparison.
 
 The codebase is a Pure Go Opus implementation with a decoder that passes all 12
 official RFC 8251 vectors and the libopus 1.6.1 reference comparison. The
-encoder is a CELT-only path with the current quality pipeline, standard packet
-output, and libopus decode cross-checks. It is not bit-exact with libopus and
-does not yet provide SILK-only or hybrid encode modes.
+encoder has a CELT path with the current quality pipeline, standard packet
+output, and libopus decode cross-checks, plus a narrow mono low-bitrate
+SILK-only speech path. It is not bit-exact with libopus and does not yet provide
+full SILK mode selection or hybrid encode modes.

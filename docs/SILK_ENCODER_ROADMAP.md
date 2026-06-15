@@ -1,6 +1,6 @@
 # SILK Encoder Roadmap
 
-Last updated: 2026-06-15
+Last updated: 2026-06-16
 
 This roadmap starts from the implementation snapshot in
 `docs/CURRENT_IMPLEMENTATION.md`. If this document and the current snapshot
@@ -286,6 +286,20 @@ Exit criteria:
 - Mode selection only enables stereo SILK where tests cover it.
 
 ## Slice 13: Hybrid Encoder
+
+Status: Complete (2026-06-16)
+
+Implemented:
+
+- Added shared-range encoder hooks for SILK and CELT so a hybrid Opus frame can
+  write `SILK -> hybrid redundancy flag -> CELT high-band start=17` into one
+  entropy stream.
+- Wired top-level high-bitrate 24/48 kHz voice mode selection to hybrid packets:
+  24 kHz emits SWB hybrid config 13, and 48 kHz emits FB hybrid config 15 when
+  bandwidth selection allows fullband.
+- Left hybrid redundancy disabled for this first slice.
+- Added normal round-trip tests for 20 ms and multi-frame hybrid packets and an
+  `opusref` libopus decoder cross-check for hybrid packets.
 
 Purpose: add Opus hybrid encode after the SILK low band is robust enough to be a
 useful base layer.

@@ -11,11 +11,12 @@ from the code state and takes precedence when this roadmap lags.
 
 - Decoder: complete for the current public API; passes all 12 official RFC 8251
   vectors and the libopus 1.6.1 reference comparison.
-- Encoder: CELT-only quality pipeline with transient handling, TF analysis,
+- Encoder: CELT quality pipeline with transient handling, TF analysis,
   allocation shaping, stereo/intensity decisions, signal-driven bandwidth,
-  VBR/CVBR, DTX, and multi-frame packetization through 120 ms. The encoder emits
-  standard Opus packets that libopus decodes, but is not bit-exact and does not
-  implement SILK-only or hybrid encode modes.
+  VBR/CVBR, DTX, and multi-frame packetization through 120 ms, plus limited
+  SILK-only and hybrid speech encode paths. The encoder emits standard Opus
+  packets that libopus decodes, but is not bit-exact and does not implement full
+  libopus-equivalent SILK/hybrid mode selection.
 - Runtime CGO: none. CGO is used only by optional `opusref` reference tests.
 
 ## Historical Milestones
@@ -76,8 +77,8 @@ from the code state and takes precedence when this roadmap lags.
 ### Remaining Current Tasks
 
 **SILK/hybrid encoder integration** 🔄
-- Add top-level mode selection and packet generation for SILK-only and hybrid
-  encode paths.
+- Broaden the current limited SILK-only and initial hybrid encode paths toward
+  fuller libopus mode/rate-control coverage.
 
 **FEC/PLC API parity** 🔄
 - Implement true packet FEC extraction and expose a public PLC API.
@@ -326,13 +327,13 @@ For each major component:
 ## Current Focus
 
 **Immediate priorities after v1.1.1**:
-1. 🔄 SILK-only and hybrid encoder integration.
+1. 🔄 Broader SILK/hybrid encoder mode coverage.
 2. 🔄 True FEC decode and public PLC API design.
 3. 🔄 Multistream/surround and Ogg Opus container APIs.
 4. 🔄 Encoder parity/quality refinements against libopus.
 5. 📝 Keep README and `CURRENT_IMPLEMENTATION.md` aligned with releases.
 
-**Next milestone**: choose and scope the SILK/hybrid encoder phase.
+**Next milestone**: broaden SILK/hybrid mode selection and rate-control parity.
 
 ## Notes
 

@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-06-15
+Last reviewed: 2026-06-16
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -59,9 +59,16 @@ That path uses the internal SILK encoder, emits SILK-only duration configs for
 multiple Opus frame streams. Explicit `SignalMusic`, restricted-low-delay,
 bitrates above 40 kbps, a forced bandwidth that cannot be represented by the
 selected SILK layer, or a max-bandwidth cap below the SILK bandwidth keep the
-encoder on CELT. DTX, VBR/CVBR, and packet padding do not by themselves opt the
-packet out of the supported SILK-only path. Hybrid high-band encoding is still
-not wired.
+encoder out of the SILK-only path. DTX, VBR/CVBR, and packet padding do not by
+themselves opt the packet out of the supported SILK-only path.
+
+As of SILK Encoder slice 13, high-bitrate 24/48 kHz voice input can emit hybrid
+packets. The encoder writes a 16 kHz SILK low band and CELT high band into one
+shared range stream in decoder-compatible order (`SILK -> hybrid redundancy flag
+-> CELT start=17`), with redundancy disabled. 24 kHz voice emits SWB hybrid
+config 13; 48 kHz voice emits FB hybrid config 15 when the selected bandwidth is
+fullband. Hybrid is currently limited to 20 ms Opus frames, optionally packed as
+standard multi-frame packets for longer public frame sizes.
 
 Supported public encode packet durations are exact 20 ms multiples from 20 ms
 through 120 ms (`frameSize == base20ms * 1..6`). Unsupported frame sizes and
@@ -256,13 +263,14 @@ Current encoder limitations:
 
 - `application` and `SignalType` drive encoder heuristics and can select the
   limited low-bitrate SILK-only path, including stereo and 24/48 kHz input
-  downsampled to WB SILK, but do not yet select hybrid modes.
+  downsampled to WB SILK, and the initial high-bitrate 24/48 kHz hybrid voice
+  path.
 - VBR/CVBR affects CELT target sizing and packet sizes, but the rate controller
   is still a simplified CELT-only implementation rather than libopus-equivalent
   full mode/rate control.
 - `EncodeFloat` uses `float64`; there is no public `EncodeFloat32` method.
-- The public encoder exposes only a limited low-bitrate SILK-only speech path;
-  it does not yet expose full SILK mode selection or a hybrid encoder path.
+- The public encoder exposes limited SILK-only and hybrid speech paths; it does
+  not yet expose full libopus-equivalent SILK/hybrid mode selection.
 - The CELT encoder path is functional but not verified as bit-exact against
   libopus.
 
@@ -428,9 +436,10 @@ The SILK package contains:
   Opus frame packing for longer supported durations. Slice 7 added libopus
   decoder cross-checks for the public mono SILK encode path and fixed the
   packetization so libopus accepts those packets. Slice 11 adds 24/48 kHz voice
-  input downsampling to a 16 kHz WB SILK layer, and Slice 12 adds conservative
-  stereo SILK mid/side packet writing with zero stereo predictors. The public
-  integration is still intentionally narrow: no hybrid mode. Slice 8 adds
+  input downsampling to a 16 kHz WB SILK layer, Slice 12 adds conservative
+  stereo SILK mid/side packet writing with zero stereo predictors, and Slice 13
+  adds the first public hybrid mode for high-bitrate 24/48 kHz voice. The public
+  integration is still intentionally narrow. Slice 8 adds
   deterministic quality/regression baselines for
   the internal mono SILK encoder and the public SILK-only path, covering silence,
   unvoiced/noise-like input, steady voiced tones, speech-like harmonics, and
@@ -456,7 +465,8 @@ Command checked:
 go test ./...
 ```
 
-Result on 2026-06-15: passing (`go vet ./...` and `go test ./...` exit 0).
+Result on 2026-06-16: passing (`go vet ./...`, `go test ./...`, and
+`go test -tags opusref ./...` exit 0).
 
 Passing package-level tests:
 
@@ -500,6 +510,8 @@ Notes:
   duration, output length, bounded peaks/energy, and coarse decoder/libopus
   reconstruction similarity. Normal tests now also cover 24/48 kHz downsampled
   voice input and stereo SILK round trips.
+- `TestCGOEncodeRefHybrid` cross-checks the initial public hybrid encoder path
+  with libopus for 24 kHz SWB mono and 48 kHz FB mono/stereo voice packets.
 - `TestSILKInternalQualityBaseline` and `TestEncoderSILKOnlyQualityBaseline`
   provide the Slice 8 SILK quality/regression baseline using deterministic
   synthetic mono fixtures. They run in normal `go test ./...` and log packet
@@ -519,16 +531,16 @@ reference comparison.
 - No public multistream, surround, or Ogg Opus container API.
 - No public float32 encode/decode API.
 - No public `DecodePLC(pcm, frameSize)` API matching the README examples.
-- Top-level SILK-only encoder selection exists only for low-bitrate
-  VOIP/voice; 24/48 kHz input is downsampled to WB SILK rather than preserving
-  high bands.
-- No top-level hybrid encoder.
+- Top-level SILK-only encoder selection exists only for low-bitrate VOIP/voice.
+- Top-level hybrid encoder selection exists only for high-bitrate 24/48 kHz
+  VOIP/voice; there is no full libopus-equivalent hybrid mode/rate-control
+  coverage.
 - FEC decode is currently a PLC fallback, not packet FEC extraction.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
   to full libopus-compatible mode/rate-control behavior.
 - Decoder parity is achieved on the official vectors and the libopus reference;
   the open correctness work is now on the encoder side (bit-exact CELT and the
-  SILK/hybrid encoder paths).
+  broader SILK/hybrid encoder paths).
 
 ## Practical Use Today
 
@@ -536,5 +548,5 @@ The codebase is a Pure Go Opus implementation with a decoder that passes all 12
 official RFC 8251 vectors and the libopus 1.6.1 reference comparison. The
 encoder has a CELT path with the current quality pipeline, standard packet
 output, and libopus decode cross-checks, plus a narrow low-bitrate SILK-only
-speech path. It is not bit-exact with libopus and does not yet provide
-full SILK mode selection or hybrid encode modes.
+speech path, and an initial high-bitrate 24/48 kHz hybrid voice path. It is not
+bit-exact with libopus and does not yet provide full SILK/hybrid mode selection.

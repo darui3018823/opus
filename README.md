@@ -17,14 +17,15 @@ standard Opus packets that libopus decodes correctly — see [Status](#status).
 
 > Note: the encoder is not bit-exact with libopus. The CELT path is suitable for
 > speech and music in pure Go. The SILK path is intentionally limited to
-> low-bitrate speech, and hybrid encoding is not yet implemented.
+> low-bitrate speech, and hybrid encoding is currently limited to high-bitrate
+> 24/48 kHz voice packets.
 
 ## Status
 
 | Area | State |
 |------|-------|
 | **Decoder** | ✅ Passes all 12 official RFC 8251 vectors (RMSE < 0.001); matches libopus 1.6.1 reference. SILK, CELT, and hybrid (SILK+CELT) modes are reconstructed, including hybrid SILK→CELT redundancy. |
-| **Encoder** | ✅ Full CELT quality pipeline (Phase 1+2) plus limited SILK-only speech encode for low-bitrate voice, including stereo and 24/48 kHz input downsampled to WB SILK. Emits standard Opus packets that libopus 1.6.1 decodes correctly. SNR: ~48 dB (440 Hz), ~47 dB (1 kHz), ~43 dB (stereo) at 64 kbps. **Not** bit-exact with libopus. Hybrid encode is not yet implemented. |
+| **Encoder** | ✅ Full CELT quality pipeline (Phase 1+2), limited SILK-only speech encode for low-bitrate voice, and initial hybrid speech encode for high-bitrate 24/48 kHz voice. Emits standard Opus packets that libopus 1.6.1 decodes correctly. SNR: ~48 dB (440 Hz), ~47 dB (1 kHz), ~43 dB (stereo) at 64 kbps. **Not** bit-exact with libopus. |
 | **CGO** | None at runtime. A libopus wrapper exists only for reference tests, behind the `opusref` build tag. |
 | **CI** | `test`, `race`, `bench`, and `fuzz` workflows run on **amd64 and arm64**. |
 

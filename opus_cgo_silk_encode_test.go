@@ -143,6 +143,95 @@ func TestCGOEncodeRefSILKOnly(t *testing.T) {
 	}
 }
 
+func TestCGOEncodeRefHybrid(t *testing.T) {
+	t.Logf("libopus version: %s", cgoref.Version())
+
+	cases := []struct {
+		name       string
+		rate       int
+		channels   int
+		bitrate    int
+		wantConfig int
+	}{
+		{name: "swb-24k-mono", rate: 24000, channels: 1, bitrate: 64000, wantConfig: 13},
+		{name: "fb-48k-mono", rate: 48000, channels: 1, bitrate: 64000, wantConfig: 15},
+		{name: "fb-48k-stereo", rate: 48000, channels: 2, bitrate: 96000, wantConfig: 15},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			enc, err := opus.NewEncoder(tc.rate, tc.channels, opus.ApplicationVOIP)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(tc.bitrate); err != nil {
+				t.Fatalf("SetBitrate: %v", err)
+			}
+			dec, err := opus.NewDecoder(tc.rate, tc.channels)
+			if err != nil {
+				t.Fatalf("NewDecoder: %v", err)
+			}
+			ref, err := cgoref.NewDecoder(tc.rate, tc.channels)
+			if err != nil {
+				t.Fatalf("cgoref.NewDecoder: %v", err)
+			}
+			defer ref.Close()
+
+			frameSize := tc.rate * 20 / 1000
+			maxSPC := tc.rate * 120 / 1000
+			var oursAll, refAll []float64
+			for p := 0; p < 8; p++ {
+				in := silkRefSpeechFrame(tc.rate, p*frameSize, frameSize, tc.channels)
+				pkt, err := enc.EncodeFloat(in, frameSize)
+				if err != nil {
+					t.Fatalf("packet %d: EncodeFloat: %v", p, err)
+				}
+				config := int((pkt[0] >> 3) & 0x1f)
+				if config != tc.wantConfig {
+					t.Fatalf("packet %d: TOC config=%d, want hybrid config %d (toc=0x%02x)", p, config, tc.wantConfig, pkt[0])
+				}
+				if code := int(pkt[0] & 0x03); code != 0 {
+					t.Fatalf("packet %d: count code=%d, want single-frame hybrid", p, code)
+				}
+
+				ours, err := dec.DecodeFloat(pkt)
+				if err != nil {
+					t.Fatalf("packet %d: DecodeFloat: %v", p, err)
+				}
+				refOut, err := ref.DecodeFloat(pkt, maxSPC)
+				if err != nil {
+					t.Fatalf("packet %d: libopus decode (hybrid packet non-conformant): %v", p, err)
+				}
+				wantSamples := frameSize * tc.channels
+				if len(ours) != wantSamples {
+					t.Fatalf("packet %d: decoder samples=%d, want %d", p, len(ours), wantSamples)
+				}
+				if len(refOut) != wantSamples {
+					t.Fatalf("packet %d: libopus samples=%d, want %d", p, len(refOut), wantSamples)
+				}
+				oursAll = append(oursAll, ours...)
+				for _, v := range refOut {
+					refAll = append(refAll, float64(v))
+				}
+			}
+
+			oursRMS, oursPeak := silkRefStats(oursAll)
+			refRMS, refPeak := silkRefStats(refAll)
+			if oursPeak > 1.5 || refPeak > 1.5 {
+				t.Fatalf("decoded peak too large: decoder=%g libopus=%g", oursPeak, refPeak)
+			}
+			if oursRMS < 1e-5 || refRMS < 1e-5 {
+				t.Fatalf("decoded output collapsed: decoder RMS=%g libopus RMS=%g", oursRMS, refRMS)
+			}
+			ratio := oursRMS / refRMS
+			if ratio < 0.5 || ratio > 2.0 {
+				t.Fatalf("decoder/libopus RMS ratio=%g outside coarse match range (decoder=%g libopus=%g)", ratio, oursRMS, refRMS)
+			}
+		})
+	}
+}
+
 func silkRefSpeechFrame(rate, start, n, channels int) []float64 {
 	out := make([]float64, n*channels)
 	for i := 0; i < n; i++ {

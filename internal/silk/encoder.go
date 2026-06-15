@@ -146,15 +146,30 @@ func (e *Encoder) Encode(pcm []float64) ([]byte, error) {
 // all frames, LBRR flags, then frame payloads in order. Stereo input is encoded
 // as a conservative mid/side pair with zero stereo predictors.
 func (e *Encoder) EncodeMulti(pcm []float64, nFrames int) ([]byte, error) {
+	enc := entcode.NewEncoder(64)
+	if err := e.EncodeMultiWithEncoder(enc, pcm, nFrames); err != nil {
+		return nil, err
+	}
+	enc.Flush()
+	return enc.Bytes(), nil
+}
+
+// EncodeMultiWithEncoder writes n consecutive SILK frames into an existing
+// range encoder. It is used by hybrid Opus packets, where SILK and CELT share
+// one entropy stream.
+func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nFrames int) error {
+	if enc == nil {
+		return fmt.Errorf("nil range encoder")
+	}
 	if nFrames < 1 {
-		return nil, fmt.Errorf("invalid frame count: %d", nFrames)
+		return fmt.Errorf("invalid frame count: %d", nFrames)
 	}
 	expected := e.frameSize * e.channels * nFrames
 	if len(pcm) != expected {
-		return nil, fmt.Errorf("invalid PCM length: got %d, expected %d", len(pcm), expected)
+		return fmt.Errorf("invalid PCM length: got %d, expected %d", len(pcm), expected)
 	}
 	if e.channels == 2 {
-		return e.encodeMultiStereo(pcm, nFrames)
+		return e.encodeMultiStereoWithEncoder(enc, pcm, nFrames)
 	}
 
 	frames := make([][]float64, nFrames)
@@ -166,7 +181,6 @@ func (e *Encoder) EncodeMulti(pcm []float64, nFrames int) ([]byte, error) {
 		vadFlags[frame] = e.vad.Detect(framePCM)
 	}
 
-	enc := entcode.NewEncoder(64)
 	for _, active := range vadFlags {
 		enc.EncodeBitLogp(active, 1)
 	}
@@ -175,13 +189,21 @@ func (e *Encoder) EncodeMulti(pcm []float64, nFrames int) ([]byte, error) {
 	for i, signal := range frames {
 		e.encodeRangeFrame(enc, signal, vadFlags[i], i > 0)
 	}
+	return nil
+}
+
+func (e *Encoder) encodeMultiStereo(pcm []float64, nFrames int) ([]byte, error) {
+	enc := entcode.NewEncoder(64)
+	if err := e.encodeMultiStereoWithEncoder(enc, pcm, nFrames); err != nil {
+		return nil, err
+	}
 	enc.Flush()
 	return enc.Bytes(), nil
 }
 
-func (e *Encoder) encodeMultiStereo(pcm []float64, nFrames int) ([]byte, error) {
+func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float64, nFrames int) error {
 	if e.side == nil {
-		return nil, fmt.Errorf("missing SILK side-channel encoder")
+		return fmt.Errorf("missing SILK side-channel encoder")
 	}
 
 	midFrames := make([][]float64, nFrames)
@@ -206,7 +228,6 @@ func (e *Encoder) encodeMultiStereo(pcm []float64, nFrames int) ([]byte, error) 
 		vadFlags[1][frame] = e.side.vad.Detect(side)
 	}
 
-	enc := entcode.NewEncoder(64)
 	for ch := 0; ch < 2; ch++ {
 		for _, active := range vadFlags[ch] {
 			enc.EncodeBitLogp(active, 1)
@@ -228,8 +249,7 @@ func (e *Encoder) encodeMultiStereo(pcm []float64, nFrames int) ([]byte, error) 
 		}
 		prevOnlyMiddle = onlyMiddle
 	}
-	enc.Flush()
-	return enc.Bytes(), nil
+	return nil
 }
 
 func encodeZeroStereoPred(enc *entcode.Encoder) {

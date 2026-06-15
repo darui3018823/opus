@@ -482,6 +482,61 @@ func TestEncoderSILKOnlyVBRDTXAndPaddingStillSelectSILK(t *testing.T) {
 	}
 }
 
+func TestEncoderHybridVoiceRoundTrip(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		rate       int
+		channels   int
+		bitrate    int
+		packetMs   int
+		wantConfig int
+		wantCode   int
+	}{
+		{name: "swb_24k_mono", rate: 24000, channels: 1, bitrate: 64000, packetMs: 20, wantConfig: 13, wantCode: 0},
+		{name: "fb_48k_mono", rate: 48000, channels: 1, bitrate: 64000, packetMs: 20, wantConfig: 15, wantCode: 0},
+		{name: "fb_48k_stereo_multiframe", rate: 48000, channels: 2, bitrate: 96000, packetMs: 40, wantConfig: 15, wantCode: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			enc, err := NewEncoder(tc.rate, tc.channels, ApplicationVOIP)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(tc.bitrate); err != nil {
+				t.Fatalf("SetBitrate: %v", err)
+			}
+
+			frameSize := tc.rate * tc.packetMs / 1000
+			pkt, err := enc.Encode(generateSine(220, tc.rate, tc.channels, frameSize), frameSize)
+			if err != nil {
+				t.Fatalf("Encode: %v", err)
+			}
+			config := int(pkt[0] >> 3)
+			if config != tc.wantConfig {
+				t.Fatalf("TOC config=%d, want hybrid config %d (toc=0x%02x)", config, tc.wantConfig, pkt[0])
+			}
+			if code := int(pkt[0] & 0x03); code != tc.wantCode {
+				t.Fatalf("count code=%d, want %d", code, tc.wantCode)
+			}
+			if gotStereo := (pkt[0] & 0x04) != 0; gotStereo != (tc.channels == 2) {
+				t.Fatalf("TOC stereo=%v, want %v", gotStereo, tc.channels == 2)
+			}
+
+			dec, err := NewDecoder(tc.rate, tc.channels)
+			if err != nil {
+				t.Fatalf("NewDecoder: %v", err)
+			}
+			decoded, err := dec.DecodeFloat(pkt)
+			if err != nil {
+				t.Fatalf("DecodeFloat: %v", err)
+			}
+			want := frameSize * tc.channels
+			if len(decoded) != want {
+				t.Fatalf("decoded samples=%d, want %d", len(decoded), want)
+			}
+		})
+	}
+}
+
 func rateName(rate int) string {
 	switch rate {
 	case 8000:

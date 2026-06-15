@@ -204,8 +204,27 @@ func (e *Encoder) targetBytes() int {
 
 // Encode encodes one CELT frame (interleaved float64 PCM, FrameSize*Channels).
 func (e *Encoder) Encode(samples []float64) ([]byte, error) {
+	_, out, err := e.encodeRange(samples, nil, e.targetBytes(), 0, -1)
+	return out, err
+}
+
+// EncodeHybrid writes the CELT high-band layer of a hybrid frame into an
+// already-started range encoder. The SILK layer must already have written its
+// symbols. totalBytes is the full shared Opus frame payload size.
+func (e *Encoder) EncodeHybrid(samples []float64, enc *entcode.Encoder, totalBytes, start, end int) error {
+	if enc == nil {
+		return errors.New("celt: nil range encoder")
+	}
+	if totalBytes < 2 {
+		return errors.New("celt: invalid hybrid payload size")
+	}
+	_, _, err := e.encodeRange(samples, enc, totalBytes, start, end)
+	return err
+}
+
+func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, maxTargetBytes, startBand, endBand int) (int, []byte, error) {
 	if len(samples) != e.mode.FrameSize*e.mode.Channels {
-		return nil, errors.New("celt: invalid input size")
+		return 0, nil, errors.New("celt: invalid input size")
 	}
 
 	ch := e.mode.Channels
@@ -214,14 +233,30 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	lm := e.mode.LM
 	frameSize := e.mode.FrameSize
 	ov := e.mode.Overlap
-	start, end := 0, numBands
-	if e.endBand > 0 && e.endBand < numBands {
+	shared := sharedEnc != nil
+	start, end := startBand, numBands
+	if start < 0 {
+		start = 0
+	}
+	if start > numBands {
+		start = numBands
+	}
+	if endBand > 0 {
+		end = endBand
+	} else if e.endBand > 0 && e.endBand < numBands {
 		end = e.endBand
+	}
+	if end > numBands {
+		end = numBands
+	}
+	if end < start {
+		end = start
 	}
 	M := 1 << uint(lm)
 	frameLen := M * int(EBands48000[numBands])
-
-	maxTargetBytes := e.targetBytes()
+	if maxTargetBytes < 2 {
+		maxTargetBytes = 2
+	}
 
 	// --- Analysis: pre-emphasis, forward MDCT, band energy, normalisation ---
 	X := make([]float64, ch*frameLen)
@@ -366,8 +401,9 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 			frameEnergy += amp * amp
 		}
 	}
-	if frameEnergy < silenceEnergyThreshold {
-		return e.encodeSilenceFrame(maxTargetBytes)
+	if frameEnergy < silenceEnergyThreshold && !shared {
+		out, err := e.encodeSilenceFrame(maxTargetBytes)
+		return maxTargetBytes, out, err
 	}
 
 	// --- patch_transient_decision (energy-rise fallback transient detector) ---
@@ -406,7 +442,7 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	//     get the full budget.
 	targetBytes := maxTargetBytes
 
-	if e.rateMode != RateModeCBR {
+	if e.rateMode != RateModeCBR && !shared {
 		// Sum log-domain band energies to estimate activity.
 		// EMean-subtracted logE is ~0 for a typical signal; very negative = quiet.
 		var activity float64
@@ -479,15 +515,19 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	// bitrates; doing the same unconditionally here would risk a low-bitrate
 	// stereo desync (the bitsLeft<30 qi-clamp in QuantizeCoarseEnergy can trip on
 	// the smaller decoder-side budget but not on the larger pre-shrink budget).
-	enc := entcode.NewEncoder(maxTargetBytes)
-	if targetBytes < maxTargetBytes {
-		enc.Shrink(targetBytes)
+	enc := sharedEnc
+	if enc == nil {
+		enc = entcode.NewEncoder(maxTargetBytes)
+		if targetBytes < maxTargetBytes {
+			enc.Shrink(targetBytes)
+		}
 	}
 
 	// === Header symbols, in decoder order (decodeCELTRange) ===
 
-	// Silence flag (logp 15) — first symbol. No silence detection yet.
-	if enc.ECTell()+1 <= totalBits {
+	// Silence flag (logp 15) — read only when ec_tell is still at the initial
+	// one-bit offset. Hybrid frames skip this after SILK has consumed bits.
+	if enc.ECTell() == 1 && enc.ECTell()+1 <= totalBits {
 		enc.EncodeBitLogp(false, 15)
 	}
 	etr(enc, "silence")
@@ -729,6 +769,9 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	}
 
 	etr(enc, "final")
+	if shared {
+		return targetBytes, nil, nil
+	}
 	enc.Flush()
 
 	// --- Rate mode: determine final packet size ---
@@ -777,7 +820,7 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 		copy(padded, out)
 		out = padded
 	}
-	return out, nil
+	return targetBytes, out, nil
 }
 
 // encodeSilenceFrame emits a CELT frame whose only bitstream content is the

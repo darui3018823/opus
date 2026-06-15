@@ -224,6 +224,9 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	if e.shouldEncodeSILKOnly() {
 		return e.encodeSILKOnlyPacket(pcm, nFrames)
 	}
+	if e.shouldEncodeHybrid(nFrames) {
+		return e.encodeHybridPacket(pcm, nFrames)
+	}
 
 	// Select the coded bandwidth (NB/WB/SWB/FB) and limit the CELT encoder's
 	// coded bands to match, then generate the base TOC byte for that bandwidth.
@@ -322,6 +325,99 @@ func (e *Encoder) shouldEncodeSILKOnly() bool {
 		return false
 	}
 	return true
+}
+
+func (e *Encoder) shouldEncodeHybrid(nFrames int) bool {
+	if e.silkEncoder == nil || e.silkSampleRate != 16000 {
+		return false
+	}
+	if nFrames < 1 || nFrames > 6 {
+		return false
+	}
+	if e.application == ApplicationRestrictedLowDelay {
+		return false
+	}
+	signal := e.celtEncoder.SignalTypeHint()
+	voiceIntent := signal == SignalVoice || (signal == SignalAuto && e.application == ApplicationVOIP)
+	if !voiceIntent || e.bitrate <= 40000 {
+		return false
+	}
+	bw := e.selectHybridBandwidth()
+	return bw == framing.BandwidthSuperwideband || bw == framing.BandwidthFullband
+}
+
+func (e *Encoder) selectHybridBandwidth() int {
+	bw := e.selectCeltBandwidth()
+	if bw < framing.BandwidthSuperwideband {
+		return bw
+	}
+	if e.sampleRate == 24000 && bw > framing.BandwidthSuperwideband {
+		return framing.BandwidthSuperwideband
+	}
+	return bw
+}
+
+func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames int) ([]byte, error) {
+	bw := e.selectHybridBandwidth()
+	toc, err := framing.GenerateTOCExt(framing.ModeHybrid, bw, e.channels, framing.FrameSize20ms)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate hybrid TOC: %w", err)
+	}
+
+	inputChunkLen := e.frameSize * e.channels
+	silkFrameSize := e.silkSampleRate * 20 / 1000
+	silkChunkLen := silkFrameSize * e.channels
+	celtEnd := celtEndBandForFramingBW(bw)
+	targetBytes := e.hybridFrameTargetBytes()
+
+	frames := make([][]byte, 0, nFrames)
+	for k := 0; k < nFrames; k++ {
+		chunk := pcm[k*inputChunkLen : (k+1)*inputChunkLen]
+		silkPCM := chunk
+		if e.silkResampler != nil {
+			silkPCM = e.silkResampler.Process(chunk)
+			silkPCM = padOrTrim(silkPCM, silkChunkLen)
+		}
+		celtInput := e.celtInputFrame(chunk)
+
+		enc := entcode.NewEncoder(targetBytes)
+		if err := e.silkEncoder.EncodeMultiWithEncoder(enc, silkPCM, 1); err != nil {
+			return nil, fmt.Errorf("SILK hybrid encoding failed: %w", err)
+		}
+		// Hybrid redundancy is disabled in this first encoder slice.
+		if enc.ECTell()+37 <= targetBytes*8 {
+			enc.EncodeBitLogp(false, 12)
+		}
+		if err := e.celtEncoder.EncodeHybrid(celtInput, enc, targetBytes, 17, celtEnd); err != nil {
+			return nil, fmt.Errorf("CELT hybrid encoding failed: %w", err)
+		}
+		enc.Flush()
+		frame := enc.Bytes()
+		if len(frame) < targetBytes {
+			padded := make([]byte, targetBytes)
+			copy(padded, frame)
+			frame = padded
+		}
+		frames = append(frames, frame)
+	}
+
+	vbr := e.rateMode != celt.RateModeCBR || e.dtx
+	payload, code, err := packOpusFramesPadded(frames, vbr, e.padBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack hybrid stream: %w", err)
+	}
+	return append([]byte{toc | byte(code)}, payload...), nil
+}
+
+func (e *Encoder) hybridFrameTargetBytes() int {
+	tb := int(float64(e.bitrate) * 0.020 / 8.0)
+	if tb < 2 {
+		tb = 2
+	}
+	if tb > 1275 {
+		tb = 1275
+	}
+	return tb
 }
 
 func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int) ([]byte, error) {
@@ -464,6 +560,16 @@ func (e *Encoder) validateFrameSize(frameSize int) (int, error) {
 // encodeOneCELTFrame resamples one 20 ms PCM chunk (if needed) and encodes it
 // into a single CELT frame payload (no TOC byte).
 func (e *Encoder) encodeOneCELTFrame(pcm []float64) ([]byte, error) {
+	celtInput := e.celtInputFrame(pcm)
+
+	compressed, err := e.celtEncoder.Encode(celtInput)
+	if err != nil {
+		return nil, fmt.Errorf("CELT encoding failed: %w", err)
+	}
+	return compressed, nil
+}
+
+func (e *Encoder) celtInputFrame(pcm []float64) []float64 {
 	var celtInput []float64
 	if e.inputResampler != nil {
 		// Resample from sampleRate to 48kHz.
@@ -475,12 +581,7 @@ func (e *Encoder) encodeOneCELTFrame(pcm []float64) ([]byte, error) {
 	} else {
 		celtInput = pcm
 	}
-
-	compressed, err := e.celtEncoder.Encode(celtInput)
-	if err != nil {
-		return nil, fmt.Errorf("CELT encoding failed: %w", err)
-	}
-	return compressed, nil
+	return celtInput
 }
 
 // padOrTrim adjusts a slice to exactly targetLen, padding with zeros or trimming.
@@ -649,6 +750,9 @@ func (e *Encoder) Bandwidth() int {
 	if e.shouldEncodeSILKOnly() {
 		bw, _ := nativeSilkFramingBandwidth(e.silkSampleRate)
 		return silkFramingBWToPublic(bw)
+	}
+	if e.shouldEncodeHybrid(1) {
+		return celtFramingBWToPublic(e.selectHybridBandwidth())
 	}
 	return celtFramingBWToPublic(e.selectCeltBandwidth())
 }

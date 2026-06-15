@@ -39,11 +39,12 @@ const (
 
 // Bandwidth types
 const (
-	BandwidthNarrowband   = 1101 // 4kHz
-	BandwidthMediumband   = 1102 // 6kHz
-	BandwidthWideband     = 1103 // 8kHz
-	BandwidthSuperWideband = 1104 // 12kHz
-	BandwidthFullband     = 1105 // 20kHz
+	BandwidthAuto          = -1000 // automatic selection (default)
+	BandwidthNarrowband    = 1101  // 4kHz
+	BandwidthMediumband    = 1102  // 6kHz
+	BandwidthWideband      = 1103  // 8kHz
+	BandwidthSuperWideband = 1104  // 12kHz
+	BandwidthFullband      = 1105  // 20kHz
 )
 
 // Channel modes

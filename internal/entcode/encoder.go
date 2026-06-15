@@ -65,12 +65,15 @@ func (enc *Encoder) Bytes() []byte {
 	}
 
 	frontLen := len(enc.buf)
-	mergeByte := 0
-	if enc.mergeUsed > 0 {
-		mergeByte = 1
+	// The packet is the fixed capacity (libopus storage). The merge byte holds
+	// the leftover (<8) raw window bits and shares buf[storage-end_offs-1] — the
+	// byte just before the raw tail — which is also the last range-front byte when
+	// the packet is full, so it must NOT add a byte. Only grow past capacity when
+	// the range front and raw tail genuinely cannot coexist (real over-budget).
+	n := enc.capacity
+	if need := frontLen + tailLen; need > n {
+		n = need
 	}
-	minN := frontLen + tailLen + mergeByte
-	n := max(enc.capacity, minN)
 
 	out := make([]byte, n)
 	copy(out, enc.buf)
@@ -78,11 +81,44 @@ func (enc *Encoder) Bytes() []byte {
 	for i, b := range enc.endBytes {
 		out[n-1-i] = b
 	}
-	// Merge byte: leftover (<8) raw bits in the slot just before the tail.
+	// Merge byte: leftover (<8) raw bits OR'd into the slot just before the tail
+	// (shared with the last range-front byte when full).
 	if enc.mergeUsed > 0 {
 		out[n-tailLen-1] |= byte(enc.mergeBits)
 	}
 	return out
+}
+
+// Shrink reduces the encoder's capacity (storage) to newSize bytes.
+// This is the equivalent of libopus ec_enc_shrink: for VBR mode, after encoding
+// all symbols, the packet can be shrunk so that the decoder sees a smaller
+// packet and computes its allocation accordingly. The raw end-of-packet bits
+// are logically relocated to the new end position.
+//
+// In libopus the raw tail bytes must be memmove'd because they live at the end
+// of a single flat buffer. Our encoder keeps endBytes in a separate slice, so
+// only the capacity field needs updating — Bytes() already places the tail at
+// offset capacity-1.
+//
+// Precondition: newSize >= len(buf) + len(endBytes) (the range-coded front and
+// raw tail must both fit).
+func (enc *Encoder) Shrink(newSize int) {
+	if newSize < len(enc.buf)+len(enc.endBytes) {
+		// Cannot shrink below the actually-used bytes.
+		return
+	}
+	enc.capacity = newSize
+}
+
+// UsedBytes returns the minimum number of bytes needed to hold the encoded
+// content. Valid after Flush(). This mirrors (ec_tell(&enc)+7)/8 in libopus
+// which is used to determine the shrink target for VBR packets.
+func (enc *Encoder) UsedBytes() int {
+	n := (enc.ECTell() + 7) >> 3
+	if n < 2 {
+		n = 2 // Opus minimum packet size
+	}
+	return n
 }
 
 // Debug accessors for testing
@@ -100,6 +136,42 @@ func (enc *Encoder) Tell() int {
 	}
 	nbytes += int(enc.ext)
 	return nbytes*8 + (32 - ILog(enc.rng)) + enc.nbitsRaw
+}
+
+// ecNbitsTotal returns the libopus encoder nbits_total value. libopus tracks
+// nbits_total = (EC_CODE_BITS+1) + EC_SYM_BITS*(symbols shifted out) + raw bits.
+// The number of symbols shifted out equals the bytes committed to the range
+// stream (those in buf, the pending rem byte, and any buffered 0xFF ext bytes).
+func (enc *Encoder) ecNbitsTotal() int {
+	nbytes := len(enc.buf)
+	if enc.rem >= 0 {
+		nbytes++
+	}
+	nbytes += int(enc.ext)
+	return nbytes*8 + (CodeBits + 1) + enc.nbitsRaw
+}
+
+// ECTell returns bits consumed using the libopus ec_tell convention (== 1
+// immediately after init). Our internal Tell() reports ec_tell-1, so this is
+// Tell()+1, matching the decoder's ECTell(). Use this where porting libopus
+// guards verbatim so encoder and decoder budget decisions stay symmetric.
+func (enc *Encoder) ECTell() int { return enc.Tell() + 1 }
+
+// TellFrac returns bits used in 1/8-bit (Q3) resolution, bit-exact with
+// ec_tell_frac in libopus (celt/entcode.c). Symmetric with Decoder.TellFrac so
+// the shared CELT quant/allocation code computes identical budgets in both
+// directions.
+func (enc *Encoder) TellFrac() int {
+	correction := [8]uint32{35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535}
+	nbits := enc.ecNbitsTotal() << 3
+	l := ILog(enc.rng)
+	r := enc.rng >> uint(l-16)
+	b := (r >> 12) - 8
+	if r > correction[b] {
+		b++
+	}
+	l = (l << 3) + int(b)
+	return nbits - l
 }
 
 // carryOut handles carry propagation - matches ec_enc_carry_out in libopus.
@@ -270,23 +342,22 @@ func (enc *Encoder) Flush() {
 		end = (enc.val + msk) &^ msk
 	}
 
-	// Output the needed bytes through the carry chain
+	// Output the needed bytes through the carry chain.
 	for l > 0 {
 		enc.carryOut(end >> CodeShift)
 		end = (end << SymBits) & (CodeTop - 1)
 		l -= SymBits
 	}
 
-	// Flush the buffered rem byte and any ext bytes
+	// Flush the buffered rem byte and any ext bytes via a final carry-out with
+	// no carry, exactly as libopus ec_enc_done does:
+	//     if(_this->rem>=0||_this->ext>0)ec_enc_carry_out(_this,0);
+	// This resolves pending ext (0xFF carry-chain) bytes to 0xFF — NOT 0x00 —
+	// when there is no trailing carry. Hardcoding 0x00 here corrupts the tail of
+	// any packet that ends with the range at the top of its interval (e.g. a
+	// single top-of-range symbol flushed to 0x00 instead of 0xFF, decoding to 0).
 	if enc.rem >= 0 || enc.ext > 0 {
-		if enc.rem >= 0 {
-			enc.buf = append(enc.buf, byte(enc.rem))
-		}
-		for enc.ext > 0 {
-			enc.buf = append(enc.buf, 0x00)
-			enc.ext--
-		}
-		enc.rem = -1
+		enc.carryOut(0)
 	}
 
 	// Flush whole bytes still held in the raw end-of-packet window, then stash

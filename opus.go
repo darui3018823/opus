@@ -29,8 +29,22 @@ type Encoder struct {
 	// Configuration
 	bitrate    int
 	complexity int
-	vbr        bool
-	frameSize  int // frame size in samples at sampleRate
+	rateMode   celt.RateMode // CBR/VBR/CVBR
+	frameSize  int           // frame size in samples at sampleRate
+	padBytes   int           // code-3 padding-data bytes to append (0 = none)
+	dtx        bool          // discontinuous transmission: minimal silence packets
+
+	// Bandwidth control (CELT-only path). maxBandwidth caps the automatic
+	// selection; forcedBandwidth pins an exact bandwidth (BandwidthAuto means
+	// automatic). Both use the public Bandwidth* constants.
+	maxBandwidth    int
+	forcedBandwidth int
+
+	// lastDetectedBW is the framing bandwidth chosen by the signal-driven detector
+	// on the previous auto-selection packet (negative = no history). It seeds the
+	// detector's hysteresis so the per-packet decision does not flap near a tier
+	// boundary. Only updated while bandwidth is automatic (forcedBandwidth==Auto).
+	lastDetectedBW int
 
 	// Internal 48kHz frame size (always 960 for 20ms)
 	internalFrameSize int
@@ -77,10 +91,13 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		channels:          channels,
 		application:       application,
 		celtEncoder:       celtEnc,
-		bitrate:           64000, // Default bitrate
-		complexity:        5,     // Default complexity
-		vbr:               true,  // Default VBR on
+		bitrate:           64000,           // Default bitrate
+		complexity:        5,               // Default complexity
+		rateMode:          celt.RateModeCBR, // Default CBR (backward compatible)
 		frameSize:         frameSize,
+		maxBandwidth:      BandwidthFullband,
+		forcedBandwidth:   BandwidthAuto,
+		lastDetectedBW:    -1, // no detection history yet
 		internalFrameSize: internalFrameSize,
 	}
 
@@ -96,8 +113,22 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 	// Apply default settings
 	enc.celtEncoder.SetBitrate(enc.bitrate)
 	enc.celtEncoder.SetComplexity(enc.complexity)
+	enc.celtEncoder.SetSignalType(signalTypeForApplication(application))
 
 	return enc, nil
+}
+
+// signalTypeForApplication maps an Opus application to the CELT content hint used
+// by application-driven encoder heuristics (e.g. the patch-transient
+// sensitivity). VOIP is treated as voice; general audio and restricted-low-delay
+// are treated as music/general.
+func signalTypeForApplication(application Application) celt.SignalType {
+	switch application {
+	case ApplicationVOIP:
+		return celt.SignalVoice
+	default: // ApplicationAudio, ApplicationRestrictedLowDelay
+		return celt.SignalMusic
+	}
 }
 
 // Encode encodes PCM audio samples
@@ -134,37 +165,101 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 }
 
 // encodeFloat is the internal encoding path shared by Encode and EncodeFloat.
+//
+// The encoder always emits 20 ms CELT-only fullband frames internally. When the
+// requested frameSize is an exact multiple (2..6) of the 20 ms base, the input
+// is split into that many consecutive 20 ms chunks, each is encoded into its own
+// CELT frame, and the frames are packed into a single multi-frame Opus packet
+// (RFC 6716 §3.2, count codes 1/2/3). Otherwise a single-frame (code 0) packet
+// is produced.
 func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
-	var celtInput []float64
+	// Select the coded bandwidth (NB/WB/SWB/FB) and limit the CELT encoder's
+	// coded bands to match, then generate the base TOC byte for that bandwidth.
+	// The per-frame duration is always 20 ms; multi-frame packets express longer
+	// durations via the count code rather than a different config. The config-driven
+	// ceiling (sample rate, bitrate, explicit settings) is the widest bandwidth
+	// allowed; when selection is automatic it is further narrowed by analysing the
+	// actual signal, so a source with no high-frequency energy is coded in a
+	// narrower band rather than wasting bits. The detection runs once over the whole
+	// input PCM, so every frame in a packet still shares the same bandwidth/config.
+	bw := e.selectCeltBandwidth()
+	if e.forcedBandwidth == BandwidthAuto {
+		det := detectSignalBandwidth(pcm, e.channels, e.sampleRate, e.lastDetectedBW)
+		e.lastDetectedBW = det
+		if det < bw {
+			bw = det
+		}
+	}
+	e.celtEncoder.SetEndBand(celtEndBandForFramingBW(bw))
+	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, bw, e.channels, framing.FrameSize20ms)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate TOC: %w", err)
+	}
 
+	// base = 20 ms in samples at the caller's sample rate.
+	base := e.frameSize
+	nFrames := 1
+	if base > 0 && frameSize > base && frameSize%base == 0 {
+		nFrames = frameSize / base
+	}
+
+	// Single-frame, no padding: compact code-0 packet (TOC + payload).
+	if nFrames == 1 && e.padBytes <= 0 {
+		compressed, err := e.encodeOneCELTFrame(pcm)
+		if err != nil {
+			return nil, err
+		}
+		return append([]byte{toc}, compressed...), nil
+	}
+
+	// Encode each 20 ms chunk continuously (the resampler and CELT encoder keep
+	// their inter-frame state across chunks) and pack the frames. A single frame
+	// reaches here only when padding was requested, in which case it is wrapped in
+	// a code-3 packet (the only count code that carries padding).
+	chunkLen := base * e.channels
+	frames := make([][]byte, 0, nFrames)
+	for k := 0; k < nFrames; k++ {
+		chunk := pcm[k*chunkLen : (k+1)*chunkLen]
+		f, err := e.encodeOneCELTFrame(chunk)
+		if err != nil {
+			return nil, err
+		}
+		frames = append(frames, f)
+	}
+
+	// CBR packs frames of equal size with the most compact code; VBR/CVBR
+	// frames vary in size and need explicit length prefixes. Padding (when
+	// requested) forces a code-3 packet with the padding flag. DTX may turn an
+	// otherwise-CBR run of frames into mixed sizes (silent frames shrink), so it
+	// also needs the variable-length packing path.
+	vbr := e.rateMode != celt.RateModeCBR || e.dtx
+	payload, code, err := packOpusFramesPadded(frames, vbr, e.padBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack %d frames: %w", nFrames, err)
+	}
+	return append([]byte{toc | byte(code)}, payload...), nil
+}
+
+// encodeOneCELTFrame resamples one 20 ms PCM chunk (if needed) and encodes it
+// into a single CELT frame payload (no TOC byte).
+func (e *Encoder) encodeOneCELTFrame(pcm []float64) ([]byte, error) {
+	var celtInput []float64
 	if e.inputResampler != nil {
-		// Resample from sampleRate to 48kHz
+		// Resample from sampleRate to 48kHz.
 		resampled := e.inputResampler.Process(pcm)
-		// The resampled output should be approximately internalFrameSize * channels samples.
-		// Pad or trim to exact size for CELT.
+		// The resampled output should be approximately internalFrameSize *
+		// channels samples. Pad or trim to exact size for CELT.
 		targetLen := e.internalFrameSize * e.channels
 		celtInput = padOrTrim(resampled, targetLen)
 	} else {
 		celtInput = pcm
 	}
 
-	// Generate TOC byte using CELT-only fullband config for all rates
-	// (we always encode internally at 48kHz with CELT)
-	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, framing.BandwidthFullband, e.channels, framing.FrameSize20ms)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate TOC: %w", err)
-	}
-
-	// Encode using CELT at 48kHz
 	compressed, err := e.celtEncoder.Encode(celtInput)
 	if err != nil {
 		return nil, fmt.Errorf("CELT encoding failed: %w", err)
 	}
-
-	// Prepend TOC byte
-	packet := append([]byte{toc}, compressed...)
-
-	return packet, nil
+	return compressed, nil
 }
 
 // padOrTrim adjusts a slice to exactly targetLen, padding with zeros or trimming.
@@ -198,14 +293,234 @@ func (e *Encoder) SetComplexity(complexity int) error {
 	return nil
 }
 
-// SetVBR enables or disables variable bitrate mode
+// SetVBR enables or disables variable bitrate mode.
+// When enabled, this sets constrained VBR (CVBR), which is the libopus default:
+// the encoder produces variable-size packets but keeps the average bitrate
+// close to the target. Use SetVBRConstraint(false) for unconstrained VBR.
 func (e *Encoder) SetVBR(vbr bool) {
-	e.vbr = vbr
+	if vbr {
+		e.rateMode = celt.RateModeCVBR
+	} else {
+		e.rateMode = celt.RateModeCBR
+	}
+	e.celtEncoder.SetRateMode(e.rateMode)
 }
 
-// SetApplication changes the application mode
+// SetVBRConstraint controls the VBR constraint. When true (default), CVBR is
+// used; when false, unconstrained VBR is used. Has no effect if VBR is disabled.
+func (e *Encoder) SetVBRConstraint(constrained bool) {
+	if e.rateMode == celt.RateModeCBR {
+		return // VBR not enabled, nothing to do
+	}
+	if constrained {
+		e.rateMode = celt.RateModeCVBR
+	} else {
+		e.rateMode = celt.RateModeVBR
+	}
+	e.celtEncoder.SetRateMode(e.rateMode)
+}
+
+// SetPacketPadding sets the number of code-3 padding-data bytes appended to each
+// emitted packet (RFC 6716 §3.2.5). When n > 0, every packet is encoded as a
+// code-3 packet with the padding flag set and n zero bytes appended at the end;
+// the padding does not affect the decoded audio (the decoder strips it). This is
+// useful for keeping a constant on-the-wire packet size or for obscuring the true
+// payload length. n <= 0 disables padding (the default), restoring the compact
+// code-0/1/2/3 selection.
+func (e *Encoder) SetPacketPadding(n int) {
+	if n < 0 {
+		n = 0
+	}
+	e.padBytes = n
+}
+
+// SetDTX enables or disables discontinuous transmission. When enabled, frames
+// the encoder detects as silent are emitted as minimal packets (a few bytes)
+// instead of being padded to the target size. This reduces bitrate during
+// silence. The decoder reconstructs such frames as digital silence. DTX is off
+// by default. The reduction is effective in any rate mode; in CBR it overrides
+// the fixed-size padding for silent frames only.
+func (e *Encoder) SetDTX(enabled bool) {
+	e.dtx = enabled
+	e.celtEncoder.SetDTX(enabled)
+}
+
+// DTX reports whether discontinuous transmission is enabled.
+func (e *Encoder) DTX() bool { return e.dtx }
+
+// SetApplication changes the application mode. This re-derives the CELT content
+// hint (voice for VOIP, music otherwise), which influences bandwidth selection
+// and transient sensitivity; it does not affect already-emitted packets.
 func (e *Encoder) SetApplication(application Application) {
 	e.application = application
+	e.celtEncoder.SetSignalType(signalTypeForApplication(application))
+}
+
+// SetMaxBandwidth caps the automatically selected coded bandwidth. bw must be one
+// of the public Bandwidth* constants (Narrowband..Fullband). The encoder never
+// exceeds this cap, nor the input sample rate's Nyquist limit. The default is
+// BandwidthFullband (no extra cap). Has no effect when an explicit bandwidth is
+// forced via SetBandwidth.
+func (e *Encoder) SetMaxBandwidth(bw int) error {
+	if !isValidBandwidth(bw) {
+		return fmt.Errorf("invalid bandwidth: %d", bw)
+	}
+	e.maxBandwidth = bw
+	return nil
+}
+
+// SetBandwidth forces a specific coded bandwidth, overriding the automatic
+// selection (it is still clamped to the input sample rate's Nyquist limit). Pass
+// BandwidthAuto to return to automatic selection (the default). bw must be
+// BandwidthAuto or one of the public Bandwidth* constants. CELT has no
+// medium-band mode, so BandwidthMediumband is rounded up to BandwidthWideband.
+func (e *Encoder) SetBandwidth(bw int) error {
+	if bw != BandwidthAuto && !isValidBandwidth(bw) {
+		return fmt.Errorf("invalid bandwidth: %d", bw)
+	}
+	e.forcedBandwidth = bw
+	return nil
+}
+
+// Bandwidth reports the coded bandwidth the encoder would currently use, as a
+// public Bandwidth* constant.
+func (e *Encoder) Bandwidth() int {
+	return celtFramingBWToPublic(e.selectCeltBandwidth())
+}
+
+// isValidBandwidth reports whether bw is one of the public Bandwidth* constants.
+func isValidBandwidth(bw int) bool {
+	switch bw {
+	case BandwidthNarrowband, BandwidthMediumband, BandwidthWideband,
+		BandwidthSuperWideband, BandwidthFullband:
+		return true
+	}
+	return false
+}
+
+// selectCeltBandwidth chooses the coded bandwidth (an internal framing.Bandwidth*
+// value: NB/WB/SWB/FB) for the CELT-only path. It starts from the input sample
+// rate's Nyquist limit, then applies either the forced bandwidth (clamped to
+// Nyquist) or, for automatic selection, the max-bandwidth cap and a coarse
+// bitrate-based reduction. The bitrate reduction is application-aware: the VOIP
+// (voice) application requires a higher bitrate before widening, since speech
+// concentrates its energy at lower frequencies (see bitrateCeltBandwidth).
+// Narrower bandwidths avoid spending bits on frequency bands the source rate or
+// bitrate cannot meaningfully support.
+func (e *Encoder) selectCeltBandwidth() int {
+	nyq := nyquistCeltBandwidth(e.sampleRate)
+	if e.forcedBandwidth != BandwidthAuto {
+		bw := publicToCeltFramingBW(e.forcedBandwidth)
+		if bw > nyq {
+			bw = nyq
+		}
+		return bw
+	}
+	bw := nyq
+	if cap := publicToCeltFramingBW(e.maxBandwidth); cap < bw {
+		bw = cap
+	}
+	if br := bitrateCeltBandwidth(e.bitrate, e.application); br < bw {
+		bw = br
+	}
+	return bw
+}
+
+// nyquistCeltBandwidth returns the widest CELT bandwidth supported by an input
+// sample rate's Nyquist limit. CELT has no medium-band mode, so 12 kHz input
+// (6 kHz Nyquist) maps to wideband rather than dropping the 4–6 kHz range.
+func nyquistCeltBandwidth(sampleRate int) int {
+	switch sampleRate {
+	case 8000:
+		return framing.BandwidthNarrowband
+	case 12000, 16000:
+		return framing.BandwidthWideband
+	case 24000:
+		return framing.BandwidthSuperwideband
+	default: // 48000
+		return framing.BandwidthFullband
+	}
+}
+
+// bitrateCeltBandwidth returns a coarse bandwidth ceiling for a target bitrate so
+// that low bitrates do not waste bits on high-frequency bands. The thresholds are
+// heuristic and conservative (the default 64 kbps stays fullband for every
+// application); the decoder reconstructs whatever bandwidth is signalled, so these
+// only shape quality.
+//
+// The thresholds are application-aware, mirroring libopus' separate voice and
+// music bandwidth thresholds: VOIP (voice) content stays in a narrower band until
+// a higher bitrate is available, because speech energy is concentrated at low
+// frequencies and the extra bits are better spent on the speech range. The audio
+// and restricted-low-delay applications use the (wider) music thresholds.
+func bitrateCeltBandwidth(bitrate, application int) int {
+	if application == ApplicationVOIP {
+		switch {
+		case bitrate < 20000:
+			return framing.BandwidthNarrowband
+		case bitrate < 36000:
+			return framing.BandwidthWideband
+		case bitrate < 52000:
+			return framing.BandwidthSuperwideband
+		default:
+			return framing.BandwidthFullband
+		}
+	}
+	switch {
+	case bitrate < 16000:
+		return framing.BandwidthNarrowband
+	case bitrate < 28000:
+		return framing.BandwidthWideband
+	case bitrate < 44000:
+		return framing.BandwidthSuperwideband
+	default:
+		return framing.BandwidthFullband
+	}
+}
+
+// publicToCeltFramingBW maps a public Bandwidth* constant to the internal framing
+// bandwidth used for CELT. Medium-band is rounded up to wideband (CELT has no MB).
+func publicToCeltFramingBW(pub int) int {
+	switch pub {
+	case BandwidthNarrowband:
+		return framing.BandwidthNarrowband
+	case BandwidthMediumband, BandwidthWideband:
+		return framing.BandwidthWideband
+	case BandwidthSuperWideband:
+		return framing.BandwidthSuperwideband
+	default: // BandwidthFullband
+		return framing.BandwidthFullband
+	}
+}
+
+// celtFramingBWToPublic is the inverse of publicToCeltFramingBW for the framing
+// bandwidths CELT uses (NB/WB/SWB/FB).
+func celtFramingBWToPublic(bw int) int {
+	switch bw {
+	case framing.BandwidthNarrowband:
+		return BandwidthNarrowband
+	case framing.BandwidthWideband:
+		return BandwidthWideband
+	case framing.BandwidthSuperwideband:
+		return BandwidthSuperWideband
+	default:
+		return BandwidthFullband
+	}
+}
+
+// celtEndBandForFramingBW maps an internal framing bandwidth to the CELT "end"
+// band count the encoder and decoder must agree on for that bandwidth.
+func celtEndBandForFramingBW(bw int) int {
+	switch bw {
+	case framing.BandwidthNarrowband:
+		return 13
+	case framing.BandwidthWideband:
+		return 17
+	case framing.BandwidthSuperwideband:
+		return 19
+	default: // fullband
+		return 21
+	}
 }
 
 // Reset resets the encoder state
@@ -450,6 +765,176 @@ func parseOpusFrameLength(data []byte) (int, int, error) {
 		return 0, 0, fmt.Errorf("truncated extended length")
 	}
 	return int(data[1])*4 + n, 2, nil
+}
+
+// encodeOpusFrameLength encodes a single frame length using the RFC 6716 §3.2.1
+// 1-or-2-byte scheme. It is the exact inverse of parseOpusFrameLength.
+//
+// Values < 252 use one byte; values in [252, 1275] use two bytes b0,b1 where
+// length = b1*4 + b0 and b0 ∈ [252, 255].
+func encodeOpusFrameLength(n int) ([]byte, error) {
+	const maxLen = 255*4 + 255 // 1275
+	if n < 0 || n > maxLen {
+		return nil, fmt.Errorf("frame length %d out of range [0,%d]", n, maxLen)
+	}
+	if n < 252 {
+		return []byte{byte(n)}, nil
+	}
+	b0 := 252 + ((n - 252) & 3)
+	b1 := (n - b0) / 4
+	return []byte{byte(b0), byte(b1)}, nil
+}
+
+// packOpusFrames builds the frame portion of an Opus packet (everything after
+// the TOC byte) from the given per-frame payloads, choosing the most compact
+// RFC 6716 §3.2 count code. It returns the payload bytes and the count code to
+// OR into the TOC. It is the inverse of splitOpusFrames.
+//
+// vbr selects whether variable-size codes are allowed: when false (CBR) and all
+// frames are equal length, the compact equal-size codes (1 / 3-CBR) are used;
+// otherwise explicit length prefixes (codes 2 / 3-VBR) are emitted. Frames of
+// unequal length always force a VBR code regardless of the hint.
+func packOpusFrames(frames [][]byte, vbr bool) ([]byte, int, error) {
+	n := len(frames)
+	if n == 0 {
+		return nil, 0, fmt.Errorf("no frames to pack")
+	}
+	if n > 48 {
+		return nil, 0, fmt.Errorf("too many frames: %d (max 48)", n)
+	}
+
+	if n == 1 {
+		return frames[0], 0, nil
+	}
+
+	allEqual := true
+	for i := 1; i < n; i++ {
+		if len(frames[i]) != len(frames[0]) {
+			allEqual = false
+			break
+		}
+	}
+
+	if n == 2 {
+		if !vbr && allEqual {
+			// Code 1: two equal-size frames, no length prefix.
+			out := make([]byte, 0, len(frames[0])+len(frames[1]))
+			out = append(out, frames[0]...)
+			out = append(out, frames[1]...)
+			return out, 1, nil
+		}
+		// Code 2: explicit length of the first frame; second is the remainder.
+		lp, err := encodeOpusFrameLength(len(frames[0]))
+		if err != nil {
+			return nil, 0, err
+		}
+		out := make([]byte, 0, len(lp)+len(frames[0])+len(frames[1]))
+		out = append(out, lp...)
+		out = append(out, frames[0]...)
+		out = append(out, frames[1]...)
+		return out, 2, nil
+	}
+
+	// n >= 3: code 3.
+	if !vbr && allEqual {
+		// Code 3 CBR: frame-count byte (vbr=0, padding=0) then equal frames.
+		out := make([]byte, 0, 1+n*len(frames[0]))
+		out = append(out, byte(n)) // lower 6 bits = count
+		for _, f := range frames {
+			out = append(out, f...)
+		}
+		return out, 3, nil
+	}
+
+	// Code 3 VBR: frame-count byte with VBR flag, then the first n-1 frame
+	// lengths, then all frame payloads.
+	out := make([]byte, 0, 1+2*(n-1))
+	out = append(out, 0x80|byte(n)) // VBR flag | count
+	for i := 0; i < n-1; i++ {
+		lp, err := encodeOpusFrameLength(len(frames[i]))
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, lp...)
+	}
+	for _, f := range frames {
+		out = append(out, f...)
+	}
+	return out, 3, nil
+}
+
+// encodePaddingCount encodes a padding-data-byte count as the run of count bytes
+// that prefixes a code-3 padding payload (RFC 6716 §3.2.5). It is the inverse of
+// the run the decoder consumes in splitOpusFrames: each 0xFF byte contributes 254
+// and continues; the first byte < 255 contributes its value (0..254) and ends the
+// run. padBytes is the number of trailing padding-data bytes (it does NOT count
+// the run bytes themselves). padBytes must be >= 0.
+func encodePaddingCount(padBytes int) []byte {
+	var run []byte
+	for padBytes > 254 {
+		run = append(run, 255)
+		padBytes -= 254
+	}
+	run = append(run, byte(padBytes))
+	return run
+}
+
+// packOpusFramesPadded is packOpusFrames with optional code-3 padding. When
+// padBytes <= 0 it is exactly packOpusFrames. When padBytes > 0 it forces a
+// code-3 packet (the only count code with a padding mechanism), sets the padding
+// flag (0x40) in the frame-count byte, writes the padding-count run, the frame
+// lengths (VBR) or nothing (CBR), all frame payloads, then padBytes zero bytes at
+// the very end. The result round-trips through splitOpusFrames, which strips the
+// padding-data bytes from the end. A single frame is legal under code 3
+// (frameCount=1), so padding is available for 1..48 frames.
+func packOpusFramesPadded(frames [][]byte, vbr bool, padBytes int) ([]byte, int, error) {
+	if padBytes <= 0 {
+		return packOpusFrames(frames, vbr)
+	}
+	n := len(frames)
+	if n == 0 {
+		return nil, 0, fmt.Errorf("no frames to pack")
+	}
+	if n > 48 {
+		return nil, 0, fmt.Errorf("too many frames: %d (max 48)", n)
+	}
+
+	allEqual := true
+	for i := 1; i < n; i++ {
+		if len(frames[i]) != len(frames[0]) {
+			allEqual = false
+			break
+		}
+	}
+	// CBR layout is only possible when every frame is the same size; otherwise
+	// explicit per-frame lengths (VBR layout) are required.
+	useVBR := vbr || !allEqual
+
+	runBytes := encodePaddingCount(padBytes)
+
+	out := make([]byte, 0, 1+len(runBytes)+2*n+padBytes)
+	flags := byte(0x40) | byte(n) // padding flag | frame count
+	if useVBR {
+		flags |= 0x80
+	}
+	out = append(out, flags)
+	out = append(out, runBytes...)
+	if useVBR {
+		// First n-1 frame lengths, then all payloads.
+		for i := 0; i < n-1; i++ {
+			lp, err := encodeOpusFrameLength(len(frames[i]))
+			if err != nil {
+				return nil, 0, err
+			}
+			out = append(out, lp...)
+		}
+	}
+	for _, f := range frames {
+		out = append(out, f...)
+	}
+	// Trailing padding-data bytes (zeros), stripped from the end on decode.
+	out = append(out, make([]byte, padBytes)...)
+	return out, 3, nil
 }
 
 // splitOpusFrames splits an Opus packet payload into individual frame payloads

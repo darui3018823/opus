@@ -189,6 +189,12 @@ func TestTOCByte(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewEncoder: %v", err)
 		}
+		// Force fullband so this test exercises the Nyquist ceiling and stereo bit
+		// deterministically. Under automatic selection a 440 Hz tone would be
+		// narrowed by signal-driven detection (covered by TestDetect* tests).
+		if err := enc.SetBandwidth(BandwidthFullband); err != nil {
+			t.Fatalf("SetBandwidth: %v", err)
+		}
 
 		pcm := generateSine(440.0, 48000, tc.channels, 960)
 		encoded, err := enc.Encode(pcm, 960)
@@ -215,27 +221,48 @@ func TestTOCByte(t *testing.T) {
 	}
 }
 
-// TestTOCByteMultiRate checks that packets from non-48kHz encoders still have valid TOC.
+// TestTOCByteMultiRate checks that each input sample rate produces a CELT-only
+// packet whose signalled bandwidth matches the rate's Nyquist limit: 8 kHz → NB
+// (configs 16-19), 12/16 kHz → WB (20-23), 24 kHz → SWB (24-27), 48 kHz → FB
+// (28-31). The encoder limits the coded bandwidth so it does not spend bits on
+// bands the source rate cannot support.
 func TestTOCByteMultiRate(t *testing.T) {
-	rates := []int{8000, 12000, 16000, 24000, 48000}
-	for _, rate := range rates {
-		enc, err := NewEncoder(rate, 1, ApplicationAudio)
+	cases := []struct {
+		rate          int
+		loConfig      int
+		hiConfig      int
+		bandwidthName string
+	}{
+		{8000, 16, 19, "NB"},
+		{12000, 20, 23, "WB"},
+		{16000, 20, 23, "WB"},
+		{24000, 24, 27, "SWB"},
+		{48000, 28, 31, "FB"},
+	}
+	for _, tc := range cases {
+		enc, err := NewEncoder(tc.rate, 1, ApplicationAudio)
 		if err != nil {
-			t.Fatalf("NewEncoder(%d): %v", rate, err)
+			t.Fatalf("NewEncoder(%d): %v", tc.rate, err)
+		}
+		// Force fullband (clamped to each rate's Nyquist limit) so this test checks
+		// the Nyquist ceiling itself. Automatic selection would narrow the 200 Hz
+		// tone via signal-driven detection (covered by TestDetect* tests).
+		if err := enc.SetBandwidth(BandwidthFullband); err != nil {
+			t.Fatalf("SetBandwidth(%d): %v", tc.rate, err)
 		}
 
-		frameSize := (rate * 20) / 1000
-		pcm := generateSine(200.0, rate, 1, frameSize)
+		frameSize := (tc.rate * 20) / 1000
+		pcm := generateSine(200.0, tc.rate, 1, frameSize)
 		encoded, err := enc.Encode(pcm, frameSize)
 		if err != nil {
-			t.Fatalf("Encode at %dHz: %v", rate, err)
+			t.Fatalf("Encode at %dHz: %v", tc.rate, err)
 		}
 
 		toc := encoded[0]
 		config := int(toc >> 3)
-		// All rates use CELT-only FB internally, so config should be 28-31
-		if config < 28 || config > 31 {
-			t.Errorf("rate=%d: expected CELT-only FB config (28-31), got %d", rate, config)
+		if config < tc.loConfig || config > tc.hiConfig {
+			t.Errorf("rate=%d: expected CELT-only %s config (%d-%d), got %d",
+				tc.rate, tc.bandwidthName, tc.loConfig, tc.hiConfig, config)
 		}
 	}
 }

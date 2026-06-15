@@ -4,11 +4,16 @@ package celt
 
 import (
 	"fmt"
+	"os"
+
 	"github.com/darui3018823/opus/internal/entcode"
 )
 
 // allocDebug enables allocation debug output when set to true.
 var allocDebug = false
+
+var allocRangeTrace = os.Getenv("OPUS_ALLOC_TRACE") != ""
+var osStderr = os.Stderr
 
 // RateAllocator performs RFC 6716 compliant bit allocation.
 type RateAllocator struct {
@@ -303,6 +308,30 @@ func computeAllocation(
 	numBands, start, end, lm, ch, allocTrim, available int,
 	offsets []int,
 ) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
+	return computeAllocationShared(dec, nil, end, false, numBands, start, end, lm, ch, allocTrim, available, offsets)
+}
+
+// computeAllocationEncode is the encoder-side entry point. encIntensity and
+// encDualStereo are the encoder's chosen stereo parameters (written to the
+// stream); they are returned (possibly clamped) so quant_all_bands uses the same
+// values the decoder will read.
+func computeAllocationEncode(
+	enc *entcode.Encoder,
+	encIntensity int, encDualStereo bool,
+	numBands, start, end, lm, ch, allocTrim, available int,
+	offsets []int,
+) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
+	return computeAllocationShared(nil, enc, encIntensity, encDualStereo, numBands, start, end, lm, ch, allocTrim, available, offsets)
+}
+
+func computeAllocationShared(
+	dec *entcode.Decoder,
+	enc *entcode.Encoder,
+	encIntensity int, encDualStereo bool,
+	numBands, start, end, lm, ch, allocTrim, available int,
+	offsets []int,
+) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
+	encode := enc != nil
 	pulses = make([]int, numBands)
 	codedBands = end
 	eBits = make([]int, numBands)
@@ -594,9 +623,12 @@ func computeAllocation(
 			skipThresh = allocFloor + 8
 		}
 		if bandBitsJ >= skipThresh {
-			// Decode 1-bit skip signal from range coder.
-			keepBand := true // default if no decoder
-			if dec != nil {
+			// Encode/decode a 1-bit skip signal. The encoder keeps every band
+			// that reaches the threshold (no rate-driven skipping yet).
+			keepBand := true
+			if encode {
+				enc.EncodeBitLogp(keepBand, 1)
+			} else if dec != nil {
 				keepBand = dec.DecodeBitLogp(1)
 			}
 			if keepBand {
@@ -633,7 +665,13 @@ func computeAllocation(
 	// Phase 6: decode intensity stereo and dual-stereo (C==2 only).
 	// In libopus these are decoded inside interp_bits2pulses AFTER the skip loop.
 	if intensityRsv > 0 {
-		if dec != nil {
+		if encode {
+			intensity = encIntensity
+			if intensity > codedBands {
+				intensity = codedBands
+			}
+			enc.EncodeUint(uint32(intensity-start), uint32(codedBands-start+1))
+		} else if dec != nil {
 			intensity = int(dec.DecodeUint(uint32(codedBands-start+1))) + start
 		}
 	} else {
@@ -644,7 +682,10 @@ func computeAllocation(
 		dualStereoRsv = 0
 	}
 	if dualStereoRsv > 0 {
-		if dec != nil {
+		if encode {
+			dualStereo = encDualStereo
+			enc.EncodeBitLogp(dualStereo, 1)
+		} else if dec != nil {
 			dualStereo = dec.DecodeBitLogp(1)
 		}
 	}
@@ -794,6 +835,17 @@ func computeAllocation(
 	if allocDebug {
 		fmt.Printf("[alloc] phase8: eBits[0..5]=%v\n", eBits[:6])
 		fmt.Printf("[alloc] phase8: bandBits[0..5]=%v (after fine removal)\n", bandBits[:6])
+	}
+
+	if allocRangeTrace {
+		tag := "DEC"
+		if encode {
+			tag = "ENC"
+		}
+		fmt.Fprintf(osStderr, "[ALLOC %s] available=%d total=%d codedBands=%d balance=%d intensity=%d\n",
+			tag, available, total, codedBands, balance, intensity)
+		fmt.Fprintf(osStderr, "[ALLOC %s] bandBits=%v\n", tag, bandBits[:numBands])
+		fmt.Fprintf(osStderr, "[ALLOC %s] eBits=%v\n", tag, eBits[:numBands])
 	}
 
 	// libopus `pulses[]` IS the per-band PVQ bit budget (Q3), NOT the pulse count K.

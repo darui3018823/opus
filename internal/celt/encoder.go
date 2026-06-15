@@ -35,6 +35,28 @@ const (
 	RateModeCVBR
 )
 
+// SignalType hints the dominant content type, letting application-driven
+// heuristics tune their decisions. SignalUnknown applies the music/general
+// defaults. The top-level encoder derives it from the Opus application
+// (VOIP -> voice, audio/low-delay -> music).
+type SignalType int
+
+const (
+	// SignalUnknown means no content hint is available; use general defaults.
+	SignalUnknown SignalType = iota
+	// SignalVoice marks speech-leaning content.
+	SignalVoice
+	// SignalMusic marks music/general-audio content.
+	SignalMusic
+)
+
+// patchTransientVoiceThreshold is the energy-rise threshold (log2-amplitude, the
+// bandLogE domain) used by patch_transient_decision for voice-leaning content. It
+// is lower than the libopus default of 1.0 so that speech plosives and onsets
+// switch to short blocks more eagerly (mirroring the spirit of libopus enabling
+// allow_weak_transients on the voice path).
+const patchTransientVoiceThreshold = 0.5
+
 // Encoder is a CELT encoder instance. Its output is decoded by the CELT decoder
 // in this package: the encode path is the structural mirror of decodeCELTRange,
 // emitting the same range-coder symbol sequence in the same order so that the
@@ -52,7 +74,8 @@ type Encoder struct {
 	bitrate    int
 	complexity int
 	rateMode   RateMode
-	dtx        bool // discontinuous transmission: minimal packets for silence
+	dtx        bool       // discontinuous transmission: minimal packets for silence
+	signalType SignalType // content hint (voice/music) for application-driven heuristics
 	// endBand is the number of coded bands (the CELT "end" band). 0 means full
 	// band (mode.Bands.NumBands). A smaller value limits the coded bandwidth
 	// (NB=13, WB=17, SWB=19, FB=21), matching the decoder's per-config band count.
@@ -255,51 +278,59 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	// short-block. Off transients (or below complexity 8) the long block IS the
 	// actual MDCT, so logE2==logE — matching libopus' OPUS_COPY fallback.
 	logE2 := make([]float64, ch*numBands)
-	secondMdct := isTransient && e.complexity >= 8
 	nBase := e.mode.NBase
-	for c := 0; c < ch; c++ {
-		buf := bufs[c]
-		var coeffs []float64
-		if isTransient {
-			// M short MDCTs over overlapping NBase windows, interleaved into the
-			// layout the decoder's transient synthesis expects (coeff k+i*M).
-			coeffs = make([]float64, frameSize)
-			for b := 0; b < M; b++ {
-				sub := buf[b*nBase : b*nBase+nBase+ov]
-				sc := e.shortCeltMode.CLTMDCTForward(sub)
-				for i := 0; i < nBase; i++ {
-					coeffs[b+i*M] = sc[i]
+
+	// computeSpectrum runs the forward MDCT (M interleaved short blocks when
+	// transient, else one long block), band energy, normalised spectrum X and
+	// logE for the given block type. The overlap-state copy reads the unchanged
+	// analysis buffer, so calling this twice (after patch_transient_decision
+	// promotes the frame to transient) advances the overlap exactly once.
+	computeSpectrum := func(transient bool) {
+		for c := 0; c < ch; c++ {
+			buf := bufs[c]
+			var coeffs []float64
+			if transient {
+				// M short MDCTs over overlapping NBase windows, interleaved into the
+				// layout the decoder's transient synthesis expects (coeff k+i*M).
+				coeffs = make([]float64, frameSize)
+				for b := 0; b < M; b++ {
+					sub := buf[b*nBase : b*nBase+nBase+ov]
+					sc := e.shortCeltMode.CLTMDCTForward(sub)
+					for i := 0; i < nBase; i++ {
+						coeffs[b+i*M] = sc[i]
+					}
+				}
+			} else {
+				coeffs = e.celtMode.CLTMDCTForward(buf)
+			}
+			copy(e.overlap[c], buf[frameSize:frameSize+ov])
+
+			base := c * frameLen
+			for i := 0; i < numBands; i++ {
+				lo := M * int(EBands48000[i])
+				hi := M * int(EBands48000[i+1])
+				sumsq := 1e-27
+				for j := lo; j < hi; j++ {
+					sumsq += coeffs[j] * coeffs[j]
+				}
+				amp := math.Sqrt(sumsq)
+				bandE[c*nbEBands+i] = amp
+				logE[c*numBands+i] = math.Log2(amp) - EMean(i)
+				inv := 1.0 / amp
+				for j := lo; j < hi; j++ {
+					X[base+j] = coeffs[j] * inv
 				}
 			}
-		} else {
-			coeffs = e.celtMode.CLTMDCTForward(buf)
 		}
-		copy(e.overlap[c], buf[frameSize:frameSize+ov])
+	}
 
-		base := c * frameLen
-		for i := 0; i < numBands; i++ {
-			lo := M * int(EBands48000[i])
-			hi := M * int(EBands48000[i+1])
-			sumsq := 1e-27
-			for j := lo; j < hi; j++ {
-				sumsq += coeffs[j] * coeffs[j]
-			}
-			amp := math.Sqrt(sumsq)
-			bandE[c*nbEBands+i] = amp
-			logE[c*numBands+i] = math.Log2(amp) - EMean(i)
-			inv := 1.0 / amp
-			for j := lo; j < hi; j++ {
-				X[base+j] = coeffs[j] * inv
-			}
-		}
-
-		if secondMdct {
-			// Long-block MDCT for bandLogE2. CLTMDCTForward is a pure function of
-			// its input, so this does not disturb the overlap state already
-			// advanced above. The +LM/2 term compensates the short-vs-long MDCT
-			// amplitude scaling (verified by TestMDCTShortLongScaleOffset).
-			longCoeffs := e.celtMode.CLTMDCTForward(buf)
-			corr := 0.5 * float64(lm)
+	// computeLogE2Long fills logE2 from a full-length (long-block) MDCT of the
+	// analysis buffer plus the +corr short-vs-long amplitude-scale compensation.
+	// CLTMDCTForward is a pure function of its input, so this never disturbs the
+	// overlap state already advanced by computeSpectrum.
+	computeLogE2Long := func(corr float64) {
+		for c := 0; c < ch; c++ {
+			longCoeffs := e.celtMode.CLTMDCTForward(bufs[c])
 			for i := 0; i < numBands; i++ {
 				lo := M * int(EBands48000[i])
 				hi := M * int(EBands48000[i+1])
@@ -309,11 +340,19 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 				}
 				logE2[c*numBands+i] = math.Log2(math.Sqrt(sumsq)) - EMean(i) + corr
 			}
-		} else {
-			for i := 0; i < numBands; i++ {
-				logE2[c*numBands+i] = logE[c*numBands+i]
-			}
 		}
+	}
+
+	computeSpectrum(isTransient)
+	// logE2 (bandLogE2) feeds the dynalloc masking follower. On transient frames at
+	// complexity>=8 (secondMdct) it comes from a long-block MDCT (superior frequency
+	// resolution) while the actual per-band energy stays short-block; otherwise the
+	// long block IS the actual MDCT, so logE2==logE (libopus' OPUS_COPY fallback).
+	secondMdct := isTransient && e.complexity >= 8
+	if secondMdct {
+		computeLogE2Long(0.5 * float64(lm))
+	} else {
+		copy(logE2, logE)
 	}
 
 	// --- Silence detection ---
@@ -329,6 +368,33 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	}
 	if frameEnergy < silenceEnergyThreshold {
 		return e.encodeSilenceFrame(maxTargetBytes)
+	}
+
+	// --- patch_transient_decision (energy-rise fallback transient detector) ---
+	// When the time-domain transientAnalysis did not flag the frame but the band
+	// energies jumped over the previous frame (an onset the envelope analysis
+	// missed), promote the frame to transient and re-run the MDCT with short blocks
+	// to limit pre-echo. libopus runs this at complexity>=5 on non-LFE frames.
+	// Skipped on the first frame (no previous energies to compare) and on silent
+	// frames (returned above). Voice-leaning content uses a lower threshold so
+	// plosives switch eagerly.
+	if lm > 0 && !isTransient && e.complexity >= 5 && e.frameCount > 0 {
+		threshold := 1.0 // libopus QCONST16(1, DB_SHIFT)
+		if e.signalType == SignalVoice {
+			threshold = patchTransientVoiceThreshold
+		}
+		if patchTransientDecision(logE, e.prevBandEnergies, numBands, start, end, ch, threshold) {
+			isTransient = true
+			tfEstimate = 0.2 // libopus QCONST16(.2f, 14)
+			// The long-block logE just computed becomes the bandLogE2 estimate
+			// (good frequency resolution); add the +LM/2 scale correction. Then
+			// recompute the actual spectrum with short blocks.
+			corr := 0.5 * float64(lm)
+			for idx := range logE2 {
+				logE2[idx] = logE[idx] + corr
+			}
+			computeSpectrum(true)
+		}
 	}
 
 	// --- VBR target computation ---
@@ -789,6 +855,16 @@ func (e *Encoder) SetComplexity(complexity int) {
 func (e *Encoder) SetRateMode(mode RateMode) {
 	e.rateMode = mode
 }
+
+// SetSignalType sets the content hint used by application-driven heuristics (the
+// patch-transient sensitivity). It does not change the bitstream layout, so any
+// value round-trips; it only shapes encoder decisions.
+func (e *Encoder) SetSignalType(t SignalType) {
+	e.signalType = t
+}
+
+// SignalTypeHint reports the current content hint.
+func (e *Encoder) SignalTypeHint() SignalType { return e.signalType }
 
 // SetEndBand sets the number of coded bands (the CELT "end" band), limiting the
 // coded bandwidth. Pass 0 (or a value >= the full band count) for full band. The

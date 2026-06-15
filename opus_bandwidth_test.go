@@ -96,6 +96,61 @@ func TestBandwidthSelection(t *testing.T) {
 	}
 }
 
+// TestApplicationBandwidthCoupling verifies the application (VOIP vs Audio)
+// shifts the bitrate→bandwidth thresholds: VOIP (voice) requires a higher bitrate
+// before widening, so at a mid bitrate it codes a narrower band than Audio, while
+// both stay fullband at the default 64 kbps.
+func TestApplicationBandwidthCoupling(t *testing.T) {
+	cases := []struct {
+		bitrate   int
+		wantVoIP  int
+		wantAudio int
+	}{
+		{18000, BandwidthNarrowband, BandwidthWideband},    // voice still NB, music WB
+		{30000, BandwidthWideband, BandwidthSuperWideband}, // voice WB, music SWB
+		{48000, BandwidthSuperWideband, BandwidthFullband}, // voice SWB, music FB
+		{64000, BandwidthFullband, BandwidthFullband},      // both FB at default
+	}
+	for _, tc := range cases {
+		voip, _ := NewEncoder(48000, 1, ApplicationVOIP)
+		if err := voip.SetBitrate(tc.bitrate); err != nil {
+			t.Fatal(err)
+		}
+		audio, _ := NewEncoder(48000, 1, ApplicationAudio)
+		if err := audio.SetBitrate(tc.bitrate); err != nil {
+			t.Fatal(err)
+		}
+		if got := voip.Bandwidth(); got != tc.wantVoIP {
+			t.Errorf("bitrate=%d VOIP bandwidth = %d, want %d", tc.bitrate, got, tc.wantVoIP)
+		}
+		if got := audio.Bandwidth(); got != tc.wantAudio {
+			t.Errorf("bitrate=%d Audio bandwidth = %d, want %d", tc.bitrate, got, tc.wantAudio)
+		}
+	}
+
+	// SetApplication re-derives the coupling on an existing encoder.
+	enc, _ := NewEncoder(48000, 1, ApplicationAudio)
+	if err := enc.SetBitrate(30000); err != nil {
+		t.Fatal(err)
+	}
+	if got := enc.Bandwidth(); got != BandwidthSuperWideband {
+		t.Errorf("Audio@30k bandwidth = %d, want SWB", got)
+	}
+	enc.SetApplication(ApplicationVOIP)
+	if got := enc.Bandwidth(); got != BandwidthWideband {
+		t.Errorf("after SetApplication(VOIP)@30k bandwidth = %d, want WB", got)
+	}
+
+	// RestrictedLowDelay uses the music (audio) thresholds.
+	rld, _ := NewEncoder(48000, 1, ApplicationRestrictedLowDelay)
+	if err := rld.SetBitrate(30000); err != nil {
+		t.Fatal(err)
+	}
+	if got := rld.Bandwidth(); got != BandwidthSuperWideband {
+		t.Errorf("RestrictedLowDelay@30k bandwidth = %d, want SWB (music thresholds)", got)
+	}
+}
+
 // TestBandwidthRoundTrip encodes a low-frequency tone (well within every CELT
 // bandwidth) at each forced bandwidth and checks the packet carries the matching
 // config and decodes back to the tone with reasonable delay-aligned SNR. This

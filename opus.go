@@ -113,8 +113,22 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 	// Apply default settings
 	enc.celtEncoder.SetBitrate(enc.bitrate)
 	enc.celtEncoder.SetComplexity(enc.complexity)
+	enc.celtEncoder.SetSignalType(signalTypeForApplication(application))
 
 	return enc, nil
+}
+
+// signalTypeForApplication maps an Opus application to the CELT content hint used
+// by application-driven encoder heuristics (e.g. the patch-transient
+// sensitivity). VOIP is treated as voice; general audio and restricted-low-delay
+// are treated as music/general.
+func signalTypeForApplication(application Application) celt.SignalType {
+	switch application {
+	case ApplicationVOIP:
+		return celt.SignalVoice
+	default: // ApplicationAudio, ApplicationRestrictedLowDelay
+		return celt.SignalMusic
+	}
 }
 
 // Encode encodes PCM audio samples
@@ -334,9 +348,12 @@ func (e *Encoder) SetDTX(enabled bool) {
 // DTX reports whether discontinuous transmission is enabled.
 func (e *Encoder) DTX() bool { return e.dtx }
 
-// SetApplication changes the application mode
+// SetApplication changes the application mode. This re-derives the CELT content
+// hint (voice for VOIP, music otherwise), which influences bandwidth selection
+// and transient sensitivity; it does not affect already-emitted packets.
 func (e *Encoder) SetApplication(application Application) {
 	e.application = application
+	e.celtEncoder.SetSignalType(signalTypeForApplication(application))
 }
 
 // SetMaxBandwidth caps the automatically selected coded bandwidth. bw must be one
@@ -385,8 +402,11 @@ func isValidBandwidth(bw int) bool {
 // value: NB/WB/SWB/FB) for the CELT-only path. It starts from the input sample
 // rate's Nyquist limit, then applies either the forced bandwidth (clamped to
 // Nyquist) or, for automatic selection, the max-bandwidth cap and a coarse
-// bitrate-based reduction. Narrower bandwidths avoid spending bits on frequency
-// bands the source rate or bitrate cannot meaningfully support.
+// bitrate-based reduction. The bitrate reduction is application-aware: the VOIP
+// (voice) application requires a higher bitrate before widening, since speech
+// concentrates its energy at lower frequencies (see bitrateCeltBandwidth).
+// Narrower bandwidths avoid spending bits on frequency bands the source rate or
+// bitrate cannot meaningfully support.
 func (e *Encoder) selectCeltBandwidth() int {
 	nyq := nyquistCeltBandwidth(e.sampleRate)
 	if e.forcedBandwidth != BandwidthAuto {
@@ -400,7 +420,7 @@ func (e *Encoder) selectCeltBandwidth() int {
 	if cap := publicToCeltFramingBW(e.maxBandwidth); cap < bw {
 		bw = cap
 	}
-	if br := bitrateCeltBandwidth(e.bitrate); br < bw {
+	if br := bitrateCeltBandwidth(e.bitrate, e.application); br < bw {
 		bw = br
 	}
 	return bw
@@ -424,9 +444,28 @@ func nyquistCeltBandwidth(sampleRate int) int {
 
 // bitrateCeltBandwidth returns a coarse bandwidth ceiling for a target bitrate so
 // that low bitrates do not waste bits on high-frequency bands. The thresholds are
-// heuristic and conservative (the default 64 kbps stays fullband); the decoder
-// reconstructs whatever bandwidth is signalled, so these only shape quality.
-func bitrateCeltBandwidth(bitrate int) int {
+// heuristic and conservative (the default 64 kbps stays fullband for every
+// application); the decoder reconstructs whatever bandwidth is signalled, so these
+// only shape quality.
+//
+// The thresholds are application-aware, mirroring libopus' separate voice and
+// music bandwidth thresholds: VOIP (voice) content stays in a narrower band until
+// a higher bitrate is available, because speech energy is concentrated at low
+// frequencies and the extra bits are better spent on the speech range. The audio
+// and restricted-low-delay applications use the (wider) music thresholds.
+func bitrateCeltBandwidth(bitrate, application int) int {
+	if application == ApplicationVOIP {
+		switch {
+		case bitrate < 20000:
+			return framing.BandwidthNarrowband
+		case bitrate < 36000:
+			return framing.BandwidthWideband
+		case bitrate < 52000:
+			return framing.BandwidthSuperwideband
+		default:
+			return framing.BandwidthFullband
+		}
+	}
 	switch {
 	case bitrate < 16000:
 		return framing.BandwidthNarrowband

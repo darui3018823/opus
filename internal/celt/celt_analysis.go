@@ -146,6 +146,57 @@ func transientAnalysis(bufs [][]float64, length, C int) (bool, int, float64) {
 	return isTransient, tfChan, tfEstimate
 }
 
+// patchTransientDecision is the float port of libopus celt_encoder.c
+// patch_transient_decision. It is the fallback transient detector run after the
+// MDCT: when the time-domain transientAnalysis did not flag the frame but the
+// band energies show a sharp rise over the previous frame (an onset), the frame
+// should be re-coded with short blocks to limit pre-echo.
+//
+// newE is the current frame's per-band log2-amplitude band energies (bandLogE)
+// and oldE the previous frame's (oldBandE); both are channel-major with the given
+// per-channel stride. An aggressive -6 dB/band ("octave") spreading function is
+// applied to oldE first so that energy in unrelated neighbouring bands does not
+// mask a genuine localised onset. The mean positive increase of newE over the
+// spread old energy across [max(2,start), end-1) is compared against threshold
+// (libopus uses 1 dB; the caller may lower it for voice-leaning content, which
+// benefits from eager short-block switching on plosives). start/end are the
+// coded band range and C the channel count.
+func patchTransientDecision(newE, oldE []float64, stride, start, end, C int, threshold float64) bool {
+	from := start
+	if from < 2 {
+		from = 2
+	}
+	if end-1 <= from {
+		return false
+	}
+	spreadOld := make([]float64, end)
+	if C == 1 {
+		spreadOld[start] = oldE[start]
+		for i := start + 1; i < end; i++ {
+			spreadOld[i] = math.Max(spreadOld[i-1]-1.0, oldE[i])
+		}
+	} else {
+		spreadOld[start] = math.Max(oldE[start], oldE[stride+start])
+		for i := start + 1; i < end; i++ {
+			spreadOld[i] = math.Max(spreadOld[i-1]-1.0,
+				math.Max(oldE[i], oldE[stride+i]))
+		}
+	}
+	for i := end - 2; i >= start; i-- {
+		spreadOld[i] = math.Max(spreadOld[i], spreadOld[i+1]-1.0)
+	}
+	var meanDiff float64
+	for c := 0; c < C; c++ {
+		for i := from; i < end-1; i++ {
+			x1 := math.Max(0, newE[i+c*stride])
+			x2 := math.Max(0, spreadOld[i])
+			meanDiff += math.Max(0, x1-x2)
+		}
+	}
+	meanDiff /= float64(C * (end - 1 - from))
+	return meanDiff > threshold
+}
+
 // stereoAnalysis is the float port of libopus bands.c stereo_analysis. It chooses
 // between dual stereo (independent L/R coding) and joint mid/side coding by
 // comparing an L1-norm entropy proxy of the L/R representation against the M/S

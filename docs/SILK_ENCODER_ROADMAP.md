@@ -26,21 +26,180 @@ noise-shaping feedback. Stereo uses conservative mid/side coding with zero
 stereo predictors. It is intentionally not a libopus-equivalent SILK encoder
 yet.
 
-## Goals
+## Phase Transition: Foundation Done, Quality Next (2026-06-16)
 
-- Keep emitted packets standard Opus packets that both this decoder and libopus
-  can decode.
-- Improve the limited SILK path incrementally before broadening into hybrid
-  mode coverage.
-- Preserve the working CELT encoder path and official-vector decoder coverage.
-- Add tests before quality work when the next change needs objective comparison.
+Slices 1-13 below built a **structurally complete** SILK/hybrid encode skeleton:
+decoder-compatible mono/stereo/downsampled/hybrid streams that both this decoder
+and libopus 1.6.1 accept. Measured self-decode SNR is still low (voiced
+~9-10 dB, speech-harmonic ~4.4 dB) and rate control leaks badly on hard signals
+(unvoiced noise reached ~536 B / 20 ms ≈ 200+ kbps despite a 40 kbps target).
 
-## Non-goals For This Phase
+From here the goal is **quality**, not new structure. The remaining work is to
+replace each simplified analysis stage with a faithful port of the libopus SILK
+encoder chain, climbing from the bottom of the chain upward.
+
+## Quality Goal (Restated)
+
+- Target: **perceptual / SNR parity with the libopus SILK encoder at a matched
+  bitrate** — NOT bit-exact output (the RFC only specifies the decoder, so
+  bit-exact encode is impossible and not a goal).
+- Keep every emitted packet a standard Opus packet that this decoder and libopus
+  both decode (never regress the Slice 7/13 cross-checks).
+- Preserve the CELT encoder path and the 12/12 official-vector decoder coverage.
+- Every quality slice must move a measured number on the scoreboard below, or
+  prove non-regression while improving robustness.
+
+## Non-goals For The Quality Phase
 
 - Bit-exact matching with libopus encoder output.
-- LBRR/FEC encoding.
+- LBRR/FEC encoding (deferred to after Q7).
 - Ogg Opus container support.
 - Multistream or surround.
+
+## The Scoreboard (Q0) — North Star
+
+Progress toward libopus is measured by an **A/B harness**, not by self-decode SNR
+alone:
+
+```
+fixture ─┬→ our encoder   → our decoder → SNR_a, bytes_a
+         └→ libopus encoder → our decoder → SNR_b, bytes_b
+
+score per fixture = gap_SNR = (SNR_b - SNR_a)   [dB we are behind libopus]
+                    ratio_bytes = bytes_a / bytes_b   [our bit overspend]
+```
+
+Every quality slice (Q1+) states an **exit metric in terms of shrinking
+`gap_SNR` and/or `ratio_bytes`** on named fixtures, and must keep the existing
+self-decode quality-baseline tests (Slice 8) green or improved. The harness runs
+under the `opusref` build tag (needs gcc + libopus). See
+`[[feedback_cgo_powershell]]`: CGO/`opusref` tests run from the PowerShell tool,
+not the Bash tool.
+
+## Operating Model (Director / Implementer Split)
+
+- **Director (Claude):** writes each slice spec (the exact libopus function being
+  ported, the encoder symbol order, the exit metric, the required test), reviews
+  the diff, runs the scoreboard + `opusref` cross-check, and decides commit-go.
+- **Implementer (Codex):** implements one slice at a time from the written spec.
+- One slice per branch/commit; bisectable; never merge a slice that regresses a
+  cross-check or the official vectors.
+
+## Quality Phases
+
+The order follows the libopus SILK encode chain bottom-up: build the analysis
+stages, then the quantizer that consumes them, then the control loop around it,
+then broaden. Q3 (shaping) and Q4 (NSQ) are tightly coupled and detailed/tuned
+together.
+
+### Q0 — libopus A/B scoreboard harness
+
+- Goal: the A/B harness above, reusing the existing `cgoref` libopus wrapper for
+  the libopus-**encode** side (Slice 7/13 only used libopus decode).
+- libopus ref: `opus_encoder_create` / `opus_encode` in `internal/cgoref`
+  (extend the `opusref` wrapper to expose encode).
+- Exit: a deterministic `opusref` test prints `gap_SNR` and `ratio_bytes` per
+  Slice 8 fixture at matched bitrate; numbers recorded as the Q1 baseline.
+- Risk: low; pure measurement, no encoder change.
+
+### Q1 — LPC / NLSF analysis fidelity
+
+- Goal: real autocorrelation + Burg LPC, windowing, LPC→LSF→NLSF conversion,
+  NLSF rate-distortion quantization with the actual codebook weights, and LSF
+  interpolation between subframes. Replaces `bestNLSFStage1` / `refineNLSFResidual`.
+- libopus ref: `silk_find_LPC_FLP`, `silk_A2NLSF`, `silk_NLSF_encode`,
+  `silk_NLSF_VQ_weights_laroia`, `silk_interpolate`.
+- Exit: residual energy (`lpcResidualEnergy`) drops on voiced fixtures;
+  `gap_SNR` shrinks on steady-voiced and speech-harmonic.
+- Risk: medium; NLSF quantization grammar must stay decoder-compatible.
+
+### Q2 — Pitch & LTP
+
+- Goal: full multi-stage pitch search (correlation, contour, voiced threshold,
+  VAD-gated) and real per-subframe 5-tap LTP with codebook quantization + LTP
+  scaling. Replaces `analyzePitch` / flat contour / `selectLTPGain`.
+- libopus ref: `silk_find_pitch_lags_FLP`, `silk_pitch_analysis_core_FLP`,
+  `silk_find_LTP_FLP`, `silk_quant_LTP_gains`, `silk_VAD_GetSA_Q8`.
+- Exit: large `gap_SNR` shrink on voiced fixtures; pitch continuity stable
+  (`pitchMaxDelta` bounded); voiced packet bytes move toward `ratio_bytes`→1.
+- Risk: medium-high; pitch lag/contour symbol order is intricate.
+
+### Q3 — Noise-shaping analysis + prefilter
+
+- Goal: compute the shaping that makes SILK sound like SILK — AR/MA shaping
+  coefficients, spectral tilt, HF/LF shaping, harmonic shaping gain, per-subframe
+  input gains, and the Lambda rate/distortion weight. Replaces the lone
+  output-error feedback term.
+- libopus ref: `silk_noise_shape_analysis_FLP`, `silk_prefilter_FLP`.
+- Exit: in-band SNR up; sets up Q4 (tested jointly — shaping is only fully
+  observable through the NSQ that consumes it).
+- Risk: high; coefficients feed Q4 directly.
+
+### Q4 — Real NSQ (delayed-decision)
+
+- Goal: replace `simpleNSQ` / `closedLoopNSQ` with a faithful delayed-decision
+  noise-shaping quantizer using the Q3 coefficients and Lagrangian
+  rate/distortion over multiple candidate states. The centerpiece quality lever.
+- libopus ref: `silk_NSQ_del_dec_FLP` (and `silk_NSQ_FLP` for the
+  non-delayed/low-complexity path).
+- Exit: the single largest `gap_SNR` reduction across all voiced/speech
+  fixtures; `ratio_bytes` improves at fixed quality.
+- Risk: high; largest and most coupled change. Likely split into sub-slices
+  (single-state shaped NSQ first, then delayed decision).
+
+### Q5 — Gain processing & rate-control loop
+
+- Goal: proper gain quantization plus the feedback loop that adjusts
+  gains/Lambda and re-quantizes to hit the target bit budget. **Fixes the
+  unvoiced-noise byte blowup.** Replaces the energy→index heuristic.
+- libopus ref: `silk_process_gains_FLP`, `silk_gains_quant`, and the
+  `silk_encode_frame` bit-feedback loop.
+- Exit: `ratio_bytes` → ~1 on ALL fixtures including unvoiced noise; packet size
+  tracks target bitrate; CBR/VBR sizing honest.
+- Risk: medium; mostly a control loop around existing stages.
+
+### Q6 — Stereo prediction
+
+- Goal: replace the conservative zero stereo predictors with real mid/side
+  prediction weights and the side-channel / only-middle decision driven by
+  prediction gain.
+- libopus ref: `silk_stereo_LR_to_MS`, `silk_stereo_encode_pred`,
+  `silk_stereo_find_predictor`.
+- Exit: stereo `gap_SNR` shrinks; stereo bytes drop vs dual-mono baseline.
+- Risk: medium; must preserve decoder stereo state transitions.
+
+### Q7 — Finishing: complexity scaling, hybrid redundancy, cleanup
+
+- Goal: make `SetComplexity` actually scale search effort (NSQ states, pitch
+  search depth), enable hybrid redundancy where it helps, polish mode
+  transitions, and delete the dead `encodeLegacyAnalysisFrame` / `encodeFrame`
+  reference paths once Q1-Q5 fully supersede them.
+- Exit: complexity 0..10 trades CPU for `gap_SNR` monotonically; cross-checks and
+  official vectors stay green; dead code removed.
+- Risk: low-medium; mostly consolidation.
+
+## Suggested Quality Ordering
+
+1. **Q0** scoreboard (prerequisite — nothing is "proven better" without it).
+2. **Q1** LPC/NLSF (foundation of the residual everything else shapes).
+3. **Q2** pitch/LTP (biggest single voiced-quality lever after LPC).
+4. **Q3 + Q4** shaping + real NSQ (the core, tuned together).
+5. **Q5** gain/rate control (fixes the bit blowup, makes bitrate honest).
+6. **Q6** stereo prediction.
+7. **Q7** complexity scaling, redundancy, cleanup.
+
+Rationale: you cannot honestly tune a quantizer (Q4) before its inputs (Q1-Q3)
+are faithful, and you cannot claim a quality win at all without the Q0
+scoreboard. Q5 is somewhat independent and high-value/low-risk, but is placed
+after the core so the bit budget is being spent on a good signal.
+
+---
+
+## Appendix: Foundation Slices 1-13 (Complete)
+
+Slices 1-6 are recorded in git history (`feat(silk): ...` commits
+`1e7378e`..`d64fb28`). Slices 7-13 below are kept verbatim as the record of the
+structural foundation the quality phase builds on.
 
 ## Slice 7: libopus Decoder Cross-check For SILK Encode
 

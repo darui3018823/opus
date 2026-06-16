@@ -337,9 +337,10 @@ func (e *Encoder) analyzePitch(signal []float64) (int, float64) {
 	bestCorr := 0.0
 	for lag := minLag; lag <= maxLag; lag++ {
 		corr, currentEnergy, lagEnergy := 0.0, 0.0, 0.0
-		for i := lag; i < len(signal); i++ {
-			current := signal[i]
-			delayed := signal[i-lag]
+		windowLen := len(signal) - lag
+		for i := 0; i < windowLen; i++ {
+			current := signal[i+lag]
+			delayed := signal[i]
 			corr += current * delayed
 			currentEnergy += current * current
 			lagEnergy += delayed * delayed

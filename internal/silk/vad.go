@@ -65,34 +65,54 @@ func (v *VAD) computeEnergy(signal []float64) float64 {
 	return energy / float64(len(signal))
 }
 
-// computeSpectralFlatness computes spectral flatness measure
-// Flatness near 1.0 indicates noise, near 0.0 indicates tonal (speech)
+// computeSpectralFlatness computes a coarse spectral flatness measure.
+// Flatness near 1.0 indicates energy spread across bands, near 0.0 indicates
+// concentrated tonal energy.
 func (v *VAD) computeSpectralFlatness(signal []float64) float64 {
-	// Compute magnitude spectrum (simplified - using time domain as proxy)
-	magnitudes := make([]float64, len(signal))
-	for i := range signal {
-		magnitudes[i] = math.Abs(signal[i]) + 1e-10 // Add epsilon to avoid log(0)
-	}
-
-	// Geometric mean
-	geometricMean := 0.0
-	for _, mag := range magnitudes {
-		geometricMean += math.Log(mag)
-	}
-	geometricMean = math.Exp(geometricMean / float64(len(magnitudes)))
-
-	// Arithmetic mean
-	arithmeticMean := 0.0
-	for _, mag := range magnitudes {
-		arithmeticMean += mag
-	}
-	arithmeticMean /= float64(len(magnitudes))
-
-	// Spectral flatness
-	if arithmeticMean <= 0 {
+	if len(signal) < 4 {
 		return 1.0
 	}
-	return geometricMean / arithmeticMean
+
+	const subbands = 8
+	var bandEnergy [subbands]float64
+	totalEnergy := 0.0
+	nyquistBin := len(signal) / 2
+	for k := 1; k <= nyquistBin; k++ {
+		real, imag := 0.0, 0.0
+		for n, sample := range signal {
+			phase := 2 * math.Pi * float64(k*n) / float64(len(signal))
+			real += sample * math.Cos(phase)
+			imag -= sample * math.Sin(phase)
+		}
+		power := real*real + imag*imag
+		band := (k - 1) * subbands / nyquistBin
+		if band >= subbands {
+			band = subbands - 1
+		}
+		bandEnergy[band] += power
+		totalEnergy += power
+	}
+
+	if totalEnergy <= 1e-12 {
+		return 1.0
+	}
+
+	maxBandRatio := 0.0
+	for _, energy := range bandEnergy {
+		ratio := energy / totalEnergy
+		if ratio > maxBandRatio {
+			maxBandRatio = ratio
+		}
+	}
+
+	flatness := 1.0 - maxBandRatio
+	if flatness < 0 {
+		return 0
+	}
+	if flatness > 1 {
+		return 1
+	}
+	return flatness
 }
 
 // computeZeroCrossingRate computes zero crossing rate
@@ -139,6 +159,14 @@ func (v *VAD) makeDecision(energy, spectralFlatness, zeroCrossingRate float64) b
 	// Update adaptive threshold based on energy
 	v.updateThreshold(energy)
 
+	activityFloor := 0.75 * v.energyThreshold
+	if activityFloor < VADEnergyThresholdMin {
+		activityFloor = VADEnergyThresholdMin
+	}
+	if energy < activityFloor {
+		return false
+	}
+
 	return score >= 0.4 // Slightly lower threshold for better sensitivity
 }
 
@@ -173,8 +201,8 @@ func (v *VAD) smoothDecision() bool {
 		}
 	}
 
-	// Majority vote
-	return count > v.historySize/2
+	threshold := (v.historySize + 2) / 3
+	return count >= threshold
 }
 
 // Reset resets VAD state

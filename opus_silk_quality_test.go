@@ -221,8 +221,9 @@ func opusSILKQualitySignals() []opusSILKQualitySignal {
 			},
 		},
 		{
-			name:   "speech-like-harmonic",
-			minSNR: -20,
+			name:         "speech-like-harmonic",
+			pitchTracked: true,
+			minSNR:       -20,
 			gen: func(rate, start, n int) []float64 {
 				out := make([]float64, n)
 				for i := range out {

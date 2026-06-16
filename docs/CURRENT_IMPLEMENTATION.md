@@ -479,12 +479,12 @@ Commands checked:
 
 ```bash
 go vet ./...
-go test ./...
-go test -tags opusref ./...
+go test -count=1 ./...
+go test -count=1 -tags opusref ./...
 ```
 
-Result on 2026-06-16: passing (`go vet ./...`, `go test ./...`, and
-`go test -tags opusref ./...` exit 0).
+Result on 2026-06-16: passing (`go vet ./...`, `go test -count=1 ./...`,
+and `go test -count=1 -tags opusref ./...` exit 0).
 
 Passing package-level tests:
 

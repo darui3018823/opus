@@ -40,6 +40,20 @@ type nlsfAnalysis struct {
 	interpFactor int
 }
 
+type encoderFrameState struct {
+	prevPitchLag int
+	prevLagIndex int
+	prevGainQ16  int32
+	lpcState     []int32
+	ltpState     []int32
+}
+
+type rateControlPlan struct {
+	gainTargets []int
+	gainIndices []int
+	rateScale   float64
+}
+
 // NewEncoder creates a new 20 ms SILK encoder.
 func NewEncoder(sampleRate, channels int) (*Encoder, error) {
 	return NewEncoderWithFrameMs(sampleRate, channels, 20)
@@ -265,6 +279,8 @@ func encodeZeroStereoPred(enc *entcode.Encoder) {
 // first voiced path: simple pitch/LTP decisions are encoded before the seed,
 // and pulse coding is driven from a short-term residual instead of raw samples.
 func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadActive, conditionalGain bool) {
+	initialState := e.snapshotFrameState()
+
 	signalType := SignalTypeInactive
 	pitchLag := e.prevPitchLag
 	pitchGain := 0.0
@@ -277,13 +293,14 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	}
 	quantOffset := 0
 
-	e.encodeTypeOffset(enc, vadActive, signalType, quantOffset)
-
-	gainTargets := e.analysisGainIndices(signal)
-	gainIndices := e.encodeGains(enc, signalType, gainTargets, conditionalGain)
-
 	cb := getNLSFCB(e.lpcOrder)
 	nlsf := e.analyzeNLSF(signal, cb, signalType)
+
+	plan := e.selectRateControlPlan(initialState, signal, vadActive, signalType, quantOffset, conditionalGain, nlsf, pitchLag, pitchGain)
+
+	e.restoreFrameState(initialState)
+	e.encodeTypeOffset(enc, vadActive, signalType, quantOffset)
+	gainIndices := e.encodeGains(enc, signalType, plan.gainTargets, conditionalGain)
 	e.encodeNLSF(enc, cb, signalType, nlsf)
 
 	if e.nSubframes == 4 {
@@ -302,8 +319,11 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	for sf := range pitchLags {
 		pitchLags[sf] = pitchLag
 	}
-	pulses := e.closedLoopNSQ(signal, nlsf.lpcQ12, gainIndices,
-		signalType, quantOffset, seed, pitchLags, ltpCoeffsQ14, ltpScaleQ14)
+	if len(plan.gainIndices) == len(gainIndices) {
+		gainIndices = plan.gainIndices
+	}
+	pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, gainIndices,
+		signalType, quantOffset, seed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale)
 	e.encodePulses(enc, pulses, signalType, quantOffset)
 
 	e.prevNLSF = nlsfQ15ToRadians(nlsf.nlsfQ15)
@@ -312,6 +332,174 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	}
 	e.prevEnergy = computeEnergy(signal)
 	e.prevSignalType = signalType
+}
+
+func (e *Encoder) snapshotFrameState() encoderFrameState {
+	return encoderFrameState{
+		prevPitchLag: e.prevPitchLag,
+		prevLagIndex: e.prevLagIndex,
+		prevGainQ16:  e.prevGainQ16,
+		lpcState:     append([]int32(nil), e.lpcState...),
+		ltpState:     append([]int32(nil), e.ltpState...),
+	}
+}
+
+func (e *Encoder) restoreFrameState(st encoderFrameState) {
+	e.prevPitchLag = st.prevPitchLag
+	e.prevLagIndex = st.prevLagIndex
+	e.prevGainQ16 = st.prevGainQ16
+	if len(st.lpcState) == len(e.lpcState) {
+		copy(e.lpcState, st.lpcState)
+	}
+	if len(st.ltpState) == len(e.ltpState) {
+		copy(e.ltpState, st.ltpState)
+	}
+}
+
+func (e *Encoder) selectRateControlPlan(
+	initial encoderFrameState,
+	signal []float64,
+	vadActive bool,
+	signalType, quantOffset int,
+	conditionalGain bool,
+	nlsf nlsfAnalysis,
+	pitchLag int,
+	pitchGain float64,
+) rateControlPlan {
+	baseTargets := e.analysisGainIndices(signal)
+	baseIndices := e.resolveGainIndices(baseTargets, conditionalGain)
+	if signalType == SignalTypeInactive || signalType == SignalTypeVoiced {
+		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
+	}
+
+	targetBits := e.silkFrameTargetBits()
+	if targetBits <= 0 {
+		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
+	}
+
+	gainBoosts := []int{0, 2, 4, 6, 8, 10, 12, 16, 20}
+	rateScales := []float64{1, 2, 4, 8, 16, 32, 64, 128, 512}
+	if e.complexity < 4 {
+		gainBoosts = []int{0, 4, 8, 12, 20}
+		rateScales = []float64{1, 4, 16, 64, 512}
+	}
+
+	best := rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
+	maxInt := int(^uint(0) >> 1)
+	bestOver := maxInt
+	bestTotal := maxInt
+
+	for _, boost := range gainBoosts {
+		targets := boostedGainTargets(baseTargets, boost)
+		e.restoreFrameState(initial)
+		headerBits, gainIndices, pitchLags, ltpCoeffsQ14, ltpScaleQ14 := e.estimateFrameHeaderBits(
+			vadActive, signalType, quantOffset, conditionalGain, targets, nlsf, pitchLag, pitchGain)
+		for _, scale := range rateScales {
+			e.restoreFrameState(initial)
+			pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, gainIndices,
+				signalType, quantOffset, 0, pitchLags, ltpCoeffsQ14, ltpScaleQ14, scale)
+			if !pulsesMeetActivityFloor(pulses, e.frameSize) {
+				continue
+			}
+			pulseBits := e.estimatePulseBits(pulses, signalType, quantOffset)
+			totalBits := headerBits + pulseBits + 8
+			over := totalBits - targetBits
+			if over <= 0 {
+				e.restoreFrameState(initial)
+				return rateControlPlan{gainTargets: targets, gainIndices: gainIndices, rateScale: scale}
+			}
+			if over < bestOver || (over == bestOver && totalBits < bestTotal) {
+				bestOver = over
+				bestTotal = totalBits
+				best = rateControlPlan{gainTargets: targets, gainIndices: gainIndices, rateScale: scale}
+			}
+		}
+	}
+
+	e.restoreFrameState(initial)
+	return best
+}
+
+func pulsesMeetActivityFloor(pulses []int16, frameSize int) bool {
+	nonZero := 0
+	absSum := 0
+	for _, p := range pulses {
+		if p == 0 {
+			continue
+		}
+		nonZero++
+		if p < 0 {
+			absSum += int(-p)
+		} else {
+			absSum += int(p)
+		}
+	}
+	minNonZero := frameSize / 4
+	if minNonZero < 16 {
+		minNonZero = 16
+	}
+	minAbsSum := frameSize * 2
+	if minAbsSum < 64 {
+		minAbsSum = 64
+	}
+	return nonZero >= minNonZero && absSum >= minAbsSum
+}
+
+func (e *Encoder) silkFrameTargetBits() int {
+	bits := e.bitrate * e.frameMs / 1000
+	if e.channels == 2 {
+		bits /= 2
+	}
+	if bits < 16 {
+		bits = 16
+	}
+	return bits
+}
+
+func boostedGainTargets(base []int, boost int) []int {
+	out := make([]int, len(base))
+	for i, v := range base {
+		out[i] = clampInt(v+boost, 0, NLevelsQGain-1)
+	}
+	return out
+}
+
+func (e *Encoder) estimateFrameHeaderBits(
+	vadActive bool,
+	signalType, quantOffset int,
+	conditionalGain bool,
+	gainTargets []int,
+	nlsf nlsfAnalysis,
+	pitchLag int,
+	pitchGain float64,
+) (bits int, gainIndices []int, pitchLags []int, ltpCoeffsQ14 [][5]int16, ltpScaleQ14 int16) {
+	enc := entcode.NewEncoder((e.silkFrameTargetBits() + 7) / 8)
+	e.encodeTypeOffset(enc, vadActive, signalType, quantOffset)
+	gainIndices = e.encodeGains(enc, signalType, gainTargets, conditionalGain)
+	cb := getNLSFCB(e.lpcOrder)
+	e.encodeNLSF(enc, cb, signalType, nlsf)
+	if e.nSubframes == 4 {
+		enc.EncodeIcdf(nlsf.interpFactor, silkNLSFInterpFactorICDF[:], 8)
+	}
+	ltpCoeffsQ14 = make([][5]int16, e.nSubframes)
+	ltpScaleQ14 = silkLTPScalesTable[0]
+	if signalType == SignalTypeVoiced {
+		ltpCoeffsQ14, ltpScaleQ14 = e.encodePitchAndLTP(enc, pitchLag, pitchGain, conditionalGain)
+	}
+	enc.EncodeIcdf(0, silkUniform4ICDF[:], 8)
+	pitchLags = make([]int, e.nSubframes)
+	for sf := range pitchLags {
+		pitchLags[sf] = pitchLag
+	}
+	enc.Flush()
+	return len(enc.Bytes()) * 8, gainIndices, pitchLags, ltpCoeffsQ14, ltpScaleQ14
+}
+
+func (e *Encoder) estimatePulseBits(pulses []int16, signalType, quantOffset int) int {
+	enc := entcode.NewEncoder((e.silkFrameTargetBits() + 7) / 8)
+	e.encodePulses(enc, pulses, signalType, quantOffset)
+	enc.Flush()
+	return len(enc.Bytes()) * 8
 }
 
 func (e *Encoder) analyzePitch(signal []float64) (int, float64) {
@@ -626,6 +814,32 @@ func (e *Encoder) encodeGains(enc *entcode.Encoder, signalType int, targetIndice
 	return absIndices
 }
 
+func (e *Encoder) resolveGainIndices(targetIndices []int, conditional bool) []int {
+	absIndices := make([]int, e.nSubframes)
+	prevIdx := e.prevGainIdx
+	targetIdx := gainTargetAt(targetIndices, 0)
+	if conditional {
+		targetIdx = quantizedGainDelta(prevIdx, targetIdx)
+	} else {
+		if targetIdx < prevIdx-16 {
+			targetIdx = prevIdx - 16
+		}
+		if targetIdx >= NLevelsQGain {
+			targetIdx = NLevelsQGain - 1
+		}
+		if targetIdx < 0 {
+			targetIdx = 0
+		}
+	}
+	absIndices[0] = targetIdx
+
+	for sf := 1; sf < e.nSubframes; sf++ {
+		targetIdx = quantizedGainDelta(targetIdx, gainTargetAt(targetIndices, sf))
+		absIndices[sf] = targetIdx
+	}
+	return absIndices
+}
+
 func gainTargetAt(targetIndices []int, sf int) int {
 	if len(targetIndices) == 0 {
 		return 10
@@ -648,7 +862,21 @@ func (e *Encoder) encodeGainDelta(enc *entcode.Encoder, prevIdx, targetIdx int) 
 		delta = MaxDeltaGainQuant
 	}
 	enc.EncodeIcdf(delta-MinDeltaGainQuant, silkDeltaGainICDF[:], 8)
+	return applyQuantizedGainDelta(prevIdx, delta)
+}
 
+func quantizedGainDelta(prevIdx, targetIdx int) int {
+	delta := targetIdx - prevIdx
+	if delta < MinDeltaGainQuant {
+		delta = MinDeltaGainQuant
+	}
+	if delta > MaxDeltaGainQuant {
+		delta = MaxDeltaGainQuant
+	}
+	return applyQuantizedGainDelta(prevIdx, delta)
+}
+
+func applyQuantizedGainDelta(prevIdx, delta int) int {
 	dblStepThresh := 2*MaxDeltaGainQuant - NLevelsQGain + prevIdx
 	if delta > dblStepThresh {
 		prevIdx += 2*delta - dblStepThresh
@@ -1137,10 +1365,28 @@ func (e *Encoder) closedLoopNSQ(
 	ltpCoeffsQ14 [][5]int16,
 	ltpScaleQ14 int16,
 ) []int16 {
+	return e.closedLoopNSQWithRateScale(signal, lpcQ12, gainIndices,
+		signalType, quantOffset, seed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, 1)
+}
+
+func (e *Encoder) closedLoopNSQWithRateScale(
+	signal []float64,
+	lpcQ12 []int16,
+	gainIndices []int,
+	signalType, quantOffset int,
+	seed int32,
+	pitchLags []int,
+	ltpCoeffsQ14 [][5]int16,
+	ltpScaleQ14 int16,
+	rateScale float64,
+) []int16 {
 	pulses := make([]int16, e.frameSize)
 	if signalType == SignalTypeInactive || len(signal) == 0 {
 		e.updateSilentSynthesisState()
 		return pulses
+	}
+	if rateScale < 1 {
+		rateScale = 1
 	}
 
 	uvIdx := 0
@@ -1166,6 +1412,7 @@ func (e *Encoder) closedLoopNSQ(
 		shape = 0.50
 		pulseRatePenalty = 28.0 * float64(int64(1)<<20)
 	}
+	pulseRatePenalty *= rateScale
 
 	for sf := 0; sf < e.nSubframes; sf++ {
 		start := sf * subframeLen
@@ -1326,7 +1573,12 @@ func chooseNSQPulseShaped(desiredQ14, offsetQ14 int32, flipSign bool, pulseRateP
 
 	bestPulse := 0
 	bestCost := math.Inf(1)
+	candidates := make([]int, 0, 16)
 	for p := base - 4; p <= base+4; p++ {
+		candidates = append(candidates, p)
+	}
+	candidates = append(candidates, 0, -1, 1, -2, 2)
+	for _, p := range candidates {
 		candidate := clampInt(p, -1024, 1024)
 		exc := decodedExcitationQ14(candidate, offsetQ14, flipSign)
 		err := float64(int64(exc) - int64(desiredQ14))

@@ -120,6 +120,57 @@ func TestEncoderSILKOnlyQualityBaseline(t *testing.T) {
 	}
 }
 
+func TestEncoderSILKOnlyUnvoicedNoiseRateControlBound(t *testing.T) {
+	for _, rate := range []int{8000, 12000, 16000} {
+		rate := rate
+		t.Run(rateName(rate), func(t *testing.T) {
+			frameSize := rate * 20 / 1000
+			enc, err := NewEncoder(rate, 1, ApplicationVOIP)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(24000); err != nil {
+				t.Fatalf("SetBitrate: %v", err)
+			}
+			enc.SetSignalType(SignalVoice)
+
+			dec, err := NewDecoder(rate, 1)
+			if err != nil {
+				t.Fatalf("NewDecoder: %v", err)
+			}
+			sig := opusSILKQualitySignals()[1]
+			var totalBytes int
+			var out []float64
+			for frame := 0; frame < opusSILKQualityFrames; frame++ {
+				pcm := sig.gen(rate, frame*frameSize, frameSize)
+				pkt, err := enc.EncodeFloat(pcm, frameSize)
+				if err != nil {
+					t.Fatalf("frame %d: EncodeFloat: %v", frame, err)
+				}
+				decoded, err := dec.DecodeFloat(pkt)
+				if err != nil {
+					t.Fatalf("frame %d: DecodeFloat: %v", frame, err)
+				}
+				totalBytes += len(pkt)
+				out = append(out, decoded...)
+			}
+
+			avgPacketBytes := float64(totalBytes) / opusSILKQualityFrames
+			nominalPacketBytes := 1 + float64(24000)*0.020/8.0
+			if avgPacketBytes > nominalPacketBytes*3.0 {
+				t.Fatalf("unvoiced noise packet %.1fB exceeds 3x nominal %.1fB", avgPacketBytes, nominalPacketBytes)
+			}
+			outRMS, peak, _ := opusSILKQualityStats(out)
+			if outRMS < 0.002 {
+				t.Fatalf("unvoiced noise output collapsed: RMS %.6f", outRMS)
+			}
+			if peak > 1.25 {
+				t.Fatalf("unvoiced noise output peak %.4f indicates runaway synthesis", peak)
+			}
+		})
+	}
+}
+
 func TestEncoderSILKOnlyStereoQualityBaseline(t *testing.T) {
 	for _, rate := range []int{16000, 48000} {
 		rate := rate

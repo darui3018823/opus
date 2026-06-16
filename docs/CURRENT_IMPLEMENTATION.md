@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-06-16
+Last reviewed: 2026-06-17
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -481,7 +481,14 @@ The SILK package contains:
   candidate on the decoder-compatible reconstruction path with a spectral
   peak-gain guard around the current simple NSQ. This is an incremental quality
   slice, not a full libopus-equivalent `silk_find_LPC_FLP` / `silk_A2NLSF` /
-  `silk_NLSF_encode` port, and active NLSF interpolation is still deferred.
+  `silk_NLSF_encode` port, and active NLSF interpolation is still deferred. Q5a
+  has started gain/rate-control work for unvoiced SILK frames: the encoder
+  snapshots frame synthesis state, tries candidate gain boosts and NSQ
+  pulse-rate penalties against a flushed range-byte estimate, and selects the
+  first non-collapsing plan that fits or best approaches the 20 ms bitrate
+  target. This bounds the unvoiced-noise byte blowup without changing voiced
+  frames, which stay on the previous path until the pitch, shaping, and NSQ
+  quality phases are further along.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single
@@ -501,6 +508,10 @@ go test -count=1 -tags opusref ./...
 
 Result on 2026-06-16: passing (`go vet ./...`, `go test -count=1 ./...`,
 and `go test -count=1 -tags opusref ./...` exit 0).
+
+Q5a verification on 2026-06-17: passing (`go vet ./...`,
+`go test -count=1 ./...`, and
+`go test -count=1 -tags opusref -run TestOpusSILKABAgainstLibopusEncoder -v .`).
 
 Passing package-level tests:
 

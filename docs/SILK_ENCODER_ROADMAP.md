@@ -226,6 +226,31 @@ Status: In progress (started 2026-06-16)
 
 ### Q5 — Gain processing & rate-control loop
 
+Status: In progress (started 2026-06-17)
+
+#### Q5a — bounded unvoiced pulse-rate feedback (Complete 2026-06-17)
+
+- Added the first bounded rate-control loop around the current simple SILK NSQ:
+  the encoder snapshots frame synthesis state, tries candidate gain boosts and
+  NSQ pulse-rate penalties, estimates header/pulse bytes after range flush, and
+  selects the first non-collapsing unvoiced plan that fits or best approaches
+  the per-frame bitrate target.
+- Kept voiced frames out of this first loop to avoid regressing pitch continuity
+  while Q2/Q3/Q4 are still simplified.
+- Expanded the NSQ pulse candidate set so a high rate penalty can choose small
+  pulses rather than only searching around the distortion-optimal pulse.
+- Added `TestEncoderSILKOnlyUnvoicedNoiseRateControlBound`: at 24 kbps, the
+  public SILK-only unvoiced-noise fixture is bounded to at most 3x the nominal
+  packet size while preserving non-collapsed output.
+- `opusref` scoreboard movement for unvoiced noise at 24 kbps: public packet
+  averages are now about 85.6 B (8 kHz), 118.8 B (12 kHz), and 158.4 B
+  (16 kHz), with `ratio_bytes` about 1.32 / 1.90 / 2.56. The earlier gross
+  blowup reached roughly 110-215 kbps effective rate depending on sample rate.
+- Scoreboard intent: this is a Q5 start, not full libopus-equivalent
+  `silk_process_gains_FLP` / `silk_encode_frame` control. It reduces the gross
+  unvoiced-noise byte blowup enough to make later quality work easier, but
+  `ratio_bytes -> ~1` remains open for the rest of Q5.
+
 - Goal: proper gain quantization plus the feedback loop that adjusts
   gains/Lambda and re-quantizes to hit the target bit budget. **Fixes the
   unvoiced-noise byte blowup.** Replaces the energy→index heuristic.

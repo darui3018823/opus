@@ -94,13 +94,61 @@ together.
 
 ### Q0 — libopus A/B scoreboard harness
 
+Status: Complete (2026-06-16)
+
 - Goal: the A/B harness above, reusing the existing `cgoref` libopus wrapper for
   the libopus-**encode** side (Slice 7/13 only used libopus decode).
-- libopus ref: `opus_encoder_create` / `opus_encode` in `internal/cgoref`
-  (extend the `opusref` wrapper to expose encode).
-- Exit: a deterministic `opusref` test prints `gap_SNR` and `ratio_bytes` per
-  Slice 8 fixture at matched bitrate; numbers recorded as the Q1 baseline.
-- Risk: low; pure measurement, no encoder change.
+- libopus ref: `opus_encoder_create` / `opus_encode_float` in `internal/cgoref`
+  (extended the `opusref` wrapper to expose encode).
+- Implemented: `cgoref.Encoder` (`NewEncoder`/`SetBitrate`/`SetComplexity`/
+  `SetVoiceMode`/`Encode`/`Close`) + `!opusref` stub; `opus_silk_ab_test.go`
+  (`TestOpusSILKABAgainstLibopusEncoder`) over the Slice 8 fixtures, mono
+  8/12/16 kHz, 24 kbps, complexity 5, VOIP/voice. Run from PowerShell:
+  `go test -tags opusref -run TestOpusSILKABAgainstLibopusEncoder .`
+
+#### Q0.5 — bitrate-matched scoreboard column (Complete 2026-06-16)
+
+The first `gap_SNR` lies whenever the two encoders spend different bytes (on
+noise we appeared to "win" by 4 dB only by spending 8.7× the bytes). Q0.5 adds a
+third reference: re-encode the same input with libopus at **our effective
+bitrate** (`matchedBitrate = bytesA*8*rate / (frames*frameSize)`), giving
+`gap_SNR_matched = SNR(libopus@our-bitrate) − SNR(ours)` = the honest
+equal-bits quality gap, plus `ratio_bytes_matched` (≈1.0 confirms the match).
+
+#### Q1 Baseline (libopus 1.6.1, 24 kbps target = 720 B / 12×20 ms frames)
+
+Effective bitrate = `bytes / 30` kbps. libopus sits at/below 24 kbps everywhere;
+our encoder ignores the budget in both directions. `gap_SNR_matched` is the
+scoreboard going forward.
+
+| fixture | our kbps | libopus kbps | gap_SNR (unfair) | **gap_SNR_matched** |
+|---|---|---|---|---|
+| silence | ~24.4 (pads to full) | ~2.7 | 0.0 | 0.0 |
+| unvoiced-noise | 110–215 | ~25 | −4.0…+2.2¹ | **+2.3…+3.2** |
+| steady-voiced | ~30 | ~13 | 3.6–3.9 | **3.7–3.9** |
+| speech-harmonic | ~40 | ~15 | 6.0–6.5 | **6.1–6.6** |
+| onset | ~33 | ~10 | 1.5–2.3 | **1.6–2.3** |
+
+¹ The "win" on noise was pure byte-overspend illusion; at equal bits we trail by
+2.3–3.2 dB. Q0.5 made this visible.
+
+**Honest reading:** at equal bitrate we trail libopus by **2.3–6.6 dB on every
+non-silent fixture**, worst on speech-harmonic — a genuine analysis-quality
+deficit (LPC/pitch/LTP/NSQ), independent of the separate rate-control problem.
+
+**Two findings the scoreboard surfaced immediately:**
+
+1. **Rate control is non-functional in both directions** — easy signals pad to
+   full budget (silence 24 vs 2.7 kbps), hard signals explode (noise up to
+   215 vs 25 kbps). libopus uses VBR to move up and down intelligently.
+2. **Voiced/speech quality trails 2.3–6.6 dB at equal bitrate** — worst on
+   speech-harmonic.
+
+**Director note on ordering:** with Q0.5 the scoreboard is now honest at any
+byte mismatch, so Q1/Q2 (LPC, pitch/LTP) stay next as planned. Q5 (gain/rate
+control) is co-critical rather than late — revisit promoting it after Q2 if the
+byte explosion still obscures listening/robustness even though `gap_SNR_matched`
+itself is now fair.
 
 ### Q1 — LPC / NLSF analysis fidelity
 

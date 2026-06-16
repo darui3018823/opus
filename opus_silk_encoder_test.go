@@ -1,6 +1,7 @@
 package opus
 
 import (
+	"fmt"
 	"math"
 	"testing"
 )
@@ -821,6 +822,93 @@ func TestEncoderSILKOnlyVBRDTXAndPaddingStillSelectSILK(t *testing.T) {
 	}
 }
 
+func TestEncoderSILKOnlyCBRPacketSizeTracksBitrateAndDuration(t *testing.T) {
+	const rate = 16000
+	base := rate * 20 / 1000
+
+	for _, tc := range []struct {
+		bitrate int
+		mult    int
+	}{
+		{bitrate: 12000, mult: 1},
+		{bitrate: 24000, mult: 1},
+		{bitrate: 40000, mult: 1},
+		{bitrate: 24000, mult: 3},
+	} {
+		t.Run(fmt.Sprintf("%dbps/%dms", tc.bitrate, tc.mult*20), func(t *testing.T) {
+			enc, err := NewEncoder(rate, 1, ApplicationVOIP)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(tc.bitrate); err != nil {
+				t.Fatalf("SetBitrate: %v", err)
+			}
+
+			frameSize := base * tc.mult
+			pkt, err := enc.EncodeFloat(make([]float64, frameSize), frameSize)
+			if err != nil {
+				t.Fatalf("EncodeFloat: %v", err)
+			}
+			wantPayload := tc.bitrate * (20 * tc.mult) / 1000 / 8
+			if want := 1 + wantPayload; len(pkt) != want {
+				t.Fatalf("packet bytes=%d, want %d for %d bps/%d ms CBR SILK", len(pkt), want, tc.bitrate, 20*tc.mult)
+			}
+			if config := int(pkt[0] >> 3); config != 9 && config != 11 {
+				t.Fatalf("TOC config=%d, want SILK WB 20/60ms config", config)
+			}
+		})
+	}
+}
+
+func TestEncoderSILKOnlyVBRAndDTXDoNotUseCBRPadding(t *testing.T) {
+	const (
+		rate     = 16000
+		bitrate  = 24000
+		cbrBytes = 1 + bitrate*20/1000/8
+	)
+	frameSize := rate * 20 / 1000
+
+	for _, tc := range []struct {
+		name      string
+		configure func(*Encoder)
+	}{
+		{
+			name: "cvbr",
+			configure: func(e *Encoder) {
+				e.SetVBR(true)
+			},
+		},
+		{
+			name: "dtx",
+			configure: func(e *Encoder) {
+				e.SetDTX(true)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			enc, err := NewEncoder(rate, 1, ApplicationVOIP)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(bitrate); err != nil {
+				t.Fatalf("SetBitrate: %v", err)
+			}
+			tc.configure(enc)
+
+			pkt, err := enc.EncodeFloat(make([]float64, frameSize), frameSize)
+			if err != nil {
+				t.Fatalf("EncodeFloat: %v", err)
+			}
+			if len(pkt) >= cbrBytes {
+				t.Fatalf("%s packet bytes=%d, want less than CBR padded size %d", tc.name, len(pkt), cbrBytes)
+			}
+			if config := int(pkt[0] >> 3); config != 9 {
+				t.Fatalf("TOC config=%d, want SILK WB 20ms config 9", config)
+			}
+		})
+	}
+}
+
 func TestEncoderHybridVoiceRoundTrip(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -912,10 +1000,10 @@ func multName(mult int) string {
 func strictSILKDurationIndex(mult, channels int) int {
 	if channels == 2 {
 		switch mult {
-		case 3:
-			return 1
-		case 6:
+		case 2:
 			return 2
+		default:
+			return 1
 		}
 	}
 	switch mult {
@@ -933,8 +1021,6 @@ func strictSILKCountCode(mult, channels int) int {
 		switch mult {
 		case 1, 2:
 			return 0
-		case 4:
-			return 2
 		default:
 			return 3
 		}

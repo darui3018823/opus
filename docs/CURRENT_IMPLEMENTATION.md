@@ -55,14 +55,19 @@ voice signal hint, mono or stereo input, and target bitrates up to and including
 40 kbps. Native 8/12/16 kHz input maps to SILK NB/MB/WB; 24/48 kHz voice input
 is downsampled to a 16 kHz WB SILK layer and emits a WB SILK-only TOC config.
 That path uses the internal SILK encoder, emits SILK-only duration configs for
-20/40/60 ms Opus frames, and packs longer supported durations as standard
-multiple Opus frame streams. Explicit `SignalMusic`, restricted-low-delay,
-bitrates above 40 kbps, a forced bandwidth that cannot be represented by the
-selected SILK layer, or, while bandwidth selection is automatic, a max-bandwidth
-cap below the SILK bandwidth keep the encoder out of the SILK-only path. An
-explicit forced bandwidth takes precedence over the max-bandwidth cap. DTX,
-VBR/CVBR, and packet padding do not by themselves opt the packet out of the
-supported SILK-only path.
+20/40/60 ms Opus frames for mono, and packs longer supported durations as
+standard multiple Opus frame streams. Stereo SILK packets use 20 ms streams for
+60 ms and longer public packet durations to keep individual Opus frame payloads
+inside the 1275-byte framing limit. Explicit `SignalMusic`,
+restricted-low-delay, bitrates above 40 kbps, a forced bandwidth that cannot be
+represented by the selected SILK layer, or, while bandwidth selection is
+automatic, a max-bandwidth cap below the SILK bandwidth keep the encoder out of
+the SILK-only path. An explicit forced bandwidth takes precedence over the
+max-bandwidth cap. DTX, VBR/CVBR, and packet padding do not by themselves opt
+the packet out of the supported SILK-only path. In CBR mode, undersized
+SILK-only streams are padded up to the nominal per-stream bitrate target; VBR,
+CVBR, and DTX silence keep compact stream sizes unless explicit packet padding
+is requested.
 
 As of SILK Encoder slice 13, high-bitrate 24/48 kHz voice input can emit hybrid
 packets. The encoder writes a 16 kHz SILK low band and CELT high band into one
@@ -446,7 +451,9 @@ The SILK package contains:
 - SILK Encoder slice 6 wires that internal mono encoder into the public Opus
   encoder for low-bitrate VOIP/voice packets at 8/12/16 kHz. It packs one shared
   SILK range stream for 20/40/60 ms single-Opus-frame packets and uses standard
-  Opus frame packing for longer supported durations. Slice 7 added libopus
+  Opus frame packing for longer supported durations; stereo uses 20 ms streams
+  for public durations of 60 ms and above to stay within the Opus per-frame
+  payload-size limit. Slice 7 added libopus
   decoder cross-checks for the public mono SILK encode path and fixed the
   packetization so libopus accepts those packets. Slice 11 adds 24/48 kHz voice
   input downsampling to a 16 kHz WB SILK layer, Slice 12 adds conservative
@@ -465,7 +472,9 @@ The SILK package contains:
   mode/rate boundary with tests for
   the 40 kbps SILK limit, application and signal hints, pre-Slice-11/12
   channel/input-rate exclusions, forced/max bandwidth interaction, and
-  VBR/DTX/padding interaction.
+  VBR/DTX/padding interaction. The public SILK-only integration now also pads
+  undersized CBR streams to the nominal bitrate target while leaving VBR/CVBR
+  and DTX-silence streams compact.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single

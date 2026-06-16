@@ -517,7 +517,7 @@ func silkRefPacketName(ms int) string {
 }
 
 func silkRefDurationIndex(ms, channels int) int {
-	if channels == 2 && ms == 60 {
+	if channels == 2 && ms >= 60 {
 		return 1
 	}
 	switch ms {
@@ -531,8 +531,8 @@ func silkRefDurationIndex(ms, channels int) int {
 }
 
 func silkRefExtendedDurationIndex(ms, channels int) int {
-	if channels == 2 && ms == 120 {
-		return 2
+	if channels == 2 {
+		return 1
 	}
 	switch ms {
 	case 80:
@@ -546,12 +546,7 @@ func silkRefExtendedDurationIndex(ms, channels int) int {
 
 func silkRefExtendedCountCode(ms, channels int) int {
 	if channels == 2 {
-		switch ms {
-		case 80:
-			return 2
-		default:
-			return 3
-		}
+		return 3
 	}
 	switch ms {
 	case 80, 120:

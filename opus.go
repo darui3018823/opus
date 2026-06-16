@@ -463,6 +463,14 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int) ([]byte, erro
 		if err != nil {
 			return nil, fmt.Errorf("SILK encoding failed: %w", err)
 		}
+		if e.shouldPadSILKStream(silkPCM) {
+			targetBytes := e.silkStreamTargetBytes(group)
+			if len(stream) < targetBytes {
+				padded := make([]byte, targetBytes)
+				copy(padded, stream)
+				stream = padded
+			}
+		}
 		streams = append(streams, stream)
 		pos += inputSamples
 	}
@@ -471,6 +479,36 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int) ([]byte, erro
 		return nil, fmt.Errorf("failed to pack SILK stream: %w", err)
 	}
 	return append([]byte{toc | byte(code)}, payload...), nil
+}
+
+func (e *Encoder) shouldPadSILKStream(pcm []float64) bool {
+	if e.rateMode != celt.RateModeCBR {
+		return false
+	}
+	if e.dtx && isSilentPCM(pcm) {
+		return false
+	}
+	return true
+}
+
+func (e *Encoder) silkStreamTargetBytes(nFrames int) int {
+	tb := int(float64(e.bitrate) * (0.020 * float64(nFrames)) / 8.0)
+	if tb < 2 {
+		tb = 2
+	}
+	if tb > 1275 {
+		tb = 1275
+	}
+	return tb
+}
+
+func isSilentPCM(pcm []float64) bool {
+	for _, v := range pcm {
+		if math.Abs(v) > 1.0/32768.0 {
+			return false
+		}
+	}
+	return true
 }
 
 func silkPacketGroups(nFrames int) (groupSize int, groups []int, err error) {
@@ -495,10 +533,12 @@ func silkPacketGroups(nFrames int) (groupSize int, groups []int, err error) {
 func silkPacketGroupsForChannels(nFrames, channels int) (groupSize int, groups []int, err error) {
 	if channels == 2 {
 		switch nFrames {
-		case 3:
-			return 1, []int{1, 1, 1}, nil
-		case 6:
-			return 2, []int{2, 2, 2}, nil
+		case 3, 4, 5, 6:
+			groups := make([]int, nFrames)
+			for i := range groups {
+				groups[i] = 1
+			}
+			return 1, groups, nil
 		}
 	}
 	return silkPacketGroups(nFrames)

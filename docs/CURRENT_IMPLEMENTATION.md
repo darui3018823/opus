@@ -474,7 +474,14 @@ The SILK package contains:
   channel/input-rate exclusions, forced/max bandwidth interaction, and
   VBR/DTX/padding interaction. The public SILK-only integration now also pads
   undersized CBR streams to the nominal bitrate target while leaving VBR/CVBR
-  and DTX-silence streams compact.
+  and DTX-silence streams compact. Q1a of the quality phase has started the
+  LPC/NLSF fidelity work: the encoder builds a windowed LPC spectral-envelope
+  NLSF target, uses libopus NLSF codebook weights to rank stage-1 candidates,
+  seeds encodable residual indices from that target, and then keeps the selected
+  candidate on the decoder-compatible reconstruction path with a spectral
+  peak-gain guard around the current simple NSQ. This is an incremental quality
+  slice, not a full libopus-equivalent `silk_find_LPC_FLP` / `silk_A2NLSF` /
+  `silk_NLSF_encode` port, and active NLSF interpolation is still deferred.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single

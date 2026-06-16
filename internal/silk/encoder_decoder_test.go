@@ -507,6 +507,62 @@ func TestEncoderAdaptiveNLSFEncoding(t *testing.T) {
 	}
 }
 
+func TestEncoderLPCNLSFTargetQuantization(t *testing.T) {
+	enc, err := NewEncoder(16000, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder() error = %v", err)
+	}
+
+	signal := make([]float64, enc.frameSize)
+	for i := range signal {
+		tm := float64(i) / 16000.0
+		env := 0.18 + 0.07*math.Sin(2*math.Pi*3.2*tm)
+		signal[i] = env * (0.63*math.Sin(2*math.Pi*170*tm) +
+			0.24*math.Sin(2*math.Pi*340*tm+0.25) +
+			0.12*math.Sin(2*math.Pi*680*tm+0.8))
+	}
+
+	cb := getNLSFCB(enc.lpcOrder)
+	targetQ15, ok := enc.lpcNLSFTargetQ15(signal, cb)
+	if !ok {
+		t.Fatal("lpcNLSFTargetQ15() failed")
+	}
+	if len(targetQ15) != cb.order {
+		t.Fatalf("target len=%d, want %d", len(targetQ15), cb.order)
+	}
+	for i := 1; i < len(targetQ15); i++ {
+		if targetQ15[i] <= targetQ15[i-1] {
+			t.Fatalf("target NLSF not ordered at %d: %d <= %d", i, targetQ15[i], targetQ15[i-1])
+		}
+	}
+
+	top := topNLSFCB1ByTarget(cb, targetQ15, 4)
+	if len(top) != 4 {
+		t.Fatalf("topNLSFCB1ByTarget len=%d, want 4", len(top))
+	}
+	seed := rawNLSFResidualForTarget(cb, top[0], targetQ15)
+	for i, v := range seed {
+		if v < -3 || v > 3 {
+			t.Fatalf("seed raw[%d]=%d outside encodable range", i, v)
+		}
+	}
+
+	legacyCB1 := bestNLSFStage1(signal, cb)
+	legacyRaw := refineNLSFResidual(signal, cb, legacyCB1)
+	legacyLPC := nlsfToLPCLibopus(reconstructNLSFQ15(cb, legacyCB1, legacyRaw), cb.order)
+	chosenCB1, chosenRaw := bestNLSFAnalysis(signal, cb, targetQ15, true)
+	chosenLPC := nlsfToLPCLibopus(reconstructNLSFQ15(cb, chosenCB1, chosenRaw), cb.order)
+
+	legacyResidual := lpcResidualEnergy(signal, legacyLPC)
+	chosenResidual := lpcResidualEnergy(signal, chosenLPC)
+	if chosenResidual > legacyResidual+1e-12 {
+		t.Fatalf("Q1 NLSF residual=%g, legacy=%g", chosenResidual, legacyResidual)
+	}
+	if lpcSpectralPeakGain(chosenLPC) > math.Max(18.0, lpcSpectralPeakGain(legacyLPC)*1.35)+1e-9 {
+		t.Fatalf("chosen LPC spectral peak gain escaped Q1 guard")
+	}
+}
+
 func TestEncoderSimpleNSQResidualQuantization(t *testing.T) {
 	enc, err := NewEncoder(8000, 1)
 	if err != nil {

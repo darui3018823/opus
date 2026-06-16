@@ -152,6 +152,35 @@ itself is now fair.
 
 ### Q1 — LPC / NLSF analysis fidelity
 
+Status: In progress (started 2026-06-16)
+
+#### Q1a — LPC-derived NLSF target and guarded codebook search (Complete 2026-06-16)
+
+- Added a first LPC/NLSF fidelity slice without changing the SILK packet grammar:
+  windowed LPC autocorrelation, stabilized LPC coefficients, an LPC spectral
+  envelope-derived NLSF target in Q15, target-weighted stage-1 candidate
+  ranking using the libopus NLSF codebook weights, inverse residual seeding for
+  the existing raw NLSF residual symbols, and a guarded local residual-energy
+  refinement.
+- Kept decoder compatibility by reconstructing the selected NLSF through the
+  same `reconstructNLSFQ15` / `nlsfToLPCLibopus` path the decoder uses. A
+  spectral peak-gain guard rejects NLSF candidates that lower analysis residual
+  only by creating an overly sharp LPC envelope that destabilizes the current
+  simple NSQ.
+- Added `TestEncoderLPCNLSFTargetQuantization` to pin the new target generation,
+  encodable raw residual range, non-regression versus the previous residual-only
+  search, and the peak-gain guard.
+- Scoreboard movement (`go test -tags opusref -run
+  TestOpusSILKABAgainstLibopusEncoder -v .`): 8 kHz improved on
+  `gap_SNR_matched` for unvoiced-noise (2.89 -> 2.70 dB), steady-voiced
+  (3.91 -> 3.88 dB), speech-like-harmonic (6.26 -> 6.22 dB), and onset
+  (2.24 -> 2.20 dB). 12/16 kHz were mostly neutral with small mixed changes;
+  the public quality baseline and libopus decode cross-check stayed green.
+- Still open for the rest of Q1: a closer port of libopus `silk_find_LPC_FLP`
+  / `silk_A2NLSF`, true NLSF rate-distortion quantization behavior beyond this
+  bounded encoder-symbol subset, and active interpolation between previous and
+  current NLSFs once the NSQ path consumes per-half LPC coefficient sets.
+
 - Goal: real autocorrelation + Burg LPC, windowing, LPC→LSF→NLSF conversion,
   NLSF rate-distortion quantization with the actual codebook weights, and LSF
   interpolation between subframes. Replaces `bestNLSFStage1` / `refineNLSFResidual`.

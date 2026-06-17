@@ -495,7 +495,14 @@ The SILK package contains:
   until the pitch, shaping, and NSQ quality phases are further along. Q5c keeps
   public SILK-only digital-silence streams minimal even in CBR mode by emitting
   the one-byte SILK silence payload instead of padding them to the nominal
-  packet size; explicit packet padding still applies when requested.
+  packet size; explicit packet padding still applies when requested. Q3a/Q4a
+  starts the shaping/NSQ handoff by computing per-subframe shaping controls
+  (feedback, spectral tilt, LF/HF shaping, voiced harmonic shaping, and a
+  Lambda-style pulse penalty scale) and feeding them into the current
+  single-state closed-loop NSQ. This replaces the former single scalar
+  output-error feedback term, but it is still not a faithful libopus
+  `silk_noise_shape_analysis_FLP` / `silk_prefilter_FLP` /
+  `silk_NSQ_del_dec_FLP` port.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single
@@ -516,6 +523,10 @@ go test -count=1 -tags opusref ./...
 Result on 2026-06-16: passing (`go vet ./...`, `go test -count=1 ./...`,
 and `go test -count=1 -tags opusref ./...` exit 0).
 
+Q3a/Q4a verification on 2026-06-17: passing (`go vet ./...`,
+`go test -count=1 ./...`,
+`go test -count=1 ./internal/silk -run TestSILKInternalQualityBaseline -v`,
+and `go test -count=1 -tags opusref -run "TestCGOEncodeRefSILKOnly|TestOpusSILKABAgainstLibopusEncoder" -v .`).
 Q5a verification on 2026-06-17: passing (`go vet ./...`,
 `go test -count=1 ./...`, and
 `go test -count=1 -tags opusref -run TestOpusSILKABAgainstLibopusEncoder -v .`).

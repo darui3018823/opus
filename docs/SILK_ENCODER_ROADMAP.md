@@ -224,6 +224,20 @@ Status: In progress (started 2026-06-16)
 - Risk: high; largest and most coupled change. Likely split into sub-slices
   (single-state shaped NSQ first, then delayed decision).
 
+#### Q3a/Q4a — single-state shaped NSQ (Complete 2026-06-17)
+
+- Added the first Q3/Q4 handoff: the encoder now derives per-subframe shaping
+  controls from the current signal class and spectrum proxy, including feedback,
+  spectral tilt, LF/HF shaping, voiced harmonic shaping, and a Lambda-style
+  pulse penalty scale.
+- The existing closed-loop NSQ consumes those controls while preserving the
+  current SILK bitstream grammar and decoder-compatible synthesis state update.
+- Added a coefficient guard test covering voiced versus high-frequency unvoiced
+  material, and kept the closed-loop NSQ synthesis comparison in place.
+- This is intentionally the first sub-slice only: no libopus-equivalent
+  `silk_noise_shape_analysis_FLP`, `silk_prefilter_FLP`, or delayed-decision
+  `silk_NSQ_del_dec_FLP` state search yet.
+
 ### Q5 — Gain processing & rate-control loop
 
 Status: In progress (started 2026-06-17)

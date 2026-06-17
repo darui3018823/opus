@@ -617,6 +617,71 @@ func TestEncoderSimpleNSQResidualQuantization(t *testing.T) {
 	}
 }
 
+func TestEncoderNoiseShapeAnalysisTracksSignalClass(t *testing.T) {
+	const rate = 16000
+	enc, err := NewEncoder(rate, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder() error = %v", err)
+	}
+
+	voiced := make([]float64, enc.frameSize)
+	for i := range voiced {
+		tm := float64(i) / rate
+		voiced[i] = 0.20 * (0.72*math.Sin(2*math.Pi*180*tm) +
+			0.22*math.Sin(2*math.Pi*360*tm+0.3) +
+			0.09*math.Sin(2*math.Pi*540*tm+0.7))
+	}
+	_, pitchGain := enc.analyzePitch(voiced)
+	voicedShape := enc.analyzeNoiseShape(voiced, SignalTypeVoiced, pitchGain)
+
+	noise := make([]float64, enc.frameSize)
+	prev := 0.0
+	for i := range noise {
+		white := 0.27
+		if i%2 == 0 {
+			white = -white
+		}
+		noise[i] = white - 0.18*prev
+		prev = white
+	}
+	noiseShape := enc.analyzeNoiseShape(noise, SignalTypeUnvoiced, 0)
+
+	if len(voicedShape.subframes) != enc.nSubframes || len(noiseShape.subframes) != enc.nSubframes {
+		t.Fatalf("shape subframes voiced=%d noise=%d want %d", len(voicedShape.subframes), len(noiseShape.subframes), enc.nSubframes)
+	}
+
+	avg := func(sh silkShapeAnalysis, field func(silkShapeSubframe) float64) float64 {
+		sum := 0.0
+		for _, sf := range sh.subframes {
+			v := field(sf)
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				t.Fatalf("non-finite shape coefficient: %+v", sf)
+			}
+			sum += v
+		}
+		return sum / float64(len(sh.subframes))
+	}
+	voicedHarmonic := avg(voicedShape, func(sf silkShapeSubframe) float64 { return sf.harmonic })
+	noiseHarmonic := avg(noiseShape, func(sf silkShapeSubframe) float64 { return sf.harmonic })
+	voicedFeedback := avg(voicedShape, func(sf silkShapeSubframe) float64 { return sf.feedback })
+	noiseFeedback := avg(noiseShape, func(sf silkShapeSubframe) float64 { return sf.feedback })
+	voicedHF := avg(voicedShape, func(sf silkShapeSubframe) float64 { return sf.hf })
+	noiseHF := avg(noiseShape, func(sf silkShapeSubframe) float64 { return sf.hf })
+
+	if voicedHarmonic <= 0.15 {
+		t.Fatalf("voiced harmonic shaping=%g, want active shaping", voicedHarmonic)
+	}
+	if noiseHarmonic != 0 {
+		t.Fatalf("unvoiced harmonic shaping=%g, want zero", noiseHarmonic)
+	}
+	if voicedFeedback <= noiseFeedback {
+		t.Fatalf("feedback voiced=%g noise=%g, want stronger voiced feedback", voicedFeedback, noiseFeedback)
+	}
+	if noiseHF <= voicedHF {
+		t.Fatalf("HF shaping noise=%g voiced=%g, want stronger noisy HF shaping", noiseHF, voicedHF)
+	}
+}
+
 func TestEncoderClosedLoopNSQImprovesVoicedSynthesis(t *testing.T) {
 	const rate = 16000
 	enc, err := NewEncoder(rate, 1)

@@ -54,6 +54,19 @@ type rateControlPlan struct {
 	rateScale   float64
 }
 
+type silkShapeSubframe struct {
+	feedback float64
+	tilt     float64
+	lf       float64
+	hf       float64
+	harmonic float64
+	lambda   float64
+}
+
+type silkShapeAnalysis struct {
+	subframes []silkShapeSubframe
+}
+
 // NewEncoder creates a new 20 ms SILK encoder.
 func NewEncoder(sampleRate, channels int) (*Encoder, error) {
 	return NewEncoderWithFrameMs(sampleRate, channels, 20)
@@ -732,6 +745,93 @@ func (e *Encoder) analysisExcitation(signal []float64, lpcQ12 []int16, signalTyp
 		excitation[i] -= ltpGain * residual[i-pitchLag]
 	}
 	return excitation
+}
+
+func (e *Encoder) analyzeNoiseShape(signal []float64, signalType int, pitchGain float64) silkShapeAnalysis {
+	out := silkShapeAnalysis{subframes: make([]silkShapeSubframe, e.nSubframes)}
+	if e.nSubframes == 0 {
+		return out
+	}
+	subframeLen := e.frameSize / e.nSubframes
+	frameEnergy := computeEnergy(signal)
+	frameRMS := math.Sqrt(frameEnergy + 1e-18)
+	for sf := 0; sf < e.nSubframes; sf++ {
+		start := sf * subframeLen
+		end := start + subframeLen
+		if end > len(signal) {
+			end = len(signal)
+		}
+		if start >= end {
+			out.subframes[sf] = defaultShapeSubframe(signalType, pitchGain)
+			continue
+		}
+
+		energy, lag1, diffEnergy := 0.0, 0.0, 0.0
+		prev := signal[start]
+		for i := start; i < end; i++ {
+			x := signal[i]
+			energy += x * x
+			if i > start {
+				lag1 += x * prev
+				d := x - prev
+				diffEnergy += d * d
+			}
+			prev = x
+		}
+		n := float64(end - start)
+		rms := math.Sqrt(energy/n + 1e-18)
+		tilt := 0.0
+		if energy > 1e-12 {
+			tilt = lag1 / energy
+		}
+		tilt = clampFloat(tilt, -0.75, 0.75)
+		hfRatio := 0.0
+		if energy > 1e-12 {
+			hfRatio = diffEnergy / (4.0 * energy)
+		}
+		hfRatio = clampFloat(hfRatio, 0, 1)
+
+		activity := clampFloat(rms/(frameRMS+1e-9), 0.35, 2.0)
+		shape := defaultShapeSubframe(signalType, pitchGain)
+		shape.tilt = 0.18 * tilt
+		shape.lf = clampFloat(-0.11*tilt, -0.10, 0.10)
+		shape.hf = clampFloat(0.14*(hfRatio-0.22), -0.05, 0.13)
+		shape.lambda *= clampFloat(1.10-0.12*activity+0.10*hfRatio, 0.82, 1.24)
+		if signalType == SignalTypeVoiced {
+			shape.feedback = clampFloat(0.42+0.10*pitchGain+0.04*math.Max(tilt, 0), 0.40, 0.58)
+			shape.harmonic = clampFloat(0.10+0.42*pitchGain, 0, 0.55)
+			shape.lambda *= clampFloat(0.96-0.08*pitchGain, 0.86, 1.0)
+		} else {
+			shape.feedback = clampFloat(0.25+0.10*math.Max(tilt, 0)+0.09*hfRatio, 0.22, 0.42)
+			shape.harmonic = 0
+			shape.lambda *= clampFloat(1.0+0.12*hfRatio, 1.0, 1.12)
+		}
+		out.subframes[sf] = shape
+	}
+	return out
+}
+
+func defaultShapeSubframe(signalType int, pitchGain float64) silkShapeSubframe {
+	shape := silkShapeSubframe{
+		feedback: 0.30,
+		lambda:   1.0,
+	}
+	if signalType == SignalTypeVoiced {
+		shape.feedback = 0.50
+		shape.harmonic = clampFloat(0.10+0.42*pitchGain, 0, 0.55)
+		shape.lambda = 0.92
+	}
+	return shape
+}
+
+func clampFloat(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 func (e *Encoder) encodeTypeOffset(enc *entcode.Encoder, vadActive bool, signalType, quantOffset int) {
@@ -1426,11 +1526,13 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 	sLPCQ14 := make([]int32, silkMaxLPCOrder+subframeLen)
 	copy(sLPCQ14[:silkMaxLPCOrder], e.lpcState)
 	output := make([]int16, e.frameSize)
+	shaping := e.analyzeNoiseShape(signal, signalType, estimatePitchGainFromLTP(ltpCoeffsQ14))
+	errHist := make([]float64, ltpMemLen+e.frameSize)
 	shapeErr := 0.0
-	shape := 0.30
+	prevShapeErr := 0.0
+	lfShapeErr := 0.0
 	pulseRatePenalty := 96.0 * float64(int64(1)<<20)
 	if signalType == SignalTypeVoiced {
-		shape = 0.50
 		pulseRatePenalty = 28.0 * float64(int64(1)<<20)
 	}
 	pulseRatePenalty *= rateScale
@@ -1443,6 +1545,7 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 		if gainQ10 <= 0 {
 			gainQ10 = 1
 		}
+		shape := shapeForSubframe(shaping, sf, signalType)
 		invGainQ31 := silkInverse32VarQ(gainQ16, 47)
 		gainAdjQ16 := int32(1 << 16)
 		if gainQ16 != e.prevGainQ16 {
@@ -1503,7 +1606,20 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 				ltpPredQ14 = ltpPredQ13 << 1
 			}
 
-			target := signal[start+i] + shape*shapeErr
+			harmonicErr := 0.0
+			if signalType == SignalTypeVoiced && lag > 0 {
+				errIdx := ltpMemLen + start + i - lag
+				if errIdx >= 0 && errIdx < len(errHist) {
+					harmonicErr = errHist[errIdx]
+				}
+			}
+			hfErr := shapeErr - prevShapeErr
+			target := signal[start+i] +
+				shape.feedback*shapeErr +
+				shape.tilt*prevShapeErr +
+				shape.lf*lfShapeErr +
+				shape.hf*hfErr +
+				shape.harmonic*harmonicErr
 			if target > 1.5 {
 				target = 1.5
 			} else if target < -1.5 {
@@ -1513,7 +1629,7 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 			desiredExcQ14 := desiredQ14 - predQ14 - ltpPredQ14
 
 			seed = 196314165*seed + 907633515
-			pulse := chooseNSQPulseShaped(desiredExcQ14, offsetQ14, seed < 0, pulseRatePenalty)
+			pulse := chooseNSQPulseShaped(desiredExcQ14, offsetQ14, seed < 0, pulseRatePenalty*shape.lambda)
 			pulses[start+i] = pulse
 
 			excQ14 := decodedExcitationQ14(int(pulse), offsetQ14, seed < 0)
@@ -1529,7 +1645,10 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 			output[start+i] = clamp16(pxq)
 
 			recon := float64(output[start+i]) / 32768.0
+			prevShapeErr = shapeErr
 			shapeErr = signal[start+i] - recon
+			lfShapeErr = 0.94*lfShapeErr + shapeErr
+			errHist[ltpMemLen+start+i] = shapeErr
 			seed += int32(pulse)
 		}
 
@@ -1545,6 +1664,33 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 		}
 	}
 	return pulses
+}
+
+func estimatePitchGainFromLTP(ltpCoeffsQ14 [][5]int16) float64 {
+	best := 0.0
+	for _, coeffs := range ltpCoeffsQ14 {
+		sum := 0.0
+		for _, c := range coeffs {
+			if c > 0 {
+				sum += float64(c) / 16384.0
+			}
+		}
+		if sum > best {
+			best = sum
+		}
+	}
+	return clampFloat(best, 0, 1)
+}
+
+func shapeForSubframe(analysis silkShapeAnalysis, sf, signalType int) silkShapeSubframe {
+	if sf >= 0 && sf < len(analysis.subframes) {
+		shape := analysis.subframes[sf]
+		if shape.lambda <= 0 {
+			shape.lambda = 1
+		}
+		return shape
+	}
+	return defaultShapeSubframe(signalType, 0)
 }
 
 func (e *Encoder) updateSilentSynthesisState() {

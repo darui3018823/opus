@@ -559,6 +559,9 @@ func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]floa
 
 		side := make([]float64, d.frameSize)
 		if !decodeOnlyMiddle {
+			if d.prevDecodeOnlyMiddle {
+				d.side.Reset()
+			}
 			sideConditional := i > 0 && !d.prevDecodeOnlyMiddle
 			pcm, err := d.side.decodeFrame(dec, vadFlags[1][i], sideConditional)
 			if err == nil {

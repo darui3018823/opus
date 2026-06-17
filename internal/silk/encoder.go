@@ -44,20 +44,19 @@ type Encoder struct {
 	useSNRTargetVBR  bool
 	lastSNRVBRFrame  bool
 	lastSNRVBRStream bool
-	// stereoComponent marks the mid/side encoders of a stereo packet. The Step 4
-	// voiced trellis + process_gains path is gated to mono for now: it produces a
-	// stereo multi-frame bitstream that our decoder and libopus reconstruct
-	// differently (a conformance gap to chase down with the stereo predictor in
-	// Step 5). Stereo components keep the proven heuristic-gain + homebrew path.
+	// stereoComponent marks the mid/side encoders of a stereo packet. The stereo
+	// predictor path converts L/R to decoder-symmetric adaptive M/S before these
+	// component encoders run.
 	stereoComponent bool
 	// hybridMode marks frames encoded as the SILK low band of a hybrid packet.
-	// Like stereoComponent it gates off the Step 4 voiced trellis: the hybrid
-	// SILK+CELT energy balance is a separate WIP and the trellis-coded low band
-	// is not yet conformant there. Set per-call by the hybrid encoder.
+	// It gates off the Step 4 voiced trellis: the hybrid SILK+CELT energy balance
+	// is a separate WIP and the trellis-coded low band is not yet conformant
+	// there. Set per-call by the hybrid encoder.
 	hybridMode      bool
 	shapeHarmSmooth float64
 	shapeTiltSmooth float64
 	side            *Encoder // side-channel encoder for stereo packets
+	stereoState     stereoPredState
 
 	// Pitch analysis state (silk_find_pitch_lags_FLP).
 	pitchHist            []float64 // Past ltp_mem_length input samples, [-1,1]
@@ -229,7 +228,7 @@ func (e *Encoder) Encode(pcm []float64) ([]byte, error) {
 // EncodeMulti encodes n consecutive SILK frames into one shared range-coded
 // stream. This mirrors the SILK packet structure used by Opus: VAD flags for
 // all frames, LBRR flags, then frame payloads in order. Stereo input is encoded
-// as a conservative mid/side pair with zero stereo predictors.
+// as adaptive mid/side, with predictor indices written before each frame.
 func (e *Encoder) EncodeMulti(pcm []float64, nFrames int) ([]byte, error) {
 	enc := entcode.NewEncoder(64)
 	if err := e.EncodeMultiWithEncoder(enc, pcm, nFrames); err != nil {
@@ -295,22 +294,17 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 
 	midFrames := make([][]float64, nFrames)
 	sideFrames := make([][]float64, nFrames)
+	stereoPredIx := make([][2][3]int8, nFrames)
 	vadFlags := [2][]bool{
 		make([]bool, nFrames),
 		make([]bool, nFrames),
 	}
 	for frame := 0; frame < nFrames; frame++ {
-		mid := make([]float64, e.frameSize)
-		side := make([]float64, e.frameSize)
 		base := frame * e.frameSize * 2
-		for i := 0; i < e.frameSize; i++ {
-			l := pcm[base+i*2]
-			r := pcm[base+i*2+1]
-			mid[i] = 0.5 * (l + r)
-			side[i] = 0.5 * (l - r)
-		}
+		mid, side, predIx := e.stereoState.lrToMS(pcm[base:base+e.frameSize*2], e.sampleRate/1000, e.frameSize)
 		midFrames[frame] = mid
 		sideFrames[frame] = side
+		stereoPredIx[frame] = predIx
 		vadFlags[0][frame] = e.vad.Detect(mid)
 		vadFlags[1][frame] = e.side.vad.Detect(side)
 	}
@@ -324,7 +318,7 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 
 	prevOnlyMiddle := false
 	for i := 0; i < nFrames; i++ {
-		encodeZeroStereoPred(enc)
+		encodeStereoPred(enc, stereoPredIx[i])
 		onlyMiddle := false
 		if !vadFlags[1][i] {
 			onlyMiddle = true
@@ -332,6 +326,9 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		}
 		e.encodeRangeFrame(enc, midFrames[i], vadFlags[0][i], i > 0)
 		if !onlyMiddle {
+			if prevOnlyMiddle {
+				e.side.Reset()
+			}
 			e.side.encodeRangeFrame(enc, sideFrames[i], vadFlags[1][i], i > 0 && !prevOnlyMiddle)
 		}
 		prevOnlyMiddle = onlyMiddle
@@ -339,12 +336,12 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 	return nil
 }
 
-func encodeZeroStereoPred(enc *entcode.Encoder) {
-	// joint=12, ix0=1, ix1=2 decodes both predictors to zero.
-	enc.EncodeIcdf(12, silkStereoPredJointICDF[:], 8)
+func encodeStereoPred(enc *entcode.Encoder, ix [2][3]int8) {
+	n := 5*int(ix[0][2]) + int(ix[1][2])
+	enc.EncodeIcdf(n, silkStereoPredJointICDF[:], 8)
 	for i := 0; i < 2; i++ {
-		enc.EncodeIcdf(1, silkUniform3ICDF[:], 8)
-		enc.EncodeIcdf(2, silkUniform5ICDF[:], 8)
+		enc.EncodeIcdf(int(ix[i][0]), silkUniform3ICDF[:], 8)
+		enc.EncodeIcdf(int(ix[i][1]), silkUniform5ICDF[:], 8)
 	}
 }
 
@@ -1944,10 +1941,10 @@ func (e *Encoder) closedLoopNSQ(
 }
 
 // voicedUsesTrellis reports whether voiced frames take the Step 4 trellis NSQ +
-// process_gains path. Gated to the enabled flag and to non-stereo encoders: the
-// stereo multi-frame trellis bitstream is not yet conformant (Step 5).
+// process_gains path. Hybrid SILK low-band frames keep the legacy path until the
+// hybrid energy balance is tuned.
 func (e *Encoder) voicedUsesTrellis() bool {
-	return e.useTrellisNSQ && !e.stereoComponent && !e.hybridMode
+	return e.useTrellisNSQ && !e.hybridMode
 }
 
 // LastStreamSNRVBR reports whether the most recently encoded mono SILK stream
@@ -2783,6 +2780,7 @@ func (e *Encoder) Reset() {
 	e.ltpSumLogGainQ7 = 0
 	e.lastSNRVBRFrame = false
 	e.lastSNRVBRStream = false
+	e.stereoState.reset()
 	if e.side != nil {
 		e.side.Reset()
 	}

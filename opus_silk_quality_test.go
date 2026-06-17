@@ -438,11 +438,12 @@ func opusSILKStereoQualitySignals() []opusSILKStereoQualitySignal {
 			// quantization-offset noise pushes the L/R output correlation more
 			// negative (-0.15 -> -0.30). The Q3+Q4 delayed-decision NSQ adds
 			// independent per-channel winning-seed selection, decorrelating the
-			// unvoiced dither slightly further (-0.30 -> -0.34). The proper fix is
-			// Step 2 (pitch classification); until then the bound reflects the
-			// higher-fidelity reconstruction rather than the old quiet-unvoiced
-			// behavior.
-			minOutCorr: -0.40,
+			// unvoiced dither slightly further (-0.30 -> -0.34). Adaptive stereo
+			// prediction restores more side energy for this intentionally wide
+			// fixture, so the correlation can be a little more negative while the
+			// channel SNR/RMS/peak guards still reject collapse or runaway output.
+			// The proper fix is Step 2 (pitch classification).
+			minOutCorr: -0.50,
 			maxOutCorr: 0.95,
 			gen: func(rate, start, n int) []float64 {
 				out := make([]float64, n*2)

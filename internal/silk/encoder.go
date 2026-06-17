@@ -29,6 +29,9 @@ type Encoder struct {
 	prevGainQ16    int32     // Previous synthesis gain, matching decoder state
 	lpcState       []int32   // Encoder-side LPC synthesis state, Q14
 	ltpState       []int32   // Encoder-side LTP output history, Q0
+	nsq            silkNSQState
+	shapeHarmSmooth float64
+	shapeTiltSmooth float64
 	side           *Encoder  // side-channel encoder for stereo packets
 
 	// Pitch analysis state (silk_find_pitch_lags_FLP).
@@ -54,6 +57,9 @@ type encoderFrameState struct {
 	prevGainQ16  int32
 	lpcState     []int32
 	ltpState     []int32
+	nsq          silkNSQState
+	shapeHarmSmooth float64
+	shapeTiltSmooth float64
 }
 
 type rateControlPlan struct {
@@ -129,6 +135,7 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		prevGainQ16:    65536,
 		lpcState:       make([]int32, silkMaxLPCOrder),
 		ltpState:       make([]int32, silkLTPMemLengthMs*(sampleRate/1000)),
+		nsq:            newSilkNSQState(frameSize, silkLTPMemLengthMs*(sampleRate/1000)),
 
 		pitchHist:            make([]float64, peLtpMemLengthMs*(sampleRate/1000)),
 		prevLagForPitch:      0,
@@ -327,6 +334,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 
 	cb := getNLSFCB(e.lpcOrder)
 	nlsf := e.analyzeNLSF(signal, cb, signalType)
+	quantOffset = e.estimateQuantOffsetType(signal, nlsf.lpcQ12, signalType, pitchLag, pitchGain)
 
 	plan := e.selectRateControlPlan(initialState, signal, vadActive, signalType, quantOffset, conditionalGain, nlsf, pitchLag, pitchGain)
 
@@ -380,6 +388,9 @@ func (e *Encoder) snapshotFrameState() encoderFrameState {
 		prevGainQ16:  e.prevGainQ16,
 		lpcState:     append([]int32(nil), e.lpcState...),
 		ltpState:     append([]int32(nil), e.ltpState...),
+		nsq:          e.nsq.clone(),
+		shapeHarmSmooth: e.shapeHarmSmooth,
+		shapeTiltSmooth: e.shapeTiltSmooth,
 	}
 }
 
@@ -393,6 +404,9 @@ func (e *Encoder) restoreFrameState(st encoderFrameState) {
 	if len(st.ltpState) == len(e.ltpState) {
 		copy(e.ltpState, st.ltpState)
 	}
+	e.nsq = st.nsq.clone()
+	e.shapeHarmSmooth = st.shapeHarmSmooth
+	e.shapeTiltSmooth = st.shapeTiltSmooth
 }
 
 func (e *Encoder) selectRateControlPlan(

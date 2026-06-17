@@ -470,7 +470,7 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int) ([]byte, erro
 				return nil, fmt.Errorf("SILK encoding failed: %w", err)
 			}
 		}
-		if e.shouldPadSILKStream(silkPCM) {
+		if e.shouldPadSILKStream(silkPCM, e.silkEncoder.LastStreamSNRVBR()) {
 			targetBytes := e.silkStreamTargetBytes(group)
 			if len(stream) < targetBytes {
 				padded := make([]byte, targetBytes)
@@ -488,11 +488,14 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int) ([]byte, erro
 	return append([]byte{toc | byte(code)}, payload...), nil
 }
 
-func (e *Encoder) shouldPadSILKStream(pcm []float64) bool {
+func (e *Encoder) shouldPadSILKStream(pcm []float64, snrVBR bool) bool {
 	if e.rateMode != celt.RateModeCBR {
 		return false
 	}
 	if isSilentPCM(pcm) {
+		return false
+	}
+	if snrVBR {
 		return false
 	}
 	return true

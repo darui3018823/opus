@@ -491,11 +491,16 @@ The SILK package contains:
   candidate that collapsed unvoiced noise energy, relaxing the activity floor
   enough for compact non-collapsed plans, and rejecting candidates whose
   synthesized frame RMS is far below the input. This bounds the unvoiced-noise
-  byte blowup without changing voiced frames, which stay on the previous path
-  until the pitch, shaping, and NSQ quality phases are further along. Q5c keeps
-  public SILK-only digital-silence streams minimal even in CBR mode by emitting
-  the one-byte SILK silence payload instead of padding them to the nominal
-  packet size; explicit packet padding still applies when requested. Q3a/Q4a
+  byte blowup while leaving the voiced path to the Step 4 SNR/gain pipeline. Q5c
+  keeps public SILK-only digital-silence streams minimal even in CBR mode by
+  emitting the one-byte SILK silence payload instead of padding them to the
+  nominal packet size; explicit packet padding still applies when requested.
+  Voiced mono SILK-only frames now use the SNR-derived gains as a VBR target:
+  the encoder tries the natural trellis NSQ result once, keeps it when it fits
+  the per-frame byte ceiling, and only falls back to the budget-search clamp on
+  overflow. `OPUS_SILK_RC_SNR=0` restores the previous budget-fitting/padding
+  behaviour for A/B comparisons; unvoiced, silence, stereo, and hybrid paths
+  keep their previous rate-control behaviour. Q3a/Q4a
   starts the shaping/NSQ handoff by computing per-subframe shaping controls
   (feedback, spectral tilt, LF/HF shaping, voiced harmonic shaping, and a
   Lambda-style pulse penalty scale) and feeding them into the current
@@ -542,6 +547,9 @@ and `go test -count=1 -tags opusref -run "TestCGOEncodeRefSILKOnly|TestOpusSILKA
 Q5a verification on 2026-06-17: passing (`go vet ./...`,
 `go test -count=1 ./...`, and
 `go test -count=1 -tags opusref -run TestOpusSILKABAgainstLibopusEncoder -v .`).
+Voiced SNR-VBR rate-control verification on 2026-06-18: passing
+(`go test ./...` and
+`go test -tags opusref -run TestOpusSILKABAgainstLibopusEncoder -v .`).
 
 Passing package-level tests:
 

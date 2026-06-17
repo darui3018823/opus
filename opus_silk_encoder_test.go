@@ -823,6 +823,7 @@ func TestEncoderSILKOnlyVBRDTXAndPaddingStillSelectSILK(t *testing.T) {
 }
 
 func TestEncoderSILKOnlyCBRPacketSizeTracksBitrateAndDuration(t *testing.T) {
+	t.Setenv("OPUS_SILK_RC_SNR", "0")
 	const rate = 16000
 	base := rate * 20 / 1000
 

@@ -120,6 +120,49 @@ func TestEncoderSILKOnlyQualityBaseline(t *testing.T) {
 	}
 }
 
+func TestEncoderSILKOnlyVoicedSNRVBRSkipsCBRPadding(t *testing.T) {
+	const rate = 16000
+	const frames = 12
+	frameSize := rate * 20 / 1000
+	totalBytes := func(rcSNR string) int {
+		t.Helper()
+		t.Setenv("OPUS_SILK_TRELLIS", "1")
+		t.Setenv("OPUS_SILK_RC_SNR", rcSNR)
+		enc, err := NewEncoder(rate, 1, ApplicationVOIP)
+		if err != nil {
+			t.Fatalf("NewEncoder: %v", err)
+		}
+		if err := enc.SetBitrate(24000); err != nil {
+			t.Fatalf("SetBitrate: %v", err)
+		}
+		enc.SetSignalType(SignalVoice)
+
+		total := 0
+		for frame := 0; frame < frames; frame++ {
+			pcm := opusSILKHarmonicFrame(rate, frame*frameSize, frameSize, 180, 0.20)
+			pkt, err := enc.EncodeFloat(pcm, frameSize)
+			if err != nil {
+				t.Fatalf("frame %d: EncodeFloat: %v", frame, err)
+			}
+			total += len(pkt)
+		}
+		return total
+	}
+
+	snrVBRBytes := totalBytes("1")
+	budgetBytes := totalBytes("0")
+	nominalCBRBytes := frames * (1 + int(float64(24000)*0.020/8.0))
+	if snrVBRBytes >= nominalCBRBytes {
+		t.Fatalf("SNR VBR voiced bytes=%d, want below nominal padded CBR %d", snrVBRBytes, nominalCBRBytes)
+	}
+	if budgetBytes < nominalCBRBytes {
+		t.Fatalf("legacy RC bytes=%d, want at least nominal padded CBR %d", budgetBytes, nominalCBRBytes)
+	}
+	if snrVBRBytes >= budgetBytes {
+		t.Fatalf("SNR VBR bytes=%d, want below legacy budget bytes=%d", snrVBRBytes, budgetBytes)
+	}
+}
+
 func TestEncoderSILKOnlyUnvoicedNoiseRateControlBound(t *testing.T) {
 	for _, rate := range []int{8000, 12000, 16000} {
 		rate := rate

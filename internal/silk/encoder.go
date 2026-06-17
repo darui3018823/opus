@@ -385,6 +385,12 @@ func (e *Encoder) selectRateControlPlan(
 		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
 	}
 
+	// Unvoiced frames have no LTP prediction, so the gain must normalize the
+	// excitation directly (Q5d). Start the rate-control search from the
+	// excitation-normalized gains rather than the mis-scaled dB heuristic.
+	baseTargets = e.excitationGainIndices(signal)
+	baseIndices = e.resolveGainIndices(baseTargets, conditionalGain)
+
 	targetBits := e.silkFrameTargetBits()
 	if targetBits <= 0 {
 		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
@@ -863,6 +869,21 @@ func (e *Encoder) analysisGainIndex(signal []float64) int {
 }
 
 func (e *Encoder) analysisGainIndices(signal []float64) []int {
+	return e.gainIndicesFromEnergy(signal, analysisGainIndexFromEnergy)
+}
+
+// excitationGainIndices derives per-subframe gains so that the quantized
+// excitation stays normalized (RMS ≈ 2 pulse-units). The legacy dB heuristic
+// used by analysisGainIndices is ~1000× too low for unpredicted signals, which
+// drives the NSQ pulses into the ±1024 clamp and blows the bit budget; rate
+// control then crushes the pulses to silence, leaving only the PRNG quantization
+// offset (decorrelated noise). This path is used for the unvoiced branch where
+// there is no LTP prediction to carry the waveform.
+func (e *Encoder) excitationGainIndices(signal []float64) []int {
+	return e.gainIndicesFromEnergy(signal, excitationGainIndexFromEnergy)
+}
+
+func (e *Encoder) gainIndicesFromEnergy(signal []float64, fromEnergy func(float64) int) []int {
 	targets := make([]int, e.nSubframes)
 	if len(signal) == 0 {
 		for i := range targets {
@@ -871,7 +892,7 @@ func (e *Encoder) analysisGainIndices(signal []float64) []int {
 		return targets
 	}
 
-	frameTarget := e.analysisGainIndex(signal)
+	frameTarget := fromEnergy(computeEnergy(signal))
 	subframeLen := e.frameSize / e.nSubframes
 	for sf := range targets {
 		start := sf * subframeLen
@@ -883,7 +904,7 @@ func (e *Encoder) analysisGainIndices(signal []float64) []int {
 		if end > len(signal) {
 			end = len(signal)
 		}
-		targets[sf] = analysisGainIndexFromEnergy(computeEnergy(signal[start:end]))
+		targets[sf] = fromEnergy(computeEnergy(signal[start:end]))
 		if targets[sf] > frameTarget {
 			targets[sf] = frameTarget
 		}
@@ -904,6 +925,41 @@ func analysisGainIndexFromEnergy(energy float64) int {
 		idx = 40
 	}
 	return idx
+}
+
+func excitationGainIndexFromEnergy(energy float64) int {
+	if energy <= 1e-12 {
+		return 10
+	}
+	// gainQ16 ≈ rms · 2^30 keeps the excitation RMS near 2 pulse-units, matching
+	// libopus's operating point: small pulses the shell coder represents cheaply,
+	// landing the per-frame size near the 24 kbps budget so rate control does not
+	// have to throttle (legacy idx≈10 saturated the ±1024 clamp and blew budget).
+	targetQ16 := math.Sqrt(energy) * float64(int64(1)<<30)
+	return silkQuantizeGainIndex(targetQ16)
+}
+
+// silkQuantizeGainIndex returns the gain index whose dequantized Q16 gain is
+// closest (in the log domain) to targetQ16, over the full SILK gain range.
+func silkQuantizeGainIndex(targetQ16 float64) int {
+	if targetQ16 < 1 {
+		targetQ16 = 1
+	}
+	logTarget := math.Log(targetQ16)
+	best := 0
+	bestErr := math.Inf(1)
+	for idx := 0; idx < NLevelsQGain; idx++ {
+		g := float64(silkGainDequantQ16(idx))
+		if g < 1 {
+			g = 1
+		}
+		errAbs := math.Abs(math.Log(g) - logTarget)
+		if errAbs < bestErr {
+			bestErr = errAbs
+			best = idx
+		}
+	}
+	return best
 }
 
 func (e *Encoder) encodeGains(enc *entcode.Encoder, signalType int, targetIndices []int, conditional bool) []int {

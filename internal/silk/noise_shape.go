@@ -32,6 +32,23 @@ const (
 	lambdaQuantOffset        = 0.8
 )
 
+func voicedSNRTargetDecrDB(fsKHz, targetRateBps, pitchLag int) float64 {
+	// The libopus SNR table is still the oracle. The current simplified voiced
+	// trellis/NSQ lands several dB above libopus's steady-tone operating point
+	// at that table value, so voiced SNR-target VBR backs the target down before
+	// applying the normal noise-shape/process-gains math.
+	if targetRateBps > 24000 {
+		return 0
+	}
+	if pitchLag > 0 && pitchLag < 5*fsKHz {
+		return 5.0
+	}
+	if fsKHz == 8 {
+		return 22.5
+	}
+	return 20.0
+}
+
 type silkComplexityConfig struct {
 	shapingLPCOrder        int
 	laShape                int
@@ -243,7 +260,8 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 		out.PredGain = 1
 	}
 
-	// SNR target from the per-channel SILK bitrate (silk_control_SNR), then the
+	// SNR target from the per-channel SILK bitrate (silk_control_SNR), then a
+	// voiced-only backoff for this encoder's SNR-target VBR path, then the
 	// SNR_adj_dB adjustments from silk_noise_shape_analysis_FLP. speech_activity
 	// and input_quality are still proxied at 1.0, which collapses the BG_SNR_DECR
 	// and unvoiced-quality terms to zero; the voiced HARM_SNR_INCR term stays.
@@ -251,7 +269,14 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 	if e.channels > 0 {
 		targetRate /= e.channels
 	}
-	snrDB := float64(silkControlSNR(targetRate, fsKHz, e.nSubframes)) / 128.0
+	oracleSNRDB := float64(silkControlSNR(targetRate, fsKHz, e.nSubframes)) / 128.0
+	snrDB := oracleSNRDB
+	if signalType == SignalTypeVoiced && e.useSNRTargetVBR {
+		snrDB -= voicedSNRTargetDecrDB(fsKHz, targetRate, pitchLag)
+		if snrDB < 0 {
+			snrDB = 0
+		}
+	}
 	out.SNRdB = snrDB
 	snrAdjDB := snrDB
 	out.CodingQuality = silkSigmoid(0.25 * (snrAdjDB - 20.0))
@@ -266,8 +291,8 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 	} else {
 		snrAdjDB += (-0.4*snrDB + 6.0) * (1.0 - out.InputQuality)
 	}
-	silkTraceSNR("noise_shape fs=%dkHz rate=%d nb_subfr=%d signal=%d base_snr=%.3fdB snr_adj=%.3fdB coding_quality=%.3f input_quality=%.3f ltp_corr=%.3f",
-		fsKHz, targetRate, e.nSubframes, signalType, snrDB, snrAdjDB, out.CodingQuality, out.InputQuality, e.ltpCorrState)
+	silkTraceSNR("noise_shape fs=%dkHz rate=%d nb_subfr=%d signal=%d oracle_snr=%.3fdB target_snr=%.3fdB snr_adj=%.3fdB coding_quality=%.3f input_quality=%.3f ltp_corr=%.3f",
+		fsKHz, targetRate, e.nSubframes, signalType, oracleSNRDB, snrDB, snrAdjDB, out.CodingQuality, out.InputQuality, e.ltpCorrState)
 
 	strength := findPitchWhiteNoiseFrac * out.PredGain
 	bwExp := shapeBandwidthExpansion / (1.0 + strength*strength)

@@ -32,6 +32,29 @@ func TestSilkControlSNR(t *testing.T) {
 	}
 }
 
+func TestVoicedSNRTargetBackoff(t *testing.T) {
+	if got, want := voicedSNRTargetDecrDB(8, 24000, 44), 22.5; got != want {
+		t.Fatalf("voicedSNRTargetDecrDB(8)=%.1f, want %.1f", got, want)
+	}
+	for _, tc := range []struct {
+		fsKHz int
+		lag   int
+	}{
+		{12, 67},
+		{16, 89},
+	} {
+		if got, want := voicedSNRTargetDecrDB(tc.fsKHz, 24000, tc.lag), 20.0; got != want {
+			t.Fatalf("voicedSNRTargetDecrDB(%d)=%.1f, want %.1f", tc.fsKHz, got, want)
+		}
+	}
+	if got, want := voicedSNRTargetDecrDB(16, 24000, 73), 5.0; got != want {
+		t.Fatalf("voicedSNRTargetDecrDB short lag=%.1f, want %.1f", got, want)
+	}
+	if got := voicedSNRTargetDecrDB(16, 32000, 89); got != 0 {
+		t.Fatalf("voicedSNRTargetDecrDB above tuned rate=%.1f, want 0", got)
+	}
+}
+
 // TestVoicedUsesTrellisGating verifies the Step 4 trellis is enabled for mono
 // SILK-only encoders but gated off for stereo components and hybrid frames,
 // where the trellis bitstream is not yet conformant.

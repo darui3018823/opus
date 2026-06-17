@@ -498,9 +498,15 @@ The SILK package contains:
   Voiced mono SILK-only frames now use the SNR-derived gains as a VBR target:
   the encoder tries the natural trellis NSQ result once, keeps it when it fits
   the per-frame byte ceiling, and only falls back to the budget-search clamp on
-  overflow. `OPUS_SILK_RC_SNR=0` restores the previous budget-fitting/padding
-  behaviour for A/B comparisons; unvoiced, silence, stereo, and hybrid paths
-  keep their previous rate-control behaviour. Q3a/Q4a
+  overflow. The `silk_control_SNR` table is still copied from libopus, but the
+  voiced SNR-target VBR path now backs the effective target down at 24 kbps and
+  below before `gain_mult`/`process_gains` (22.5 dB for NB, 20 dB for MB/WB)
+  because the simplified voiced trellis/NSQ lands well above libopus's
+  steady-tone operating point at the raw table values; short-lag voiced frames
+  use only a 5 dB backoff to avoid over-thinning onset-like signals.
+  `OPUS_SILK_RC_SNR=0` restores the previous
+  budget-fitting/padding behaviour for A/B comparisons; unvoiced, silence,
+  stereo, and hybrid paths keep their previous rate-control behaviour. Q3a/Q4a
   starts the shaping/NSQ handoff by computing per-subframe shaping controls
   (feedback, spectral tilt, LF/HF shaping, voiced harmonic shaping, and a
   Lambda-style pulse penalty scale) and feeding them into the current

@@ -1133,11 +1133,11 @@ func (e *Encoder) excitationGainIndices(signal []float64) []int {
 	return e.gainIndicesFromEnergy(signal, excitationGainIndexFromEnergy)
 }
 
-// shapeGainIndices derives per-subframe target gain indices the libopus way
-// (silk_noise_shape_analysis_FLP gains + silk_process_gains_FLP soft limit),
-// rather than from the signal-energy dB heuristic. The shape gains come from the
-// noise-shaping spectral envelope (never near-zero, so steady voiced frames
-// stay stable) scaled by the target-SNR gain_mult; the soft limit then floors
+// shapeGainIndices derives per-subframe target gain indices from the libopus
+// gain pipeline (silk_noise_shape_analysis_FLP gains + silk_process_gains_FLP
+// soft limit), with the voiced SNR-target VBR backoff applied before gain_mult.
+// The shape gains come from the noise-shaping spectral envelope (never
+// near-zero, so steady voiced frames stay stable); the soft limit then floors
 // the gain using the LPC+LTP residual energy so the quantized signal is bounded.
 // Used for voiced frames where the dB heuristic mis-scaled the gain and flooded
 // the shell coder with pulses (Step 4). The shape-smoothing state is saved and

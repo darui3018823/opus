@@ -40,8 +40,15 @@ func voicedSNRTargetDecrDB(fsKHz, targetRateBps, pitchLag int) float64 {
 	if targetRateBps > 24000 {
 		return 0
 	}
-	if pitchLag > 0 && pitchLag < 5*fsKHz {
-		return 5.0
+	if isShortLagVoiced(fsKHz, pitchLag) {
+		switch fsKHz {
+		case 8:
+			return 30.0
+		case 12:
+			return 20.0
+		default:
+			return 16.0
+		}
 	}
 	if fsKHz == 8 {
 		return 22.5
@@ -237,16 +244,22 @@ func (e *Encoder) estimateQuantOffsetType(signal []float64, lpcQ12 []int16, sign
 	return 1
 }
 
-func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalType int, quantOffsetType int, pitchLags []int, pitchGain float64) silkNoiseShapeAnalysis {
+func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalType int, quantOffsetType int, pitchLags []int, pitchGain float64, speechActivity float64) silkNoiseShapeAnalysis {
 	cfg := e.silkComplexityConfig()
 	fsKHz := e.sampleRate / 1000
 	subframeLen := e.frameSize / e.nSubframes
 	shapeWinLength := silkSubframeLengthMS*fsKHz + 2*cfg.laShape
+	speechActivity = clampFloat(speechActivity, 0, 1)
+	inputQuality := clampFloat(e.inputQuality, 0, 1)
+	inputQualityBand0 := inputQuality
+	if len(e.inputQualityB) > 0 {
+		inputQualityBand0 = clampFloat(e.inputQualityB[0], 0, 1)
+	}
 	out := silkNoiseShapeAnalysis{
 		QuantOffsetType: quantOffsetType,
 		ShapingLPCOrder: cfg.shapingLPCOrder,
 		Warping_Q16:     cfg.warpingQ16,
-		InputQuality:    1.0, // Proxy until VAD-band input quality is ported.
+		InputQuality:    inputQuality,
 	}
 
 	pitchLag := e.prevPitchLag
@@ -262,9 +275,7 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 
 	// SNR target from the per-channel SILK bitrate (silk_control_SNR), then a
 	// voiced-only backoff for this encoder's SNR-target VBR path, then the
-	// SNR_adj_dB adjustments from silk_noise_shape_analysis_FLP. speech_activity
-	// and input_quality are still proxied at 1.0, which collapses the BG_SNR_DECR
-	// and unvoiced-quality terms to zero; the voiced HARM_SNR_INCR term stays.
+	// SNR_adj_dB adjustments from silk_noise_shape_analysis_FLP.
 	targetRate := e.bitrate
 	if e.channels > 0 {
 		targetRate /= e.channels
@@ -280,10 +291,7 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 	out.SNRdB = snrDB
 	snrAdjDB := snrDB
 	out.CodingQuality = silkSigmoid(0.25 * (snrAdjDB - 20.0))
-	speechActivity := 1.0 // proxy until silk_VAD_GetSA_Q8 is ported
-	// VBR path: reduce coding SNR during low speech activity. With the
-	// speech_activity proxy pinned at 1.0 the b*b factor is zero, so this is a
-	// no-op today; kept for when the VAD is ported.
+	// VBR path: reduce coding SNR during low speech activity.
 	b := 1.0 - speechActivity
 	snrAdjDB -= bgSNRDecrDB * out.CodingQuality * (0.5 + 0.5*out.InputQuality) * b * b
 	if signalType == SignalTypeVoiced {
@@ -356,8 +364,9 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 		out.Gains[sf] = out.Gains[sf]*gainMult + gainAdd
 	}
 
-	// libopus: LOW_FREQ_SHAPING * (1 + LOW_QUALITY_LF_SHAPING_DECR*(input_quality-1)).
-	strength = lowFreqShaping * (1.0 + lowQualityLFShapingDecr*(out.InputQuality-1.0))
+	// libopus: LOW_FREQ_SHAPING * (1 + LOW_QUALITY_LF_SHAPING_DECR*(input_quality_bands[0]-1)).
+	strength = lowFreqShaping * (1.0 + lowQualityLFShapingDecr*(inputQualityBand0-1.0))
+	strength *= speechActivity
 	if signalType == SignalTypeVoiced {
 		for sf := 0; sf < e.nSubframes; sf++ {
 			lag := pitchLag
@@ -372,7 +381,7 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 			lfAR := 1.0 - b - b*strength
 			out.LF_shp_Q14[sf] = packLFShapeQ14(lfAR, lfMA)
 		}
-		tilt := -hpNoiseCoef - (1.0-hpNoiseCoef)*harmHPNoiseCoef
+		tilt := -hpNoiseCoef - (1.0-hpNoiseCoef)*harmHPNoiseCoef*speechActivity
 		harmShapeGain := harmonicShaping + highRateHarmonicShaping*(1.0-(1.0-out.CodingQuality)*out.InputQuality)
 		harmShapeGain *= math.Sqrt(clampFloat(e.ltpCorrState, 0, 1))
 		for sf := 0; sf < e.nSubframes; sf++ {
@@ -397,7 +406,7 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 	quantOffset := float64(silkQuantizationOffsetsQ10[signalType>>1][quantOffsetType]) / 1024.0
 	lambda := lambdaOffset +
 		lambdaDelayedDecisions*float64(cfg.nStatesDelayedDecision) +
-		lambdaSpeechAct*1.0 + // speech_activity_Q8 proxy = 256.
+		lambdaSpeechAct*speechActivity +
 		lambdaInputQuality*out.InputQuality +
 		lambdaCodingQuality*out.CodingQuality +
 		lambdaQuantOffset*quantOffset

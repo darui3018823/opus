@@ -47,8 +47,18 @@ func TestVoicedSNRTargetBackoff(t *testing.T) {
 			t.Fatalf("voicedSNRTargetDecrDB(%d)=%.1f, want %.1f", tc.fsKHz, got, want)
 		}
 	}
-	if got, want := voicedSNRTargetDecrDB(16, 24000, 73), 5.0; got != want {
-		t.Fatalf("voicedSNRTargetDecrDB short lag=%.1f, want %.1f", got, want)
+	for _, tc := range []struct {
+		fsKHz int
+		lag   int
+		want  float64
+	}{
+		{8, 36, 30.0},
+		{12, 55, 20.0},
+		{16, 73, 16.0},
+	} {
+		if got := voicedSNRTargetDecrDB(tc.fsKHz, 24000, tc.lag); got != tc.want {
+			t.Fatalf("voicedSNRTargetDecrDB short lag fs=%d got %.1f, want %.1f", tc.fsKHz, got, tc.want)
+		}
 	}
 	if got := voicedSNRTargetDecrDB(16, 32000, 89); got != 0 {
 		t.Fatalf("voicedSNRTargetDecrDB above tuned rate=%.1f, want 0", got)

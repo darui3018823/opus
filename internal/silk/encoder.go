@@ -10,15 +10,20 @@ import (
 
 // Encoder represents a SILK encoder instance
 type Encoder struct {
-	sampleRate     int       // Sample rate (8000, 12000, 16000, 24000)
-	frameSize      int       // Frame size in samples
-	frameMs        int       // Frame duration in milliseconds (10 or 20)
-	nSubframes     int       // Number of SILK subframes in one frame
-	channels       int       // Number of channels (1 or 2)
-	lpcOrder       int       // LPC order based on bandwidth
-	complexity     int       // Complexity (0-10)
-	bitrate        int       // Target bitrate in bps
-	vad            *VAD      // Voice activity detector
+	sampleRate     int  // Sample rate (8000, 12000, 16000, 24000)
+	frameSize      int  // Frame size in samples
+	frameMs        int  // Frame duration in milliseconds (10 or 20)
+	nSubframes     int  // Number of SILK subframes in one frame
+	channels       int  // Number of channels (1 or 2)
+	lpcOrder       int  // LPC order based on bandwidth
+	complexity     int  // Complexity (0-10)
+	bitrate        int  // Target bitrate in bps
+	vad            *VAD // Voice activity detector
+	silkVAD        silkVADState
+	speechActivity float64
+	inputTilt      float64
+	inputQuality   float64
+	inputQualityB  [silkVADNBands]float64
 	prevEnergy     float64   // Previous frame energy for smoothing
 	prevLPC        []float64 // Previous LPC coefficients
 	prevNLSF       []float64 // Previous NLSF
@@ -154,6 +159,9 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		complexity:     5,
 		bitrate:        sampleRate * channels * 16 / 8,
 		vad:            NewVAD(),
+		silkVAD:        newSilkVADState(),
+		speechActivity: 1.0,
+		inputQuality:   1.0,
 		prevEnergy:     1.0,
 		prevLPC:        make([]float64, lpcOrder),
 		prevNLSF:       prevNLSF,
@@ -176,6 +184,9 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		// legacy homebrew quantizer everywhere for A/B comparison.
 		useTrellisNSQ:   os.Getenv("OPUS_SILK_TRELLIS") != "0",
 		useSNRTargetVBR: os.Getenv("OPUS_SILK_RC_SNR") != "0",
+	}
+	for i := range enc.inputQualityB {
+		enc.inputQualityB[i] = 1.0
 	}
 	if channels == 2 {
 		side, err := NewEncoderWithFrameMs(sampleRate, 1, frameMs)
@@ -350,6 +361,11 @@ func encodeStereoPred(enc *entcode.Encoder, ix [2][3]int8) {
 // and pulse coding is driven from a short-term residual instead of raw samples.
 func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadActive, conditionalGain bool) {
 	initialState := e.snapshotFrameState()
+	vadSA := e.silkVADGetSAQ8(signal)
+	e.speechActivity = vadSA.speechActivity
+	e.inputTilt = vadSA.inputTilt
+	e.inputQuality = vadSA.inputQuality
+	e.inputQualityB = vadSA.inputQualityBand
 
 	signalType := SignalTypeInactive
 	pitchLag := e.prevPitchLag
@@ -358,8 +374,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	e.curPitchContourIndex = 0
 	if vadActive {
 		signalType = SignalTypeUnvoiced
-		speechActivity := 1.0 // proxy until silk_VAD_GetSA_Q8 is ported
-		voiced, lagIndex, contourIndex, ltpCorr := e.silkFindPitchLags(signal, speechActivity)
+		voiced, lagIndex, contourIndex, ltpCorr := e.silkFindPitchLags(signal, e.speechActivity)
 		if voiced {
 			signalType = SignalTypeVoiced
 			e.curPitchLagIndex = lagIndex
@@ -496,12 +511,16 @@ func (e *Encoder) selectRateControlPlan(
 
 	if signalType == SignalTypeVoiced && e.useSNRTargetVBR {
 		e.restoreFrameState(initial)
+		snrRateScale := 1.0
+		if fsKHz := e.sampleRate / 1000; fsKHz == 8 && isShortLagVoiced(fsKHz, pitchLag) {
+			snrRateScale = 64.0
+		}
 		totalBits, gainIndices := e.estimateFrameCandidateBits(
 			signal, vadActive, signalType, quantOffset, conditionalGain,
-			baseTargets, nlsf, pitchLag, pitchGain, 1)
+			baseTargets, nlsf, pitchLag, pitchGain, snrRateScale)
 		if totalBits <= targetBits {
 			e.restoreFrameState(initial)
-			return rateControlPlan{gainTargets: baseTargets, gainIndices: gainIndices, rateScale: 1, snrVBR: true}
+			return rateControlPlan{gainTargets: baseTargets, gainIndices: gainIndices, rateScale: snrRateScale, snrVBR: true}
 		}
 	}
 
@@ -659,6 +678,10 @@ func (e *Encoder) silkFrameTargetBits() int {
 		bits = 16
 	}
 	return bits
+}
+
+func isShortLagVoiced(fsKHz, pitchLag int) bool {
+	return pitchLag > 0 && pitchLag < 5*fsKHz
 }
 
 func boostedGainTargets(base []int, boost int) []int {
@@ -1141,7 +1164,7 @@ func (e *Encoder) excitationGainIndices(signal []float64) []int {
 // restored so this acts as a pure analysis pass.
 func (e *Encoder) shapeGainIndices(signal []float64, lpcQ12 []int16, signalType, quantOffset int, pitchLags []int, ltpCoeffsQ14 [][5]int16, pitchGain float64) []int {
 	harmSmooth, tiltSmooth := e.shapeHarmSmooth, e.shapeTiltSmooth
-	shape := e.analyzeNoiseShapeFLP(signal, lpcQ12, signalType, quantOffset, pitchLags, pitchGain)
+	shape := e.analyzeNoiseShapeFLP(signal, lpcQ12, signalType, quantOffset, pitchLags, pitchGain, e.speechActivity)
 	e.shapeHarmSmooth, e.shapeTiltSmooth = harmSmooth, tiltSmooth
 
 	resNrg := e.ltpResidualEnergyPerSubframe(signal, lpcQ12, signalType, pitchLags, ltpCoeffsQ14)
@@ -2022,7 +2045,7 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 	}
 
 	pitchGain := estimatePitchGainFromLTP(ltpCoeffsQ14)
-	shape := e.analyzeNoiseShapeFLP(signal, lpcQ12, signalType, quantOffset, pitchLags, pitchGain)
+	shape := e.analyzeNoiseShapeFLP(signal, lpcQ12, signalType, quantOffset, pitchLags, pitchGain, e.speechActivity)
 
 	lambdaQ10 := shape.Lambda_Q10
 	if rateScale > 1 {
@@ -2751,6 +2774,13 @@ func computePulseCounts(residual []float64, numSubframes int) []int {
 // Reset resets the encoder state
 func (e *Encoder) Reset() {
 	e.vad.Reset()
+	e.silkVAD.reset()
+	e.speechActivity = 1.0
+	e.inputTilt = 0
+	e.inputQuality = 1.0
+	for i := range e.inputQualityB {
+		e.inputQualityB[i] = 1.0
+	}
 	e.prevEnergy = 1.0
 	for i := range e.prevLPC {
 		e.prevLPC[i] = 0

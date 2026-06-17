@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-06-17
+Last reviewed: 2026-06-18
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -503,7 +503,8 @@ The SILK package contains:
   below before `gain_mult`/`process_gains` (22.5 dB for NB, 20 dB for MB/WB)
   because the simplified voiced trellis/NSQ lands well above libopus's
   steady-tone operating point at the raw table values; short-lag voiced frames
-  use only a 5 dB backoff to avoid over-thinning onset-like signals.
+  use rate-specific backoff and, for NB, an extra pulse-rate penalty to keep
+  onset packet sizes closer to libopus.
   `OPUS_SILK_RC_SNR=0` restores the previous
   budget-fitting/padding behaviour for A/B comparisons; unvoiced, silence,
   stereo, and hybrid paths keep their previous rate-control behaviour. Q3a/Q4a
@@ -524,8 +525,10 @@ The SILK package contains:
   per-subframe lags from the encoded indices so the NSQ uses the same lags the
   decoder will. This is the pitch slice only; LTP-gain quantization and voiced
   rate control remain simplified, so voiced/onset packets still spend more bytes
-  than libopus. `silk_VAD_GetSA_Q8` is not yet ported (the voicing threshold uses
-  a fixed speech-activity proxy).
+  than libopus. `silk_VAD_GetSA_Q8` is now ported for encoder analysis as a
+  four-band SILK VAD state feeding speech activity, input tilt, and input
+  quality into pitch and noise-shape analysis, while the older homebrew VAD is
+  still used for the bitstream VAD flag decision.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single

@@ -750,8 +750,8 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64) (v
 	searchThres2 := 0.6 -
 		0.004*float64(order) -
 		0.1*speechActivity -
-		0.15*float64(e.prevSignalType>>1)
-	// input_tilt_Q15 term is omitted (tilt estimate not yet ported).
+		0.15*float64(e.prevSignalType>>1) -
+		0.1*e.inputTilt
 	if searchThres2 < 0 {
 		searchThres2 = 0
 	}

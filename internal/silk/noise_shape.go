@@ -51,6 +51,14 @@ type silkNoiseShapeAnalysis struct {
 	CodingQuality     float64
 	InputQuality      float64
 	PredGain          float64
+	// Gains holds the per-subframe quantization gains (int16-magnitude domain)
+	// derived from the noise-shaping spectral-envelope energy and the target-SNR
+	// scaling (silk_noise_shape_analysis_FLP). process_gains refines and
+	// quantizes these into the gain indices written to the bitstream (Step 4).
+	Gains [silkMaxNBSubframes]float64
+	// SNRdB is the residual-quantizer SNR target in dB (silk_control_SNR), kept
+	// for the process_gains soft limit.
+	SNRdB float64
 }
 
 func (e *Encoder) silkComplexityConfig() silkComplexityConfig {
@@ -235,14 +243,28 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 		out.PredGain = 1
 	}
 
-	// Proxy SNR_dB_Q7: target-bitrate-derived but centered near the current
-	// quality phase's historical 30 dB operating point. This is intentionally
-	// simple until process_gains/VAD SNR tracking is ported in Step 4.
-	snrDB := clampFloat(18.0+float64(e.bitrate)/2000.0, 20.0, 36.0)
+	// SNR target from the per-channel SILK bitrate (silk_control_SNR), then the
+	// SNR_adj_dB adjustments from silk_noise_shape_analysis_FLP. speech_activity
+	// and input_quality are still proxied at 1.0, which collapses the BG_SNR_DECR
+	// and unvoiced-quality terms to zero; the voiced HARM_SNR_INCR term stays.
+	targetRate := e.bitrate
+	if e.channels > 0 {
+		targetRate /= e.channels
+	}
+	snrDB := float64(silkControlSNR(targetRate, fsKHz, e.nSubframes)) / 128.0
+	out.SNRdB = snrDB
 	snrAdjDB := snrDB
 	out.CodingQuality = silkSigmoid(0.25 * (snrAdjDB - 20.0))
+	speechActivity := 1.0 // proxy until silk_VAD_GetSA_Q8 is ported
+	// VBR path: reduce coding SNR during low speech activity. With the
+	// speech_activity proxy pinned at 1.0 the b*b factor is zero, so this is a
+	// no-op today; kept for when the VAD is ported.
+	b := 1.0 - speechActivity
+	snrAdjDB -= bgSNRDecrDB * out.CodingQuality * (0.5 + 0.5*out.InputQuality) * b * b
 	if signalType == SignalTypeVoiced {
 		snrAdjDB += harmSNRIncrDB * e.ltpCorrState
+	} else {
+		snrAdjDB += (-0.4*snrDB + 6.0) * (1.0 - out.InputQuality)
 	}
 
 	strength := findPitchWhiteNoiseFrac * out.PredGain
@@ -285,7 +307,7 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 		if cfg.warpingQ16 > 0 {
 			gain *= warpedGain(ar, warping, cfg.shapingLPCOrder)
 		}
-		_ = gain // Step 3 keeps the existing quantized gain-index source.
+		out.Gains[sf] = gain
 		silkBwexpanderFLP(ar, cfg.shapingLPCOrder, bwExp)
 		if cfg.warpingQ16 > 0 {
 			warpedTrue2MonicCoefs(ar, warping, 3.999, cfg.shapingLPCOrder)
@@ -295,6 +317,15 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 		for j := 0; j < cfg.shapingLPCOrder; j++ {
 			out.AR_Q13[sf][j] = int16(silkFloat2Int(ar[j] * 8192.0))
 		}
+	}
+
+	// Gain tweaking (silk_noise_shape_analysis_FLP): scale the spectral-envelope
+	// gains by the SNR target and add a floor of MIN_QGAIN_DB. A higher SNR
+	// target shrinks gain_mult, lowering the gains, raising the pulse count.
+	gainMult := math.Pow(2.0, -0.16*snrAdjDB)
+	gainAdd := math.Pow(2.0, 0.16*minQGainDB)
+	for sf := 0; sf < e.nSubframes; sf++ {
+		out.Gains[sf] = out.Gains[sf]*gainMult + gainAdd
 	}
 
 	// libopus: LOW_FREQ_SHAPING * (1 + LOW_QUALITY_LF_SHAPING_DECR*(input_quality-1)).

@@ -3,6 +3,7 @@ package silk
 import (
 	"fmt"
 	"math"
+	"os"
 
 	"github.com/darui3018823/opus/internal/entcode"
 )
@@ -31,13 +32,23 @@ type Encoder struct {
 	ltpState       []int32   // Encoder-side LTP output history, Q0
 	nsq            silkNSQState
 	nsqSeed        int32 // winning del-dec seed (silk_NSQ_del_dec writes this back to the bitstream)
-	// useTrellisNSQ selects the FLP noise-shape analysis + delayed-decision
-	// trellis NSQ (Q3+Q4) over the legacy single-state homebrew quantizer. It is
-	// off by default: the trellis is correctly ported and round-trips, but its
-	// perceptual shaping lowers broadband SNR until the gains are co-designed by
-	// silk_process_gains_FLP (Step 4). Enabling it before Step 4 regresses the
-	// libopus A/B SNR scoreboard, so it stays gated as the Step 4 foundation.
-	useTrellisNSQ   bool
+	// useTrellisNSQ enables the FLP noise-shape analysis + delayed-decision
+	// trellis NSQ (Q3+Q4) for voiced frames, where the gains co-designed by
+	// silk_process_gains_FLP (Step 4) make it a clear win over the legacy
+	// single-state homebrew quantizer. On by default; unvoiced/inactive frames
+	// always use the homebrew path (the trellis shaping hurts broadband noise).
+	useTrellisNSQ bool
+	// stereoComponent marks the mid/side encoders of a stereo packet. The Step 4
+	// voiced trellis + process_gains path is gated to mono for now: it produces a
+	// stereo multi-frame bitstream that our decoder and libopus reconstruct
+	// differently (a conformance gap to chase down with the stereo predictor in
+	// Step 5). Stereo components keep the proven heuristic-gain + homebrew path.
+	stereoComponent bool
+	// hybridMode marks frames encoded as the SILK low band of a hybrid packet.
+	// Like stereoComponent it gates off the Step 4 voiced trellis: the hybrid
+	// SILK+CELT energy balance is a separate WIP and the trellis-coded low band
+	// is not yet conformant there. Set per-call by the hybrid encoder.
+	hybridMode      bool
 	shapeHarmSmooth float64
 	shapeTiltSmooth float64
 	side            *Encoder // side-channel encoder for stereo packets
@@ -149,6 +160,10 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		prevLagForPitch:      0,
 		ltpCorrState:         0,
 		firstFrameAfterReset: true,
+		// Step 4: voiced frames use the delayed-decision trellis NSQ with gains
+		// co-designed by silk_process_gains_FLP. OPUS_SILK_TRELLIS=0 forces the
+		// legacy homebrew quantizer everywhere for A/B comparison.
+		useTrellisNSQ: os.Getenv("OPUS_SILK_TRELLIS") != "0",
 	}
 	if channels == 2 {
 		side, err := NewEncoderWithFrameMs(sampleRate, 1, frameMs)
@@ -157,6 +172,8 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		}
 		side.complexity = enc.complexity
 		side.bitrate = enc.bitrate
+		enc.stereoComponent = true
+		side.stereoComponent = true
 		enc.side = side
 	}
 
@@ -432,14 +449,30 @@ func (e *Encoder) selectRateControlPlan(
 ) rateControlPlan {
 	baseTargets := e.analysisGainIndices(signal)
 	baseIndices := e.resolveGainIndices(baseTargets, conditionalGain)
-	if signalType == SignalTypeInactive || signalType == SignalTypeVoiced {
+	if signalType == SignalTypeInactive {
+		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
+	}
+	// Voiced frames only get the Step 4 noise-shape + process_gains + rate-control
+	// treatment on the (mono) trellis path. Stereo components keep the proven
+	// no-rate-control heuristic-gain path so their bitstream stays conformant.
+	if signalType == SignalTypeVoiced && !e.voicedUsesTrellis() {
 		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
 	}
 
-	// Unvoiced frames have no LTP prediction, so the gain must normalize the
-	// excitation directly (Q5d). Start the rate-control search from the
-	// excitation-normalized gains rather than the mis-scaled dB heuristic.
-	baseTargets = e.excitationGainIndices(signal)
+	// Seed the rate-control search from excitation-normalized gains rather than
+	// the mis-scaled dB heuristic. Unvoiced frames have no LTP prediction so the
+	// gain normalizes the signal directly (Q5d); voiced frames take the
+	// noise-shape + process_gains pipeline so the gain matches the spectral
+	// envelope and bounds the residual, instead of the heuristic that flooded the
+	// shell coder with pulses (Step 4).
+	if signalType == SignalTypeVoiced {
+		pitchLags := e.reconstructCurrentPitchLags()
+		ltpPerIdx, ltpGainIdx := selectLTPGain(pitchGain)
+		ltpCoeffsQ14 := ltpCoeffsForIndices(ltpPerIdx, ltpGainIdx, e.nSubframes)
+		baseTargets = e.shapeGainIndices(signal, nlsf.lpcQ12, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
+	} else {
+		baseTargets = e.excitationGainIndices(signal)
+	}
 	baseIndices = e.resolveGainIndices(baseTargets, conditionalGain)
 
 	targetBits := e.silkFrameTargetBits()
@@ -649,8 +682,6 @@ func (e *Encoder) analyzePitch(signal []float64) (int, float64) {
 // uses the same lags the decoder will, and returns them alongside the LTP taps.
 func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, pitchGain float64, conditionalGain bool) ([][5]int16, int16, []int) {
 	fsKHz := e.sampleRate / 1000
-	minLag := PitchEstMinLagMs * fsKHz
-	maxLag := PitchEstMaxLagMs * fsKHz
 
 	step := fsKHz >> 1
 	if step < 1 {
@@ -683,12 +714,7 @@ func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, pitchGain float64, con
 	// Reconstruct the per-subframe lags the way the decoder will, from the
 	// encoded indices (so encoder and decoder stay bit-for-bit in sync).
 	recLag := lagIndex*step + lagLowBits
-	baseLag := minLag + recLag
-	contourOffsets := silkPitchContourOffsets(contourIndex, e.nSubframes, fsKHz)
-	pitchLags := make([]int, e.nSubframes)
-	for sf := 0; sf < e.nSubframes; sf++ {
-		pitchLags[sf] = clampInt(baseLag+contourOffsets[sf], minLag, maxLag)
-	}
+	pitchLags := e.reconstructCurrentPitchLags()
 
 	ltpPerIdx, ltpGainIdx := selectLTPGain(pitchGain)
 	enc.EncodeIcdf(ltpPerIdx, silkLTPPerIndexICDF[:], 8)
@@ -708,8 +734,51 @@ func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, pitchGain float64, con
 
 	e.prevPitchLag = pitchLags[e.nSubframes-1]
 	e.prevLagIndex = recLag
-	ltpCoeffsQ14 := make([][5]int16, e.nSubframes)
+	ltpCoeffsQ14 := ltpCoeffsForIndices(ltpPerIdx, ltpGainIdx, e.nSubframes)
+	return ltpCoeffsQ14, silkLTPScalesTable[0], pitchLags
+}
+
+// reconstructCurrentPitchLags rebuilds the per-subframe pitch lags from the
+// current frame's quantized lag/contour indices the same way the decoder does
+// (mirrors the lag math in encodePitchAndLTP). Gain analysis uses it so the LTP
+// residual it measures lines up with the lags actually written to the bitstream.
+func (e *Encoder) reconstructCurrentPitchLags() []int {
+	fsKHz := e.sampleRate / 1000
+	minLag := PitchEstMinLagMs * fsKHz
+	maxLag := PitchEstMaxLagMs * fsKHz
+	step := fsKHz >> 1
+	if step < 1 {
+		step = 1
+	}
+	coreLagIndex := e.curPitchLagIndex
+	if coreLagIndex < 0 {
+		coreLagIndex = 0
+	}
+	lagIndex := coreLagIndex / step
+	lagLowBits := coreLagIndex % step
+	if lagIndex >= len(silkPitchLagICDF) {
+		lagIndex = len(silkPitchLagICDF) - 1
+		lagLowBits = step - 1
+	}
+	contourIndex := e.curPitchContourIndex
+	contourMax := contourCBSize(fsKHz, e.nSubframes)
+	if contourIndex < 0 || contourIndex >= contourMax {
+		contourIndex = 0
+	}
+	baseLag := minLag + lagIndex*step + lagLowBits
+	contourOffsets := silkPitchContourOffsets(contourIndex, e.nSubframes, fsKHz)
+	pitchLags := make([]int, e.nSubframes)
 	for sf := 0; sf < e.nSubframes; sf++ {
+		pitchLags[sf] = clampInt(baseLag+contourOffsets[sf], minLag, maxLag)
+	}
+	return pitchLags
+}
+
+// ltpCoeffsForIndices builds the per-subframe Q14 LTP coefficient set from the
+// quantized periodicity/gain indices (the codebook entries the decoder reads).
+func ltpCoeffsForIndices(ltpPerIdx, ltpGainIdx, nSubframes int) [][5]int16 {
+	ltpCoeffsQ14 := make([][5]int16, nSubframes)
+	for sf := 0; sf < nSubframes; sf++ {
 		for k := 0; k < 5; k++ {
 			switch ltpPerIdx {
 			case 0:
@@ -721,7 +790,7 @@ func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, pitchGain float64, con
 			}
 		}
 	}
-	return ltpCoeffsQ14, silkLTPScalesTable[0], pitchLags
+	return ltpCoeffsQ14
 }
 
 // contourCBSize returns the number of pitch-contour codebook entries for the
@@ -977,6 +1046,101 @@ func (e *Encoder) analysisGainIndices(signal []float64) []int {
 // there is no LTP prediction to carry the waveform.
 func (e *Encoder) excitationGainIndices(signal []float64) []int {
 	return e.gainIndicesFromEnergy(signal, excitationGainIndexFromEnergy)
+}
+
+// shapeGainIndices derives per-subframe target gain indices the libopus way
+// (silk_noise_shape_analysis_FLP gains + silk_process_gains_FLP soft limit),
+// rather than from the signal-energy dB heuristic. The shape gains come from the
+// noise-shaping spectral envelope (never near-zero, so steady voiced frames
+// stay stable) scaled by the target-SNR gain_mult; the soft limit then floors
+// the gain using the LPC+LTP residual energy so the quantized signal is bounded.
+// Used for voiced frames where the dB heuristic mis-scaled the gain and flooded
+// the shell coder with pulses (Step 4). The shape-smoothing state is saved and
+// restored so this acts as a pure analysis pass.
+func (e *Encoder) shapeGainIndices(signal []float64, lpcQ12 []int16, signalType, quantOffset int, pitchLags []int, ltpCoeffsQ14 [][5]int16, pitchGain float64) []int {
+	harmSmooth, tiltSmooth := e.shapeHarmSmooth, e.shapeTiltSmooth
+	shape := e.analyzeNoiseShapeFLP(signal, lpcQ12, signalType, quantOffset, pitchLags, pitchGain)
+	e.shapeHarmSmooth, e.shapeTiltSmooth = harmSmooth, tiltSmooth
+
+	resNrg := e.ltpResidualEnergyPerSubframe(signal, lpcQ12, signalType, pitchLags, ltpCoeffsQ14)
+	subLen := e.frameSize / e.nSubframes
+	invMaxSqr := 0.0
+	if subLen > 0 {
+		invMaxSqr = math.Pow(2.0, 0.33*(21.0-shape.SNRdB)) / float64(subLen)
+	}
+
+	targets := make([]int, e.nSubframes)
+	for sf := 0; sf < e.nSubframes; sf++ {
+		gain := shape.Gains[sf]
+		// Soft limit on the ratio of residual energy to squared gain
+		// (silk_process_gains_FLP): raises the gain when the prediction residual
+		// is large, capping the number of pulses the NSQ has to spend.
+		gain = math.Sqrt(gain*gain + resNrg[sf]*invMaxSqr)
+		if gain > 32767 {
+			gain = 32767
+		}
+		targets[sf] = silkQuantizeGainIndex(gain * 65536.0)
+	}
+	return targets
+}
+
+// ltpResidualEnergyPerSubframe returns the per-subframe LPC (+LTP for voiced)
+// open-loop prediction residual energy in the int16-magnitude domain (sum of
+// squares), used by the process_gains soft limit. Mirrors the residual libopus
+// measures in silk_residual_energy_FLP.
+func (e *Encoder) ltpResidualEnergyPerSubframe(signal []float64, lpcQ12 []int16, signalType int, pitchLags []int, ltpCoeffsQ14 [][5]int16) [silkMaxNBSubframes]float64 {
+	var nrgs [silkMaxNBSubframes]float64
+	if e.nSubframes == 0 {
+		return nrgs
+	}
+	subLen := e.frameSize / e.nSubframes
+
+	hist := e.pitchHist
+	buf := make([]float64, len(hist)+len(signal))
+	copy(buf, hist)
+	copy(buf[len(hist):], signal)
+	res := make([]float64, len(buf))
+	for i := range buf {
+		pred := 0.0
+		for j := 0; j < e.lpcOrder && j <= i-1; j++ {
+			pred += float64(lpcQ12[j]) / 4096.0 * buf[i-j-1]
+		}
+		res[i] = buf[i] - pred
+	}
+
+	frameStart := len(hist)
+	const int16Scale = 32768.0 * 32768.0
+	for sf := 0; sf < e.nSubframes; sf++ {
+		lag := 0
+		var b [5]float64
+		if signalType == SignalTypeVoiced {
+			lag = pitchLags[clampInt(sf, 0, len(pitchLags)-1)]
+			if sf < len(ltpCoeffsQ14) {
+				for k := 0; k < 5; k++ {
+					b[k] = float64(ltpCoeffsQ14[sf][k]) / 16384.0
+				}
+			}
+		}
+		sum := 0.0
+		for i := 0; i < subLen; i++ {
+			idx := frameStart + sf*subLen + i
+			if idx >= len(res) {
+				break
+			}
+			v := res[idx]
+			if lag > 0 {
+				for k := 0; k < 5; k++ {
+					src := idx - lag + 2 - k
+					if src >= 0 && src < len(res) {
+						v -= b[k] * res[src]
+					}
+				}
+			}
+			sum += v * v
+		}
+		nrgs[sf] = sum * int16Scale
+	}
+	return nrgs
 }
 
 func (e *Encoder) gainIndicesFromEnergy(signal []float64, fromEnergy func(float64) int) []int {
@@ -1642,6 +1806,20 @@ func (e *Encoder) closedLoopNSQ(
 		signalType, quantOffset, seed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, 1)
 }
 
+// voicedUsesTrellis reports whether voiced frames take the Step 4 trellis NSQ +
+// process_gains path. Gated to the enabled flag and to non-stereo encoders: the
+// stereo multi-frame trellis bitstream is not yet conformant (Step 5).
+func (e *Encoder) voicedUsesTrellis() bool {
+	return e.useTrellisNSQ && !e.stereoComponent && !e.hybridMode
+}
+
+// SetHybridMode marks subsequent frames as the SILK low band of a hybrid packet
+// (see hybridMode). The hybrid encoder sets it before encoding and clears it
+// after so the same SILK encoder instance can also serve SILK-only packets.
+func (e *Encoder) SetHybridMode(on bool) {
+	e.hybridMode = on
+}
+
 // closedLoopNSQWithRateScale quantizes the excitation with the FLP
 // noise-shaping analysis (Q3) feeding the delayed-decision trellis NSQ (Q4),
 // the libopus core ported in noise_shape.go / nsq_del_dec.go. The legacy
@@ -1660,7 +1838,11 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 	ltpScaleQ14 int16,
 	rateScale float64,
 ) []int16 {
-	if !e.useTrellisNSQ {
+	// The delayed-decision trellis with the co-designed process_gains gains is a
+	// clear win for voiced frames (Step 4), but its perceptual shaping lowers
+	// broadband SNR on noise, so unvoiced/inactive frames stay on the homebrew
+	// quantizer with the excitation-normalized gains (Q5d). Dispatch by type.
+	if signalType != SignalTypeVoiced || !e.voicedUsesTrellis() {
 		return e.closedLoopNSQHomebrew(signal, lpcQ12, gainIndices,
 			signalType, quantOffset, seed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, rateScale)
 	}

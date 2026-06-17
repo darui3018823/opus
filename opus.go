@@ -392,7 +392,10 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int) ([]byte, er
 		celtInput := e.celtInputFrame(chunk)
 
 		enc := entcode.NewEncoder(targetBytes)
-		if err := e.silkEncoder.EncodeMultiWithEncoder(enc, silkPCM, 1); err != nil {
+		e.silkEncoder.SetHybridMode(true)
+		err := e.silkEncoder.EncodeMultiWithEncoder(enc, silkPCM, 1)
+		e.silkEncoder.SetHybridMode(false)
+		if err != nil {
 			return nil, fmt.Errorf("SILK hybrid encoding failed: %w", err)
 		}
 		// Hybrid redundancy is disabled in this first encoder slice.

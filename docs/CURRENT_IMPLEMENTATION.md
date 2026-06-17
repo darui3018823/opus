@@ -65,9 +65,10 @@ automatic, a max-bandwidth cap below the SILK bandwidth keep the encoder out of
 the SILK-only path. An explicit forced bandwidth takes precedence over the
 max-bandwidth cap. DTX, VBR/CVBR, and packet padding do not by themselves opt
 the packet out of the supported SILK-only path. In CBR mode, undersized
-SILK-only streams are padded up to the nominal per-stream bitrate target; VBR,
-CVBR, and DTX silence keep compact stream sizes unless explicit packet padding
-is requested.
+SILK-only streams are padded up to the nominal per-stream bitrate target; VBR
+and CVBR keep compact stream sizes, and digital-silence SILK streams use the
+minimal one-byte SILK silence payload unless explicit packet padding is
+requested.
 
 As of SILK Encoder slice 13, high-bitrate 24/48 kHz voice input can emit hybrid
 packets. The encoder writes a 16 kHz SILK low band and CELT high band into one
@@ -491,7 +492,10 @@ The SILK package contains:
   enough for compact non-collapsed plans, and rejecting candidates whose
   synthesized frame RMS is far below the input. This bounds the unvoiced-noise
   byte blowup without changing voiced frames, which stay on the previous path
-  until the pitch, shaping, and NSQ quality phases are further along.
+  until the pitch, shaping, and NSQ quality phases are further along. Q5c keeps
+  public SILK-only digital-silence streams minimal even in CBR mode by emitting
+  the one-byte SILK silence payload instead of padding them to the nominal
+  packet size; explicit packet padding still applies when requested.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single

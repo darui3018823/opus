@@ -459,9 +459,13 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int) ([]byte, erro
 			silkPCM = e.silkResampler.Process(silkPCM)
 			silkPCM = padOrTrim(silkPCM, group*silkChunkLen)
 		}
-		stream, err := e.silkEncoder.EncodeMulti(silkPCM, group)
-		if err != nil {
-			return nil, fmt.Errorf("SILK encoding failed: %w", err)
+		stream := []byte{0x00}
+		if !isSilentPCM(silkPCM) {
+			var err error
+			stream, err = e.silkEncoder.EncodeMulti(silkPCM, group)
+			if err != nil {
+				return nil, fmt.Errorf("SILK encoding failed: %w", err)
+			}
 		}
 		if e.shouldPadSILKStream(silkPCM) {
 			targetBytes := e.silkStreamTargetBytes(group)
@@ -485,7 +489,7 @@ func (e *Encoder) shouldPadSILKStream(pcm []float64) bool {
 	if e.rateMode != celt.RateModeCBR {
 		return false
 	}
-	if e.dtx && isSilentPCM(pcm) {
+	if isSilentPCM(pcm) {
 		return false
 	}
 	return true
@@ -738,7 +742,8 @@ func (e *Encoder) SetPacketPadding(n int) {
 // instead of being padded to the target size. This reduces bitrate during
 // silence. The decoder reconstructs such frames as digital silence. DTX is off
 // by default. The reduction is effective in any rate mode; in CBR it overrides
-// the fixed-size padding for silent frames only.
+// the fixed-size padding for silent CELT frames, while SILK digital-silence
+// frames are kept compact even without DTX.
 func (e *Encoder) SetDTX(enabled bool) {
 	e.dtx = enabled
 	e.celtEncoder.SetDTX(enabled)

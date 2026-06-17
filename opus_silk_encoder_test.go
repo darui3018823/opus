@@ -845,13 +845,13 @@ func TestEncoderSILKOnlyCBRPacketSizeTracksBitrateAndDuration(t *testing.T) {
 			}
 
 			frameSize := base * tc.mult
-			pkt, err := enc.EncodeFloat(make([]float64, frameSize), frameSize)
+			pkt, err := enc.Encode(generateSine(220, rate, 1, frameSize), frameSize)
 			if err != nil {
-				t.Fatalf("EncodeFloat: %v", err)
+				t.Fatalf("Encode: %v", err)
 			}
 			wantPayload := tc.bitrate * (20 * tc.mult) / 1000 / 8
-			if want := 1 + wantPayload; len(pkt) != want {
-				t.Fatalf("packet bytes=%d, want %d for %d bps/%d ms CBR SILK", len(pkt), want, tc.bitrate, 20*tc.mult)
+			if want := 1 + wantPayload; len(pkt) < want {
+				t.Fatalf("packet bytes=%d, want at least %d for active %d bps/%d ms CBR SILK", len(pkt), want, tc.bitrate, 20*tc.mult)
 			}
 			if config := int(pkt[0] >> 3); config != 9 && config != 11 {
 				t.Fatalf("TOC config=%d, want SILK WB 20/60ms config", config)
@@ -895,9 +895,13 @@ func TestEncoderSILKOnlyVBRAndDTXDoNotUseCBRPadding(t *testing.T) {
 			}
 			tc.configure(enc)
 
-			pkt, err := enc.EncodeFloat(make([]float64, frameSize), frameSize)
+			pcm := generateSine(220, rate, 1, frameSize)
+			if tc.name == "dtx" {
+				pcm = make([]int16, frameSize)
+			}
+			pkt, err := enc.Encode(pcm, frameSize)
 			if err != nil {
-				t.Fatalf("EncodeFloat: %v", err)
+				t.Fatalf("Encode: %v", err)
 			}
 			if len(pkt) >= cbrBytes {
 				t.Fatalf("%s packet bytes=%d, want less than CBR padded size %d", tc.name, len(pkt), cbrBytes)

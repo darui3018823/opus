@@ -263,6 +263,14 @@ Status: In progress (started 2026-06-17)
   averages are about 61.0 B (8 kHz), 126.1 B (12 kHz), and 108.7 B (16 kHz)
   with non-collapsed decoded output.
 
+#### Q5c — silence padding removal (Complete 2026-06-17)
+
+- Public SILK-only CBR no longer pads digital-silence streams up to the nominal
+  bitrate target; silence now keeps the minimal SILK range stream unless
+  explicit packet padding is requested.
+- Added `TestEncoderSILKOnlySilenceMinimalPacket` to cover CBR/DTX-off silence
+  at 8, 12, and 16 kHz and verify the decoded output remains silent.
+
 - Goal: proper gain quantization plus the feedback loop that adjusts
   gains/Lambda and re-quantizes to hit the target bit budget. **Fixes the
   unvoiced-noise byte blowup.** Replaces the energy→index heuristic.

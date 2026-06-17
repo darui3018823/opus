@@ -177,6 +177,50 @@ func TestEncoderSILKOnlyUnvoicedNoiseRateControlBound(t *testing.T) {
 	}
 }
 
+func TestEncoderSILKOnlySilenceMinimalPacket(t *testing.T) {
+	for _, rate := range []int{8000, 12000, 16000} {
+		rate := rate
+		t.Run(rateName(rate), func(t *testing.T) {
+			frameSize := rate * 20 / 1000
+			enc, err := NewEncoder(rate, 1, ApplicationVOIP)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(24000); err != nil {
+				t.Fatalf("SetBitrate: %v", err)
+			}
+			enc.SetVBR(false)
+
+			pkt, err := enc.EncodeFloat(make([]float64, frameSize), frameSize)
+			if err != nil {
+				t.Fatalf("EncodeFloat: %v", err)
+			}
+			if len(pkt) != 2 {
+				t.Fatalf("CBR silence packet = %d bytes, want minimal 2-byte SILK packet", len(pkt))
+			}
+			if config := int(pkt[0] >> 3); config >= 12 {
+				t.Fatalf("TOC config=%d, want SILK-only", config)
+			}
+			if payload := pkt[1]; payload != 0x00 {
+				t.Fatalf("SILK silence payload=0x%02x, want 0x00", payload)
+			}
+
+			dec, err := NewDecoder(rate, 1)
+			if err != nil {
+				t.Fatalf("NewDecoder: %v", err)
+			}
+			out, err := dec.DecodeFloat(pkt)
+			if err != nil {
+				t.Fatalf("DecodeFloat: %v", err)
+			}
+			rms, peak, _ := opusSILKQualityStats(out)
+			if rms > 0.001 || peak > 0.001 {
+				t.Fatalf("decoded silence too loud: rms=%.6f peak=%.6f", rms, peak)
+			}
+		})
+	}
+}
+
 func TestEncoderSILKOnlyStereoQualityBaseline(t *testing.T) {
 	for _, rate := range []int{16000, 48000} {
 		rate := rate

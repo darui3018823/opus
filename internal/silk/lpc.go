@@ -133,6 +133,21 @@ func windowForLPC(signal []float64) []float64 {
 	return out
 }
 
+// nlsfGridCos[g][i] = cos(-pi*(g+0.5)/512 * (i+1)), precomputed for NLSFTargetQ15.
+var nlsfGridCos [512][24]float64
+var nlsfGridSin [512][24]float64
+
+func init() {
+	for g := 0; g < 512; g++ {
+		w := math.Pi * (float64(g) + 0.5) / 512.0
+		for i := 0; i < 24; i++ {
+			phase := -w * float64(i+1)
+			nlsfGridCos[g][i] = math.Cos(phase)
+			nlsfGridSin[g][i] = math.Sin(phase)
+		}
+	}
+}
+
 // NLSFTargetQ15 returns an LPC-derived NLSF target in Q15. It uses the all-pole
 // spectral envelope as a robust A2NLSF approximation: frequencies are distributed
 // as weighted quantiles of 1/|A(e^jw)|^2, placing more NLSF points around narrow
@@ -146,13 +161,11 @@ func (lpc *LPCAnalysis) NLSFTargetQ15() []int16 {
 	weights := make([]float64, grid)
 	total := 0.0
 	for g := 0; g < grid; g++ {
-		w := math.Pi * (float64(g) + 0.5) / grid
 		realPart := 1.0
 		imagPart := 0.0
 		for i, a := range lpc.coeffs {
-			phase := -w * float64(i+1)
-			realPart -= a * math.Cos(phase)
-			imagPart -= a * math.Sin(phase)
+			realPart -= a * nlsfGridCos[g][i]
+			imagPart -= a * nlsfGridSin[g][i]
 		}
 		den := realPart*realPart + imagPart*imagPart
 		if den < 1e-8 {

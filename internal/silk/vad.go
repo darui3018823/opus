@@ -1,7 +1,7 @@
 package silk
 
 import (
-	"math"
+	"github.com/darui3018823/opus/internal/dsp"
 )
 
 // VAD (Voice Activity Detection) detects presence of speech vs silence/noise
@@ -65,7 +65,7 @@ func (v *VAD) computeEnergy(signal []float64) float64 {
 	return energy / float64(len(signal))
 }
 
-// computeSpectralFlatness computes a coarse spectral flatness measure.
+// computeSpectralFlatness computes a coarse spectral flatness measure using FFT.
 // Flatness near 1.0 indicates energy spread across bands, near 0.0 indicates
 // concentrated tonal energy.
 func (v *VAD) computeSpectralFlatness(signal []float64) float64 {
@@ -73,19 +73,19 @@ func (v *VAD) computeSpectralFlatness(signal []float64) float64 {
 		return 1.0
 	}
 
+	cx := make([]dsp.Complex, len(signal))
+	for i, s := range signal {
+		cx[i] = dsp.Complex{Real: s}
+	}
+	bins := dsp.AnyFFT(cx)
+
 	const subbands = 8
 	var bandEnergy [subbands]float64
 	totalEnergy := 0.0
-	nyquistBin := len(signal) / 2
-	for k := 1; k <= nyquistBin; k++ {
-		real, imag := 0.0, 0.0
-		for n, sample := range signal {
-			phase := 2 * math.Pi * float64(k*n) / float64(len(signal))
-			real += sample * math.Cos(phase)
-			imag -= sample * math.Sin(phase)
-		}
-		power := real*real + imag*imag
-		band := (k - 1) * subbands / nyquistBin
+	nyquistBin := len(signal)/2 + 1
+	for k := 1; k < nyquistBin && k < len(bins); k++ {
+		power := bins[k].Real*bins[k].Real + bins[k].Imag*bins[k].Imag
+		band := (k - 1) * subbands / (nyquistBin - 1)
 		if band >= subbands {
 			band = subbands - 1
 		}

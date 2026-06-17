@@ -157,6 +157,31 @@ var silkLTPGainVQ2 = [32][5]int8{
 	{2, 0, 9, 10, 88},
 }
 
+// LTP gain VQ rate cost (silk_LTP_gain_BITS_Q5_*, code length per codebook
+// vector, Q5) and effective gain (silk_LTP_gain_vq_*_gain, sum of absolute taps,
+// Q7). Used by the LTP gain quantizer's weighted rate-distortion VQ search.
+var silkLTPGainBITSQ5Codebooks = [3][]uint8{
+	{15, 131, 138, 138, 155, 155, 173, 173},
+	{69, 93, 115, 118, 131, 138, 141, 138, 150, 150, 155, 150, 155, 160, 166, 160},
+	{
+		131, 128, 134, 141, 141, 141, 145, 145,
+		145, 150, 155, 155, 155, 155, 160, 160,
+		160, 160, 166, 166, 173, 173, 182, 192,
+		182, 192, 192, 192, 205, 192, 205, 224,
+	},
+}
+
+var silkLTPGainVQGainCodebooks = [3][]uint8{
+	{46, 2, 90, 87, 93, 91, 82, 98},
+	{109, 120, 118, 12, 113, 115, 117, 119, 99, 59, 87, 111, 63, 111, 112, 80},
+	{
+		126, 124, 125, 124, 129, 121, 126, 23,
+		132, 127, 127, 127, 126, 127, 122, 133,
+		130, 134, 101, 118, 119, 145, 126, 86,
+		124, 120, 123, 119, 170, 173, 107, 109,
+	},
+}
+
 // ── Other tables (silk/tables_other.c) ──────────────────────────────────────
 
 // silkTypeOffsetVADICDF — signal type + quantization offset for VAD=1 frames (4 symbols).

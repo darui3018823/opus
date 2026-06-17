@@ -60,6 +60,10 @@ type Encoder struct {
 	firstFrameAfterReset bool      // Skip pitch search on the first frame
 	curPitchLagIndex     int       // Lag index selected for the current frame
 	curPitchContourIndex int       // Pitch contour index for the current frame
+
+	// ltpSumLogGainQ7 is the cumulative log prediction gain across subframes
+	// (silk sum_log_gain_Q7), limiting the total LTP gain for stability.
+	ltpSumLogGainQ7 float64
 }
 
 type nlsfAnalysis struct {
@@ -79,6 +83,7 @@ type encoderFrameState struct {
 	nsq             silkNSQState
 	shapeHarmSmooth float64
 	shapeTiltSmooth float64
+	ltpSumLogGainQ7 float64
 }
 
 type rateControlPlan struct {
@@ -379,7 +384,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		pitchLags[sf] = pitchLag
 	}
 	if signalType == SignalTypeVoiced {
-		ltpCoeffsQ14, ltpScaleQ14, pitchLags = e.encodePitchAndLTP(enc, pitchGain, conditionalGain)
+		ltpCoeffsQ14, ltpScaleQ14, pitchLags = e.encodePitchAndLTP(enc, signal, nlsf.lpcQ12, pitchGain, conditionalGain)
 	}
 
 	if len(plan.gainIndices) == len(gainIndices) {
@@ -419,6 +424,7 @@ func (e *Encoder) snapshotFrameState() encoderFrameState {
 		nsq:             e.nsq.clone(),
 		shapeHarmSmooth: e.shapeHarmSmooth,
 		shapeTiltSmooth: e.shapeTiltSmooth,
+		ltpSumLogGainQ7: e.ltpSumLogGainQ7,
 	}
 }
 
@@ -435,6 +441,7 @@ func (e *Encoder) restoreFrameState(st encoderFrameState) {
 	e.nsq = st.nsq.clone()
 	e.shapeHarmSmooth = st.shapeHarmSmooth
 	e.shapeTiltSmooth = st.shapeTiltSmooth
+	e.ltpSumLogGainQ7 = st.ltpSumLogGainQ7
 }
 
 func (e *Encoder) selectRateControlPlan(
@@ -467,8 +474,7 @@ func (e *Encoder) selectRateControlPlan(
 	// shell coder with pulses (Step 4).
 	if signalType == SignalTypeVoiced {
 		pitchLags := e.reconstructCurrentPitchLags()
-		ltpPerIdx, ltpGainIdx := selectLTPGain(pitchGain)
-		ltpCoeffsQ14 := ltpCoeffsForIndices(ltpPerIdx, ltpGainIdx, e.nSubframes)
+		_, _, ltpCoeffsQ14 := e.selectLTPGainsVQ(signal, nlsf.lpcQ12, pitchLags)
 		baseTargets = e.shapeGainIndices(signal, nlsf.lpcQ12, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
 	} else {
 		baseTargets = e.excitationGainIndices(signal)
@@ -501,7 +507,7 @@ func (e *Encoder) selectRateControlPlan(
 		targets := boostedGainTargets(baseTargets, boost)
 		e.restoreFrameState(initial)
 		headerBits, gainIndices, pitchLags, ltpCoeffsQ14, ltpScaleQ14 := e.estimateFrameHeaderBits(
-			vadActive, signalType, quantOffset, conditionalGain, targets, nlsf, pitchLag, pitchGain)
+			signal, vadActive, signalType, quantOffset, conditionalGain, targets, nlsf, pitchLag, pitchGain)
 		for _, scale := range rateScales {
 			e.restoreFrameState(initial)
 			pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, gainIndices,
@@ -589,6 +595,7 @@ func boostedGainTargets(base []int, boost int) []int {
 }
 
 func (e *Encoder) estimateFrameHeaderBits(
+	signal []float64,
 	vadActive bool,
 	signalType, quantOffset int,
 	conditionalGain bool,
@@ -612,7 +619,7 @@ func (e *Encoder) estimateFrameHeaderBits(
 		pitchLags[sf] = pitchLag
 	}
 	if signalType == SignalTypeVoiced {
-		ltpCoeffsQ14, ltpScaleQ14, pitchLags = e.encodePitchAndLTP(enc, pitchGain, conditionalGain)
+		ltpCoeffsQ14, ltpScaleQ14, pitchLags = e.encodePitchAndLTP(enc, signal, nlsf.lpcQ12, pitchGain, conditionalGain)
 	}
 	enc.EncodeIcdf(0, silkUniform4ICDF[:], 8)
 	enc.Flush()
@@ -680,7 +687,7 @@ func (e *Encoder) analyzePitch(signal []float64) (int, float64) {
 // e.curPitchContourIndex), then the LTP gains. It reconstructs the per-subframe
 // pitch lags exactly as the decoder does (from the encoded indices) so the NSQ
 // uses the same lags the decoder will, and returns them alongside the LTP taps.
-func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, pitchGain float64, conditionalGain bool) ([][5]int16, int16, []int) {
+func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, signal []float64, lpcQ12 []int16, pitchGain float64, conditionalGain bool) ([][5]int16, int16, []int) {
 	fsKHz := e.sampleRate / 1000
 
 	step := fsKHz >> 1
@@ -716,9 +723,10 @@ func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, pitchGain float64, con
 	recLag := lagIndex*step + lagLowBits
 	pitchLags := e.reconstructCurrentPitchLags()
 
-	ltpPerIdx, ltpGainIdx := selectLTPGain(pitchGain)
+	ltpPerIdx, ltpGainIndices, ltpCoeffsQ14 := e.selectLTPGainsVQ(signal, lpcQ12, pitchLags)
 	enc.EncodeIcdf(ltpPerIdx, silkLTPPerIndexICDF[:], 8)
 	for sf := 0; sf < e.nSubframes; sf++ {
+		ltpGainIdx := ltpGainIndices[sf]
 		switch ltpPerIdx {
 		case 0:
 			enc.EncodeIcdf(ltpGainIdx, silkLTPGainICDF0[:], 8)
@@ -734,7 +742,6 @@ func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, pitchGain float64, con
 
 	e.prevPitchLag = pitchLags[e.nSubframes-1]
 	e.prevLagIndex = recLag
-	ltpCoeffsQ14 := ltpCoeffsForIndices(ltpPerIdx, ltpGainIdx, e.nSubframes)
 	return ltpCoeffsQ14, silkLTPScalesTable[0], pitchLags
 }
 
@@ -2683,6 +2690,7 @@ func (e *Encoder) Reset() {
 	e.firstFrameAfterReset = true
 	e.curPitchLagIndex = 0
 	e.curPitchContourIndex = 0
+	e.ltpSumLogGainQ7 = 0
 	if e.side != nil {
 		e.side.Reset()
 	}

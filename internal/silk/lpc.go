@@ -30,17 +30,31 @@ func NewLPCAnalysis(order int) *LPCAnalysis {
 // Analyze performs LPC analysis using Levinson-Durbin recursion.
 // This extracts the spectral envelope of speech.
 func (lpc *LPCAnalysis) Analyze(signal []float64) error {
+	return lpc.AnalyzeWindowed(signal)
+}
+
+// AnalyzeWindowed performs LPC analysis on a tapered frame. SILK derives its
+// NLSF target from windowed autocorrelation rather than from the raw frame; the
+// taper keeps frame edges from dominating the spectral envelope estimate.
+func (lpc *LPCAnalysis) AnalyzeWindowed(signal []float64) error {
 	n := len(signal)
 	if n < lpc.order+1 {
 		return fmt.Errorf("signal too short for LPC order %d", lpc.order)
 	}
+
+	windowed := windowForLPC(signal)
 
 	// Compute autocorrelation
 	autocorr := make([]float64, lpc.order+1)
 	for lag := 0; lag <= lpc.order; lag++ {
 		sum := 0.0
 		for i := lag; i < n; i++ {
-			sum += signal[i] * signal[i-lag]
+			sum += windowed[i] * windowed[i-lag]
+		}
+		// A light lag window follows the same intent as libopus's bandwidth
+		// expansion: keep the LPC filter comfortably inside the unit circle.
+		if lag > 0 {
+			sum *= math.Exp(-0.5 * math.Pow(0.03*float64(lag), 2))
 		}
 		autocorr[lag] = sum
 	}
@@ -85,11 +99,110 @@ func (lpc *LPCAnalysis) Analyze(signal []float64) error {
 
 	// Copy final coefficients (skip the leading 1.0)
 	for i := 0; i < lpc.order; i++ {
-		lpc.coeffs[i] = workCoeffs[i+1]
+		chirp := math.Pow(0.985, float64(i+1))
+		lpc.coeffs[i] = workCoeffs[i+1] * chirp
 	}
 
 	lpc.gain = math.Sqrt(err)
 	return nil
+}
+
+func windowForLPC(signal []float64) []float64 {
+	out := make([]float64, len(signal))
+	if len(signal) == 0 {
+		return out
+	}
+	taper := len(signal) / 5
+	if taper < 8 {
+		taper = 8
+	}
+	if taper*2 > len(signal) {
+		taper = len(signal) / 2
+	}
+	for i, v := range signal {
+		w := 1.0
+		switch {
+		case i < taper:
+			w = 0.5 - 0.5*math.Cos(math.Pi*float64(i+1)/float64(taper+1))
+		case i >= len(signal)-taper:
+			j := len(signal) - i
+			w = 0.5 - 0.5*math.Cos(math.Pi*float64(j)/float64(taper+1))
+		}
+		out[i] = v * w
+	}
+	return out
+}
+
+// nlsfGridCos[g][i] = cos(-pi*(g+0.5)/512 * (i+1)), precomputed for NLSFTargetQ15.
+var nlsfGridCos [512][24]float64
+var nlsfGridSin [512][24]float64
+
+func init() {
+	for g := 0; g < 512; g++ {
+		w := math.Pi * (float64(g) + 0.5) / 512.0
+		for i := 0; i < 24; i++ {
+			phase := -w * float64(i+1)
+			nlsfGridCos[g][i] = math.Cos(phase)
+			nlsfGridSin[g][i] = math.Sin(phase)
+		}
+	}
+}
+
+// NLSFTargetQ15 returns an LPC-derived NLSF target in Q15. It uses the all-pole
+// spectral envelope as a robust A2NLSF approximation: frequencies are distributed
+// as weighted quantiles of 1/|A(e^jw)|^2, placing more NLSF points around narrow
+// formants while preserving strict ordering.
+func (lpc *LPCAnalysis) NLSFTargetQ15() []int16 {
+	const grid = 512
+	order := lpc.order
+	if order <= 0 {
+		return nil
+	}
+	weights := make([]float64, grid)
+	total := 0.0
+	for g := 0; g < grid; g++ {
+		realPart := 1.0
+		imagPart := 0.0
+		for i, a := range lpc.coeffs {
+			realPart -= a * nlsfGridCos[g][i]
+			imagPart -= a * nlsfGridSin[g][i]
+		}
+		den := realPart*realPart + imagPart*imagPart
+		if den < 1e-8 {
+			den = 1e-8
+		}
+		weight := 1.0 / den
+		if weight > 1e4 {
+			weight = 1e4
+		}
+		weights[g] = weight
+		total += weight
+	}
+	if total <= 0 || math.IsNaN(total) || math.IsInf(total, 0) {
+		return nil
+	}
+
+	nlsf := make([]int16, order)
+	cum := 0.0
+	bin := 0
+	for i := 0; i < order; i++ {
+		target := total * float64(i+1) / float64(order+1)
+		for bin < grid-1 && cum+weights[bin] < target {
+			cum += weights[bin]
+			bin++
+		}
+		q15 := int(math.Round((float64(bin) + 0.5) / grid * 32768.0))
+		minQ15 := 32 * (i + 1)
+		maxQ15 := 32767 - 32*(order-i)
+		if q15 < minQ15 {
+			q15 = minQ15
+		}
+		if q15 > maxQ15 {
+			q15 = maxQ15
+		}
+		nlsf[i] = int16(q15)
+	}
+	return nlsf
 }
 
 // ComputeResidual computes the LPC residual (excitation signal).
@@ -269,12 +382,12 @@ func LSFToLPC(lsf []float64) []float64 {
 	if lpc == nil {
 		return nil
 	}
-	
+
 	err := lpc.FromLSF(lsf)
 	if err != nil {
 		return nil
 	}
-	
+
 	return lpc.GetCoefficients()
 }
 
@@ -284,12 +397,12 @@ func AnalyzeLPC(signal []float64, order int) []float64 {
 	if lpc == nil {
 		return nil
 	}
-	
+
 	err := lpc.Analyze(signal)
 	if err != nil {
 		return nil
 	}
-	
+
 	return lpc.GetCoefficients()
 }
 
@@ -299,10 +412,10 @@ func LPCToLSF(lpcCoeffs []float64) []float64 {
 	if lpc == nil {
 		return nil
 	}
-	
+
 	// Set coefficients
 	copy(lpc.coeffs, lpcCoeffs)
-	
+
 	return lpc.ToLSF()
 }
 
@@ -312,10 +425,10 @@ func ComputeResidual(signal []float64, lpcCoeffs []float64) []float64 {
 	if lpc == nil {
 		return nil
 	}
-	
+
 	// Set coefficients
 	copy(lpc.coeffs, lpcCoeffs)
-	
+
 	return lpc.ComputeResidual(signal)
 }
 
@@ -325,9 +438,9 @@ func SynthesizeLPC(residual []float64, lpcCoeffs []float64) []float64 {
 	if lpc == nil {
 		return nil
 	}
-	
+
 	// Set coefficients
 	copy(lpc.coeffs, lpcCoeffs)
-	
+
 	return lpc.Synthesize(residual)
 }

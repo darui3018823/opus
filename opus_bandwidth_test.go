@@ -97,17 +97,17 @@ func TestBandwidthSelection(t *testing.T) {
 }
 
 // TestApplicationBandwidthCoupling verifies the application (VOIP vs Audio)
-// shifts the bitrate→bandwidth thresholds: VOIP (voice) requires a higher bitrate
-// before widening, so at a mid bitrate it codes a narrower band than Audio, while
-// both stay fullband at the default 64 kbps.
+// shifts public bandwidth selection. At low speech bitrates VOIP now enters the
+// WB SILK-only path; above the SILK ceiling it falls back to the CELT voice
+// thresholds, which widen more slowly than Audio.
 func TestApplicationBandwidthCoupling(t *testing.T) {
 	cases := []struct {
 		bitrate   int
 		wantVoIP  int
 		wantAudio int
 	}{
-		{18000, BandwidthNarrowband, BandwidthWideband},    // voice still NB, music WB
-		{30000, BandwidthWideband, BandwidthSuperWideband}, // voice WB, music SWB
+		{18000, BandwidthWideband, BandwidthWideband},      // voice uses WB SILK, music WB CELT
+		{30000, BandwidthWideband, BandwidthSuperWideband}, // voice uses WB SILK, music SWB
 		{48000, BandwidthSuperWideband, BandwidthFullband}, // voice SWB, music FB
 		{64000, BandwidthFullband, BandwidthFullband},      // both FB at default
 	}

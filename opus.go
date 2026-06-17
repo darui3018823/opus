@@ -40,8 +40,15 @@ type Encoder struct {
 	// CELT encoder (always operates at 48kHz internally)
 	celtEncoder *celt.Encoder
 
+	// SILK encoder for the speech/low-bitrate path. It operates at the packet's
+	// SILK internal rate (8/12/16 kHz); 24/48 kHz voice input is downsampled to
+	// 16 kHz before encoding.
+	silkEncoder    *silk.Encoder
+	silkSampleRate int
+
 	// Resampler for non-48kHz input rates
 	inputResampler *resampler.Resampler // inRate -> 48kHz
+	silkResampler  *resampler.Resampler // input sampleRate -> silkSampleRate
 
 	// Configuration
 	bitrate    int
@@ -132,6 +139,23 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 	enc.celtEncoder.SetComplexity(enc.complexity)
 	enc.celtEncoder.SetSignalType(signalTypeForApplication(application))
 
+	if silkRate, ok := silkEncodeSampleRate(sampleRate); ok {
+		silkEnc, err := silk.NewEncoder(silkRate, channels)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create SILK encoder: %w", err)
+		}
+		_ = silkEnc.SetComplexity(enc.complexity)
+		enc.silkEncoder = silkEnc
+		enc.silkSampleRate = silkRate
+		if silkRate != sampleRate {
+			r, err := resampler.NewResampler(sampleRate, silkRate, channels, resampler.QualityDefault)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create SILK input resampler: %w", err)
+			}
+			enc.silkResampler = r
+		}
+	}
+
 	return enc, nil
 }
 
@@ -197,6 +221,16 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 // is produced.
 func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	nFrames := frameSize / e.frameSize
+	if e.shouldEncodeSILKOnly() {
+		return e.encodeSILKOnlyPacket(pcm, nFrames)
+	}
+	bw := -1
+	if e.shouldEncodeHybrid(nFrames) {
+		bw = e.narrowAutoBandwidth(pcm, e.selectHybridBandwidth())
+		if bw == framing.BandwidthSuperwideband || bw == framing.BandwidthFullband {
+			return e.encodeHybridPacket(pcm, nFrames, bw)
+		}
+	}
 
 	// Select the coded bandwidth (NB/WB/SWB/FB) and limit the CELT encoder's
 	// coded bands to match, then generate the base TOC byte for that bandwidth.
@@ -207,13 +241,8 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	// actual signal, so a source with no high-frequency energy is coded in a
 	// narrower band rather than wasting bits. The detection runs once over the whole
 	// input PCM, so every frame in a packet still shares the same bandwidth/config.
-	bw := e.selectCeltBandwidth()
-	if e.forcedBandwidth == BandwidthAuto {
-		det := detectSignalBandwidth(pcm, e.channels, e.sampleRate, e.lastDetectedBW)
-		e.lastDetectedBW = det
-		if det < bw {
-			bw = det
-		}
+	if bw < 0 {
+		bw = e.narrowAutoBandwidth(pcm, e.selectCeltBandwidth())
 	}
 	e.celtEncoder.SetEndBand(celtEndBandForFramingBW(bw))
 	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, bw, e.channels, framing.FrameSize20ms)
@@ -261,6 +290,322 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	return append([]byte{toc | byte(code)}, payload...), nil
 }
 
+func (e *Encoder) shouldEncodeSILKOnly() bool {
+	if e.silkEncoder == nil {
+		return false
+	}
+	if e.application == ApplicationRestrictedLowDelay {
+		return false
+	}
+
+	// SILK encode support is intentionally narrow: only speech intent may enter
+	// it. ApplicationVOIP derives voice intent by default, SignalVoice can opt
+	// other applications in, and SignalMusic explicitly keeps the packet on CELT.
+	if !e.hasVoiceIntent() {
+		return false
+	}
+	if e.bitrate > 40000 {
+		return false
+	}
+	nativeBW, ok := nativeSilkFramingBandwidth(e.silkSampleRate)
+	if !ok {
+		return false
+	}
+	nativePublic := silkFramingBWToPublic(nativeBW)
+	if e.forcedBandwidth != BandwidthAuto {
+		forced := celtFramingBWToPublic(nyquistClampFramingBW(publicToCeltFramingBW(e.forcedBandwidth), e.sampleRate))
+		if forced != nativePublic {
+			return false
+		}
+	}
+	if e.forcedBandwidth == BandwidthAuto && bandwidthRank(e.maxBandwidth) < bandwidthRank(nativePublic) {
+		return false
+	}
+	return true
+}
+
+func (e *Encoder) shouldEncodeHybrid(nFrames int) bool {
+	if e.silkEncoder == nil || e.silkSampleRate != 16000 {
+		return false
+	}
+	if nFrames < 1 || nFrames > 6 {
+		return false
+	}
+	if e.application == ApplicationRestrictedLowDelay {
+		return false
+	}
+	if !e.hasVoiceIntent() || e.bitrate <= 40000 {
+		return false
+	}
+	bw := e.selectHybridBandwidth()
+	return bw == framing.BandwidthSuperwideband || bw == framing.BandwidthFullband
+}
+
+func (e *Encoder) hasVoiceIntent() bool {
+	signal := e.celtEncoder.SignalTypeHint()
+	return signal == SignalVoice || (signal == SignalAuto && e.application == ApplicationVOIP)
+}
+
+func (e *Encoder) selectHybridBandwidth() int {
+	bw := e.selectCeltBandwidth()
+	if bw < framing.BandwidthSuperwideband {
+		return bw
+	}
+	if e.sampleRate == 24000 && bw > framing.BandwidthSuperwideband {
+		return framing.BandwidthSuperwideband
+	}
+	return bw
+}
+
+func (e *Encoder) narrowAutoBandwidth(pcm []float64, bw int) int {
+	if e.forcedBandwidth != BandwidthAuto {
+		return bw
+	}
+	det := detectSignalBandwidth(pcm, e.channels, e.sampleRate, e.lastDetectedBW)
+	e.lastDetectedBW = det
+	if det < bw {
+		return det
+	}
+	return bw
+}
+
+func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int) ([]byte, error) {
+	toc, err := framing.GenerateTOCExt(framing.ModeHybrid, bw, e.channels, framing.FrameSize20ms)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate hybrid TOC: %w", err)
+	}
+
+	inputChunkLen := e.frameSize * e.channels
+	silkFrameSize := e.silkSampleRate * 20 / 1000
+	silkChunkLen := silkFrameSize * e.channels
+	celtEnd := celtEndBandForFramingBW(bw)
+	targetBytes := e.hybridFrameTargetBytes()
+
+	frames := make([][]byte, 0, nFrames)
+	for k := 0; k < nFrames; k++ {
+		chunk := pcm[k*inputChunkLen : (k+1)*inputChunkLen]
+		silkPCM := chunk
+		if e.silkResampler != nil {
+			silkPCM = e.silkResampler.Process(chunk)
+			silkPCM = padOrTrim(silkPCM, silkChunkLen)
+		}
+		celtInput := e.celtInputFrame(chunk)
+
+		enc := entcode.NewEncoder(targetBytes)
+		e.silkEncoder.SetHybridMode(true)
+		err := e.silkEncoder.EncodeMultiWithEncoder(enc, silkPCM, 1)
+		e.silkEncoder.SetHybridMode(false)
+		if err != nil {
+			return nil, fmt.Errorf("SILK hybrid encoding failed: %w", err)
+		}
+		// Hybrid redundancy is disabled in this first encoder slice.
+		if enc.ECTell()+37 <= targetBytes*8 {
+			enc.EncodeBitLogp(false, 12)
+		}
+		if err := e.celtEncoder.EncodeHybrid(celtInput, enc, targetBytes, 17, celtEnd); err != nil {
+			return nil, fmt.Errorf("CELT hybrid encoding failed: %w", err)
+		}
+		enc.Flush()
+		frame := enc.Bytes()
+		if len(frame) < targetBytes {
+			padded := make([]byte, targetBytes)
+			copy(padded, frame)
+			frame = padded
+		}
+		frames = append(frames, frame)
+	}
+
+	vbr := e.rateMode != celt.RateModeCBR || e.dtx
+	payload, code, err := packOpusFramesPadded(frames, vbr, e.padBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack hybrid stream: %w", err)
+	}
+	return append([]byte{toc | byte(code)}, payload...), nil
+}
+
+func (e *Encoder) hybridFrameTargetBytes() int {
+	tb := int(float64(e.bitrate) * 0.020 / 8.0)
+	if tb < 2 {
+		tb = 2
+	}
+	if tb > 1275 {
+		tb = 1275
+	}
+	return tb
+}
+
+func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int) ([]byte, error) {
+	bw, ok := nativeSilkFramingBandwidth(e.silkSampleRate)
+	if !ok {
+		return nil, fmt.Errorf("SILK-only encoding not available for %d Hz", e.sampleRate)
+	}
+
+	groupSize, groups, err := silkPacketGroupsForChannels(nFrames, e.channels)
+	if err != nil {
+		return nil, err
+	}
+	tocFrameSize := groupSize * framing.FrameSize20ms
+	toc, err := framing.GenerateTOCExt(framing.ModeSILKOnly, bw, e.channels, tocFrameSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate SILK TOC: %w", err)
+	}
+
+	inputChunkLen := e.frameSize * e.channels
+	silkFrameSize := e.silkSampleRate * 20 / 1000
+	silkChunkLen := silkFrameSize * e.channels
+	streams := make([][]byte, 0, len(groups))
+	pos := 0
+	for _, group := range groups {
+		inputSamples := group * inputChunkLen
+		silkPCM := pcm[pos : pos+inputSamples]
+		if e.silkResampler != nil {
+			silkPCM = e.silkResampler.Process(silkPCM)
+			silkPCM = padOrTrim(silkPCM, group*silkChunkLen)
+		}
+		stream := []byte{0x00}
+		if !isSilentPCM(silkPCM) {
+			var err error
+			stream, err = e.silkEncoder.EncodeMulti(silkPCM, group)
+			if err != nil {
+				return nil, fmt.Errorf("SILK encoding failed: %w", err)
+			}
+		}
+		if e.shouldPadSILKStream(silkPCM, e.silkEncoder.LastStreamSNRVBR()) {
+			targetBytes := e.silkStreamTargetBytes(group)
+			if len(stream) < targetBytes {
+				padded := make([]byte, targetBytes)
+				copy(padded, stream)
+				stream = padded
+			}
+		}
+		streams = append(streams, stream)
+		pos += inputSamples
+	}
+	payload, code, err := packOpusFramesPadded(streams, true, e.padBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pack SILK stream: %w", err)
+	}
+	return append([]byte{toc | byte(code)}, payload...), nil
+}
+
+func (e *Encoder) shouldPadSILKStream(pcm []float64, snrVBR bool) bool {
+	if e.rateMode != celt.RateModeCBR {
+		return false
+	}
+	if isSilentPCM(pcm) {
+		return false
+	}
+	if snrVBR {
+		return false
+	}
+	return true
+}
+
+func (e *Encoder) silkStreamTargetBytes(nFrames int) int {
+	tb := int(float64(e.bitrate) * (0.020 * float64(nFrames)) / 8.0)
+	if tb < 2 {
+		tb = 2
+	}
+	if tb > 1275 {
+		tb = 1275
+	}
+	return tb
+}
+
+func isSilentPCM(pcm []float64) bool {
+	for _, v := range pcm {
+		if math.Abs(v) > 1.0/32768.0 {
+			return false
+		}
+	}
+	return true
+}
+
+func silkPacketGroups(nFrames int) (groupSize int, groups []int, err error) {
+	switch nFrames {
+	case 1:
+		return 1, []int{1}, nil
+	case 2:
+		return 2, []int{2}, nil
+	case 3:
+		return 3, []int{3}, nil
+	case 4:
+		return 2, []int{2, 2}, nil
+	case 5:
+		return 1, []int{1, 1, 1, 1, 1}, nil
+	case 6:
+		return 3, []int{3, 3}, nil
+	default:
+		return 0, nil, fmt.Errorf("invalid SILK frame count %d", nFrames)
+	}
+}
+
+func silkPacketGroupsForChannels(nFrames, channels int) (groupSize int, groups []int, err error) {
+	if channels == 2 {
+		switch nFrames {
+		case 3, 4, 5, 6:
+			groups := make([]int, nFrames)
+			for i := range groups {
+				groups[i] = 1
+			}
+			return 1, groups, nil
+		}
+	}
+	return silkPacketGroups(nFrames)
+}
+
+func nativeSilkFramingBandwidth(sampleRate int) (int, bool) {
+	switch sampleRate {
+	case 8000:
+		return framing.BandwidthNarrowband, true
+	case 12000:
+		return framing.BandwidthMediumband, true
+	case 16000:
+		return framing.BandwidthWideband, true
+	default:
+		return 0, false
+	}
+}
+
+func silkEncodeSampleRate(sampleRate int) (int, bool) {
+	switch sampleRate {
+	case 8000, 12000, 16000:
+		return sampleRate, true
+	case 24000, 48000:
+		return 16000, true
+	default:
+		return 0, false
+	}
+}
+
+func silkFramingBWToPublic(bw int) int {
+	switch bw {
+	case framing.BandwidthNarrowband:
+		return BandwidthNarrowband
+	case framing.BandwidthMediumband:
+		return BandwidthMediumband
+	default:
+		return BandwidthWideband
+	}
+}
+
+func bandwidthRank(bw int) int {
+	switch bw {
+	case BandwidthNarrowband:
+		return 0
+	case BandwidthMediumband:
+		return 1
+	case BandwidthWideband:
+		return 2
+	case BandwidthSuperWideband:
+		return 3
+	case BandwidthFullband:
+		return 4
+	default:
+		return 4
+	}
+}
+
 func (e *Encoder) validateFrameSize(frameSize int) (int, error) {
 	base := e.frameSize
 	if base <= 0 || frameSize <= 0 || frameSize%base != 0 {
@@ -276,6 +621,16 @@ func (e *Encoder) validateFrameSize(frameSize int) (int, error) {
 // encodeOneCELTFrame resamples one 20 ms PCM chunk (if needed) and encodes it
 // into a single CELT frame payload (no TOC byte).
 func (e *Encoder) encodeOneCELTFrame(pcm []float64) ([]byte, error) {
+	celtInput := e.celtInputFrame(pcm)
+
+	compressed, err := e.celtEncoder.Encode(celtInput)
+	if err != nil {
+		return nil, fmt.Errorf("CELT encoding failed: %w", err)
+	}
+	return compressed, nil
+}
+
+func (e *Encoder) celtInputFrame(pcm []float64) []float64 {
 	var celtInput []float64
 	if e.inputResampler != nil {
 		// Resample from sampleRate to 48kHz.
@@ -287,12 +642,7 @@ func (e *Encoder) encodeOneCELTFrame(pcm []float64) ([]byte, error) {
 	} else {
 		celtInput = pcm
 	}
-
-	compressed, err := e.celtEncoder.Encode(celtInput)
-	if err != nil {
-		return nil, fmt.Errorf("CELT encoding failed: %w", err)
-	}
-	return compressed, nil
+	return celtInput
 }
 
 // padOrTrim adjusts a slice to exactly targetLen, padding with zeros or trimming.
@@ -324,6 +674,15 @@ func (e *Encoder) SetBitrate(bitrate int) error {
 	}
 	e.bitrate = bitrate
 	e.celtEncoder.SetBitrate(bitrate)
+	if e.silkEncoder != nil {
+		silkBitrate := bitrate
+		if silkBitrate > 40000 {
+			silkBitrate = 40000
+		}
+		if err := e.silkEncoder.SetBitrate(silkBitrate); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -335,6 +694,11 @@ func (e *Encoder) SetComplexity(complexity int) error {
 	}
 	e.complexity = complexity
 	e.celtEncoder.SetComplexity(complexity)
+	if e.silkEncoder != nil {
+		if err := e.silkEncoder.SetComplexity(complexity); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -384,7 +748,8 @@ func (e *Encoder) SetPacketPadding(n int) {
 // instead of being padded to the target size. This reduces bitrate during
 // silence. The decoder reconstructs such frames as digital silence. DTX is off
 // by default. The reduction is effective in any rate mode; in CBR it overrides
-// the fixed-size padding for silent frames only.
+// the fixed-size padding for silent CELT frames, while SILK digital-silence
+// frames are kept compact even without DTX.
 func (e *Encoder) SetDTX(enabled bool) {
 	e.dtx = enabled
 	e.celtEncoder.SetDTX(enabled)
@@ -444,6 +809,13 @@ func (e *Encoder) SetBandwidth(bw int) error {
 // Bandwidth reports the coded bandwidth the encoder would currently use, as a
 // public Bandwidth* constant.
 func (e *Encoder) Bandwidth() int {
+	if e.shouldEncodeSILKOnly() {
+		bw, _ := nativeSilkFramingBandwidth(e.silkSampleRate)
+		return silkFramingBWToPublic(bw)
+	}
+	if e.shouldEncodeHybrid(1) {
+		return celtFramingBWToPublic(e.selectHybridBandwidth())
+	}
 	return celtFramingBWToPublic(e.selectCeltBandwidth())
 }
 
@@ -499,6 +871,14 @@ func nyquistCeltBandwidth(sampleRate int) int {
 	default: // 48000
 		return framing.BandwidthFullband
 	}
+}
+
+func nyquistClampFramingBW(bw, sampleRate int) int {
+	nyq := nyquistCeltBandwidth(sampleRate)
+	if bw > nyq {
+		return nyq
+	}
+	return bw
 }
 
 // bitrateCeltBandwidth returns a coarse bandwidth ceiling for a target bitrate so
@@ -586,8 +966,14 @@ func celtEndBandForFramingBW(bw int) int {
 // Reset resets the encoder state
 func (e *Encoder) Reset() error {
 	e.celtEncoder.Reset()
+	if e.silkEncoder != nil {
+		e.silkEncoder.Reset()
+	}
 	if e.inputResampler != nil {
 		e.inputResampler.Reset()
+	}
+	if e.silkResampler != nil {
+		e.silkResampler.Reset()
 	}
 	e.lastDetectedBW = -1
 	e.celtEncoder.SetBitrate(e.bitrate)
@@ -1363,109 +1749,11 @@ func adjustChannels(data []float64, inputCh, outputCh int) []float64 {
 	return data
 }
 
-// splitSILKOpusFrames splits a SILK/Hybrid packet payload into per-Opus-frame SILK streams.
-// The framing follows RFC 6716 §3.2 for all count codes.
-// Returns the individual SILK range-coded streams (one per Opus frame).
-func splitSILKOpusFrames(payload []byte, countCode int) ([][]byte, error) {
-	// makeEmpty returns n empty byte slices.
-	makeEmpty := func(n int) [][]byte {
-		frames := make([][]byte, n)
-		for i := range frames {
-			frames[i] = []byte{}
-		}
-		return frames
-	}
-
-	switch countCode {
-	case 0:
-		// Single Opus frame: entire payload is one SILK range stream
-		return [][]byte{payload}, nil
-	case 1:
-		// Two equal Opus frames: for SILK, the entire payload is one SILK range stream
-		// encoding both frames sequentially (VAD bits for both frames precede both).
-		return [][]byte{payload}, nil
-	case 2:
-		// Two SILK Opus frames share one range-coded stream after the
-		// self-delimiting length header.
-		stream, _ := silkCode2Stream(payload)
-		return [][]byte{stream}, nil
-	case 3:
-		stream, _, err := silkCode3Stream(payload)
-		if err != nil {
-			return makeEmpty(1), err
-		}
-		return [][]byte{stream}, nil
-	default:
-		return [][]byte{payload}, nil
-	}
-}
-
-// silkCode3Stream strips the Opus code-3 frame-count and padding header, then
-// returns the single SILK range-coded stream and the signaled Opus frame count.
-// For SILK, the bytes after the code-3 header are one range-coded stream that
-// contains all Opus frames sequentially; the VBR bit does not introduce per-frame
-// SILK range streams.
-func silkCode3Stream(payload []byte) ([]byte, int, error) {
-	if len(payload) < 1 {
-		return nil, 0, fmt.Errorf("code 3: empty payload")
-	}
-
-	m := payload[0]
-	frameCount := int(m & 0x3F)
-	padding := (m & 0x40) != 0
-	payload = payload[1:]
-
-	if frameCount == 0 || frameCount > 48 {
-		return nil, 0, fmt.Errorf("code 3: invalid frame count %d", frameCount)
-	}
-
-	if padding {
-		padLen := 0
-		for {
-			if len(payload) < 1 {
-				return []byte{}, frameCount, nil
-			}
-			n := int(payload[0])
-			payload = payload[1:]
-			if n == 255 {
-				padLen += 254
-				continue
-			}
-			padLen += n
-			break
-		}
-		if padLen >= len(payload) {
-			return []byte{}, frameCount, nil
-		}
-		payload = payload[:len(payload)-padLen]
-	}
-
-	return payload, frameCount, nil
-}
-
-// silkCode2Stream strips the code-2 length prefix and returns the remaining
-// bytes as one SILK range-coded stream for the two signaled Opus frames.
-func silkCode2Stream(payload []byte) ([]byte, int) {
-	if len(payload) < 1 {
-		return []byte{}, 2
-	}
-	n1 := int(payload[0])
-	payload = payload[1:]
-	if n1 >= 252 {
-		if len(payload) < 1 {
-			return []byte{}, 2
-		}
-		payload = payload[1:]
-	}
-	return payload, 2
-}
-
 // decodeSILKPacket decodes a SILK or Hybrid-mode packet.
 //
-// For SILK code-0 and code-1: the ENTIRE payload is ONE SILK range-coded stream
-// encoding all Opus frames sequentially.
-// For SILK code-2: the payload after the length prefix is ONE SILK stream for both frames.
-// For SILK code-3: the payload after the M/padding header is ONE SILK stream for all frames.
+// For SILK, each Opus frame payload is one range-coded stream. A 40 ms or
+// 60 ms SILK TOC config stores multiple 20 ms SILK subframes inside that one
+// stream; Opus count codes store multiple such Opus frame streams.
 //
 // pktChannels is the number of channels in the packet (from TOC stereo bit).
 func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannels int) ([]float64, error) {
@@ -1491,46 +1779,14 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		info.dec.CopyPrimaryStateFrom(monoPeer.dec)
 	}
 
-	// For code-0 and code-1: entire payload is ONE SILK stream with all Opus frames.
-	// For code-3: strip only the Opus code-3 header/padding; the remaining
-	// bytes are still one SILK range-coded stream for all signaled Opus frames.
-	var silkStreams [][]byte
-	var nSilkFramesPerStream int
-
-	if countCode <= 1 {
-		// Code 0 or 1: one SILK range stream for all Opus frames
-		opusFrameCount := 1
-		if countCode == 1 {
-			opusFrameCount = 2
-		}
-		silkStreams = [][]byte{payload}
-		nSilkFramesPerStream = opusFrameCount * subframesPerOpusFrame
-	} else if countCode == 3 {
-		stream, opusFrameCount, err := silkCode3Stream(payload)
-		if err != nil {
-			return nil, err
-		}
-		silkStreams = [][]byte{stream}
-		nSilkFramesPerStream = opusFrameCount * subframesPerOpusFrame
-	} else if countCode == 2 {
-		stream, opusFrameCount := silkCode2Stream(payload)
-		silkStreams = [][]byte{stream}
-		nSilkFramesPerStream = opusFrameCount * subframesPerOpusFrame
-	} else {
-		var err error
-		silkStreams, err = splitSILKOpusFrames(payload, countCode)
-		if err != nil {
-			silkStreams = [][]byte{payload}
-		}
-		nSilkFramesPerStream = subframesPerOpusFrame
+	silkStreams, err := splitOpusFrames(payload, countCode)
+	if err != nil {
+		return nil, err
 	}
+	nSilkFramesPerStream := subframesPerOpusFrame
 
 	// Compute expected samples per stream at output rate
-	opusFrameCountPerStream := nSilkFramesPerStream / subframesPerOpusFrame
-	if opusFrameCountPerStream < 1 {
-		opusFrameCountPerStream = 1
-	}
-	samplesPerStream := (d.sampleRate * frameDurationMs * opusFrameCountPerStream / 1000) * d.channels
+	samplesPerStream := (d.sampleRate * frameDurationMs / 1000) * d.channels
 	if samplesPerStream < 1 {
 		samplesPerStream = (d.sampleRate * frameDurationMs / 1000) * d.channels
 	}

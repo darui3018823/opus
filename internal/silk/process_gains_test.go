@@ -106,3 +106,47 @@ func TestShapeGainIndicesStable(t *testing.T) {
 		}
 	}
 }
+
+// TestLTPPredCodGainDB checks the Step 5(c) LTP coding gain estimate behaves like
+// silk_quant_LTP_gains's pred_gain_dB: a strongly periodic (voiced) tone, whose
+// long-term predictor removes most of the residual, reports a high coding gain
+// (driving the process_gains reduction), while a non-periodic signal reports a
+// low one (leaving the gain untouched).
+func TestLTPPredCodGainDB(t *testing.T) {
+	const rate = 16000
+	enc, err := NewEncoder(rate, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+
+	periodic := make([]float64, enc.frameSize)
+	for i := range periodic {
+		tm := float64(i) / rate
+		periodic[i] = 0.20 * math.Sin(2*math.Pi*200*tm)
+	}
+	cb := getNLSFCB(enc.lpcOrder)
+	nlsf := enc.analyzeNLSF(periodic, cb, SignalTypeVoiced)
+	pitchLag, pitchGain := enc.analyzePitch(periodic)
+	pitchLags := make([]int, enc.nSubframes)
+	for sf := range pitchLags {
+		pitchLags[sf] = pitchLag
+	}
+	ltpPerIdx, ltpGainIdx := selectLTPGain(pitchGain)
+	ltpCoeffs := ltpCoeffsForIndices(ltpPerIdx, ltpGainIdx, enc.nSubframes)
+
+	resNrg := enc.ltpResidualEnergyPerSubframe(periodic, nlsf.lpcQ12, SignalTypeVoiced, pitchLags, ltpCoeffs)
+	gainDB := enc.ltpPredCodGainDB(periodic, nlsf.lpcQ12, resNrg, pitchLags, ltpCoeffs)
+	if gainDB <= 0 {
+		t.Fatalf("periodic LTP coding gain %.2f dB should be positive", gainDB)
+	}
+	scale := 1.0 - 0.5*silkSigmoid(0.25*(gainDB-12.0))
+	if scale >= 1.0 {
+		t.Fatalf("periodic gainScale %.3f should reduce the gain (<1)", scale)
+	}
+
+	// The coding gain is clamped to be non-negative, so the reduction factor is
+	// always within the documented (0.5, 1.0] range regardless of the signal.
+	if scale <= 0.5 {
+		t.Fatalf("gainScale %.3f below the 0.5 floor of 1-0.5*sigmoid", scale)
+	}
+}

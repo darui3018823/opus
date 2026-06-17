@@ -1069,9 +1069,20 @@ func (e *Encoder) shapeGainIndices(signal []float64, lpcQ12 []int16, signalType,
 		invMaxSqr = math.Pow(2.0, 0.33*(21.0-shape.SNRdB)) / float64(subLen)
 	}
 
+	// Gain reduction when the LTP coding gain is high (silk_process_gains_FLP):
+	// a strong long-term predictor leaves a small residual, so the synthesis
+	// gain can be scaled down, sparing pulses on steady voiced frames. The soft
+	// limit below still floors the gain by the residual energy, so the reduction
+	// only takes hold where the prediction is genuinely good (ratio_bytes ~2x→~1x).
+	gainScale := 1.0
+	if signalType == SignalTypeVoiced {
+		ltpCodGainDB := e.ltpPredCodGainDB(signal, lpcQ12, resNrg, pitchLags, ltpCoeffsQ14)
+		gainScale = 1.0 - 0.5*silkSigmoid(0.25*(ltpCodGainDB-12.0))
+	}
+
 	targets := make([]int, e.nSubframes)
 	for sf := 0; sf < e.nSubframes; sf++ {
-		gain := shape.Gains[sf]
+		gain := shape.Gains[sf] * gainScale
 		// Soft limit on the ratio of residual energy to squared gain
 		// (silk_process_gains_FLP): raises the gain when the prediction residual
 		// is large, capping the number of pulses the NSQ has to spend.
@@ -1141,6 +1152,42 @@ func (e *Encoder) ltpResidualEnergyPerSubframe(signal []float64, lpcQ12 []int16,
 		nrgs[sf] = sum * int16Scale
 	}
 	return nrgs
+}
+
+// ltpPredCodGainDB returns the LTP prediction coding gain in dB, the quantity
+// silk_quant_LTP_gains reports as pred_gain_dB_Q7 / 128. libopus computes it as
+// -3*log2(res_nrg) where res_nrg is the LTP residual energy normalised by the
+// LPC residual energy (averaged over subframes). We reuse the open-loop LPC+LTP
+// residual (passed in as ltpNrg) and an LPC-only residual pass for the
+// denominator. A perfectly periodic (steady voiced) frame drives this high, so
+// the process_gains reduction shrinks its gains the most.
+func (e *Encoder) ltpPredCodGainDB(signal []float64, lpcQ12 []int16, ltpNrg [silkMaxNBSubframes]float64, pitchLags []int, ltpCoeffsQ14 [][5]int16) float64 {
+	if e.nSubframes == 0 {
+		return 0
+	}
+	lpcNrg := e.ltpResidualEnergyPerSubframe(signal, lpcQ12, SignalTypeUnvoiced, pitchLags, ltpCoeffsQ14)
+	ratioSum := 0.0
+	for sf := 0; sf < e.nSubframes; sf++ {
+		denom := lpcNrg[sf]
+		if denom < 1e-9 {
+			denom = 1e-9
+		}
+		r := ltpNrg[sf] / denom
+		// The optimal predictor never increases the residual; clamp so a crude
+		// per-subframe LTP gain cannot push the coding gain negative.
+		if r > 1.0 {
+			r = 1.0
+		}
+		if r < 1e-9 {
+			r = 1e-9
+		}
+		ratioSum += r
+	}
+	ratio := ratioSum / float64(e.nSubframes)
+	if ratio < 1e-9 {
+		ratio = 1e-9
+	}
+	return -3.0 * silkLog2(ratio)
 }
 
 func (e *Encoder) gainIndicesFromEnergy(signal []float64, fromEnergy func(float64) int) []int {

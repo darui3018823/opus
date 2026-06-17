@@ -1153,6 +1153,8 @@ func (e *Encoder) shapeGainIndices(signal []float64, lpcQ12 []int16, signalType,
 	if subLen > 0 {
 		invMaxSqr = math.Pow(2.0, 0.33*(21.0-shape.SNRdB)) / float64(subLen)
 	}
+	silkTraceSNR("process_gains fs=%dkHz signal=%d snr=%.3fdB sub_len=%d inv_max_sqr=%.9f",
+		e.sampleRate/1000, signalType, shape.SNRdB, subLen, invMaxSqr)
 
 	// Gain reduction when the LTP coding gain is high (silk_process_gains_FLP):
 	// a strong long-term predictor leaves a small residual, so the synthesis
@@ -1163,6 +1165,7 @@ func (e *Encoder) shapeGainIndices(signal []float64, lpcQ12 []int16, signalType,
 	if signalType == SignalTypeVoiced {
 		ltpCodGainDB := e.ltpPredCodGainDB(signal, lpcQ12, resNrg, pitchLags, ltpCoeffsQ14)
 		gainScale = 1.0 - 0.5*silkSigmoid(0.25*(ltpCodGainDB-12.0))
+		silkTraceSNR("process_gains voiced ltp_cod_gain=%.3fdB gain_scale=%.6f", ltpCodGainDB, gainScale)
 	}
 
 	targets := make([]int, e.nSubframes)
@@ -1175,6 +1178,8 @@ func (e *Encoder) shapeGainIndices(signal []float64, lpcQ12 []int16, signalType,
 		if gain > 32767 {
 			gain = 32767
 		}
+		silkTraceSNR("process_gains sf=%d shape_gain=%.3f res_nrg=%.3f final_gain=%.3f gain_index=%d",
+			sf, shape.Gains[sf], resNrg[sf], gain, silkQuantizeGainIndex(gain*65536.0))
 		targets[sf] = silkQuantizeGainIndex(gain * 65536.0)
 	}
 	return targets

@@ -266,6 +266,8 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 	} else {
 		snrAdjDB += (-0.4*snrDB + 6.0) * (1.0 - out.InputQuality)
 	}
+	silkTraceSNR("noise_shape fs=%dkHz rate=%d nb_subfr=%d signal=%d base_snr=%.3fdB snr_adj=%.3fdB coding_quality=%.3f input_quality=%.3f ltp_corr=%.3f",
+		fsKHz, targetRate, e.nSubframes, signalType, snrDB, snrAdjDB, out.CodingQuality, out.InputQuality, e.ltpCorrState)
 
 	strength := findPitchWhiteNoiseFrac * out.PredGain
 	bwExp := shapeBandwidthExpansion / (1.0 + strength*strength)
@@ -324,6 +326,7 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 	// target shrinks gain_mult, lowering the gains, raising the pulse count.
 	gainMult := math.Pow(2.0, -0.16*snrAdjDB)
 	gainAdd := math.Pow(2.0, 0.16*minQGainDB)
+	silkTraceSNR("noise_shape gains gain_mult=%.6f gain_add=%.6f min_qgain_db=%.3f", gainMult, gainAdd, minQGainDB)
 	for sf := 0; sf < e.nSubframes; sf++ {
 		out.Gains[sf] = out.Gains[sf]*gainMult + gainAdd
 	}

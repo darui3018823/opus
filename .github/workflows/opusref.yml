@@ -1,0 +1,40 @@
+name: Encoder Quality (opusref)
+
+on:
+  push:
+    branches: [main, dev/silk-encoder-phase4]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: opusref-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  opusref:
+    name: encoder quality vs libopus
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install libopus
+        run: sudo apt-get install -y libopus-dev
+
+      - name: SILK encoder quality (AB vs libopus)
+        run: go test -tags opusref -count=1 -v -run TestOpusSILKABAgainstLibopusEncoder .
+
+      - name: SILK encoder conformance (SILKOnly)
+        run: go test -tags opusref -count=1 -run TestCGOEncodeRefSILKOnly .
+
+      - name: Decoder reference (12/12 vectors)
+        run: go test -tags opusref -count=1 -run TestCGORef .

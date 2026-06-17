@@ -502,7 +502,19 @@ The SILK package contains:
   single-state closed-loop NSQ. This replaces the former single scalar
   output-error feedback term, but it is still not a faithful libopus
   `silk_noise_shape_analysis_FLP` / `silk_prefilter_FLP` /
-  `silk_NSQ_del_dec_FLP` port.
+  `silk_NSQ_del_dec_FLP` port. Q2 (`internal/silk/pitch_flp.go`) replaces the
+  former home-brew single-lag full-frame autocorrelation with a faithful float
+  port of `silk_find_pitch_lags_FLP` + `silk_pitch_analysis_core_FLP`: an
+  LPC-residual whitening front end feeds a three-stage hierarchical search
+  (4 kHz coarse correlation, 8 kHz stage-2 lag codebook, original-rate stage-3
+  pitch contour) using the fixed-point `down2`/`down2_3` decimators and the
+  stage-2/3 lag codebooks. The voiced path now encodes the real absolute lag
+  index and pitch contour index (no longer a flat contour) and reconstructs the
+  per-subframe lags from the encoded indices so the NSQ uses the same lags the
+  decoder will. This is the pitch slice only; LTP-gain quantization and voiced
+  rate control remain simplified, so voiced/onset packets still spend more bytes
+  than libopus. `silk_VAD_GetSA_Q8` is not yet ported (the voicing threshold uses
+  a fixed speech-activity proxy).
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single

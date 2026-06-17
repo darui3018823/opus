@@ -3,32 +3,32 @@ package silk
 import "math"
 
 type silkNSQState struct {
-	xq               []int16
-	sLTPShpQ14       []int32
-	sLPCQ14          [silkDecisionDelay + silkMaxLPCOrder]int32
-	sAR2Q14          [silkMaxShapeLPCOrder]int32
-	sLFARShpQ14      int32
-	sDiffShpQ14      int32
-	lagPrev          int
-	sLTPBufIdx       int
-	sLTPShpBufIdx    int
-	prevGainQ16      int32
-	rewhiteFlag      bool
+	xq            []int16
+	sLTPShpQ14    []int32
+	sLPCQ14       [silkDecisionDelay + silkMaxLPCOrder]int32
+	sAR2Q14       [silkMaxShapeLPCOrder]int32
+	sLFARShpQ14   int32
+	sDiffShpQ14   int32
+	lagPrev       int
+	sLTPBufIdx    int
+	sLTPShpBufIdx int
+	prevGainQ16   int32
+	rewhiteFlag   bool
 }
 
 type nsqDelayedDecision struct {
-	sLPCQ14    [120 + silkMaxLPCOrder]int32
-	randState  [silkDecisionDelay]int32
-	qQ10       [silkDecisionDelay]int32
-	xqQ14      [silkDecisionDelay]int32
-	predQ15    [silkDecisionDelay]int32
-	shapeQ14   [silkDecisionDelay]int32
-	sAR2Q14    [silkMaxShapeLPCOrder]int32
-	lfARQ14    int32
-	diffQ14    int32
-	seed       int32
-	seedInit   int32
-	rdQ10      int32
+	sLPCQ14   [120 + silkMaxLPCOrder]int32
+	randState [silkDecisionDelay]int32
+	qQ10      [silkDecisionDelay]int32
+	xqQ14     [silkDecisionDelay]int32
+	predQ15   [silkDecisionDelay]int32
+	shapeQ14  [silkDecisionDelay]int32
+	sAR2Q14   [silkMaxShapeLPCOrder]int32
+	lfARQ14   int32
+	diffQ14   int32
+	seed      int32
+	seedInit  int32
+	rdQ10     int32
 }
 
 type nsqSampleState struct {
@@ -224,8 +224,8 @@ func (e *Encoder) silkNSQDelDec(
 		e.silkNSQDelDecScaleStates(delDec, x16[frameOffset:frameOffset+subframeLen], xScQ10, sLTP, sLTPQ15,
 			sf, nStates, int32(ltpScaleQ14), gainsQ16, pitchL, signalType, decisionDelay)
 
-		e.silkNoiseShapeQuantizerDelDec(delDec, signalType, xScQ10, pulses[frameOffset:],
-			e.nsq.xq[ltpMemLen+frameOffset:], sLTPQ15, delayedGainQ10, aQ12, bQ14[:],
+		e.silkNoiseShapeQuantizerDelDec(delDec, signalType, xScQ10, pulses, frameOffset,
+			e.nsq.xq, ltpMemLen+frameOffset, sLTPQ15, delayedGainQ10, aQ12, bQ14[:],
 			shape.AR_Q13[sf][:], lag, harmShapeFIRPackedQ14, shape.Tilt_Q14[sf],
 			shape.LF_shp_Q14[sf], gainsQ16[sf], lambdaQ10, offsetQ10, subframeLen,
 			subfrCount, shape.ShapingLPCOrder, e.lpcOrder, int(shape.Warping_Q16),
@@ -241,6 +241,11 @@ func (e *Encoder) silkNSQDelDec(
 			winner = k
 		}
 	}
+	// libopus writes the winning state's initial seed back to the bitstream
+	// (psIndices->Seed = psDelDec[Winner_ind].SeedInit) so the decoder replays
+	// the same pseudo-random sign sequence the winner used. The caller encodes
+	// this seed instead of the base seed.
+	e.nsqSeed = delDec[winner].seedInit & 3
 	dd := &delDec[winner]
 	lastIdx := smplBufIdx + decisionDelay
 	gainQ10 := silkRSHIFT32(gainsQ16[e.nSubframes-1], 6)
@@ -274,7 +279,9 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 	signalType int,
 	xQ10 []int32,
 	pulses []int16,
+	pulsesBase int,
 	xq []int16,
+	xqBase int,
 	sLTPQ15 []int32,
 	delayedGainQ10 []int32,
 	aQ12 []int16,
@@ -433,10 +440,15 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 
 		dd := &delDec[winner]
 		if subfr > 0 || i >= decisionDelay {
-			outIdx := i - decisionDelay
-			if outIdx >= 0 && outIdx < len(pulses) {
-				pulses[outIdx] = int16(silkRShiftRound(int64(dd.qQ10[lastIdx]), 10))
-				xq[outIdx] = clamp16(silkRShiftRound(int64(silkSMULWW(dd.xqQ14[lastIdx], delayedGainQ10[lastIdx])), 8))
+			// libopus advances the pulses/pxq pointers per subframe, so the
+			// delayed write pulses[i-decisionDelay] reaches back into the prior
+			// subframe's region. Mirror that with absolute base offsets rather
+			// than a per-subframe sub-slice (which would drop those writes).
+			pIdx := pulsesBase + i - decisionDelay
+			xIdx := xqBase + i - decisionDelay
+			if pIdx >= 0 && pIdx < len(pulses) && xIdx >= 0 && xIdx < len(xq) {
+				pulses[pIdx] = int16(silkRShiftRound(int64(dd.qQ10[lastIdx]), 10))
+				xq[xIdx] = clamp16(silkRShiftRound(int64(silkSMULWW(dd.xqQ14[lastIdx], delayedGainQ10[lastIdx])), 8))
 				idx := e.nsq.sLTPShpBufIdx - decisionDelay
 				if idx >= 0 && idx < len(e.nsq.sLTPShpQ14) {
 					e.nsq.sLTPShpQ14[idx] = dd.shapeQ14[lastIdx]
@@ -603,4 +615,24 @@ func int16SliceToInt32(in []int16) []int32 {
 		out[i] = int32(v)
 	}
 	return out
+}
+
+// syncLegacyNSQState mirrors the trellis NSQ output history into the legacy
+// lpcState / ltpState / prevGainQ16 fields. Downstream analysis that predates
+// the delayed-decision NSQ (gain & pitch estimation, currentFrameOutputRMS,
+// frame-state snapshot/restore) still reads those fields, so they must reflect
+// what the trellis actually produced to keep enc/dec state continuity.
+func (e *Encoder) syncLegacyNSQState() {
+	ltpMemLen := len(e.ltpState)
+	if ltpMemLen > 0 && len(e.nsq.xq) >= ltpMemLen {
+		// After silkNSQDelDec shifts e.nsq.xq left by frameSize, the first
+		// ltpMemLen int16 samples hold the most recent reconstructed output.
+		for i := 0; i < ltpMemLen; i++ {
+			e.ltpState[i] = int32(e.nsq.xq[i])
+		}
+	}
+	if len(e.lpcState) == silkMaxLPCOrder {
+		copy(e.lpcState, e.nsq.sLPCQ14[:silkMaxLPCOrder])
+	}
+	e.prevGainQ16 = e.nsq.prevGainQ16
 }

@@ -22,8 +22,8 @@ const (
 	harmHPNoiseCoef          = 0.35
 	lowFreqShaping           = 4.0
 	lowQualityLFShapingDecr  = 0.5
-	subframeSmoothCoef        = 0.4
-	minQGainDB                = 2.0
+	subframeSmoothCoef       = 0.4
+	minQGainDB               = 2.0
 	lambdaOffset             = 1.2
 	lambdaSpeechAct          = -0.2
 	lambdaDelayedDecisions   = -0.05
@@ -33,24 +33,24 @@ const (
 )
 
 type silkComplexityConfig struct {
-	shapingLPCOrder          int
-	laShape                 int
-	nStatesDelayedDecision  int
-	warpingQ16              int32
+	shapingLPCOrder        int
+	laShape                int
+	nStatesDelayedDecision int
+	warpingQ16             int32
 }
 
 type silkNoiseShapeAnalysis struct {
-	AR_Q13             [silkMaxNBSubframes][silkMaxShapeLPCOrder]int16
-	LF_shp_Q14         [silkMaxNBSubframes]int32
-	Tilt_Q14           [silkMaxNBSubframes]int32
-	HarmShapeGain_Q14  [silkMaxNBSubframes]int32
-	Lambda_Q10         int32
-	QuantOffsetType    int
-	ShapingLPCOrder    int
-	Warping_Q16        int32
-	CodingQuality      float64
-	InputQuality       float64
-	PredGain           float64
+	AR_Q13            [silkMaxNBSubframes][silkMaxShapeLPCOrder]int16
+	LF_shp_Q14        [silkMaxNBSubframes]int32
+	Tilt_Q14          [silkMaxNBSubframes]int32
+	HarmShapeGain_Q14 [silkMaxNBSubframes]int32
+	Lambda_Q10        int32
+	QuantOffsetType   int
+	ShapingLPCOrder   int
+	Warping_Q16       int32
+	CodingQuality     float64
+	InputQuality      float64
+	PredGain          float64
 }
 
 func (e *Encoder) silkComplexityConfig() silkComplexityConfig {
@@ -212,7 +212,7 @@ func (e *Encoder) estimateQuantOffsetType(signal []float64, lpcQ12 []int16, sign
 	return 1
 }
 
-func (e *Encoder) analyzeNoiseShape(signal []float64, lpcQ12 []int16, signalType int, quantOffsetType int, pitchLags []int, pitchGain float64) silkNoiseShapeAnalysis {
+func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalType int, quantOffsetType int, pitchLags []int, pitchGain float64) silkNoiseShapeAnalysis {
 	cfg := e.silkComplexityConfig()
 	fsKHz := e.sampleRate / 1000
 	subframeLen := e.frameSize / e.nSubframes
@@ -228,7 +228,6 @@ func (e *Encoder) analyzeNoiseShape(signal []float64, lpcQ12 []int16, signalType
 	if len(pitchLags) > 0 && pitchLags[0] > 0 {
 		pitchLag = pitchLags[0]
 	}
-	pitchRes := e.analysisExcitation(signal, lpcQ12, signalType, pitchLag, pitchGain)
 	sigEnergy := computeEnergy(signal) + 1e-12
 	resEnergy := lpcResidualEnergy(signal, lpcQ12) + 1e-12
 	out.PredGain = math.Sqrt(sigEnergy / resEnergy)
@@ -298,7 +297,8 @@ func (e *Encoder) analyzeNoiseShape(signal []float64, lpcQ12 []int16, signalType
 		}
 	}
 
-	strength = lowFreqShaping * (1.0 + lowQualityLFShapingDecr*(1.0-1.0))
+	// libopus: LOW_FREQ_SHAPING * (1 + LOW_QUALITY_LF_SHAPING_DECR*(input_quality-1)).
+	strength = lowFreqShaping * (1.0 + lowQualityLFShapingDecr*(out.InputQuality-1.0))
 	if signalType == SignalTypeVoiced {
 		for sf := 0; sf < e.nSubframes; sf++ {
 			lag := pitchLag
@@ -365,4 +365,3 @@ func packLFShapeQ14(lfAR, lfMA float64) int32 {
 	ma := uint16(int16(silkFloat2Int(lfMA * 16384.0)))
 	return (ar << 16) | int32(ma)
 }
-

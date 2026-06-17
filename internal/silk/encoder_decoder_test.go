@@ -729,12 +729,76 @@ func TestEncoderClosedLoopNSQImprovesVoicedSynthesis(t *testing.T) {
 	closedPulses := closedEnc.closedLoopNSQ(signal, nlsf.lpcQ12, gainIndices,
 		SignalTypeVoiced, 0, 0, pitchLags, ltpCoeffsQ14, silkLTPScalesTable[0])
 
-	residualOut := synthesizeTestFrame(t, rate, residualPulses, gainIndices, nlsf.lpcQ12, pitchLags, ltpCoeffsQ14)
-	closedOut := synthesizeTestFrame(t, rate, closedPulses, gainIndices, nlsf.lpcQ12, pitchLags, ltpCoeffsQ14)
+	residualOut := synthesizeTestFrame(t, rate, residualPulses, gainIndices, nlsf.lpcQ12, pitchLags, ltpCoeffsQ14, 0)
+	// The delayed-decision NSQ selects a winning state whose seed is written to
+	// the bitstream; the decoder must replay that same seed.
+	closedOut := synthesizeTestFrame(t, rate, closedPulses, gainIndices, nlsf.lpcQ12, pitchLags, ltpCoeffsQ14, closedEnc.nsqSeed)
 	residualSNR, _, _, _ := silkAlignedSNR(signal, residualOut, enc.frameSize)
 	closedSNR, _, _, _ := silkAlignedSNR(signal, closedOut, enc.frameSize)
 	if closedSNR < residualSNR+0.5 {
 		t.Fatalf("closed-loop NSQ SNR %.2f dB, want at least 0.5 dB over residual-only %.2f dB", closedSNR, residualSNR)
+	}
+}
+
+// TestTrellisNSQVoicedRoundTrip guards the Q3+Q4 delayed-decision trellis NSQ.
+// It is gated off by default (the homebrew quantizer is active until Step 4
+// co-designs the gains), but it must remain correct: a voiced frame quantized
+// by the trellis and resynthesized with the winning seed must reconstruct the
+// signal. This locks in the two correctness fixes — the cross-subframe delayed
+// writes and the winning-state seed propagation — so Step 4 can build on it.
+func TestTrellisNSQVoicedRoundTrip(t *testing.T) {
+	const rate = 16000
+	enc, err := NewEncoder(rate, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder() error = %v", err)
+	}
+	enc.useTrellisNSQ = true
+
+	signal := make([]float64, enc.frameSize)
+	for i := range signal {
+		tm := float64(i) / rate
+		signal[i] = 0.20 * (0.72*math.Sin(2*math.Pi*180*tm) +
+			0.22*math.Sin(2*math.Pi*360*tm+0.3) +
+			0.09*math.Sin(2*math.Pi*540*tm+0.7))
+	}
+
+	pitchLag, pitchGain := enc.analyzePitch(signal)
+	if pitchGain < 0.55 {
+		t.Fatalf("test signal pitch gain=%g, want voiced", pitchGain)
+	}
+	cb := getNLSFCB(enc.lpcOrder)
+	nlsf := enc.analyzeNLSF(signal, cb, SignalTypeVoiced)
+	gainIdx := enc.analysisGainIndex(signal)
+	gainIndices := []int{gainIdx, gainIdx, gainIdx, gainIdx}
+	pitchLags := []int{pitchLag, pitchLag, pitchLag, pitchLag}
+	ltpPerIdx, ltpGainIdx := selectLTPGain(pitchGain)
+	ltpCoeffsQ14 := make([][5]int16, enc.nSubframes)
+	for sf := range ltpCoeffsQ14 {
+		for k := 0; k < 5; k++ {
+			switch ltpPerIdx {
+			case 0:
+				ltpCoeffsQ14[sf][k] = int16(silkLTPGainVQ0[ltpGainIdx][k]) << 7
+			case 1:
+				ltpCoeffsQ14[sf][k] = int16(silkLTPGainVQ1[ltpGainIdx][k]) << 7
+			default:
+				ltpCoeffsQ14[sf][k] = int16(silkLTPGainVQ2[ltpGainIdx][k]) << 7
+			}
+		}
+	}
+
+	pulses := enc.closedLoopNSQ(signal, nlsf.lpcQ12, gainIndices,
+		SignalTypeVoiced, 0, 0, pitchLags, ltpCoeffsQ14, silkLTPScalesTable[0])
+	// Resynthesize with the seed the trellis selected and wrote to the bitstream.
+	out := synthesizeTestFrame(t, rate, pulses, gainIndices, nlsf.lpcQ12, pitchLags, ltpCoeffsQ14, enc.nsqSeed)
+	snr, _, _, scale := silkAlignedSNR(signal, out, enc.frameSize)
+	// A correct trellis reconstructs the voiced tone with positive scale and
+	// meaningful SNR. The earlier broken port produced an inverted (scale<0),
+	// near-zero-SNR output, so these bounds catch a regression decisively.
+	if scale <= 0 {
+		t.Fatalf("trellis NSQ output inverted: scale=%.3f (seed=%d)", scale, enc.nsqSeed)
+	}
+	if snr < 8 {
+		t.Fatalf("trellis NSQ voiced SNR %.2f dB too low (scale=%.3f); want >= 8 dB", snr, scale)
 	}
 }
 
@@ -807,7 +871,7 @@ func TestEncoderPitchAnalysisUsesOverlapEnergy(t *testing.T) {
 	}
 }
 
-func synthesizeTestFrame(t *testing.T, rate int, pulses []int16, gainIndices []int, lpcQ12 []int16, pitchLags []int, ltpCoeffsQ14 [][5]int16) []float64 {
+func synthesizeTestFrame(t *testing.T, rate int, pulses []int16, gainIndices []int, lpcQ12 []int16, pitchLags []int, ltpCoeffsQ14 [][5]int16, seed int32) []float64 {
 	t.Helper()
 	dec, err := NewDecoder(rate, 1)
 	if err != nil {
@@ -821,7 +885,7 @@ func synthesizeTestFrame(t *testing.T, rate int, pulses []int16, gainIndices []i
 	}
 	outI16 := dec.synthesize(pulses, gainsQ16, lpcCoeffsQ12,
 		pitchLags, ltpCoeffsQ14, silkLTPScalesTable[0],
-		SignalTypeVoiced, 0, 0)
+		SignalTypeVoiced, 0, seed)
 	out := make([]float64, len(outI16))
 	for i, s := range outI16 {
 		out[i] = float64(s) / 32768.0

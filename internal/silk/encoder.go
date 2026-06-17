@@ -30,9 +30,17 @@ type Encoder struct {
 	lpcState       []int32   // Encoder-side LPC synthesis state, Q14
 	ltpState       []int32   // Encoder-side LTP output history, Q0
 	nsq            silkNSQState
+	nsqSeed        int32 // winning del-dec seed (silk_NSQ_del_dec writes this back to the bitstream)
+	// useTrellisNSQ selects the FLP noise-shape analysis + delayed-decision
+	// trellis NSQ (Q3+Q4) over the legacy single-state homebrew quantizer. It is
+	// off by default: the trellis is correctly ported and round-trips, but its
+	// perceptual shaping lowers broadband SNR until the gains are co-designed by
+	// silk_process_gains_FLP (Step 4). Enabling it before Step 4 regresses the
+	// libopus A/B SNR scoreboard, so it stays gated as the Step 4 foundation.
+	useTrellisNSQ   bool
 	shapeHarmSmooth float64
 	shapeTiltSmooth float64
-	side           *Encoder  // side-channel encoder for stereo packets
+	side            *Encoder // side-channel encoder for stereo packets
 
 	// Pitch analysis state (silk_find_pitch_lags_FLP).
 	pitchHist            []float64 // Past ltp_mem_length input samples, [-1,1]
@@ -52,12 +60,12 @@ type nlsfAnalysis struct {
 }
 
 type encoderFrameState struct {
-	prevPitchLag int
-	prevLagIndex int
-	prevGainQ16  int32
-	lpcState     []int32
-	ltpState     []int32
-	nsq          silkNSQState
+	prevPitchLag    int
+	prevLagIndex    int
+	prevGainQ16     int32
+	lpcState        []int32
+	ltpState        []int32
+	nsq             silkNSQState
 	shapeHarmSmooth float64
 	shapeTiltSmooth float64
 }
@@ -357,13 +365,16 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		ltpCoeffsQ14, ltpScaleQ14, pitchLags = e.encodePitchAndLTP(enc, pitchGain, conditionalGain)
 	}
 
-	seed := int32(0)
-	enc.EncodeIcdf(int(seed), silkUniform4ICDF[:], 8)
 	if len(plan.gainIndices) == len(gainIndices) {
 		gainIndices = plan.gainIndices
 	}
+	// Run the delayed-decision NSQ before encoding the seed: the trellis selects
+	// the winning state and its initial seed (e.nsqSeed), which libopus writes to
+	// the bitstream so the decoder reproduces the same sign sequence.
+	e.nsqSeed = 0
 	pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, gainIndices,
-		signalType, quantOffset, seed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale)
+		signalType, quantOffset, 0, pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale)
+	enc.EncodeIcdf(int(e.nsqSeed), silkUniform4ICDF[:], 8)
 	e.encodePulses(enc, pulses, signalType, quantOffset)
 
 	e.prevNLSF = nlsfQ15ToRadians(nlsf.nlsfQ15)
@@ -383,12 +394,12 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 
 func (e *Encoder) snapshotFrameState() encoderFrameState {
 	return encoderFrameState{
-		prevPitchLag: e.prevPitchLag,
-		prevLagIndex: e.prevLagIndex,
-		prevGainQ16:  e.prevGainQ16,
-		lpcState:     append([]int32(nil), e.lpcState...),
-		ltpState:     append([]int32(nil), e.ltpState...),
-		nsq:          e.nsq.clone(),
+		prevPitchLag:    e.prevPitchLag,
+		prevLagIndex:    e.prevLagIndex,
+		prevGainQ16:     e.prevGainQ16,
+		lpcState:        append([]int32(nil), e.lpcState...),
+		ltpState:        append([]int32(nil), e.ltpState...),
+		nsq:             e.nsq.clone(),
 		shapeHarmSmooth: e.shapeHarmSmooth,
 		shapeTiltSmooth: e.shapeTiltSmooth,
 	}
@@ -1631,7 +1642,99 @@ func (e *Encoder) closedLoopNSQ(
 		signalType, quantOffset, seed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, 1)
 }
 
+// closedLoopNSQWithRateScale quantizes the excitation with the FLP
+// noise-shaping analysis (Q3) feeding the delayed-decision trellis NSQ (Q4),
+// the libopus core ported in noise_shape.go / nsq_del_dec.go. The legacy
+// single-state quantizer is retained as closedLoopNSQHomebrew for reference and
+// A/B debugging. The rate-control search lever (rateScale) is mapped onto the
+// trellis rate weight Lambda: a larger rateScale raises Lambda, suppressing
+// pulses, mirroring the homebrew pulseRatePenalty semantics the search expects.
 func (e *Encoder) closedLoopNSQWithRateScale(
+	signal []float64,
+	lpcQ12 []int16,
+	gainIndices []int,
+	signalType, quantOffset int,
+	seed int32,
+	pitchLags []int,
+	ltpCoeffsQ14 [][5]int16,
+	ltpScaleQ14 int16,
+	rateScale float64,
+) []int16 {
+	if !e.useTrellisNSQ {
+		return e.closedLoopNSQHomebrew(signal, lpcQ12, gainIndices,
+			signalType, quantOffset, seed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, rateScale)
+	}
+	if signalType == SignalTypeInactive || len(signal) == 0 {
+		e.updateSilentSynthesisState()
+		e.updateSilentNSQState()
+		return make([]int16, e.frameSize)
+	}
+	if rateScale < 1 {
+		rateScale = 1
+	}
+
+	x16 := make([]int16, e.frameSize)
+	for i := 0; i < e.frameSize && i < len(signal); i++ {
+		x16[i] = clamp16(int32(math.Round(signal[i] * 32768.0)))
+	}
+
+	var gainsQ16 [silkMaxNBSubframes]int32
+	var pitchL [silkMaxNBSubframes]int
+	for sf := 0; sf < e.nSubframes; sf++ {
+		gIdx := gainIndices[clampInt(sf, 0, len(gainIndices)-1)]
+		gq := silkGainDequantQ16(gIdx)
+		if gq < 1 {
+			gq = 1
+		}
+		gainsQ16[sf] = gq
+		lag := e.prevPitchLag
+		if sf < len(pitchLags) && pitchLags[sf] > 0 {
+			lag = pitchLags[sf]
+		}
+		if lag < 1 {
+			lag = 1
+		}
+		pitchL[sf] = lag
+	}
+
+	pitchGain := estimatePitchGainFromLTP(ltpCoeffsQ14)
+	shape := e.analyzeNoiseShapeFLP(signal, lpcQ12, signalType, quantOffset, pitchLags, pitchGain)
+
+	lambdaQ10 := shape.Lambda_Q10
+	if rateScale > 1 {
+		lambdaQ10 = int32(float64(shape.Lambda_Q10) * (1.0 + 0.5*math.Log2(rateScale)))
+	}
+	if lambdaQ10 < 64 {
+		lambdaQ10 = 64
+	}
+
+	return e.silkNSQDelDec(x16, lpcQ12, ltpCoeffsQ14, shape, gainsQ16, pitchL,
+		lambdaQ10, ltpScaleQ14, signalType, quantOffset, seed)
+}
+
+func (e *Encoder) updateSilentNSQState() {
+	ltpMemLen := silkLTPMemLengthMs * (e.sampleRate / 1000)
+	if len(e.nsq.xq) == ltpMemLen+e.frameSize {
+		copy(e.nsq.xq, e.nsq.xq[e.frameSize:])
+		for i := ltpMemLen; i < len(e.nsq.xq); i++ {
+			e.nsq.xq[i] = 0
+		}
+		copy(e.nsq.sLTPShpQ14, e.nsq.sLTPShpQ14[e.frameSize:])
+		for i := ltpMemLen; i < len(e.nsq.sLTPShpQ14); i++ {
+			e.nsq.sLTPShpQ14[i] = 0
+		}
+	}
+	for i := range e.nsq.sLPCQ14 {
+		e.nsq.sLPCQ14[i] = 0
+	}
+	for i := range e.nsq.sAR2Q14 {
+		e.nsq.sAR2Q14[i] = 0
+	}
+	e.nsq.sLFARShpQ14 = 0
+	e.nsq.sDiffShpQ14 = 0
+}
+
+func (e *Encoder) closedLoopNSQHomebrew(
 	signal []float64,
 	lpcQ12 []int16,
 	gainIndices []int,

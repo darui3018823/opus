@@ -486,9 +486,12 @@ The SILK package contains:
   snapshots frame synthesis state, tries candidate gain boosts and NSQ
   pulse-rate penalties against a flushed range-byte estimate, and selects the
   first non-collapsing plan that fits or best approaches the 20 ms bitrate
-  target. This bounds the unvoiced-noise byte blowup without changing voiced
-  frames, which stay on the previous path until the pitch, shaping, and NSQ
-  quality phases are further along.
+  target. Q5b tightened that loop by removing the over-large gain-boost
+  candidate that collapsed unvoiced noise energy, relaxing the activity floor
+  enough for compact non-collapsed plans, and rejecting candidates whose
+  synthesized frame RMS is far below the input. This bounds the unvoiced-noise
+  byte blowup without changing voiced frames, which stay on the previous path
+  until the pitch, shaping, and NSQ quality phases are further along.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single

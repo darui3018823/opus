@@ -140,6 +140,7 @@ func TestEncoderSILKOnlyUnvoicedNoiseRateControlBound(t *testing.T) {
 			}
 			sig := opusSILKQualitySignals()[1]
 			var totalBytes int
+			var in []float64
 			var out []float64
 			for frame := 0; frame < opusSILKQualityFrames; frame++ {
 				pcm := sig.gen(rate, frame*frameSize, frameSize)
@@ -152,6 +153,7 @@ func TestEncoderSILKOnlyUnvoicedNoiseRateControlBound(t *testing.T) {
 					t.Fatalf("frame %d: DecodeFloat: %v", frame, err)
 				}
 				totalBytes += len(pkt)
+				in = append(in, pcm...)
 				out = append(out, decoded...)
 			}
 
@@ -161,8 +163,12 @@ func TestEncoderSILKOnlyUnvoicedNoiseRateControlBound(t *testing.T) {
 				t.Fatalf("unvoiced noise packet %.1fB exceeds 3x nominal %.1fB", avgPacketBytes, nominalPacketBytes)
 			}
 			outRMS, peak, _ := opusSILKQualityStats(out)
-			if outRMS < 0.002 {
+			if outRMS < 0.012 {
 				t.Fatalf("unvoiced noise output collapsed: RMS %.6f", outRMS)
+			}
+			_, _, _, scale := opusSILKAlignedSNR(in, out, frameSize)
+			if math.Abs(scale) > 10 {
+				t.Fatalf("unvoiced noise output requires %.2fx alignment scale; gain control collapsed energy", scale)
 			}
 			if peak > 1.25 {
 				t.Fatalf("unvoiced noise output peak %.4f indicates runaway synthesis", peak)

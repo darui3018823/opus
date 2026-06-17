@@ -251,6 +251,18 @@ Status: In progress (started 2026-06-17)
   unvoiced-noise byte blowup enough to make later quality work easier, but
   `ratio_bytes -> ~1` remains open for the rest of Q5.
 
+#### Q5b — unvoiced gain-collapse fix (Complete 2026-06-17)
+
+- Removed the over-large unvoiced gain-boost candidate that could choose a
+  compact but nearly silent noise reconstruction.
+- Relaxed the activity floor from the Q5a first pass and added an output-RMS
+  guard to the candidate search, so best-over plans cannot win solely by
+  shrinking pulses while collapsing decoded energy.
+- Tightened `TestEncoderSILKOnlyUnvoicedNoiseRateControlBound` to reject both
+  tiny RMS and excessive alignment scale. Current 24 kbps public unvoiced-noise
+  averages are about 61.0 B (8 kHz), 126.1 B (12 kHz), and 108.7 B (16 kHz)
+  with non-collapsed decoded output.
+
 - Goal: proper gain quantization plus the feedback loop that adjusts
   gains/Lambda and re-quantizes to hit the target bit budget. **Fixes the
   unvoiced-noise byte blowup.** Replaces the energy→index heuristic.

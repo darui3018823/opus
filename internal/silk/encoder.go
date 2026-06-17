@@ -377,10 +377,10 @@ func (e *Encoder) selectRateControlPlan(
 		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
 	}
 
-	gainBoosts := []int{0, 2, 4, 6, 8, 10, 12, 16, 20}
+	gainBoosts := []int{0, 2, 4, 6, 8, 10, 12}
 	rateScales := []float64{1, 2, 4, 8, 16, 32, 64, 128, 512}
 	if e.complexity < 4 {
-		gainBoosts = []int{0, 4, 8, 12, 20}
+		gainBoosts = []int{0, 4, 8, 12}
 		rateScales = []float64{1, 4, 16, 64, 512}
 	}
 
@@ -388,6 +388,11 @@ func (e *Encoder) selectRateControlPlan(
 	maxInt := int(^uint(0) >> 1)
 	bestOver := maxInt
 	bestTotal := maxInt
+	inputRMS := math.Sqrt(computeEnergy(signal))
+	minOutputRMS := inputRMS / 20
+	if minOutputRMS < 0.006 {
+		minOutputRMS = 0.006
+	}
 
 	for _, boost := range gainBoosts {
 		targets := boostedGainTargets(baseTargets, boost)
@@ -399,6 +404,9 @@ func (e *Encoder) selectRateControlPlan(
 			pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, gainIndices,
 				signalType, quantOffset, 0, pitchLags, ltpCoeffsQ14, ltpScaleQ14, scale)
 			if !pulsesMeetActivityFloor(pulses, e.frameSize) {
+				continue
+			}
+			if e.currentFrameOutputRMS() < minOutputRMS {
 				continue
 			}
 			pulseBits := e.estimatePulseBits(pulses, signalType, quantOffset)
@@ -434,15 +442,28 @@ func pulsesMeetActivityFloor(pulses []int16, frameSize int) bool {
 			absSum += int(p)
 		}
 	}
-	minNonZero := frameSize / 4
+	minNonZero := frameSize / 8
 	if minNonZero < 16 {
 		minNonZero = 16
 	}
-	minAbsSum := frameSize * 2
+	minAbsSum := frameSize
 	if minAbsSum < 64 {
 		minAbsSum = 64
 	}
 	return nonZero >= minNonZero && absSum >= minAbsSum
+}
+
+func (e *Encoder) currentFrameOutputRMS() float64 {
+	if e.frameSize <= 0 || len(e.ltpState) < e.frameSize {
+		return 0
+	}
+	start := len(e.ltpState) - e.frameSize
+	sum := 0.0
+	for _, s := range e.ltpState[start:] {
+		v := float64(s) / 32768.0
+		sum += v * v
+	}
+	return math.Sqrt(sum / float64(e.frameSize))
 }
 
 func (e *Encoder) silkFrameTargetBits() int {

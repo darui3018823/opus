@@ -1941,10 +1941,11 @@ func (e *Encoder) closedLoopNSQ(
 }
 
 // voicedUsesTrellis reports whether voiced frames take the Step 4 trellis NSQ +
-// process_gains path. Hybrid SILK low-band frames keep the legacy path until the
-// hybrid energy balance is tuned.
+// process_gains path. Stereo components and hybrid SILK low-band frames keep the
+// legacy path: stereo trellis conformance requires stereo predictor co-design
+// (Step 5+), and hybrid energy balance is a separate WIP.
 func (e *Encoder) voicedUsesTrellis() bool {
-	return e.useTrellisNSQ && !e.hybridMode
+	return e.useTrellisNSQ && !e.stereoComponent && !e.hybridMode
 }
 
 // LastStreamSNRVBR reports whether the most recently encoded mono SILK stream

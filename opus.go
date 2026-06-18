@@ -465,7 +465,15 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int) ([]byte, erro
 		stream := []byte{0x00}
 		if !isSilentPCM(silkPCM) {
 			var err error
+			conservativeNSQ := e.shouldUseConservativeSILKNSQ(group)
+			prevTrellis := e.silkEncoder.TrellisNSQ()
+			if conservativeNSQ {
+				e.silkEncoder.SetTrellisNSQ(false)
+			}
 			stream, err = e.silkEncoder.EncodeMulti(silkPCM, group)
+			if conservativeNSQ {
+				e.silkEncoder.SetTrellisNSQ(prevTrellis)
+			}
 			if err != nil {
 				return nil, fmt.Errorf("SILK encoding failed: %w", err)
 			}
@@ -486,6 +494,13 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int) ([]byte, erro
 		return nil, fmt.Errorf("failed to pack SILK stream: %w", err)
 	}
 	return append([]byte{toc | byte(code)}, payload...), nil
+}
+
+func (e *Encoder) shouldUseConservativeSILKNSQ(groupFrames int) bool {
+	return e.sampleRate == 48000 &&
+		e.silkSampleRate == 16000 &&
+		e.channels == 1 &&
+		groupFrames == 1
 }
 
 func (e *Encoder) shouldPadSILKStream(pcm []float64, snrVBR bool) bool {

@@ -20,6 +20,16 @@ static int go_opus_encoder_set_complexity(OpusEncoder *enc, int complexity) {
 static int go_opus_encoder_set_voice(OpusEncoder *enc) {
 	return opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
 }
+
+static int go_opus_decoder_disable_osce_bwe(OpusDecoder *dec) {
+#ifdef OPUS_SET_OSCE_BWE_REQUEST
+	int ret = opus_decoder_ctl(dec, OPUS_SET_OSCE_BWE(0));
+	return ret == OPUS_UNIMPLEMENTED ? 0 : ret;
+#else
+	(void)dec;
+	return 0;
+#endif
+}
 */
 import "C"
 import (
@@ -55,6 +65,11 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 	dec := C.opus_decoder_create(C.opus_int32(sampleRate), C.int(channels), &code)
 	if code != 0 {
 		return nil, fmt.Errorf("opus_decoder_create: %s", C.GoString(C.opus_strerror(code)))
+	}
+	code = C.go_opus_decoder_disable_osce_bwe(dec)
+	if code != 0 {
+		C.opus_decoder_destroy(dec)
+		return nil, fmt.Errorf("OPUS_SET_OSCE_BWE(0): %s", C.GoString(C.opus_strerror(code)))
 	}
 	return &Decoder{dec: dec, channels: channels}, nil
 }

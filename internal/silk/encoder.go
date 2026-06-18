@@ -1971,6 +1971,16 @@ func (e *Encoder) voicedUsesTrellis() bool {
 	return e.useTrellisNSQ && !e.stereoComponent && !e.hybridMode
 }
 
+// TrellisNSQ reports whether the voiced mono path may use the trellis NSQ.
+func (e *Encoder) TrellisNSQ() bool {
+	return e.useTrellisNSQ
+}
+
+// SetTrellisNSQ enables or disables the voiced mono trellis NSQ.
+func (e *Encoder) SetTrellisNSQ(enabled bool) {
+	e.useTrellisNSQ = enabled
+}
+
 // LastStreamSNRVBR reports whether the most recently encoded mono SILK stream
 // used the voiced SNR-target VBR path. Opus packetization uses this to avoid
 // CBR padding after a voiced stream has already landed below the byte ceiling.

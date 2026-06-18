@@ -31,12 +31,20 @@ func (s *stereoPredState) lrToMS(pcm []float64, fsKHz, frameLength int) ([]float
 	s.mid[0], s.mid[1] = mid[frameLength], mid[frameLength+1]
 	s.side[0], s.side[1] = side[frameLength], side[frameLength+1]
 
-	lpMid, hpMid := stereoLPHP(mid, frameLength)
-	lpSide, hpSide := stereoLPHP(side, frameLength)
 	is10msFrame := frameLength == 10*fsKHz
+	midAnalysis := make([]float64, frameLength+2)
+	sideAnalysis := make([]float64, frameLength+2)
+	for i := range midAnalysis {
+		midAnalysis[i] = float64(mid[i])
+		sideAnalysis[i] = float64(side[i])
+	}
+	foundQ13, _ := silkStereoFindPredictorFLP(midAnalysis, sideAnalysis, float64(stereoSmoothCoefQ16(is10msFrame))/(1<<16))
+	// silkStereoFindPredictorFLP returns the decoder-form predictors
+	// [LP-HP, HP]. silkStereoQuantPred takes the two codebook-domain values
+	// [LP, HP], so undo that final transform before obtaining the indices.
 	predQ13 := [2]int32{
-		silkStereoFindPredictor(&s.midSideAmpQ0, 0, lpMid, lpSide, frameLength, stereoSmoothCoefQ16(is10msFrame)),
-		silkStereoFindPredictor(&s.midSideAmpQ0, 2, hpMid, hpSide, frameLength, stereoSmoothCoefQ16(is10msFrame)),
+		int32(foundQ13[0]) + int32(foundQ13[1]),
+		int32(foundQ13[1]),
 	}
 	ix := silkStereoQuantPred(&predQ13)
 
@@ -92,6 +100,84 @@ func stereoSmoothCoefQ16(is10ms bool) int32 {
 		coef >>= 1
 	}
 	return coef
+}
+
+// silkStereoFindPredictorFLP estimates the two predictors used by SILK stereo
+// coding. The side signal is modelled from the same two mid-channel bases used
+// by the decoder:
+//
+//	side[n] ~= pred[0] * LP(mid)[n] + pred[1] * mid[n]
+//
+// The 2x2 normal equations are solved through an LDLᵀ factorization. The
+// returned predictors are quantized to the SILK stereo codebook and expressed
+// in decoder form [LP-HP, HP], with scale == 1<<13.
+func silkStereoFindPredictorFLP(mid, side []float64, smthCoef float64) (predQ13 [2]int16, scale int) {
+	const q13Scale = 1 << 13
+	scale = q13Scale
+
+	n := len(mid)
+	if len(side) < n {
+		n = len(side)
+	}
+	if n == 0 {
+		return predQ13, scale
+	}
+
+	var xx00, xx01, xx11, xy0, xy1 float64
+	for i := 0; i < n; i++ {
+		prev := mid[i]
+		if i > 0 {
+			prev = mid[i-1]
+		}
+		next := mid[i]
+		if i+1 < n {
+			next = mid[i+1]
+		}
+		lp := 0.25 * (prev + 2*mid[i] + next)
+		center := mid[i]
+		y := side[i]
+		xx00 += lp * lp
+		xx01 += lp * center
+		xx11 += center * center
+		xy0 += lp * y
+		xy1 += center * y
+	}
+
+	// Keep the matrix positive definite for silence and nearly rank-one tonal
+	// input. smthCoef is the frame smoothing coefficient used by SILK; using it
+	// in the diagonal floor makes the estimate less jumpy when the available
+	// correlation energy is weak without biasing normal active frames.
+	if smthCoef < 0 {
+		smthCoef = 0
+	} else if smthCoef > 1 {
+		smthCoef = 1
+	}
+	trace := xx00 + xx11
+	reg := math.Max(1e-9, trace*(1e-8+1e-4*smthCoef))
+
+	// LDLᵀ factorization of [[xx00, xx01], [xx01, xx11]] and solve.
+	d0 := xx00 + reg
+	l10 := xx01 / d0
+	d1 := xx11 + reg - l10*xx01
+	var w0, w1 float64
+	if d1 > 1e-12*d0 {
+		z0 := xy0 / d0
+		z1 := (xy1 - l10*xy0) / d1
+		w1 = z1
+		w0 = z0 - l10*z1
+	}
+
+	// Convert from the decoder bases [LP, center] to the codebook-domain
+	// [LP, HP], where HP=center-LP. Quantization performs the final
+	// [LP-HP, HP] transform expected by stereo_MS_to_LR.
+	codebookPred := [2]int32{
+		int32(math.Round((w0 + w1) * q13Scale)),
+		int32(math.Round(w1 * q13Scale)),
+	}
+	silkStereoQuantPred(&codebookPred)
+	predQ13[0] = int16(codebookPred[0])
+	predQ13[1] = int16(codebookPred[1])
+	return predQ13, scale
 }
 
 // silkStereoFindPredictor estimates the least-squares predictor y ~= pred*x.

@@ -30,6 +30,41 @@ func TestSilkStereoFindPredictorLeastSquares(t *testing.T) {
 	}
 }
 
+func TestSilkStereoFindPredictorFLPTwoBasis(t *testing.T) {
+	const n = 320
+	mid := make([]float64, n)
+	side := make([]float64, n)
+	for i := range mid {
+		mid[i] = 12000*math.Sin(2*math.Pi*float64(i)/37) +
+			3500*math.Sin(2*math.Pi*float64(i)/5)
+	}
+	for i := range side {
+		prev := mid[i]
+		if i > 0 {
+			prev = mid[i-1]
+		}
+		next := mid[i]
+		if i+1 < n {
+			next = mid[i+1]
+		}
+		lp := 0.25 * (prev + 2*mid[i] + next)
+		side[i] = 0.55*lp - 0.20*mid[i]
+	}
+
+	gotQ13, scale := silkStereoFindPredictorFLP(mid, side, 0.01)
+	if scale != 1<<13 {
+		t.Fatalf("scale=%d, want %d", scale, 1<<13)
+	}
+	// The helper returns decoder form [LP-HP, HP], which here is
+	// approximately [0.55, -0.20] before codebook quantization.
+	if math.Abs(float64(gotQ13[0])/float64(scale)-0.55) > 0.04 {
+		t.Fatalf("LP predictor=%d/%d, want approximately 0.55", gotQ13[0], scale)
+	}
+	if math.Abs(float64(gotQ13[1])/float64(scale)+0.20) > 0.04 {
+		t.Fatalf("center predictor=%d/%d, want approximately -0.20", gotQ13[1], scale)
+	}
+}
+
 func TestStereoPredictorIndicesRoundTrip(t *testing.T) {
 	predQ13 := [2]int32{6200, -2700}
 	ix := silkStereoQuantPred(&predQ13)

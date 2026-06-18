@@ -37,6 +37,7 @@ type Encoder struct {
 	ltpState       []int32   // Encoder-side LTP output history, Q0
 	nsq            silkNSQState
 	nsqSeed        int32 // winning del-dec seed (silk_NSQ_del_dec writes this back to the bitstream)
+	lastFinalRange uint32
 	// useTrellisNSQ enables the FLP noise-shape analysis + delayed-decision
 	// trellis NSQ (Q3+Q4) for voiced frames, where the gains co-designed by
 	// silk_process_gains_FLP (Step 4) make it a clear win over the legacy
@@ -245,6 +246,7 @@ func (e *Encoder) EncodeMulti(pcm []float64, nFrames int) ([]byte, error) {
 	if err := e.EncodeMultiWithEncoder(enc, pcm, nFrames); err != nil {
 		return nil, err
 	}
+	e.lastFinalRange = enc.GetRng()
 	enc.Flush()
 	return enc.Bytes(), nil
 }
@@ -294,6 +296,7 @@ func (e *Encoder) encodeMultiStereo(pcm []float64, nFrames int) ([]byte, error) 
 	if err := e.encodeMultiStereoWithEncoder(enc, pcm, nFrames); err != nil {
 		return nil, err
 	}
+	e.lastFinalRange = enc.GetRng()
 	enc.Flush()
 	return enc.Bytes(), nil
 }
@@ -328,6 +331,7 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 	}
 
 	prevOnlyMiddle := false
+	e.lastSNRVBRStream = false
 	for i := 0; i < nFrames; i++ {
 		encodeStereoPred(enc, stereoPredIx[i])
 		onlyMiddle := false
@@ -336,11 +340,13 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 			enc.EncodeIcdf(1, silkStereoOnlyCodeMidICDF[:], 8)
 		}
 		e.encodeRangeFrame(enc, midFrames[i], vadFlags[0][i], i > 0)
+		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 		if !onlyMiddle {
 			if prevOnlyMiddle {
 				e.side.Reset()
 			}
 			e.side.encodeRangeFrame(enc, sideFrames[i], vadFlags[1][i], i > 0 && !prevOnlyMiddle)
+			e.lastSNRVBRStream = e.lastSNRVBRStream || e.side.lastSNRVBRFrame
 		}
 		prevOnlyMiddle = onlyMiddle
 	}
@@ -482,11 +488,10 @@ func (e *Encoder) selectRateControlPlan(
 	if signalType == SignalTypeInactive {
 		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
 	}
-	// Voiced SILK-only stereo frames keep the proven no-rate-control
-	// heuristic-gain path. Hybrid frames must still run the budget search:
-	// voicedUsesTrellis remains false, so they use the conformant homebrew NSQ,
-	// but rateScale prevents the SILK low band from consuming the whole shared
-	// SILK+CELT packet budget.
+	// When trellis is explicitly disabled, voiced SILK-only frames keep the
+	// proven no-rate-control heuristic-gain path. Hybrid frames still run the
+	// budget search so their homebrew NSQ cannot consume the shared SILK+CELT
+	// packet budget.
 	if signalType == SignalTypeVoiced && !e.voicedUsesTrellis() && !e.hybridMode {
 		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
 	}
@@ -511,7 +516,7 @@ func (e *Encoder) selectRateControlPlan(
 		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
 	}
 
-	if signalType == SignalTypeVoiced && e.useSNRTargetVBR {
+	if signalType == SignalTypeVoiced && e.useSNRTargetVBR && !e.stereoComponent {
 		e.restoreFrameState(initial)
 		snrRateScale := 1.0
 		if fsKHz := e.sampleRate / 1000; fsKHz == 8 && isShortLagVoiced(fsKHz, pitchLag) {
@@ -1975,25 +1980,29 @@ func (e *Encoder) closedLoopNSQ(
 		signalType, quantOffset, seed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, 1)
 }
 
-// voicedUsesTrellis reports whether voiced frames take the Step 4 trellis NSQ +
-// process_gains path. Stereo components and hybrid SILK low-band frames keep the
-// legacy path: stereo trellis conformance requires stereo predictor co-design
-// (Step 5+), and hybrid energy balance is a separate WIP.
+// voicedUsesTrellis reports whether voiced frames take the Step 4 trellis NSQ.
+// Hybrid SILK low-band frames keep the legacy path until their energy balance
+// is co-designed with CELT.
 func (e *Encoder) voicedUsesTrellis() bool {
-	return e.useTrellisNSQ && !e.stereoComponent && !e.hybridMode
+	return e.useTrellisNSQ && !e.hybridMode
 }
 
-// TrellisNSQ reports whether the voiced mono path may use the trellis NSQ.
+// TrellisNSQ reports whether voiced SILK-only frames may use the trellis NSQ.
 func (e *Encoder) TrellisNSQ() bool {
 	return e.useTrellisNSQ
 }
 
-// SetTrellisNSQ enables or disables the voiced mono trellis NSQ.
+// LastFinalRange returns the pre-flush entropy range of the last standalone stream.
+func (e *Encoder) LastFinalRange() uint32 {
+	return e.lastFinalRange
+}
+
+// SetTrellisNSQ enables or disables the voiced SILK-only trellis NSQ.
 func (e *Encoder) SetTrellisNSQ(enabled bool) {
 	e.useTrellisNSQ = enabled
 }
 
-// LastStreamSNRVBR reports whether the most recently encoded mono SILK stream
+// LastStreamSNRVBR reports whether the most recently encoded SILK stream
 // used the voiced SNR-target VBR path. Opus packetization uses this to avoid
 // CBR padding after a voiced stream has already landed below the byte ceiling.
 func (e *Encoder) LastStreamSNRVBR() bool {
@@ -2071,6 +2080,18 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 
 	pitchGain := estimatePitchGainFromLTP(ltpCoeffsQ14)
 	shape := e.analyzeNoiseShapeFLP(signal, lpcQ12, signalType, quantOffset, pitchLags, pitchGain, e.speechActivity)
+	if e.stereoComponent {
+		// Mid/side components are later reconstructed and, for 24/48 kHz
+		// inputs, resampled as a coupled stereo signal. Aggressive component-
+		// domain spectral shaping concentrates quantization noise near the SILK
+		// layer edge, where decoder resampler differences dominate. Keep the
+		// delayed-decision trellis and its rate term, but use neutral shaping.
+		shape.AR_Q13 = [silkMaxNBSubframes][silkMaxShapeLPCOrder]int16{}
+		shape.LF_shp_Q14 = [silkMaxNBSubframes]int32{}
+		shape.Tilt_Q14 = [silkMaxNBSubframes]int32{}
+		shape.HarmShapeGain_Q14 = [silkMaxNBSubframes]int32{}
+		shape.Warping_Q16 = 0
+	}
 
 	lambdaQ10 := shape.Lambda_Q10
 	if rateScale > 1 {
@@ -2836,6 +2857,7 @@ func (e *Encoder) Reset() {
 	e.ltpSumLogGainQ7 = 0
 	e.lastSNRVBRFrame = false
 	e.lastSNRVBRStream = false
+	e.lastFinalRange = 0
 	e.stereoState.reset()
 	if e.side != nil {
 		e.side.Reset()

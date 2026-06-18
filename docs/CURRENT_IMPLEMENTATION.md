@@ -507,7 +507,13 @@ The SILK package contains:
   onset packet sizes closer to libopus.
   `OPUS_SILK_RC_SNR=0` restores the previous
   budget-fitting/padding behaviour for A/B comparisons; unvoiced, silence,
-  stereo, and hybrid paths keep their previous rate-control behaviour. Q3a/Q4a
+  stereo, and hybrid paths keep their previous rate-control behaviour. Stereo
+  voiced SILK-only frames now also use delayed-decision trellis NSQ. Stereo
+  components retain budget-based rate control and neutral component-domain
+  spectral shaping; flushed stereo trellis streams are not zero-extended for
+  CBR fill because those bytes alter libopus's tail-symbol decode. A cgo
+  final-range regression verifies encoder/libopus entropy-state agreement
+  across consecutive stereo voiced packets. Q3a/Q4a
   starts the shaping/NSQ handoff by computing per-subframe shaping controls
   (feedback, spectral tilt, LF/HF shaping, voiced harmonic shaping, and a
   Lambda-style pulse penalty scale) and feeding them into the current

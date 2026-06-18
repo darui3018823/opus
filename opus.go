@@ -517,6 +517,12 @@ func (e *Encoder) shouldPadSILKStream(pcm []float64, snrVBR bool) bool {
 	if snrVBR {
 		return false
 	}
+	if e.channels == 2 && e.silkEncoder != nil && e.silkEncoder.TrellisNSQ() {
+		// A flushed SILK range stream cannot be padded by appending payload
+		// zeros: libopus then consumes different tail symbols. Stereo trellis
+		// uses its natural budget-controlled stream size.
+		return false
+	}
 	return true
 }
 

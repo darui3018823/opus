@@ -30,6 +30,10 @@ static int go_opus_decoder_disable_osce_bwe(OpusDecoder *dec) {
 	return 0;
 #endif
 }
+
+static int go_opus_decoder_get_final_range(OpusDecoder *dec, opus_uint32 *rng) {
+	return opus_decoder_ctl(dec, OPUS_GET_FINAL_RANGE(rng));
+}
 */
 import "C"
 import (
@@ -140,6 +144,16 @@ func (d *Decoder) DecodeFloat(packet []byte, maxSPC int) ([]float32, error) {
 		return nil, fmt.Errorf("opus_decode_float: %s", C.GoString(C.opus_strerror(n)))
 	}
 	return pcm[:int(n)*d.channels], nil
+}
+
+// FinalRange returns the entropy decoder's final range for the last packet.
+func (d *Decoder) FinalRange() (uint32, error) {
+	var rng C.opus_uint32
+	code := C.go_opus_decoder_get_final_range(d.dec, &rng)
+	if code != 0 {
+		return 0, fmt.Errorf("OPUS_GET_FINAL_RANGE: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return uint32(rng), nil
 }
 
 // Close frees the libopus decoder.

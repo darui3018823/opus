@@ -66,8 +66,7 @@ func TestVoicedSNRTargetBackoff(t *testing.T) {
 }
 
 // TestVoicedUsesTrellisGating verifies the Step 4 trellis is enabled for mono
-// SILK-only encoders but gated off for stereo components and hybrid frames.
-// Stereo trellis conformance requires stereo predictor co-design (Step 5+).
+// and stereo SILK-only encoders but gated off for hybrid frames.
 func TestVoicedUsesTrellisGating(t *testing.T) {
 	mono, err := NewEncoder(16000, 1)
 	if err != nil {
@@ -89,11 +88,11 @@ func TestVoicedUsesTrellisGating(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEncoder stereo: %v", err)
 	}
-	if stereo.voicedUsesTrellis() {
-		t.Fatalf("stereo mid encoder must gate off the voiced trellis (not yet conformant)")
+	if !stereo.voicedUsesTrellis() {
+		t.Fatalf("stereo mid encoder should use the voiced trellis")
 	}
-	if stereo.side == nil || stereo.side.voicedUsesTrellis() {
-		t.Fatalf("stereo side encoder must gate off the voiced trellis (not yet conformant)")
+	if stereo.side == nil || !stereo.side.voicedUsesTrellis() {
+		t.Fatalf("stereo side encoder should use the voiced trellis")
 	}
 }
 

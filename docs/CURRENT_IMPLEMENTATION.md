@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-06-18
+Last reviewed: 2026-06-19
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -447,8 +447,8 @@ The SILK package contains:
   decoder's gain, seed, LPC, LTP, quantization-offset, and gain-adjustment
   semantics while selecting pulses, and feeds output error forward as a simple
   noise-shaping term. This is still not a full libopus delayed-decision NSQ, and
-  the analysis remains intentionally simple: no LPC-to-NLSF root solve, no stereo
-  coding, and no full rate-controlled SILK NSQ.
+  the analysis remains intentionally simple: no LPC-to-NLSF root solve and no
+  full rate-controlled SILK NSQ.
 - SILK Encoder slice 6 wires that internal mono encoder into the public Opus
   encoder for low-bitrate VOIP/voice packets at 8/12/16 kHz. It packs one shared
   SILK range stream for 20/40/60 ms single-Opus-frame packets and uses standard
@@ -458,8 +458,11 @@ The SILK package contains:
   decoder cross-checks for the public mono SILK encode path and fixed the
   packetization so libopus accepts those packets. Slice 11 adds 24/48 kHz voice
   input downsampling to a 16 kHz WB SILK layer, Slice 12 adds conservative
-  stereo SILK mid/side packet writing with zero stereo predictors, and Slice 13
-  adds the first public hybrid mode for high-bitrate 24/48 kHz voice. The public
+  stereo SILK mid/side packet writing, and Q6 replaces its original zero
+  predictors with adaptive low/high-band least-squares predictors. The
+  predictors use the libopus SILK quantization table and joint index coding,
+  and the side encoder receives the prediction residual. Slice 13 adds the
+  first public hybrid mode for high-bitrate 24/48 kHz voice. The public
   integration is still intentionally narrow. Slice 8 adds
   deterministic quality/regression baselines for
   the internal mono SILK encoder and the public SILK-only path, covering silence,

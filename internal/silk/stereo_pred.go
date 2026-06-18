@@ -94,6 +94,10 @@ func stereoSmoothCoefQ16(is10ms bool) int32 {
 	return coef
 }
 
+// silkStereoFindPredictor estimates the least-squares predictor y ~= pred*x.
+// The 64-bit accumulators are the quality-oriented equivalent of libopus'
+// scaled fixed-point energy/correlation helpers; bit-exact fixed-point
+// intermediate values are not required by this encoder.
 func silkStereoFindPredictor(midSideAmpQ0 *[4]int32, ampOffset int, x, y []int16, length int, smoothCoefQ16 int32) int32 {
 	var nrgX, nrgY, corr int64
 	for i := 0; i < length; i++ {

@@ -482,10 +482,12 @@ func (e *Encoder) selectRateControlPlan(
 	if signalType == SignalTypeInactive {
 		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
 	}
-	// Voiced frames only get the Step 4 noise-shape + process_gains + rate-control
-	// treatment on the (mono) trellis path. Stereo components keep the proven
-	// no-rate-control heuristic-gain path so their bitstream stays conformant.
-	if signalType == SignalTypeVoiced && !e.voicedUsesTrellis() {
+	// Voiced SILK-only stereo frames keep the proven no-rate-control
+	// heuristic-gain path. Hybrid frames must still run the budget search:
+	// voicedUsesTrellis remains false, so they use the conformant homebrew NSQ,
+	// but rateScale prevents the SILK low band from consuming the whole shared
+	// SILK+CELT packet budget.
+	if signalType == SignalTypeVoiced && !e.voicedUsesTrellis() && !e.hybridMode {
 		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
 	}
 
@@ -547,6 +549,13 @@ func (e *Encoder) selectBudgetRateControlPlan(
 		gainBoosts = []int{0, 4, 8, 12}
 		rateScales = []float64{1, 4, 16, 64, 512}
 	}
+	if e.hybridMode {
+		// The low band shares a hard packet ceiling with CELT. Some sustained
+		// voiced frames need a much stronger pulse penalty than SILK-only quality
+		// control permits, so keep searching until a compact fallback is found.
+		gainBoosts = []int{0, 4, 8, 12, 16, 20, 24, 32, 40, 48}
+		rateScales = []float64{1, 4, 16, 64, 256, 1024, 4096}
+	}
 
 	best := rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
 	maxInt := int(^uint(0) >> 1)
@@ -567,10 +576,13 @@ func (e *Encoder) selectBudgetRateControlPlan(
 			e.restoreFrameState(initial)
 			pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, gainIndices,
 				signalType, quantOffset, 0, pitchLags, ltpCoeffsQ14, ltpScaleQ14, scale)
-			if !pulsesMeetActivityFloor(pulses, e.frameSize) {
+			// SILK-only frames preserve the activity and synthesis-energy quality
+			// floors. In hybrid mode CELT still carries the upper band, while the
+			// shared entropy stream must remain within its strict byte ceiling.
+			if !e.hybridMode && !pulsesMeetActivityFloor(pulses, e.frameSize) {
 				continue
 			}
-			if e.currentFrameOutputRMS() < minOutputRMS {
+			if !e.hybridMode && e.currentFrameOutputRMS() < minOutputRMS {
 				continue
 			}
 			pulseBits := e.estimatePulseBits(pulses, signalType, quantOffset)
@@ -671,7 +683,7 @@ func (e *Encoder) currentFrameOutputRMS() float64 {
 
 func (e *Encoder) silkFrameTargetBits() int {
 	bits := e.bitrate * e.frameMs / 1000
-	if e.channels == 2 {
+	if e.channels == 2 || e.stereoComponent {
 		bits /= 2
 	}
 	if bits < 16 {
@@ -1993,6 +2005,9 @@ func (e *Encoder) LastStreamSNRVBR() bool {
 // after so the same SILK encoder instance can also serve SILK-only packets.
 func (e *Encoder) SetHybridMode(on bool) {
 	e.hybridMode = on
+	if e.side != nil {
+		e.side.SetHybridMode(on)
+	}
 }
 
 // closedLoopNSQWithRateScale quantizes the excitation with the FLP

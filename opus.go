@@ -407,6 +407,9 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int) ([]byte, er
 		}
 		enc.Flush()
 		frame := enc.Bytes()
+		if len(frame) > targetBytes {
+			return nil, fmt.Errorf("hybrid frame %d exceeds target: %d > %d bytes", k, len(frame), targetBytes)
+		}
 		if len(frame) < targetBytes {
 			padded := make([]byte, targetBytes)
 			copy(padded, frame)
@@ -415,8 +418,9 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int) ([]byte, er
 		frames = append(frames, frame)
 	}
 
-	vbr := e.rateMode != celt.RateModeCBR || e.dtx
-	payload, code, err := packOpusFramesPadded(frames, vbr, e.padBytes)
+	// Hybrid frames are always padded to targetBytes, so they are equal-size.
+	// Pass vbr=false so packOpusFrames selects code 1 (not code 2) for 2 frames.
+	payload, code, err := packOpusFramesPadded(frames, false, e.padBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack hybrid stream: %w", err)
 	}

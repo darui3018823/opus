@@ -1352,7 +1352,14 @@ func nlsfToLPCLibopus(nlsfQ15 []int16, order int) []int16 {
 		a32QA1[order-k-1] = Qtmp - Ptmp
 	}
 
-	return silkLPCFit(a32QA1, 12, QA+1, order)
+	coeffs := silkLPCFit(a32QA1, 12, QA+1, order)
+	for i := 0; i < 16 && silkLPCInversePredGainQ12(coeffs, order) == 0; i++ {
+		silkBWExpander32(a32QA1, order, 65536-(2<<i))
+		for k := 0; k < order; k++ {
+			coeffs[k] = int16(silkRShiftRound(int64(a32QA1[k]), QA+1-12))
+		}
+	}
+	return coeffs
 }
 
 // nlsf2APolyFindPoly implements silk_NLSF2A_find_poly.
@@ -1376,6 +1383,7 @@ func silkLPCFit(aQIN []int32, qOut, qIn, order int) []int16 {
 	coeffs := make([]int16, order)
 	shift := qIn - qOut
 
+	fit := false
 	for i := 0; i < 10; i++ {
 		maxabs := int32(0)
 		idx := 0
@@ -1391,6 +1399,7 @@ func silkLPCFit(aQIN []int32, qOut, qIn, order int) []int16 {
 		}
 		maxabs = silkRShiftRound(int64(maxabs), shift)
 		if maxabs <= 32767 {
+			fit = true
 			break
 		}
 		if maxabs > 163838 {
@@ -1406,18 +1415,99 @@ func silkLPCFit(aQIN []int32, qOut, qIn, order int) []int16 {
 
 	for k := 0; k < order; k++ {
 		coeffs[k] = clamp16(silkRShiftRound(int64(aQIN[k]), shift))
+		if !fit {
+			aQIN[k] = int32(coeffs[k]) << shift
+		}
 	}
 	return coeffs
 }
 
 func silkBWExpander32(ar []int32, order int, chirpQ16 int32) {
+	chirpMinusOneQ16 := chirpQ16 - 65536
 	for i := 0; i < order-1; i++ {
 		ar[i] = silkSMULWW(chirpQ16, ar[i])
-		chirpQ16 = silkSMULWW(chirpQ16, chirpQ16)
+		chirpQ16 += silkRShiftRound(int64(chirpQ16)*int64(chirpMinusOneQ16), 16)
 	}
 	if order > 0 {
 		ar[order-1] = silkSMULWW(chirpQ16, ar[order-1])
 	}
+}
+
+// silkLPCInversePredGainQ12 ports silk_LPC_inverse_pred_gain_c. It returns the
+// inverse prediction gain in Q30, or zero when the LPC filter is unstable or
+// exceeds SILK's maximum prediction-power gain.
+func silkLPCInversePredGainQ12(aQ12 []int16, order int) int32 {
+	const (
+		qa            = 24
+		aLimitQ24     = int32(16773022) // round(0.99975 * 2^24)
+		minInvGainQ30 = int32(107374)   // round((1 / 1e4) * 2^30)
+	)
+	if order <= 0 || order > len(aQ12) {
+		return 0
+	}
+	aQA := make([]int32, order)
+	dcResp := int32(0)
+	for k := 0; k < order; k++ {
+		dcResp += int32(aQ12[k])
+		aQA[k] = int32(aQ12[k]) << (qa - 12)
+	}
+	if dcResp >= 4096 {
+		return 0
+	}
+
+	invGainQ30 := int32(1 << 30)
+	for k := order - 1; k > 0; k-- {
+		if aQA[k] > aLimitQ24 || aQA[k] < -aLimitQ24 {
+			return 0
+		}
+		rcQ31 := -(aQA[k] << (31 - qa))
+		rcMult1Q30 := int32(1<<30) - silkSMMUL(rcQ31, rcQ31)
+		invGainQ30 = silkSMMUL(invGainQ30, rcMult1Q30) << 2
+		if invGainQ30 < minInvGainQ30 {
+			return 0
+		}
+
+		mult2Q := 32 - silkCLZ32(silkAbs32(rcMult1Q30))
+		rcMult2 := silkInverse32VarQ(rcMult1Q30, mult2Q+30)
+		for n := 0; n < (k+1)>>1; n++ {
+			tmp1 := aQA[n]
+			tmp2 := aQA[k-n-1]
+			tmp2RC := silkRShiftRound(int64(tmp2)*int64(rcQ31), 31)
+			v1 := int64(silkSUBSAT32(tmp1, tmp2RC)) * int64(rcMult2)
+			v1 = silkRShiftRound64(v1, mult2Q)
+			if v1 > math.MaxInt32 || v1 < math.MinInt32 {
+				return 0
+			}
+			tmp1RC := silkRShiftRound(int64(tmp1)*int64(rcQ31), 31)
+			v2 := int64(silkSUBSAT32(tmp2, tmp1RC)) * int64(rcMult2)
+			v2 = silkRShiftRound64(v2, mult2Q)
+			if v2 > math.MaxInt32 || v2 < math.MinInt32 {
+				return 0
+			}
+			aQA[n] = int32(v1)
+			aQA[k-n-1] = int32(v2)
+		}
+	}
+	if aQA[0] > aLimitQ24 || aQA[0] < -aLimitQ24 {
+		return 0
+	}
+	rcQ31 := -(aQA[0] << (31 - qa))
+	rcMult1Q30 := int32(1<<30) - silkSMMUL(rcQ31, rcQ31)
+	invGainQ30 = silkSMMUL(invGainQ30, rcMult1Q30) << 2
+	if invGainQ30 < minInvGainQ30 {
+		return 0
+	}
+	return invGainQ30
+}
+
+func silkRShiftRound64(v int64, shift int) int64 {
+	if shift <= 0 {
+		return v
+	}
+	if shift == 1 {
+		return (v >> 1) + (v & 1)
+	}
+	return ((v >> (shift - 1)) + 1) >> 1
 }
 
 func silkSMULWW(a, b int32) int32 {

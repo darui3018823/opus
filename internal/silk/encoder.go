@@ -1981,10 +1981,8 @@ func (e *Encoder) closedLoopNSQ(
 }
 
 // voicedUsesTrellis reports whether voiced frames take the Step 4 trellis NSQ.
-// Hybrid SILK low-band frames keep the legacy path until their energy balance
-// is co-designed with CELT.
 func (e *Encoder) voicedUsesTrellis() bool {
-	return e.useTrellisNSQ && !e.hybridMode
+	return e.useTrellisNSQ
 }
 
 // TrellisNSQ reports whether voiced SILK-only frames may use the trellis NSQ.

@@ -65,8 +65,8 @@ func TestVoicedSNRTargetBackoff(t *testing.T) {
 	}
 }
 
-// TestVoicedUsesTrellisGating verifies the Step 4 trellis is enabled for mono
-// and stereo SILK-only encoders but gated off for hybrid frames.
+// TestVoicedUsesTrellisGating verifies the Step 4 trellis is enabled for mono,
+// stereo, and hybrid voiced frames.
 func TestVoicedUsesTrellisGating(t *testing.T) {
 	mono, err := NewEncoder(16000, 1)
 	if err != nil {
@@ -76,8 +76,8 @@ func TestVoicedUsesTrellisGating(t *testing.T) {
 		t.Fatalf("mono SILK-only encoder should use the voiced trellis")
 	}
 	mono.SetHybridMode(true)
-	if mono.voicedUsesTrellis() {
-		t.Fatalf("hybrid-mode encoder must gate off the voiced trellis")
+	if !mono.voicedUsesTrellis() {
+		t.Fatalf("hybrid-mode encoder should use the voiced trellis")
 	}
 	mono.SetHybridMode(false)
 	if !mono.voicedUsesTrellis() {

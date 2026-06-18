@@ -43,7 +43,7 @@ func voicedSNRTargetDecrDB(fsKHz, targetRateBps, pitchLag int) float64 {
 	if isShortLagVoiced(fsKHz, pitchLag) {
 		switch fsKHz {
 		case 8:
-			return 30.0
+			return 22.5
 		case 12:
 			return 20.0
 		default:

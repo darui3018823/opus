@@ -383,7 +383,7 @@ func opusSILKQualitySignals() []opusSILKQualitySignal {
 		},
 		{
 			name:   "onset",
-			minSNR: -24,
+			minSNR: 10.5,
 			gen: func(rate, start, n int) []float64 {
 				out := opusSILKHarmonicFrame(rate, start, n, 220, 0.20)
 				for i := range out {

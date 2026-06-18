@@ -506,8 +506,10 @@ The SILK package contains:
   below before `gain_mult`/`process_gains` (22.5 dB for NB, 20 dB for MB/WB)
   because the simplified voiced trellis/NSQ lands well above libopus's
   steady-tone operating point at the raw table values; short-lag voiced frames
-  use rate-specific backoff and, for NB, an extra pulse-rate penalty to keep
-  onset packet sizes closer to libopus.
+  use rate-specific backoff. The former NB-only 30 dB backoff and 64x
+  pulse-rate penalty were removed because they reduced the 8 kHz onset target
+  to 0 dB and dominated the onset quality loss; NB short-lag frames now use the
+  normal 22.5 dB NB backoff and unscaled trellis rate weight.
   `OPUS_SILK_RC_SNR=0` restores the previous
   budget-fitting/padding behaviour for A/B comparisons; unvoiced, silence,
   stereo, and hybrid paths keep their previous rate-control behaviour. Stereo

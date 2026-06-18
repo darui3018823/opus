@@ -519,9 +519,6 @@ func (e *Encoder) selectRateControlPlan(
 	if signalType == SignalTypeVoiced && e.useSNRTargetVBR && !e.stereoComponent {
 		e.restoreFrameState(initial)
 		snrRateScale := 1.0
-		if fsKHz := e.sampleRate / 1000; fsKHz == 8 && isShortLagVoiced(fsKHz, pitchLag) {
-			snrRateScale = 64.0
-		}
 		totalBits, gainIndices := e.estimateFrameCandidateBits(
 			signal, vadActive, signalType, quantOffset, conditionalGain,
 			baseTargets, nlsf, pitchLag, pitchGain, snrRateScale)

@@ -52,7 +52,7 @@ func TestVoicedSNRTargetBackoff(t *testing.T) {
 		lag   int
 		want  float64
 	}{
-		{8, 36, 30.0},
+		{8, 36, 22.5},
 		{12, 55, 20.0},
 		{16, 73, 16.0},
 	} {

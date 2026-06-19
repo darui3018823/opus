@@ -541,9 +541,10 @@ The SILK package contains:
   stereo, and hybrid paths keep their previous rate-control behaviour. Stereo
   voiced SILK-only and hybrid frames now also use delayed-decision trellis NSQ.
   Stereo components retain budget-based rate control and neutral
-  component-domain spectral shaping; flushed stereo trellis streams are not
-  zero-extended for CBR fill because those bytes alter libopus's tail-symbol
-  decode. A cgo
+  component-domain spectral shaping. Flushed stereo trellis streams are not
+  zero-extended because those bytes alter libopus's tail-symbol decode; CBR
+  fill instead uses Opus code-3 packet padding, which leaves the entropy stream
+  unchanged while fixing undersized active packets at the nominal packet size. A cgo
   final-range regression verifies encoder/libopus entropy-state agreement
   across consecutive stereo and hybrid voiced packets. Hybrid trellis initially
   exposed a decoder-side RMS divergence even though the entropy final range

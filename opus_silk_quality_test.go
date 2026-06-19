@@ -378,8 +378,8 @@ func TestEncoderSILKOnlyStereoQualityBaseline(t *testing.T) {
 						if stereo := (pkt[0] & 0x04) != 0; !stereo {
 							t.Fatalf("frame %d: TOC stereo bit not set", frame)
 						}
-						if code := int(pkt[0] & 0x03); code != 0 {
-							t.Fatalf("frame %d: count code=%d, want 0 for 20ms SILK packet", frame, code)
+						if code := int(pkt[0] & 0x03); code != 0 && code != 3 {
+							t.Fatalf("frame %d: count code=%d, want compact code 0 or padded code 3 for 20ms SILK packet", frame, code)
 						}
 						decoded, err := dec.DecodeFloat(pkt)
 						if err != nil {

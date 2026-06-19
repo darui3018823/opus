@@ -266,11 +266,11 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	}
 
 	if hybrid {
-		out, err := e.encodeHybridPacket(pcm, nFrames, bw, redundancy, celtToSilk)
+		out, redundancyEmitted, err := e.encodeHybridPacket(pcm, nFrames, bw, redundancy, celtToSilk)
 		if err == nil {
 			// to_celt: after the deferred frame the real switch happens, so the
 			// next packet's predecessor is CELT-only (opus_encode_native).
-			if redundancy && !celtToSilk {
+			if redundancyEmitted && !celtToSilk {
 				e.prevMode = framing.ModeCELTOnly
 			} else {
 				e.prevMode = framing.ModeHybrid
@@ -537,10 +537,10 @@ func (e *Encoder) narrowAutoHybridBandwidth(pcm []float64, bw int) int {
 	return bw
 }
 
-func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy, celtToSilk bool) ([]byte, error) {
+func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy, celtToSilk bool) ([]byte, bool, error) {
 	toc, err := framing.GenerateTOCExt(framing.ModeHybrid, bw, e.channels, framing.FrameSize20ms)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate hybrid TOC: %w", err)
+		return nil, false, fmt.Errorf("failed to generate hybrid TOC: %w", err)
 	}
 
 	inputChunkLen := e.frameSize * e.channels
@@ -553,6 +553,7 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy,
 	cbr := e.rateMode == celt.RateModeCBR
 
 	frames := make([][]byte, 0, nFrames)
+	redundancyEmitted := false
 	for k := 0; k < nFrames; k++ {
 		chunk := pcm[k*inputChunkLen : (k+1)*inputChunkLen]
 		silkPCM := chunk
@@ -572,7 +573,7 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy,
 		err := e.silkEncoder.EncodeMultiWithEncoder(enc, silkPCM, 1)
 		e.silkEncoder.SetHybridMode(false)
 		if err != nil {
-			return nil, fmt.Errorf("SILK hybrid encoding failed: %w", err)
+			return nil, false, fmt.Errorf("SILK hybrid encoding failed: %w", err)
 		}
 
 		// Redundancy flag (logp 12) is written between SILK and CELT, then
@@ -641,19 +642,19 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy,
 		if frameRedundancy && celtToSilk {
 			rf, rerr := e.encodeRedundantFrame(celtInput, redundancyBytes, true, celtEnd, e.celtEncoder)
 			if rerr != nil {
-				return nil, fmt.Errorf("CELT leading redundant frame encoding failed: %w", rerr)
+				return nil, false, fmt.Errorf("CELT leading redundant frame encoding failed: %w", rerr)
 			}
 			leadingRedFrame = rf
 			// The new hybrid high-band stream starts from a fresh CELT state.
 			e.celtEncoder.Reset()
 		}
 		if err := e.celtEncoder.EncodeHybrid(celtInput, enc, targetBytes, 17, celtEnd); err != nil {
-			return nil, fmt.Errorf("CELT hybrid encoding failed: %w", err)
+			return nil, false, fmt.Errorf("CELT hybrid encoding failed: %w", err)
 		}
 		enc.Flush()
 		frame := enc.Bytes()
 		if len(frame) > targetBytes {
-			return nil, fmt.Errorf("hybrid frame %d exceeds target: %d > %d bytes", k, len(frame), targetBytes)
+			return nil, false, fmt.Errorf("hybrid frame %d exceeds target: %d > %d bytes", k, len(frame), targetBytes)
 		}
 		if len(frame) < targetBytes {
 			padded := make([]byte, targetBytes)
@@ -672,7 +673,7 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy,
 			} else {
 				rf, rerr := e.encodeRedundantFrame(celtInput, redundancyBytes, false, celt.NumBands48000, nil)
 				if rerr != nil {
-					return nil, fmt.Errorf("CELT redundant frame encoding failed: %w", rerr)
+					return nil, false, fmt.Errorf("CELT redundant frame encoding failed: %w", rerr)
 				}
 				redFrame = rf
 				// SILK->CELT: the next (genuinely CELT-only) packet continues from the
@@ -683,10 +684,11 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy,
 			redPadded := make([]byte, redundancyBytes)
 			copy(redPadded, redFrame)
 			frame = append(frame, redPadded...)
+			redundancyEmitted = true
 		}
 		if len(frame) != frameBytes && frameRedundancy {
 			// Defensive: redundant frame must total exactly maxBytes.
-			return nil, fmt.Errorf("hybrid redundant frame %d size %d != %d", k, len(frame), frameBytes)
+			return nil, false, fmt.Errorf("hybrid redundant frame %d size %d != %d", k, len(frame), frameBytes)
 		}
 		frames = append(frames, frame)
 	}
@@ -696,9 +698,9 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy,
 	// variable-length packing path (length prefixes / code 2/3) is required.
 	payload, code, err := packOpusFramesPadded(frames, !cbr, e.padBytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to pack hybrid stream: %w", err)
+		return nil, false, fmt.Errorf("failed to pack hybrid stream: %w", err)
 	}
-	return append([]byte{toc | byte(code)}, payload...), nil
+	return append([]byte{toc | byte(code)}, payload...), redundancyEmitted, nil
 }
 
 func (e *Encoder) hybridFrameTargetBytes() int {
@@ -880,6 +882,10 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int, celtToSilk bo
 		pos += inputSamples
 	}
 	payload, code, err := packOpusFramesPadded(streams, true, e.padBytes)
+	if err == nil && e.shouldPadSILKPacket(streams, celtToSilk) {
+		targetBytes := 1 + e.bitrate*(20*nFrames)/1000/8
+		payload, code, err = packOpusFramesToPacketSize(streams, true, targetBytes)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack SILK stream: %w", err)
 	}
@@ -905,6 +911,21 @@ func (e *Encoder) shouldPadSILKStream(pcm []float64) bool {
 		// zeros: libopus then consumes different tail symbols. Stereo trellis
 		// uses its natural budget-controlled stream size.
 		return false
+	}
+	return true
+}
+
+func (e *Encoder) shouldPadSILKPacket(streams [][]byte, celtToSilk bool) bool {
+	if e.rateMode != celt.RateModeCBR || e.padBytes > 0 || celtToSilk {
+		return false
+	}
+	if e.channels != 2 || e.silkEncoder == nil || !e.silkEncoder.TrellisNSQ() {
+		return false
+	}
+	for _, stream := range streams {
+		if len(stream) <= 1 {
+			return false
+		}
 	}
 	return true
 }
@@ -1765,12 +1786,57 @@ func packOpusFramesPadded(frames [][]byte, vbr bool, padBytes int) ([]byte, int,
 	if padBytes <= 0 {
 		return packOpusFrames(frames, vbr)
 	}
+	out, err := packOpusFramesCode3(frames, vbr, true, padBytes)
+	return out, 3, err
+}
+
+// packOpusFramesToPacketSize keeps the entropy-coded frame bytes unchanged and
+// uses only RFC 6716 code-3 framing/padding to reach an exact total packet size.
+// targetBytes includes the TOC byte, which the caller prepends separately.
+func packOpusFramesToPacketSize(frames [][]byte, vbr bool, targetBytes int) ([]byte, int, error) {
+	compact, code, err := packOpusFrames(frames, vbr)
+	if err != nil {
+		return nil, 0, err
+	}
+	if 1+len(compact) == targetBytes {
+		return compact, code, nil
+	}
+	if 1+len(compact) > targetBytes {
+		return compact, code, nil
+	}
+
+	code3, err := packOpusFramesCode3(frames, vbr, false, 0)
+	if err != nil {
+		return nil, 0, err
+	}
+	if 1+len(code3) == targetBytes {
+		return code3, 3, nil
+	}
+	for padBytes := 0; padBytes < targetBytes; padBytes++ {
+		padded, err := packOpusFramesCode3(frames, vbr, true, padBytes)
+		if err != nil {
+			return nil, 0, err
+		}
+		if 1+len(padded) == targetBytes {
+			return padded, 3, nil
+		}
+		if 1+len(padded) > targetBytes {
+			break
+		}
+	}
+	return compact, code, nil
+}
+
+func packOpusFramesCode3(frames [][]byte, vbr, padding bool, padBytes int) ([]byte, error) {
 	n := len(frames)
 	if n == 0 {
-		return nil, 0, fmt.Errorf("no frames to pack")
+		return nil, fmt.Errorf("no frames to pack")
 	}
 	if n > 48 {
-		return nil, 0, fmt.Errorf("too many frames: %d (max 48)", n)
+		return nil, fmt.Errorf("too many frames: %d (max 48)", n)
+	}
+	if padBytes < 0 {
+		return nil, fmt.Errorf("negative padding size: %d", padBytes)
 	}
 
 	allEqual := true
@@ -1784,21 +1850,28 @@ func packOpusFramesPadded(frames [][]byte, vbr bool, padBytes int) ([]byte, int,
 	// explicit per-frame lengths (VBR layout) are required.
 	useVBR := vbr || !allEqual
 
-	runBytes := encodePaddingCount(padBytes)
-
-	out := make([]byte, 0, 1+len(runBytes)+2*n+padBytes)
-	flags := byte(0x40) | byte(n) // padding flag | frame count
+	capacity := 1 + 2*n + padBytes
+	if padding {
+		capacity += len(encodePaddingCount(padBytes))
+	}
+	out := make([]byte, 0, capacity)
+	flags := byte(n)
 	if useVBR {
 		flags |= 0x80
 	}
+	if padding {
+		flags |= 0x40
+	}
 	out = append(out, flags)
-	out = append(out, runBytes...)
+	if padding {
+		out = append(out, encodePaddingCount(padBytes)...)
+	}
 	if useVBR {
 		// First n-1 frame lengths, then all payloads.
 		for i := 0; i < n-1; i++ {
 			lp, err := encodeOpusFrameLength(len(frames[i]))
 			if err != nil {
-				return nil, 0, err
+				return nil, err
 			}
 			out = append(out, lp...)
 		}
@@ -1808,7 +1881,7 @@ func packOpusFramesPadded(frames [][]byte, vbr bool, padBytes int) ([]byte, int,
 	}
 	// Trailing padding-data bytes (zeros), stripped from the end on decode.
 	out = append(out, make([]byte, padBytes)...)
-	return out, 3, nil
+	return out, nil
 }
 
 // splitOpusFrames splits an Opus packet payload into individual frame payloads

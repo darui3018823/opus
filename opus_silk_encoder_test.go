@@ -448,6 +448,62 @@ func TestEncoderHybridToCELTRedundancy(t *testing.T) {
 	decodeOK("post-transition-celt", celtPkt)
 }
 
+func TestEncoderHybridToCELTWithoutRedundancyKeepsHybridState(t *testing.T) {
+	const (
+		rate      = 48000
+		channels  = 2
+		frameSize = rate * 20 / 1000
+	)
+	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	if err := enc.SetBitrate(96000); err != nil {
+		t.Fatalf("SetBitrate warmup: %v", err)
+	}
+	if _, err := enc.EncodeFloat(strictHybridWidebandFrame(rate, channels, 0, frameSize), frameSize); err != nil {
+		t.Fatalf("hybrid warmup: %v", err)
+	}
+	if enc.prevMode != framing.ModeHybrid {
+		t.Fatalf("warmup prevMode=%d, want hybrid", enc.prevMode)
+	}
+
+	// At this tighter budget the deferred hybrid packet still fits, but its
+	// trailing redundancy does not. The emitted packet is therefore plain
+	// hybrid and must remain the predecessor for the next mode decision.
+	enc.SetSignalType(SignalMusic)
+	if err := enc.SetBitrate(10000); err != nil {
+		t.Fatalf("SetBitrate transition: %v", err)
+	}
+	transitionPCM := make([]float64, frameSize*channels)
+	pkt, err := enc.EncodeFloat(transitionPCM, frameSize)
+	if err != nil {
+		t.Fatalf("transition EncodeFloat: %v", err)
+	}
+	config, _, code := framing.ParseTOC(pkt[0])
+	if got := strictOpusMode(config); got != "hybrid" {
+		t.Fatalf("transition mode=%s, want deferred hybrid", got)
+	}
+	streams, err := splitOpusFrames(pkt[1:], code)
+	if err != nil || len(streams) != 1 {
+		t.Fatalf("split transition packet: streams=%d err=%v", len(streams), err)
+	}
+	sd, err := silk.NewDecoderWithFrameMs(16000, channels, 20)
+	if err != nil {
+		t.Fatalf("silk.NewDecoderWithFrameMs: %v", err)
+	}
+	rangeDec := entcode.NewDecoder(streams[0])
+	if _, err := sd.DecodeMultiWithDecoder(rangeDec, 1); err != nil {
+		t.Fatalf("decode SILK symbols: %v", err)
+	}
+	if rangeDec.ECTell()+37 <= len(streams[0])*8 && rangeDec.DecodeBitLogp(12) {
+		t.Fatalf("transition unexpectedly emitted redundancy at the constrained budget")
+	}
+	if enc.prevMode != framing.ModeHybrid {
+		t.Fatalf("prevMode=%d after plain hybrid fallback, want hybrid", enc.prevMode)
+	}
+}
+
 // alignedSNRWindow measures the delay/scale-aligned SNR of out against in over
 // the half-open sample window [lo, hi), searching a small decoder delay. Used to
 // assert state continuity across a mode transition.
@@ -1330,6 +1386,61 @@ func TestEncoderSILKOnlyCBRPacketSizeTracksBitrateAndDuration(t *testing.T) {
 				t.Fatalf("TOC config=%d, want SILK WB 20/60ms config", config)
 			}
 		})
+	}
+}
+
+func TestEncoderSILKOnlyStereoCBRUsesFixedPacketSize(t *testing.T) {
+	const (
+		rate      = 16000
+		channels  = 2
+		bitrate   = 32000
+		frameSize = rate * 20 / 1000
+		wantBytes = 1 + bitrate*20/1000/8
+	)
+	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	if err := enc.SetBitrate(bitrate); err != nil {
+		t.Fatalf("SetBitrate: %v", err)
+	}
+	enc.SetVBR(false)
+
+	signals := make([][]float64, 0, 3)
+	for _, tc := range []struct {
+		freq float64
+		amp  float64
+	}{
+		{freq: 180, amp: 0.18},
+		{freq: 240, amp: 0.25},
+		{freq: 360, amp: 0.12},
+	} {
+		pcm := make([]float64, frameSize*channels)
+		for i := 0; i < frameSize; i++ {
+			v := tc.amp * math.Sin(2*math.Pi*tc.freq*float64(i)/rate)
+			pcm[2*i], pcm[2*i+1] = v, v
+		}
+		signals = append(signals, pcm)
+	}
+
+	dec, err := NewDecoder(rate, channels)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	for i, pcm := range signals {
+		pkt, err := enc.EncodeFloat(pcm, frameSize)
+		if err != nil {
+			t.Fatalf("frame %d EncodeFloat: %v", i, err)
+		}
+		if len(pkt) != wantBytes {
+			t.Fatalf("frame %d packet bytes=%d, want fixed CBR size %d", i, len(pkt), wantBytes)
+		}
+		if code := int(pkt[0] & 0x03); code != 3 {
+			t.Fatalf("frame %d count code=%d, want code 3 packet padding", i, code)
+		}
+		if _, err := dec.DecodeFloat(pkt); err != nil {
+			t.Fatalf("frame %d DecodeFloat: %v", i, err)
+		}
 	}
 }
 

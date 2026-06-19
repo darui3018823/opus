@@ -1595,14 +1595,12 @@ func (e *Encoder) lpcNLSFTargetQ15(signal []float64, cb *nlsfCBParams) ([]int16,
 	if len(signal) <= cb.order {
 		return nil, false
 	}
-	lpc := NewLPCAnalysis(cb.order)
-	if lpc == nil {
-		return nil, false
-	}
-	if err := lpc.AnalyzeWindowed(signal); err != nil {
-		return nil, false
-	}
-	target := lpc.NLSFTargetQ15()
+	// Burg-method LPC over the whole frame (single subframe), then accurate
+	// A2NLSF root finding — the libopus silk_find_LPC_FLP path. minInvGain
+	// bounds the prediction gain (1 / MAX_PREDICTION_POWER_GAIN).
+	const minInvGain = 1.0 / 1e4
+	a, _ := silkBurgModifiedFLP(signal, minInvGain, len(signal), 1, cb.order)
+	target := silkA2NLSFFLP(a, cb.order)
 	if len(target) != cb.order {
 		return nil, false
 	}

@@ -75,6 +75,7 @@ type Encoder struct {
 	shapeTiltSmooth float64
 	side            *Encoder // side-channel encoder for stereo packets
 	stereoState     stereoPredState
+	prevOnlyMiddle  bool // previous stereo frame omitted the side channel
 
 	// Pitch analysis state (silk_find_pitch_lags_FLP).
 	pitchHist            []float64 // Past ltp_mem_length input samples, [-1,1]
@@ -370,7 +371,6 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		enc.EncodeBitLogp(false, 1) // No LBRR data in this encoder slice.
 	}
 
-	prevOnlyMiddle := false
 	e.lastSNRVBRStream = false
 	for i := 0; i < nFrames; i++ {
 		encodeStereoPred(enc, stereoPredIx[i])
@@ -382,13 +382,13 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		e.encodeRangeFrame(enc, midFrames[i], vadFlags[0][i], i > 0)
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 		if !onlyMiddle {
-			if prevOnlyMiddle {
+			if e.prevOnlyMiddle {
 				e.side.Reset()
 			}
-			e.side.encodeRangeFrame(enc, sideFrames[i], vadFlags[1][i], i > 0 && !prevOnlyMiddle)
+			e.side.encodeRangeFrame(enc, sideFrames[i], vadFlags[1][i], i > 0 && !e.prevOnlyMiddle)
 			e.lastSNRVBRStream = e.lastSNRVBRStream || e.side.lastSNRVBRFrame
 		}
-		prevOnlyMiddle = onlyMiddle
+		e.prevOnlyMiddle = onlyMiddle
 	}
 	return nil
 }
@@ -2697,10 +2697,15 @@ func (e *Encoder) Reset() {
 	e.curPitchLagIndex = 0
 	e.curPitchContourIndex = 0
 	e.ltpSumLogGainQ7 = 0
+	e.nsq = newSilkNSQState(e.frameSize, silkLTPMemLengthMs*(e.sampleRate/1000))
+	e.nsqSeed = 0
+	e.shapeHarmSmooth = 0
+	e.shapeTiltSmooth = 0
 	e.lastSNRVBRFrame = false
 	e.lastSNRVBRStream = false
 	e.lastFinalRange = 0
 	e.stereoState.reset()
+	e.prevOnlyMiddle = false
 	if e.side != nil {
 		e.side.Reset()
 	}

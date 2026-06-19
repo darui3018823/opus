@@ -1195,6 +1195,96 @@ func TestEncoderStereo(t *testing.T) {
 	}
 }
 
+func TestStereoOnlyMiddleStatePersistsAcrossPackets(t *testing.T) {
+	const rate = 16000
+	frameSize := rate / 50
+
+	enc, err := NewEncoder(rate, 2)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	reference, err := NewEncoder(rate, 2)
+	if err != nil {
+		t.Fatalf("NewEncoder reference: %v", err)
+	}
+
+	makeFrame := func(sideOn bool) []float64 {
+		pcm := make([]float64, frameSize*2)
+		for i := 0; i < frameSize; i++ {
+			tm := float64(i) / rate
+			mid := 0.25 * math.Sin(2*math.Pi*180*tm)
+			side := 0.0
+			if sideOn {
+				side = 0.18 * math.Sin(2*math.Pi*310*tm+0.4)
+			}
+			pcm[2*i] = mid + side
+			pcm[2*i+1] = mid - side
+		}
+		return pcm
+	}
+
+	middleOnly := makeFrame(false)
+	packet, err := enc.Encode(middleOnly)
+	if err != nil {
+		t.Fatalf("middle-only Encode: %v", err)
+	}
+	referencePacket, err := reference.Encode(middleOnly)
+	if err != nil {
+		t.Fatalf("middle-only reference Encode: %v", err)
+	}
+	if string(packet) != string(referencePacket) {
+		t.Fatal("identical middle-only encoders produced different packets")
+	}
+	if !enc.prevOnlyMiddle {
+		t.Fatal("middle-only state was not retained at the packet boundary")
+	}
+
+	// Model stale side synthesis/noise-shaping history from before the
+	// middle-only packet. The reference starts the next packet with the side
+	// encoder explicitly reset; the encoder under test must do the same based
+	// on its persisted prevOnlyMiddle flag.
+	enc.side.prevGainQ16 = 123456
+	enc.side.prevGainIdx = 31
+	enc.side.shapeHarmSmooth = 0.75
+	enc.side.shapeTiltSmooth = -0.5
+	for i := range enc.side.lpcState {
+		enc.side.lpcState[i] = int32(1000 + i)
+	}
+	for i := range enc.side.ltpState {
+		enc.side.ltpState[i] = int32(2000 - i)
+	}
+	for i := range enc.side.nsq.xq {
+		enc.side.nsq.xq[i] = int16(300 - i%600)
+	}
+	for i := range enc.side.nsq.sLTPShpQ14 {
+		enc.side.nsq.sLTPShpQ14[i] = int32(4000 - i)
+	}
+
+	reference.side.Reset()
+	reference.prevOnlyMiddle = false
+	sideActive := makeFrame(true)
+	packet, err = enc.Encode(sideActive)
+	if err != nil {
+		t.Fatalf("side-reactivation Encode: %v", err)
+	}
+	referencePacket, err = reference.Encode(sideActive)
+	if err != nil {
+		t.Fatalf("side-reactivation reference Encode: %v", err)
+	}
+	if string(packet) != string(referencePacket) {
+		t.Fatal("side reactivation did not start from reset side state")
+	}
+	if enc.prevOnlyMiddle {
+		t.Fatal("side-reactivation state was not retained")
+	}
+
+	enc.prevOnlyMiddle = true
+	enc.Reset()
+	if enc.prevOnlyMiddle {
+		t.Fatal("Reset did not clear prevOnlyMiddle")
+	}
+}
+
 // Test stereo decoding
 func TestDecoderStereo(t *testing.T) {
 	dec, err := NewDecoder(8000, 2)

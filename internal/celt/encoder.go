@@ -900,6 +900,81 @@ func (e *Encoder) Reset() {
 	e.vbrDriftComp = 0
 }
 
+// CopyStateFrom copies the inter-frame prediction state from src into e, the
+// encoder-side mirror of the decoder's CopyStateFrom. libopus carries its single
+// celt_enc across mode transitions; this codebase uses a dedicated 5 ms encoder
+// for the redundant frame, so the state must be threaded explicitly:
+//
+//   - CELT->SILK leading redundancy: the redundant frame continues from the
+//     previous CELT-only state (seed = celtEncoder) so it matches the decoder,
+//     which decodes it with its previous CELT state.
+//   - SILK->CELT trailing redundancy: the next CELT-only packet continues from
+//     the trailing redundant frame's state (seed = redundancyCelt), matching the
+//     decoder's celtDec.CopyStateFrom(redDec).
+//
+// Only streaming/prediction state is copied; the configuration (mode, bitrate,
+// complexity, rate mode, end band) is left intact. The copy is channel/band
+// clamped so a 5 ms encoder and a longer-frame encoder (identical 48 kHz overlap
+// and band count) interoperate.
+func (e *Encoder) CopyStateFrom(src *Encoder) {
+	if src == nil || src == e {
+		return
+	}
+
+	for c := range e.overlap {
+		sc := c
+		if sc >= len(src.overlap) {
+			sc = len(src.overlap) - 1
+		}
+		if sc >= 0 {
+			copy(e.overlap[c], src.overlap[sc])
+		}
+	}
+
+	dstBands := e.mode.Bands.NumBands
+	srcBands := src.mode.Bands.NumBands
+	dstHistCh := 0
+	if dstBands > 0 {
+		dstHistCh = len(e.prevBandEnergies) / dstBands
+	}
+	srcHistCh := 0
+	if srcBands > 0 {
+		srcHistCh = len(src.prevBandEnergies) / srcBands
+	}
+	for c := 0; c < dstHistCh; c++ {
+		sc := c
+		if sc >= srcHistCh {
+			sc = srcHistCh - 1
+		}
+		for i := 0; i < dstBands; i++ {
+			di := c*dstBands + i
+			if i >= srcBands || sc < 0 {
+				e.prevBandEnergies[di] = 0
+				continue
+			}
+			e.prevBandEnergies[di] = src.prevBandEnergies[sc*srcBands+i]
+		}
+	}
+
+	for c := range e.preemphMem {
+		sc := c
+		if sc >= len(src.preemphMem) {
+			sc = len(src.preemphMem) - 1
+		}
+		if sc >= 0 {
+			e.preemphMem[c] = src.preemphMem[sc]
+		}
+	}
+
+	e.foldSeed = src.foldSeed
+	e.finalRange = src.finalRange
+	e.frameCount = src.frameCount
+	e.tonalAverage = src.tonalAverage
+	e.lastSpread = src.lastSpread
+	e.consecTransient = src.consecTransient
+	e.intensity = src.intensity
+}
+
 // SetBitrate sets the target bitrate.
 func (e *Encoder) SetBitrate(bitrate int) {
 	if bitrate > 0 {

@@ -448,6 +448,165 @@ func TestEncoderHybridToCELTRedundancy(t *testing.T) {
 	decodeOK("post-transition-celt", celtPkt)
 }
 
+// alignedSNRWindow measures the delay/scale-aligned SNR of out against in over
+// the half-open sample window [lo, hi), searching a small decoder delay. Used to
+// assert state continuity across a mode transition.
+func alignedSNRWindow(in, out []float64, lo, hi, frameSize int) float64 {
+	bestErr := math.Inf(1)
+	for d := 0; d <= 3*frameSize; d++ {
+		var dot, e2 float64
+		for i := lo; i < hi; i++ {
+			oi := i - d
+			if oi < 0 || oi >= len(out) {
+				continue
+			}
+			dot += in[i] * out[oi]
+			e2 += out[oi] * out[oi]
+		}
+		if e2 == 0 {
+			continue
+		}
+		sc := dot / e2
+		var e float64
+		for i := lo; i < hi; i++ {
+			oi := i - d
+			if oi < 0 || oi >= len(out) {
+				continue
+			}
+			r := in[i] - sc*out[oi]
+			e += r * r
+		}
+		e = math.Sqrt(e / float64(hi-lo))
+		if e < bestErr {
+			bestErr = e
+		}
+	}
+	var inRMS float64
+	for i := lo; i < hi; i++ {
+		inRMS += in[i] * in[i]
+	}
+	inRMS = math.Sqrt(inRMS / float64(hi-lo))
+	if bestErr == 0 {
+		return math.Inf(1)
+	}
+	return 20 * math.Log10(inRMS/bestErr)
+}
+
+// TestEncoderHybridToCELTRedundancyStateContinuity guards the SILK->CELT trailing
+// redundancy state sync (T3): the first genuine CELT-only packet after a deferred
+// hybrid->CELT transition inter-predicts its coarse energy from the trailing
+// redundant frame's state. The decoder adopts that state (celtDec.CopyStateFrom(
+// redDec)); the encoder must seed celtEncoder from the same redundant frame state.
+// If it does not, the per-band prediction baseline diverges, leaving a persistent
+// energy offset across the whole CELT-only run, which this test detects as a
+// collapsed aligned SNR.
+func TestEncoderHybridToCELTRedundancyStateContinuity(t *testing.T) {
+	const (
+		rate     = 48000
+		channels = 1
+		bitrate  = 64000
+	)
+	frameSize := rate * 20 / 1000
+
+	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	if err := enc.SetBitrate(bitrate); err != nil {
+		t.Fatalf("SetBitrate: %v", err)
+	}
+	dec, err := NewDecoder(rate, channels)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+
+	tone := func(start, n int) []float64 {
+		out := make([]float64, n)
+		for i := 0; i < n; i++ {
+			tt := float64(start+i) / float64(rate)
+			out[i] = 0.3 * math.Sin(2*math.Pi*1000*tt)
+		}
+		return out
+	}
+
+	const (
+		warmup     = 5
+		postFrames = 14
+	)
+	var decoded []float64
+	frame := 0
+
+	// Hybrid warmup so prevMode == hybrid.
+	enc.SetSignalType(SignalVoice)
+	for ; frame < warmup; frame++ {
+		pkt, err := enc.EncodeFloat(strictHybridWidebandFrame(rate, channels, frame*frameSize, frameSize), frameSize)
+		if err != nil {
+			t.Fatalf("hybrid warmup %d: %v", frame, err)
+		}
+		if got := strictOpusMode(int(pkt[0] >> 3)); got != "hybrid" {
+			t.Fatalf("warmup %d mode=%s, want hybrid", frame, got)
+		}
+		out, err := dec.DecodeFloat(pkt)
+		if err != nil {
+			t.Fatalf("warmup decode %d: %v", frame, err)
+		}
+		decoded = append(decoded, out...)
+	}
+
+	// Deferred transition: this packet stays hybrid and carries the trailing
+	// redundant CELT frame.
+	enc.SetSignalType(SignalMusic)
+	transPkt, err := enc.EncodeFloat(strictHybridWidebandFrame(rate, channels, frame*frameSize, frameSize), frameSize)
+	if err != nil {
+		t.Fatalf("transition: %v", err)
+	}
+	if got := strictOpusMode(int(transPkt[0] >> 3)); got != "hybrid" {
+		t.Fatalf("transition mode=%s, want hybrid (deferred switch)", got)
+	}
+	out, err := dec.DecodeFloat(transPkt)
+	if err != nil {
+		t.Fatalf("transition decode: %v", err)
+	}
+	decoded = append(decoded, out...)
+	frame++
+
+	// Genuine CELT-only run carrying a steady tone.
+	celtStart := frame
+	for ; frame < celtStart+postFrames; frame++ {
+		pkt, err := enc.EncodeFloat(tone(frame*frameSize, frameSize), frameSize)
+		if err != nil {
+			t.Fatalf("post-transition celt %d: %v", frame, err)
+		}
+		if got := strictOpusMode(int(pkt[0] >> 3)); got != "celt" {
+			t.Fatalf("post-transition %d mode=%s, want celt", frame, got)
+		}
+		out, err := dec.DecodeFloat(pkt)
+		if err != nil {
+			t.Fatalf("post-transition decode %d: %v", frame, err)
+		}
+		decoded = append(decoded, out...)
+	}
+
+	totalFrames := frame
+	ref := make([]float64, totalFrames*frameSize)
+	for f := celtStart; f < totalFrames; f++ {
+		copy(ref[f*frameSize:(f+1)*frameSize], tone(f*frameSize, frameSize))
+	}
+
+	// Skip the first few CELT-only frames (transition crossfade) and measure to the
+	// end of the run.
+	lo := (celtStart + 3) * frameSize
+	hi := totalFrames * frameSize
+	snr := alignedSNRWindow(ref, decoded, lo, hi, frameSize)
+	t.Logf("post-transition CELT-only run aligned SNR=%.2fdB", snr)
+	// With the state sync the steady tone reconstructs at ~48 dB; dropping the
+	// sync leaves a persistent per-band energy offset that collapses it to ~31 dB.
+	// The 42 dB gate sits with margin between the two.
+	if snr < 42.0 {
+		t.Fatalf("post-transition CELT-only run SNR=%.2fdB too low: trailing redundancy state not inherited by the next CELT encoder (T3)", snr)
+	}
+}
+
 func TestEncoderCELTToSILKRedundancy(t *testing.T) {
 	const (
 		rate     = 48000

@@ -407,8 +407,15 @@ func (e *Encoder) redundancyEncoder() (*celt.Encoder, error) {
 
 // encodeRedundantFrame encodes either the leading or trailing 5 ms of a 20 ms
 // 48 kHz CELT input as a standalone CELT packet of exactly nbytes.
-// The dedicated encoder is reset first so the frame carries no overlap history.
-func (e *Encoder) encodeRedundantFrame(celtInput []float64, nbytes int, leading bool, endBand int) ([]byte, error) {
+//
+// seed controls the starting state of the dedicated 5 ms encoder, mirroring how
+// libopus's single celt_enc carries (or resets) state across the transition:
+//   - seed == nil: the encoder is reset, so the frame carries no overlap history
+//     (used for SILK->CELT trailing redundancy, where the decoder also resets).
+//   - seed != nil: the encoder continues from seed's state (used for CELT->SILK
+//     leading redundancy, where the decoder decodes the frame from its previous
+//     CELT state). Pass the encoder that holds the previous CELT-only state.
+func (e *Encoder) encodeRedundantFrame(celtInput []float64, nbytes int, leading bool, endBand int, seed *celt.Encoder) ([]byte, error) {
 	red, err := e.redundancyEncoder()
 	if err != nil {
 		return nil, err
@@ -425,7 +432,11 @@ func (e *Encoder) encodeRedundantFrame(celtInput []float64, nbytes int, leading 
 	} else {
 		part = padOrTrim(celtInput, tailLen)
 	}
-	red.Reset()
+	if seed != nil {
+		red.CopyStateFrom(seed)
+	} else {
+		red.Reset()
+	}
 	red.SetEndBand(endBand)
 	red.SetBitrate(e.bitrate)
 	return red.EncodeRedundant(part, nbytes)
@@ -621,9 +632,19 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy,
 			// allocation CELT computes against targetBytes stays bit-symmetric.
 			enc.Shrink(targetBytes)
 		}
+		// CELT->SILK leading redundant frame must be encoded from the previous
+		// CELT-only state, which celtEncoder still holds at this point (k==0, before
+		// the hybrid high band reuses it). libopus encodes the leading redundant
+		// frame first, then resets celt_enc for the hybrid high band. We compute it
+		// here (state-faithful) and append it to the frame tail below.
+		var leadingRedFrame []byte
 		if frameRedundancy && celtToSilk {
+			rf, rerr := e.encodeRedundantFrame(celtInput, redundancyBytes, true, celtEnd, e.celtEncoder)
+			if rerr != nil {
+				return nil, fmt.Errorf("CELT leading redundant frame encoding failed: %w", rerr)
+			}
+			leadingRedFrame = rf
 			// The new hybrid high-band stream starts from a fresh CELT state.
-			// The leading redundant frame is encoded separately below.
 			e.celtEncoder.Reset()
 		}
 		if err := e.celtEncoder.EncodeHybrid(celtInput, enc, targetBytes, 17, celtEnd); err != nil {
@@ -640,16 +661,24 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy,
 			frame = padded
 		}
 
-		// Append the trailing 5 ms redundant CELT frame so the decoder recovers it
-		// from stream[len-redundancyBytes:] (opus.go decodeHybridPacket).
+		// Append the 5 ms redundant CELT frame so the decoder recovers it from
+		// stream[len-redundancyBytes:] (opus.go decodeHybridPacket). The CELT->SILK
+		// leading frame was already computed above (from the previous CELT-only
+		// state); the SILK->CELT trailing frame is computed here from a fresh state.
 		if frameRedundancy {
-			redEndBand := celt.NumBands48000
+			var redFrame []byte
 			if celtToSilk {
-				redEndBand = celtEnd
-			}
-			redFrame, rerr := e.encodeRedundantFrame(celtInput, redundancyBytes, celtToSilk, redEndBand)
-			if rerr != nil {
-				return nil, fmt.Errorf("CELT redundant frame encoding failed: %w", rerr)
+				redFrame = leadingRedFrame
+			} else {
+				rf, rerr := e.encodeRedundantFrame(celtInput, redundancyBytes, false, celt.NumBands48000, nil)
+				if rerr != nil {
+					return nil, fmt.Errorf("CELT redundant frame encoding failed: %w", rerr)
+				}
+				redFrame = rf
+				// SILK->CELT: the next (genuinely CELT-only) packet continues from the
+				// trailing redundant frame's state, mirroring the decoder which adopts
+				// the redundant decoder's state (celtDec.CopyStateFrom(redDec)).
+				e.celtEncoder.CopyStateFrom(e.redundancyCelt)
 			}
 			redPadded := make([]byte, redundancyBytes)
 			copy(redPadded, redFrame)
@@ -805,7 +834,11 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int, celtToSilk bo
 						sharedEnc.Flush()
 						stream = sharedEnc.Bytes()
 						celtInput := e.celtInputFrame(pcm[pos : pos+inputChunkLen])
-						redFrame, rerr := e.encodeRedundantFrame(celtInput, redBytes, true, 17)
+						// CELT->SILK leading redundancy: seed the redundant frame from
+						// the previous CELT-only state (celtEncoder is untouched on the
+						// SILK-only path), matching the decoder which decodes it with its
+						// previous CELT state (decodeLeadingRedundancy copies lastCeltDec).
+						redFrame, rerr := e.encodeRedundantFrame(celtInput, redBytes, true, 17, e.celtEncoder)
 						if rerr != nil {
 							err = rerr
 						} else {

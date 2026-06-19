@@ -534,6 +534,96 @@ func TestCGOEncodeRefHybridRedundancyTransition(t *testing.T) {
 	refDecode("post-transition-celt", celtPkt)
 }
 
+// TestCGOEncodeRefCELTToSILKRedundancyTransition verifies both leading
+// redundancy destinations: CELT-only -> SILK-only and CELT-only -> hybrid.
+// libopus must accept the celt_to_silk=1 header/tail layout and produce one
+// complete, non-trivial 20 ms frame.
+func TestCGOEncodeRefCELTToSILKRedundancyTransition(t *testing.T) {
+	t.Logf("libopus version: %s", cgoref.Version())
+
+	const (
+		rate     = 48000
+		channels = 1
+	)
+	frameSize := rate * 20 / 1000
+	maxSPC := rate * 120 / 1000
+
+	cases := []struct {
+		name     string
+		bitrate  int
+		wantMode string
+	}{
+		{name: "silk-only", bitrate: 24000, wantMode: "silk"},
+		{name: "hybrid", bitrate: 64000, wantMode: "hybrid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			enc, err := opus.NewEncoder(rate, channels, opus.ApplicationVOIP)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(64000); err != nil {
+				t.Fatalf("SetBitrate warmup: %v", err)
+			}
+			enc.SetSignalType(opus.SignalMusic)
+			ref, err := cgoref.NewDecoder(rate, channels)
+			if err != nil {
+				t.Fatalf("cgoref.NewDecoder: %v", err)
+			}
+			defer ref.Close()
+
+			for frame := 0; frame < 3; frame++ {
+				pkt, err := enc.EncodeFloat(silkRefHybridFrame(rate, frame*frameSize, frameSize, channels), frameSize)
+				if err != nil {
+					t.Fatalf("CELT warmup %d: EncodeFloat: %v", frame, err)
+				}
+				if config := int((pkt[0] >> 3) & 0x1f); config < 16 {
+					t.Fatalf("CELT warmup %d: config=%d, want CELT-only", frame, config)
+				}
+				if _, err := ref.DecodeFloat(pkt, maxSPC); err != nil {
+					t.Fatalf("CELT warmup %d: libopus decode: %v", frame, err)
+				}
+			}
+
+			enc.SetSignalType(opus.SignalVoice)
+			if err := enc.SetBitrate(tc.bitrate); err != nil {
+				t.Fatalf("SetBitrate transition: %v", err)
+			}
+			pkt, err := enc.EncodeFloat(silkRefHybridFrame(rate, 3*frameSize, frameSize, channels), frameSize)
+			if err != nil {
+				t.Fatalf("transition EncodeFloat: %v", err)
+			}
+			config := int((pkt[0] >> 3) & 0x1f)
+			switch tc.wantMode {
+			case "silk":
+				if config >= 12 {
+					t.Fatalf("transition config=%d, want SILK-only", config)
+				}
+			case "hybrid":
+				if config < 12 || config > 15 {
+					t.Fatalf("transition config=%d, want hybrid", config)
+				}
+			}
+
+			out, err := ref.DecodeFloat(pkt, maxSPC)
+			if err != nil {
+				t.Fatalf("transition libopus decode (non-conformant leading redundancy): %v", err)
+			}
+			if len(out) != frameSize*channels {
+				t.Fatalf("transition libopus samples=%d, want %d", len(out), frameSize*channels)
+			}
+			out64 := make([]float64, len(out))
+			for i, v := range out {
+				out64[i] = float64(v)
+			}
+			rms, peak := silkRefStats(out64)
+			if rms < 1e-5 || peak > 1.5 {
+				t.Fatalf("transition libopus output suspect: rms=%g peak=%g", rms, peak)
+			}
+		})
+	}
+}
+
 func silkRefSpeechFrame(rate, start, n, channels int) []float64 {
 	out := make([]float64, n*channels)
 	for i := 0; i < n; i++ {

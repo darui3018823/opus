@@ -82,17 +82,21 @@ take precedence over max-bandwidth caps. Hybrid is currently limited to 20 ms
 Opus frames, optionally packed as standard multi-frame packets for longer public
 frame sizes.
 
-The encoder also implements libopus-faithful hybrid->CELT transition redundancy.
-It tracks the previous packet's coding mode; when a hybrid run would switch to
-CELT-only, the switch is deferred by one packet (`Encoder.prevMode`). That
+The encoder implements both directions of libopus-style SILK/hybrid↔CELT
+transition redundancy. It tracks the previous packet's coding mode with
+`Encoder.prevMode`. For hybrid→CELT, the switch is deferred by one packet: the
 transitional packet stays hybrid and appends a trailing 5 ms (240 @ 48 kHz)
-fullband CELT redundant frame (`celt_to_silk=0`) to the last sub-frame, sized via
-`computeRedundancyBytes` (libopus `compute_redundancy_bytes`). The redundant
-frame is encoded on a dedicated, reset CELT encoder so it carries no overlap
-history, matching the decoder's freshly reset redundant-frame decoder; its state
-seeds the next CELT-only packet. The next packet is then genuinely CELT-only.
-libopus 1.6.1 decodes these transitional packets (verified by
-`TestCGOEncodeRefHybridRedundancyTransition`).
+fullband CELT redundant frame (`celt_to_silk=0`) to the last sub-frame. For
+CELT→SILK-only or CELT→hybrid, the first sub-frame carries a leading 5 ms CELT
+redundant frame (`celt_to_silk=1`); SILK-only infers its length from the bytes
+remaining after the position bit, while hybrid explicitly codes the redundancy
+flag and byte count. Redundancy sizes use `computeRedundancyBytes` (libopus
+`compute_redundancy_bytes`). Redundant frames are encoded on a dedicated reset
+CELT encoder so they carry no overlap history; leading frames use the destination
+band limit (17 for SILK wideband, 19/21 for hybrid SWB/FB). libopus 1.6.1 decodes
+all three transition forms (verified by
+`TestCGOEncodeRefHybridRedundancyTransition` and
+`TestCGOEncodeRefCELTToSILKRedundancyTransition`).
 
 Supported public encode packet durations are exact 20 ms multiples from 20 ms
 through 120 ms (`frameSize == base20ms * 1..6`). Unsupported frame sizes and
@@ -560,9 +564,11 @@ The SILK package contains:
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single
-range decoder runs SILK, the hybrid redundancy flag, then the CELT high band,
-and the two outputs are resampled and time-domain summed. The hybrid SILK->CELT
-redundancy frame (celt_to_silk=0) is also handled.
+range decoder runs SILK, the hybrid redundancy header, then the CELT high band,
+and the two outputs are resampled and time-domain summed. Both redundancy
+directions are handled: trailing SILK→CELT frames crossfade the packet tail and
+seed subsequent CELT state, while leading CELT→SILK/hybrid frames replace the
+first 2.5 ms and crossfade into the new mode over the next 2.5 ms.
 
 ## Test Status
 

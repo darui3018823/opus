@@ -4,6 +4,10 @@ import (
 	"fmt"
 	"math"
 	"testing"
+
+	framing "github.com/darui3018823/opus/internal"
+	"github.com/darui3018823/opus/internal/entcode"
+	"github.com/darui3018823/opus/internal/silk"
 )
 
 func TestEncoderSILKOnlyVOIPLowBitrateRoundTrip(t *testing.T) {
@@ -442,6 +446,150 @@ func TestEncoderHybridToCELTRedundancy(t *testing.T) {
 		t.Fatalf("post-transition packet mode=%s, want celt", got)
 	}
 	decodeOK("post-transition-celt", celtPkt)
+}
+
+func TestEncoderCELTToSILKRedundancy(t *testing.T) {
+	const (
+		rate     = 48000
+		channels = 1
+	)
+	frameSize := rate * 20 / 1000
+	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	dec, err := NewDecoder(rate, channels)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+
+	enc.SetSignalType(SignalMusic)
+	if err := enc.SetBitrate(64000); err != nil {
+		t.Fatalf("SetBitrate CELT: %v", err)
+	}
+	celtPkt, err := enc.EncodeFloat(strictSpeechLikeFrame(rate, channels, 0, frameSize), frameSize)
+	if err != nil {
+		t.Fatalf("CELT EncodeFloat: %v", err)
+	}
+	if got := strictOpusMode(int(celtPkt[0] >> 3)); got != "celt" {
+		t.Fatalf("warmup mode=%s, want celt", got)
+	}
+	if _, err := dec.DecodeFloat(celtPkt); err != nil {
+		t.Fatalf("CELT DecodeFloat: %v", err)
+	}
+
+	enc.SetSignalType(SignalVoice)
+	if err := enc.SetBitrate(24000); err != nil {
+		t.Fatalf("SetBitrate SILK: %v", err)
+	}
+	silkPkt, err := enc.EncodeFloat(strictSpeechLikeFrame(rate, channels, frameSize, frameSize), frameSize)
+	if err != nil {
+		t.Fatalf("SILK transition EncodeFloat: %v", err)
+	}
+	config, _, code := framing.ParseTOC(silkPkt[0])
+	if got := strictOpusMode(config); got != "silk" {
+		t.Fatalf("transition mode=%s, want silk", got)
+	}
+	streams, err := splitOpusFrames(silkPkt[1:], code)
+	if err != nil || len(streams) != 1 {
+		t.Fatalf("split transition packet: streams=%d err=%v", len(streams), err)
+	}
+	sd, err := silk.NewDecoderWithFrameMs(16000, channels, 20)
+	if err != nil {
+		t.Fatalf("silk.NewDecoderWithFrameMs: %v", err)
+	}
+	rangeDec := entcode.NewDecoder(streams[0])
+	if _, err := sd.DecodeMultiWithDecoder(rangeDec, 1); err != nil {
+		t.Fatalf("decode SILK symbols: %v", err)
+	}
+	if rangeDec.ECTell()+17 > len(streams[0])*8 {
+		t.Fatalf("transition stream has no room for inferred redundancy: tell=%d bytes=%d packet=%d", rangeDec.ECTell(), len(streams[0]), len(silkPkt))
+	}
+	if !rangeDec.DecodeBitLogp(1) {
+		t.Fatalf("celt_to_silk=0, want 1")
+	}
+	redBytes := len(streams[0]) - ((rangeDec.ECTell() + 7) >> 3)
+	if redBytes < 2 {
+		t.Fatalf("redundancy bytes=%d, want >=2", redBytes)
+	}
+
+	out, err := dec.DecodeFloat(silkPkt)
+	if err != nil {
+		t.Fatalf("transition DecodeFloat: %v", err)
+	}
+	rms, peak := strictSignalStats(out)
+	if len(out) != frameSize*channels || math.IsNaN(rms) || rms < 1e-3 || peak > 1.5 {
+		t.Fatalf("transition output invalid: len=%d rms=%g peak=%g", len(out), rms, peak)
+	}
+}
+
+func TestEncoderCELTToHybridRedundancy(t *testing.T) {
+	const (
+		rate     = 48000
+		channels = 1
+	)
+	frameSize := rate * 20 / 1000
+	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	dec, err := NewDecoder(rate, channels)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+
+	enc.SetSignalType(SignalMusic)
+	if err := enc.SetBitrate(64000); err != nil {
+		t.Fatalf("SetBitrate: %v", err)
+	}
+	celtPkt, err := enc.EncodeFloat(strictHybridWidebandFrame(rate, channels, 0, frameSize), frameSize)
+	if err != nil {
+		t.Fatalf("CELT EncodeFloat: %v", err)
+	}
+	if _, err := dec.DecodeFloat(celtPkt); err != nil {
+		t.Fatalf("CELT DecodeFloat: %v", err)
+	}
+
+	enc.SetSignalType(SignalVoice)
+	hybridPkt, err := enc.EncodeFloat(strictHybridWidebandFrame(rate, channels, frameSize, frameSize), frameSize)
+	if err != nil {
+		t.Fatalf("hybrid transition EncodeFloat: %v", err)
+	}
+	config, _, code := framing.ParseTOC(hybridPkt[0])
+	if got := strictOpusMode(config); got != "hybrid" {
+		t.Fatalf("transition mode=%s, want hybrid", got)
+	}
+	streams, err := splitOpusFrames(hybridPkt[1:], code)
+	if err != nil || len(streams) != 1 {
+		t.Fatalf("split transition packet: streams=%d err=%v", len(streams), err)
+	}
+	sd, err := silk.NewDecoderWithFrameMs(16000, channels, 20)
+	if err != nil {
+		t.Fatalf("silk.NewDecoderWithFrameMs: %v", err)
+	}
+	rangeDec := entcode.NewDecoder(streams[0])
+	if _, err := sd.DecodeMultiWithDecoder(rangeDec, 1); err != nil {
+		t.Fatalf("decode SILK symbols: %v", err)
+	}
+	if !rangeDec.DecodeBitLogp(12) {
+		t.Fatalf("hybrid redundancy flag=false, want true")
+	}
+	if !rangeDec.DecodeBitLogp(1) {
+		t.Fatalf("celt_to_silk=0, want 1")
+	}
+	redBytes := int(rangeDec.DecodeUint(256)) + 2
+	if redBytes < 2 || redBytes >= len(streams[0]) {
+		t.Fatalf("redundancy bytes=%d, stream=%d", redBytes, len(streams[0]))
+	}
+
+	out, err := dec.DecodeFloat(hybridPkt)
+	if err != nil {
+		t.Fatalf("transition DecodeFloat: %v", err)
+	}
+	rms, peak := strictSignalStats(out)
+	if len(out) != frameSize*channels || math.IsNaN(rms) || rms < 1e-3 || peak > 1.5 {
+		t.Fatalf("transition output invalid: len=%d rms=%g peak=%g", len(out), rms, peak)
+	}
 }
 
 func TestComputeRedundancyBytes(t *testing.T) {

@@ -585,13 +585,15 @@ func (e *Encoder) selectBudgetRateControlPlan(
 			e.restoreFrameState(initial)
 			pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, gainIndices,
 				signalType, quantOffset, 0, pitchLags, ltpCoeffsQ14, ltpScaleQ14, scale)
-			// SILK-only frames preserve the activity and synthesis-energy quality
-			// floors. In hybrid mode CELT still carries the upper band, while the
-			// shared entropy stream must remain within its strict byte ceiling.
-			if !e.hybridMode && !pulsesMeetActivityFloor(pulses, e.frameSize) {
+			// Voiced hybrid frames may need to sacrifice SILK-layer activity to
+			// leave room for CELT in the shared packet budget. Unvoiced hybrid
+			// frames cannot: CELT only carries the upper band, so collapsing the
+			// SILK excitation destroys most of a 24 kHz noise-like signal.
+			preserveLowBand := !e.hybridMode || signalType != SignalTypeVoiced
+			if preserveLowBand && !pulsesMeetActivityFloor(pulses, e.frameSize) {
 				continue
 			}
-			if !e.hybridMode && e.currentFrameOutputRMS() < minOutputRMS {
+			if preserveLowBand && e.currentFrameOutputRMS() < minOutputRMS {
 				continue
 			}
 			pulseBits := e.estimatePulseBits(pulses, signalType, quantOffset)

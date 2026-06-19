@@ -264,6 +264,59 @@ func TestEncoderSILKOnlySilenceMinimalPacket(t *testing.T) {
 	}
 }
 
+func TestEncoderHybrid24kUnvoicedNoiseDoesNotCollapse(t *testing.T) {
+	const (
+		rate     = 24000
+		bitrate  = 64000
+		channels = 1
+	)
+	frameSize := rate * 20 / 1000
+	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	if err := enc.SetBitrate(bitrate); err != nil {
+		t.Fatalf("SetBitrate: %v", err)
+	}
+	enc.SetVBR(true)
+	enc.SetSignalType(SignalVoice)
+	dec, err := NewDecoder(rate, channels)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+
+	sig := opusSILKQualitySignals()[1]
+	var in, out []float64
+	for frame := 0; frame < opusSILKQualityFrames; frame++ {
+		pcm := sig.gen(rate, frame*frameSize, frameSize)
+		pkt, err := enc.EncodeFloat(pcm, frameSize)
+		if err != nil {
+			t.Fatalf("frame %d EncodeFloat: %v", frame, err)
+		}
+		config := int((pkt[0] >> 3) & 0x1f)
+		if config < 12 || config > 15 {
+			t.Fatalf("frame %d config=%d, want hybrid", frame, config)
+		}
+		decoded, err := dec.DecodeFloat(pkt)
+		if err != nil {
+			t.Fatalf("frame %d DecodeFloat: %v", frame, err)
+		}
+		in = append(in, pcm...)
+		out = append(out, decoded...)
+	}
+
+	snr, _, _, scale := opusSILKAlignedSNR(in, out, frameSize)
+	outRMS, peak, _ := opusSILKQualityStats(out)
+	t.Logf("24k hybrid unvoiced-noise: SNR=%.2fdB scale=%.4f RMS=%.5f peak=%.4f",
+		snr, scale, outRMS, peak)
+	if scale <= 0.25 {
+		t.Fatalf("hybrid unvoiced-noise alignment scale %.4f indicates low-band collapse or polarity reversal", scale)
+	}
+	if outRMS < 0.07 {
+		t.Fatalf("hybrid unvoiced-noise output RMS %.5f indicates energy collapse", outRMS)
+	}
+}
+
 func TestEncoderSILKOnlyStereoQualityBaseline(t *testing.T) {
 	for _, rate := range []int{16000, 48000} {
 		rate := rate

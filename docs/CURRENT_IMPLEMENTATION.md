@@ -521,7 +521,13 @@ The SILK package contains:
   Voiced mono SILK-only frames now use the SNR-derived gains as a VBR target:
   the encoder tries the natural trellis NSQ result once, keeps it when it fits
   the per-frame byte ceiling, and only falls back to the budget-search clamp on
-  overflow. The `silk_control_SNR` table is still copied from libopus, but the
+  overflow. This natural-size path is enabled only when the public encoder is in
+  VBR or constrained-VBR mode. Plain CBR keeps every active mono SILK-only
+  stream at the nominal packet size (for example, 61 bytes including the TOC
+  for 20 ms at 24 kbps); silence remains minimal. The top-level encoder now
+  passes its rate-mode contract explicitly into the SILK encoder instead of
+  allowing voiced content to bypass CBR padding. The `silk_control_SNR` table
+  is still copied from libopus, but the
   voiced SNR-target VBR path now backs the effective target down at 24 kbps and
   below before `gain_mult`/`process_gains` (22.5 dB for NB, 20 dB for MB/WB)
   because the simplified voiced trellis/NSQ lands well above libopus's
@@ -573,7 +579,12 @@ The SILK package contains:
   state to the delayed-decision trellis before a voiced frame. This keeps
   encoder and decoder synthesis aligned across unvoiced-to-voiced transitions;
   the 8/12 kHz speech-harmonic alignment-scale regression is covered by
-  sample-level state and public quality guards.
+  sample-level state and public quality guards. The libopus A/B harness now
+  compares constrained VBR on both encoders, forces the matched-bitrate
+  libopus run to the same SILK bandwidth as the Go packet, and reports an
+  explicit RMS loudness difference in dB. On the speech-harmonic fixture the
+  matched loudness differences are within 0.75 dB at 8/12/16 kHz; the former
+  approximately 0.57 alignment scale is no longer present.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single

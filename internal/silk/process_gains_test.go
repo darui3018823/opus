@@ -33,18 +33,17 @@ func TestSilkControlSNR(t *testing.T) {
 }
 
 func TestVoicedSNRTargetBackoff(t *testing.T) {
-	if got, want := voicedSNRTargetDecrDB(8, 24000, 44), 22.5; got != want {
-		t.Fatalf("voicedSNRTargetDecrDB(8)=%.1f, want %.1f", got, want)
-	}
 	for _, tc := range []struct {
 		fsKHz int
 		lag   int
+		want  float64
 	}{
-		{12, 67},
-		{16, 89},
+		{8, 44, 27.0},
+		{12, 67, 24.0},
+		{16, 89, 24.0},
 	} {
-		if got, want := voicedSNRTargetDecrDB(tc.fsKHz, 24000, tc.lag), 20.0; got != want {
-			t.Fatalf("voicedSNRTargetDecrDB(%d)=%.1f, want %.1f", tc.fsKHz, got, want)
+		if got := voicedSNRTargetDecrDB(tc.fsKHz, 24000, tc.lag); got != tc.want {
+			t.Fatalf("voicedSNRTargetDecrDB long lag fs=%d got %.1f, want %.1f", tc.fsKHz, got, tc.want)
 		}
 	}
 	for _, tc := range []struct {
@@ -52,7 +51,7 @@ func TestVoicedSNRTargetBackoff(t *testing.T) {
 		lag   int
 		want  float64
 	}{
-		{8, 36, 30.0},
+		{8, 36, 22.5},
 		{12, 55, 20.0},
 		{16, 73, 16.0},
 	} {
@@ -65,9 +64,8 @@ func TestVoicedSNRTargetBackoff(t *testing.T) {
 	}
 }
 
-// TestVoicedUsesTrellisGating verifies the Step 4 trellis is enabled for mono
-// SILK-only encoders but gated off for stereo components and hybrid frames.
-// Stereo trellis conformance requires stereo predictor co-design (Step 5+).
+// TestVoicedUsesTrellisGating verifies the Step 4 trellis is enabled for mono,
+// stereo, and hybrid voiced frames.
 func TestVoicedUsesTrellisGating(t *testing.T) {
 	mono, err := NewEncoder(16000, 1)
 	if err != nil {
@@ -77,8 +75,8 @@ func TestVoicedUsesTrellisGating(t *testing.T) {
 		t.Fatalf("mono SILK-only encoder should use the voiced trellis")
 	}
 	mono.SetHybridMode(true)
-	if mono.voicedUsesTrellis() {
-		t.Fatalf("hybrid-mode encoder must gate off the voiced trellis")
+	if !mono.voicedUsesTrellis() {
+		t.Fatalf("hybrid-mode encoder should use the voiced trellis")
 	}
 	mono.SetHybridMode(false)
 	if !mono.voicedUsesTrellis() {
@@ -89,11 +87,11 @@ func TestVoicedUsesTrellisGating(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEncoder stereo: %v", err)
 	}
-	if stereo.voicedUsesTrellis() {
-		t.Fatalf("stereo mid encoder must gate off the voiced trellis (not yet conformant)")
+	if !stereo.voicedUsesTrellis() {
+		t.Fatalf("stereo mid encoder should use the voiced trellis")
 	}
-	if stereo.side == nil || stereo.side.voicedUsesTrellis() {
-		t.Fatalf("stereo side encoder must gate off the voiced trellis (not yet conformant)")
+	if stereo.side == nil || !stereo.side.voicedUsesTrellis() {
+		t.Fatalf("stereo side encoder should use the voiced trellis")
 	}
 }
 
@@ -152,10 +150,20 @@ func TestLTPPredCodGainDB(t *testing.T) {
 		t.Fatalf("NewEncoder: %v", err)
 	}
 
+	// Prime the history with the preceding part of the same continuous tone.
+	// A reset encoder has zero history and genuinely cannot use LTP for its first
+	// frame; relying on floating-point tie-breaking there made this test
+	// architecture-dependent.
+	hist := len(enc.pitchHist)
+	tone := func(n int) float64 {
+		return 0.20 * math.Sin(2*math.Pi*200*float64(n)/rate)
+	}
+	for i := range enc.pitchHist {
+		enc.pitchHist[i] = tone(i - hist)
+	}
 	periodic := make([]float64, enc.frameSize)
 	for i := range periodic {
-		tm := float64(i) / rate
-		periodic[i] = 0.20 * math.Sin(2*math.Pi*200*tm)
+		periodic[i] = tone(i)
 	}
 	cb := getNLSFCB(enc.lpcOrder)
 	nlsf := enc.analyzeNLSF(periodic, cb, SignalTypeVoiced)

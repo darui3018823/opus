@@ -3,9 +3,9 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"github.com/darui3018823/opus"
 	"math"
 	"os"
-	"github.com/darui3018823/opus"
 )
 
 func main() {

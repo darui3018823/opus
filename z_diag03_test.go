@@ -35,20 +35,24 @@ func TestDiagCELT(t *testing.T) {
 		pos += 8 + size
 		pcm := make([]int16, 5760*2)
 		n, _ := dec.Decode(pkt, pcm)
-		
+
 		refFrame := ref[:n*2]
 		ref = ref[n*2:]
-		
+
 		rmse := 0.0
 		maxPCM := int16(0)
 		for i := 0; i < n*2; i++ {
 			d := float64(pcm[i])/32768.0 - refFrame[i]
 			rmse += d * d
-			if pcm[i] > maxPCM { maxPCM = pcm[i] }
-			if -pcm[i] > maxPCM { maxPCM = -pcm[i] }
+			if pcm[i] > maxPCM {
+				maxPCM = pcm[i]
+			}
+			if -pcm[i] > maxPCM {
+				maxPCM = -pcm[i]
+			}
 		}
 		rmse = math.Sqrt(rmse / float64(n*2))
-		
+
 		// Print a few non-overlap samples (after sample 240 in interleaved)
 		fmt.Printf("pkt%d: RMSE=%.4f maxPCM=%d\n", pi, rmse, maxPCM)
 		for i := 240; i < 260 && i < n*2; i++ {

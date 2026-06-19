@@ -37,8 +37,8 @@ func TestDetailedVectorAnalysis(t *testing.T) {
 
 		totalSamples := 0
 		pktCount := 0
-		byConfig := make(map[int]int) // config -> total samples
-		byCC := make(map[int]int)     // cc -> count
+		byConfig := make(map[int]int)       // config -> total samples
+		byCC := make(map[int]int)           // cc -> count
 		code3FrameHist := make(map[int]int) // frame_count -> count of such packets
 
 		origData := make([]byte, len(data))
@@ -137,13 +137,21 @@ func TestDetailedVectorAnalysis(t *testing.T) {
 				var frameMs int
 				if cfg < 12 {
 					switch cfg & 3 {
-					case 0: frameMs = 10
-					case 1: frameMs = 20
-					case 2: frameMs = 40
-					case 3: frameMs = 60
+					case 0:
+						frameMs = 10
+					case 1:
+						frameMs = 20
+					case 2:
+						frameMs = 40
+					case 3:
+						frameMs = 60
 					}
 				} else {
-					if cfg&1 == 0 { frameMs = 10 } else { frameMs = 20 }
+					if cfg&1 == 0 {
+						frameMs = 10
+					} else {
+						frameMs = 20
+					}
 				}
 				t.Logf("  config=%d (SILK %dms): contributed %d samples", cfg, frameMs, byConfig[cfg])
 			}

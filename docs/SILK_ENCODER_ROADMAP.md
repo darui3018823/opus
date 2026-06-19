@@ -307,9 +307,9 @@ Status: In progress (started 2026-06-17)
 ### Q7 — Finishing: complexity scaling, hybrid redundancy, cleanup
 
 - Goal: make `SetComplexity` actually scale search effort (NSQ states, pitch
-  search depth), enable hybrid redundancy where it helps, polish mode
-  transitions, and delete the dead `encodeLegacyAnalysisFrame` / `encodeFrame`
-  reference paths once Q1-Q5 fully supersede them.
+  search depth), enable hybrid redundancy where it helps, and polish mode
+  transitions. (The dead `encodeLegacyAnalysisFrame` / `encodeFrame` reference
+  paths were removed once Q1-Q5 superseded them.)
 - Exit: complexity 0..10 trades CPU for `gap_SNR` monotonically; cross-checks and
   official vectors stay green; dead code removed.
 - Risk: low-medium; mostly consolidation.

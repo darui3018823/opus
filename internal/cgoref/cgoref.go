@@ -17,8 +17,34 @@ static int go_opus_encoder_set_complexity(OpusEncoder *enc, int complexity) {
 	return opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(complexity));
 }
 
+static int go_opus_encoder_set_vbr(OpusEncoder *enc, int enabled) {
+	return opus_encoder_ctl(enc, OPUS_SET_VBR(enabled));
+}
+
+static int go_opus_encoder_set_vbr_constraint(OpusEncoder *enc, int constrained) {
+	return opus_encoder_ctl(enc, OPUS_SET_VBR_CONSTRAINT(constrained));
+}
+
+static int go_opus_encoder_set_bandwidth(OpusEncoder *enc, int bandwidth) {
+	return opus_encoder_ctl(enc, OPUS_SET_BANDWIDTH(bandwidth));
+}
+
 static int go_opus_encoder_set_voice(OpusEncoder *enc) {
 	return opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+}
+
+static int go_opus_decoder_disable_osce_bwe(OpusDecoder *dec) {
+#ifdef OPUS_SET_OSCE_BWE_REQUEST
+	int ret = opus_decoder_ctl(dec, OPUS_SET_OSCE_BWE(0));
+	return ret == OPUS_UNIMPLEMENTED ? 0 : ret;
+#else
+	(void)dec;
+	return 0;
+#endif
+}
+
+static int go_opus_decoder_get_final_range(OpusDecoder *dec, opus_uint32 *rng) {
+	return opus_decoder_ctl(dec, OPUS_GET_FINAL_RANGE(rng));
 }
 */
 import "C"
@@ -56,6 +82,11 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 	if code != 0 {
 		return nil, fmt.Errorf("opus_decoder_create: %s", C.GoString(C.opus_strerror(code)))
 	}
+	code = C.go_opus_decoder_disable_osce_bwe(dec)
+	if code != 0 {
+		C.opus_decoder_destroy(dec)
+		return nil, fmt.Errorf("OPUS_SET_OSCE_BWE(0): %s", C.GoString(C.opus_strerror(code)))
+	}
 	return &Decoder{dec: dec, channels: channels}, nil
 }
 
@@ -73,6 +104,33 @@ func (e *Encoder) SetComplexity(complexity int) error {
 	code := C.go_opus_encoder_set_complexity(e.enc, C.int(complexity))
 	if code != 0 {
 		return fmt.Errorf("OPUS_SET_COMPLEXITY: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
+// SetVBR enables or disables variable bitrate encoding.
+func (e *Encoder) SetVBR(enabled bool) error {
+	code := C.go_opus_encoder_set_vbr(e.enc, boolToCInt(enabled))
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_VBR: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
+// SetVBRConstraint enables or disables constrained VBR.
+func (e *Encoder) SetVBRConstraint(constrained bool) error {
+	code := C.go_opus_encoder_set_vbr_constraint(e.enc, boolToCInt(constrained))
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_VBR_CONSTRAINT: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
+// SetBandwidth forces the libopus encoder bandwidth.
+func (e *Encoder) SetBandwidth(bandwidth int) error {
+	code := C.go_opus_encoder_set_bandwidth(e.enc, C.int(bandwidth))
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_BANDWIDTH: %s", C.GoString(C.opus_strerror(code)))
 	}
 	return nil
 }
@@ -127,6 +185,16 @@ func (d *Decoder) DecodeFloat(packet []byte, maxSPC int) ([]float32, error) {
 	return pcm[:int(n)*d.channels], nil
 }
 
+// FinalRange returns the entropy decoder's final range for the last packet.
+func (d *Decoder) FinalRange() (uint32, error) {
+	var rng C.opus_uint32
+	code := C.go_opus_decoder_get_final_range(d.dec, &rng)
+	if code != 0 {
+		return 0, fmt.Errorf("OPUS_GET_FINAL_RANGE: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return uint32(rng), nil
+}
+
 // Close frees the libopus decoder.
 func (d *Decoder) Close() {
 	if d.dec != nil {
@@ -138,4 +206,11 @@ func (d *Decoder) Close() {
 // Version returns the libopus version string.
 func Version() string {
 	return C.GoString(C.opus_get_version_string())
+}
+
+func boolToCInt(v bool) C.int {
+	if v {
+		return 1
+	}
+	return 0
 }

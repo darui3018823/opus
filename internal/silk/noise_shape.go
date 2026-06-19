@@ -43,17 +43,25 @@ func voicedSNRTargetDecrDB(fsKHz, targetRateBps, pitchLag int) float64 {
 	if isShortLagVoiced(fsKHz, pitchLag) {
 		switch fsKHz {
 		case 8:
-			return 30.0
+			return 22.5
 		case 12:
 			return 20.0
 		default:
 			return 16.0
 		}
 	}
-	if fsKHz == 8 {
-		return 22.5
+	// Sustained (long-lag) voiced tones. The earlier 22.5/20.0 backoff still left
+	// this encoder ~4-5 dB above libopus's steady-tone SNR at the matched byte
+	// budget, so a steady pure tone — already transparent — burned bits that buy
+	// no perceptual quality. Backing the target down further lands within ~1 dB of
+	// libopus's operating point (own SNR 14.2/14.7/13.7 dB vs libopus 13.5/13.4/13.5)
+	// while cutting the steady byte rate (8k 236->189, 12k 199->187, 16k 204->194).
+	switch fsKHz {
+	case 8:
+		return 27.0
+	default:
+		return 24.0
 	}
-	return 20.0
 }
 
 type silkComplexityConfig struct {

@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-06-18
+Last reviewed: 2026-06-20
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -73,7 +73,7 @@ requested.
 As of SILK Encoder slice 13, high-bitrate 24/48 kHz voice input can emit hybrid
 packets. The encoder writes a 16 kHz SILK low band and CELT high band into one
 shared range stream in decoder-compatible order (`SILK -> hybrid redundancy flag
--> CELT start=17`), with redundancy disabled. 24 kHz voice emits SWB hybrid
+-> CELT start=17`). 24 kHz voice emits SWB hybrid
 config 13; 48 kHz voice emits FB hybrid config 15 when the selected bandwidth is
 fullband. Automatic signal-content bandwidth narrowing runs before hybrid mode
 selection; if the analysed signal narrows below SWB, the encoder falls back to a
@@ -81,6 +81,22 @@ CELT-only packet using that narrower bandwidth. Explicit forced bandwidths still
 take precedence over max-bandwidth caps. Hybrid is currently limited to 20 ms
 Opus frames, optionally packed as standard multi-frame packets for longer public
 frame sizes.
+
+The encoder implements both directions of libopus-style SILK/hybrid↔CELT
+transition redundancy. It tracks the previous packet's coding mode with
+`Encoder.prevMode`. For hybrid→CELT, the switch is deferred by one packet: the
+transitional packet stays hybrid and appends a trailing 5 ms (240 @ 48 kHz)
+fullband CELT redundant frame (`celt_to_silk=0`) to the last sub-frame. For
+CELT→SILK-only or CELT→hybrid, the first sub-frame carries a leading 5 ms CELT
+redundant frame (`celt_to_silk=1`); SILK-only infers its length from the bytes
+remaining after the position bit, while hybrid explicitly codes the redundancy
+flag and byte count. Redundancy sizes use `computeRedundancyBytes` (libopus
+`compute_redundancy_bytes`). Redundant frames are encoded on a dedicated reset
+CELT encoder so they carry no overlap history; leading frames use the destination
+band limit (17 for SILK wideband, 19/21 for hybrid SWB/FB). libopus 1.6.1 decodes
+all three transition forms (verified by
+`TestCGOEncodeRefHybridRedundancyTransition` and
+`TestCGOEncodeRefCELTToSILKRedundancyTransition`).
 
 Supported public encode packet durations are exact 20 ms multiples from 20 ms
 through 120 ms (`frameSize == base20ms * 1..6`). Unsupported frame sizes and
@@ -262,7 +278,11 @@ durations over the Opus 120 ms packet limit are rejected with
   content hint independently of `SetApplication`.
 - The same automatic bandwidth narrowing is applied before hybrid selection, so
   low-bandwidth 24/48 kHz voice input does not enter hybrid solely because the
-  sample rate and target bitrate would otherwise allow it.
+  sample rate and target bitrate would otherwise allow it. Hybrid selection
+  preserves the config-driven SWB/FB bandwidth for spectrally sparse
+  tonal/harmonic voice, preventing steady voiced frames from falling to NB
+  CELT-only merely because their highest harmonic is below 4 kHz; dense
+  low-bandwidth signals still narrow and fall back to CELT-only.
 - Mode-selection precedence now matches the public bandwidth controls:
   `SetBandwidth` is an explicit force and is not further restricted by a
   previously configured `SetMaxBandwidth` cap; the max cap applies only after
@@ -447,8 +467,8 @@ The SILK package contains:
   decoder's gain, seed, LPC, LTP, quantization-offset, and gain-adjustment
   semantics while selecting pulses, and feeds output error forward as a simple
   noise-shaping term. This is still not a full libopus delayed-decision NSQ, and
-  the analysis remains intentionally simple: no LPC-to-NLSF root solve, no stereo
-  coding, and no full rate-controlled SILK NSQ.
+  the analysis remains intentionally simple: no LPC-to-NLSF root solve and no
+  full rate-controlled SILK NSQ.
 - SILK Encoder slice 6 wires that internal mono encoder into the public Opus
   encoder for low-bitrate VOIP/voice packets at 8/12/16 kHz. It packs one shared
   SILK range stream for 20/40/60 ms single-Opus-frame packets and uses standard
@@ -458,8 +478,11 @@ The SILK package contains:
   decoder cross-checks for the public mono SILK encode path and fixed the
   packetization so libopus accepts those packets. Slice 11 adds 24/48 kHz voice
   input downsampling to a 16 kHz WB SILK layer, Slice 12 adds conservative
-  stereo SILK mid/side packet writing with zero stereo predictors, and Slice 13
-  adds the first public hybrid mode for high-bitrate 24/48 kHz voice. The public
+  stereo SILK mid/side packet writing, and Q6 replaces its original zero
+  predictors with adaptive low/high-band least-squares predictors. The
+  predictors use the libopus SILK quantization table and joint index coding,
+  and the side encoder receives the prediction residual. Slice 13 adds the
+  first public hybrid mode for high-bitrate 24/48 kHz voice. The public
   integration is still intentionally narrow. Slice 8 adds
   deterministic quality/regression baselines for
   the internal mono SILK encoder and the public SILK-only path, covering silence,
@@ -498,16 +521,37 @@ The SILK package contains:
   Voiced mono SILK-only frames now use the SNR-derived gains as a VBR target:
   the encoder tries the natural trellis NSQ result once, keeps it when it fits
   the per-frame byte ceiling, and only falls back to the budget-search clamp on
-  overflow. The `silk_control_SNR` table is still copied from libopus, but the
+  overflow. This natural-size path is enabled only when the public encoder is in
+  VBR or constrained-VBR mode. Plain CBR keeps every active mono SILK-only
+  stream at the nominal packet size (for example, 61 bytes including the TOC
+  for 20 ms at 24 kbps); silence remains minimal. The top-level encoder now
+  passes its rate-mode contract explicitly into the SILK encoder instead of
+  allowing voiced content to bypass CBR padding. The `silk_control_SNR` table
+  is still copied from libopus, but the
   voiced SNR-target VBR path now backs the effective target down at 24 kbps and
   below before `gain_mult`/`process_gains` (22.5 dB for NB, 20 dB for MB/WB)
   because the simplified voiced trellis/NSQ lands well above libopus's
   steady-tone operating point at the raw table values; short-lag voiced frames
-  use rate-specific backoff and, for NB, an extra pulse-rate penalty to keep
-  onset packet sizes closer to libopus.
+  use rate-specific backoff. The former NB-only 30 dB backoff and 64x
+  pulse-rate penalty were removed because they reduced the 8 kHz onset target
+  to 0 dB and dominated the onset quality loss; NB short-lag frames now use the
+  normal 22.5 dB NB backoff and unscaled trellis rate weight.
   `OPUS_SILK_RC_SNR=0` restores the previous
   budget-fitting/padding behaviour for A/B comparisons; unvoiced, silence,
-  stereo, and hybrid paths keep their previous rate-control behaviour. Q3a/Q4a
+  stereo, and hybrid paths keep their previous rate-control behaviour. Stereo
+  voiced SILK-only and hybrid frames now also use delayed-decision trellis NSQ.
+  Stereo components retain budget-based rate control and neutral
+  component-domain spectral shaping. Flushed stereo trellis streams are not
+  zero-extended because those bytes alter libopus's tail-symbol decode; CBR
+  fill for multi-frame packets instead uses Opus code-3 packet padding, which
+  leaves the entropy stream unchanged. Single-frame packets retain compact
+  code-0 framing. A cgo
+  final-range regression verifies encoder/libopus entropy-state agreement
+  across consecutive stereo and hybrid voiced packets. Hybrid trellis initially
+  exposed a decoder-side RMS divergence even though the entropy final range
+  matched libopus: the fixed-point NLSF-to-LPC port omitted libopus's final
+  inverse-prediction-gain stability check and iterative bandwidth expansion.
+  That stabilization is now ported, including the exact chirp update. Q3a/Q4a
   starts the shaping/NSQ handoff by computing per-subframe shaping controls
   (feedback, spectral tilt, LF/HF shaping, voiced harmonic shaping, and a
   Lambda-style pulse penalty scale) and feeding them into the current
@@ -528,13 +572,29 @@ The SILK package contains:
   than libopus. `silk_VAD_GetSA_Q8` is now ported for encoder analysis as a
   four-band SILK VAD state feeding speech activity, input tilt, and input
   quality into pitch and noise-shape analysis, while the older homebrew VAD is
-  still used for the bitstream VAD flag decision.
+  still used for the bitstream VAD flag decision. Its live-onset decision
+  bypasses the five-frame majority-vote attack delay for mono and single-frame
+  stereo mid/side components, so initial harmonic stereo frames reach pitch
+  analysis. Multi-frame stereo streams retain smoothed flags to preserve their
+  shared conditional-gain entropy context. The homebrew NSQ used by
+  inactive/unvoiced frames now hands its reconstructed LPC, LTP, gain, and lag
+  state to the delayed-decision trellis before a voiced frame. This keeps
+  encoder and decoder synthesis aligned across unvoiced-to-voiced transitions;
+  the 8/12 kHz speech-harmonic alignment-scale regression is covered by
+  sample-level state and public quality guards. The libopus A/B harness now
+  compares constrained VBR on both encoders, forces the matched-bitrate
+  libopus run to the same SILK bandwidth as the Go packet, and reports an
+  explicit RMS loudness difference in dB. On the speech-harmonic fixture the
+  matched loudness differences are within 0.75 dB at 8/12/16 kHz; the former
+  approximately 0.57 alignment scale is no longer present.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single
-range decoder runs SILK, the hybrid redundancy flag, then the CELT high band,
-and the two outputs are resampled and time-domain summed. The hybrid SILK->CELT
-redundancy frame (celt_to_silk=0) is also handled.
+range decoder runs SILK, the hybrid redundancy header, then the CELT high band,
+and the two outputs are resampled and time-domain summed. Both redundancy
+directions are handled: trailing SILK→CELT frames crossfade the packet tail and
+seed subsequent CELT state, while leading CELT→SILK/hybrid frames replace the
+first 2.5 ms and crossfade into the new mode over the next 2.5 ms.
 
 ## Test Status
 
@@ -582,6 +642,11 @@ Notes:
 - Official-vector and `.bit`-based diagnostic tests `t.Skip` when `testdata/`
   (git-ignored) is absent; CI downloads `opus_testvectors-rfc8251.tar.gz` into
   `testdata/opus_newvectors/` so they run for real.
+- The dedicated Ubuntu `opusref` workflow installs `libopus-dev` and exports
+  the header search path reported by `pkg-config --cflags opus` through
+  `CGO_CFLAGS`. This is required because distro packages install `opus.h`
+  below an `opus/` include directory rather than at the compiler's default
+  include root.
 - The cgo/libopus reference comparison runs under `go test -tags opusref` and
   needs a C toolchain plus libopus (reported `libopus 1.6.1` locally); it passes
   all 12 vectors. Normal builds use a `!opusref` stub so the codec stays

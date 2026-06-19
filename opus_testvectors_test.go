@@ -193,7 +193,9 @@ func TestOfficialVectors(t *testing.T) {
 			sumSq2 := 0.0
 			for i := 0; i < n; i++ {
 				v := math.Abs(float64(decoded[i]))
-				if v > maxAbs { maxAbs = v }
+				if v > maxAbs {
+					maxAbs = v
+				}
 				sumSq2 += float64(decoded[i]) * float64(decoded[i])
 			}
 			// Compute ref rms and find max region
@@ -202,7 +204,10 @@ func TestOfficialVectors(t *testing.T) {
 			refMaxIdx := 0
 			for i := 0; i < n; i++ {
 				v := math.Abs(ref[i])
-				if v > refMaxAbs { refMaxAbs = v; refMaxIdx = i }
+				if v > refMaxAbs {
+					refMaxAbs = v
+					refMaxIdx = i
+				}
 				refRmsSq += ref[i] * ref[i]
 			}
 			t.Logf("ref_rms=%.6f (float) ref_maxAbs=%.6f at idx=%d", math.Sqrt(refRmsSq/float64(n)), refMaxAbs, refMaxIdx)

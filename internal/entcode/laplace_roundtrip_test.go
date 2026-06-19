@@ -6,7 +6,7 @@ import (
 )
 
 func TestLaplaceRoundtrip(t *testing.T) {
-	fs0 := uint32(72) << 7  // band 0, LM=3 inter
+	fs0 := uint32(72) << 7 // band 0, LM=3 inter
 	decay := int(127) << 6
 
 	for _, val := range []int{0, 1, -1, 2, -2, 5, -5, 10, -10, 16, -16} {

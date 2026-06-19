@@ -64,42 +64,42 @@ const (
 const (
 	BitrateAuto   = -1000
 	BitrateMax    = -1
-	BitrateMin    = 500      // 500 bps
-	BitrateMaxVal = 512000   // 512 kbps
+	BitrateMin    = 500    // 500 bps
+	BitrateMaxVal = 512000 // 512 kbps
 )
 
 // Encoder/Decoder control codes (CTL)
 const (
-	SetBitrateRequest           = 4002
-	GetBitrateRequest           = 4003
-	SetForceChannelsRequest     = 4022
-	GetForceChannelsRequest     = 4023
-	SetMaxBandwidthRequest      = 4004
-	GetMaxBandwidthRequest      = 4005
-	SetBandwidthRequest         = 4008
-	GetBandwidthRequest         = 4009
-	SetComplexityRequest        = 4010
-	GetComplexityRequest        = 4011
-	SetInbandFECRequest         = 4012
-	GetInbandFECRequest         = 4013
-	SetPacketLossPercRequest    = 4014
-	GetPacketLossPercRequest    = 4015
-	SetDTXRequest               = 4016
-	GetDTXRequest               = 4017
-	SetVBRRequest               = 4006
-	GetVBRRequest               = 4007
-	SetVBRConstraintRequest     = 4020
-	GetVBRConstraintRequest     = 4021
-	SetSignalRequest            = 4024
-	GetSignalRequest            = 4025
-	SetApplicationRequest       = 4000
-	GetApplicationRequest       = 4001
-	GetLookaheadRequest         = 4027
+	SetBitrateRequest             = 4002
+	GetBitrateRequest             = 4003
+	SetForceChannelsRequest       = 4022
+	GetForceChannelsRequest       = 4023
+	SetMaxBandwidthRequest        = 4004
+	GetMaxBandwidthRequest        = 4005
+	SetBandwidthRequest           = 4008
+	GetBandwidthRequest           = 4009
+	SetComplexityRequest          = 4010
+	GetComplexityRequest          = 4011
+	SetInbandFECRequest           = 4012
+	GetInbandFECRequest           = 4013
+	SetPacketLossPercRequest      = 4014
+	GetPacketLossPercRequest      = 4015
+	SetDTXRequest                 = 4016
+	GetDTXRequest                 = 4017
+	SetVBRRequest                 = 4006
+	GetVBRRequest                 = 4007
+	SetVBRConstraintRequest       = 4020
+	GetVBRConstraintRequest       = 4021
+	SetSignalRequest              = 4024
+	GetSignalRequest              = 4025
+	SetApplicationRequest         = 4000
+	GetApplicationRequest         = 4001
+	GetLookaheadRequest           = 4027
 	SetExpertFrameDurationRequest = 4040
 	GetExpertFrameDurationRequest = 4041
 	SetPredictionDisabledRequest  = 4042
 	GetPredictionDisabledRequest  = 4043
-	ResetStateRequest           = 4028
+	ResetStateRequest             = 4028
 )
 
 // Complexity (0-10)

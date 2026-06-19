@@ -14,6 +14,8 @@ type opusSILKQualitySignal struct {
 	silent        bool
 	pitchTracked  bool
 	minSNR        float64
+	minScale      float64
+	maxScale      float64
 	maxSilenceRMS float64
 }
 
@@ -120,11 +122,11 @@ func TestEncoderSILKOnlyQualityBaseline(t *testing.T) {
 	}
 }
 
-func TestEncoderSILKOnlyVoicedSNRVBRSkipsCBRPadding(t *testing.T) {
+func TestEncoderSILKOnlyVoicedRateModeContract(t *testing.T) {
 	const rate = 16000
 	const frames = 12
 	frameSize := rate * 20 / 1000
-	totalBytes := func(rcSNR string) int {
+	packetSizes := func(rcSNR string, vbr bool, constrained bool) []int {
 		t.Helper()
 		t.Setenv("OPUS_SILK_TRELLIS", "1")
 		t.Setenv("OPUS_SILK_RC_SNR", rcSNR)
@@ -136,30 +138,52 @@ func TestEncoderSILKOnlyVoicedSNRVBRSkipsCBRPadding(t *testing.T) {
 			t.Fatalf("SetBitrate: %v", err)
 		}
 		enc.SetSignalType(SignalVoice)
+		enc.SetVBR(vbr)
+		if vbr {
+			enc.SetVBRConstraint(constrained)
+		}
 
-		total := 0
+		sizes := make([]int, 0, frames)
 		for frame := 0; frame < frames; frame++ {
 			pcm := opusSILKHarmonicFrame(rate, frame*frameSize, frameSize, 180, 0.20)
 			pkt, err := enc.EncodeFloat(pcm, frameSize)
 			if err != nil {
 				t.Fatalf("frame %d: EncodeFloat: %v", frame, err)
 			}
-			total += len(pkt)
+			sizes = append(sizes, len(pkt))
+		}
+		return sizes
+	}
+
+	const nominalPacketBytes = 1 + 24000*20/1000/8
+	cbrSizes := packetSizes("1", false, true)
+	for frame, size := range cbrSizes {
+		if size != nominalPacketBytes {
+			t.Fatalf("CBR frame %d packet=%d bytes, want %d", frame, size, nominalPacketBytes)
+		}
+	}
+
+	sum := func(sizes []int) int {
+		total := 0
+		for _, size := range sizes {
+			total += size
 		}
 		return total
 	}
+	cbrTotal := sum(cbrSizes)
+	for name, sizes := range map[string][]int{
+		"VBR":  packetSizes("1", true, false),
+		"CVBR": packetSizes("1", true, true),
+	} {
+		if got := sum(sizes); got >= cbrTotal {
+			t.Fatalf("%s steady voiced bytes=%d, want below CBR bytes=%d (sizes=%v)", name, got, cbrTotal, sizes)
+		}
+	}
 
-	snrVBRBytes := totalBytes("1")
-	budgetBytes := totalBytes("0")
-	nominalCBRBytes := frames * (1 + int(float64(24000)*0.020/8.0))
-	if snrVBRBytes >= nominalCBRBytes {
-		t.Fatalf("SNR VBR voiced bytes=%d, want below nominal padded CBR %d", snrVBRBytes, nominalCBRBytes)
-	}
-	if budgetBytes < nominalCBRBytes {
-		t.Fatalf("legacy RC bytes=%d, want at least nominal padded CBR %d", budgetBytes, nominalCBRBytes)
-	}
-	if snrVBRBytes >= budgetBytes {
-		t.Fatalf("SNR VBR bytes=%d, want below legacy budget bytes=%d", snrVBRBytes, budgetBytes)
+	snrVBRTotal := sum(packetSizes("1", true, false))
+	legacyVBRTotal := sum(packetSizes("0", true, false))
+	if snrVBRTotal >= legacyVBRTotal {
+		t.Fatalf("OPUS_SILK_RC_SNR=1 VBR bytes=%d, want below A/B legacy bytes=%d", snrVBRTotal, legacyVBRTotal)
 	}
 }
 
@@ -264,6 +288,59 @@ func TestEncoderSILKOnlySilenceMinimalPacket(t *testing.T) {
 	}
 }
 
+func TestEncoderHybrid24kUnvoicedNoiseDoesNotCollapse(t *testing.T) {
+	const (
+		rate     = 24000
+		bitrate  = 64000
+		channels = 1
+	)
+	frameSize := rate * 20 / 1000
+	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	if err := enc.SetBitrate(bitrate); err != nil {
+		t.Fatalf("SetBitrate: %v", err)
+	}
+	enc.SetVBR(true)
+	enc.SetSignalType(SignalVoice)
+	dec, err := NewDecoder(rate, channels)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+
+	sig := opusSILKQualitySignals()[1]
+	var in, out []float64
+	for frame := 0; frame < opusSILKQualityFrames; frame++ {
+		pcm := sig.gen(rate, frame*frameSize, frameSize)
+		pkt, err := enc.EncodeFloat(pcm, frameSize)
+		if err != nil {
+			t.Fatalf("frame %d EncodeFloat: %v", frame, err)
+		}
+		config := int((pkt[0] >> 3) & 0x1f)
+		if config < 12 || config > 15 {
+			t.Fatalf("frame %d config=%d, want hybrid", frame, config)
+		}
+		decoded, err := dec.DecodeFloat(pkt)
+		if err != nil {
+			t.Fatalf("frame %d DecodeFloat: %v", frame, err)
+		}
+		in = append(in, pcm...)
+		out = append(out, decoded...)
+	}
+
+	snr, _, _, scale := opusSILKAlignedSNR(in, out, frameSize)
+	outRMS, peak, _ := opusSILKQualityStats(out)
+	t.Logf("24k hybrid unvoiced-noise: SNR=%.2fdB scale=%.4f RMS=%.5f peak=%.4f",
+		snr, scale, outRMS, peak)
+	if scale <= 0.25 {
+		t.Fatalf("hybrid unvoiced-noise alignment scale %.4f indicates low-band collapse or polarity reversal", scale)
+	}
+	if outRMS < 0.07 {
+		t.Fatalf("hybrid unvoiced-noise output RMS %.5f indicates energy collapse", outRMS)
+	}
+}
+
 func TestEncoderSILKOnlyStereoQualityBaseline(t *testing.T) {
 	for _, rate := range []int{16000, 48000} {
 		rate := rate
@@ -301,8 +378,8 @@ func TestEncoderSILKOnlyStereoQualityBaseline(t *testing.T) {
 						if stereo := (pkt[0] & 0x04) != 0; !stereo {
 							t.Fatalf("frame %d: TOC stereo bit not set", frame)
 						}
-						if code := int(pkt[0] & 0x03); code != 0 {
-							t.Fatalf("frame %d: count code=%d, want 0 for 20ms SILK packet", frame, code)
+						if code := int(pkt[0] & 0x03); code != 0 && code != 3 {
+							t.Fatalf("frame %d: count code=%d, want compact code 0 or padded code 3 for 20ms SILK packet", frame, code)
 						}
 						decoded, err := dec.DecodeFloat(pkt)
 						if err != nil {
@@ -368,6 +445,8 @@ func opusSILKQualitySignals() []opusSILKQualitySignal {
 			name:         "speech-like-harmonic",
 			pitchTracked: true,
 			minSNR:       -20,
+			minScale:     0.80,
+			maxScale:     1.25,
 			gen: func(rate, start, n int) []float64 {
 				out := make([]float64, n)
 				for i := range out {
@@ -383,7 +462,7 @@ func opusSILKQualitySignals() []opusSILKQualitySignal {
 		},
 		{
 			name:   "onset",
-			minSNR: -24,
+			minSNR: 13.0,
 			gen: func(rate, start, n int) []float64 {
 				out := opusSILKHarmonicFrame(rate, start, n, 220, 0.20)
 				for i := range out {
@@ -429,21 +508,13 @@ func opusSILKStereoQualitySignals() []opusSILKStereoQualitySignal {
 		},
 		{
 			name:          "wide-speech-like",
-			minChannelSNR: 0,
+			minChannelSNR: 5,
 			minSideRMS:    0.012,
-			// This is two distinct harmonic tones (genuinely voiced) that the
-			// pitch analyzer currently misclassifies as unvoiced. After the Q5d
-			// excitation-gain fix those frames reconstruct at correct amplitude
-			// (per-channel SNR improved ~1 dB), but the louder per-channel PRNG
-			// quantization-offset noise pushes the L/R output correlation more
-			// negative (-0.15 -> -0.30). The Q3+Q4 delayed-decision NSQ adds
-			// independent per-channel winning-seed selection, decorrelating the
-			// unvoiced dither slightly further (-0.30 -> -0.34). Adaptive stereo
-			// prediction restores more side energy for this intentionally wide
-			// fixture, so the correlation can be a little more negative while the
-			// channel SNR/RMS/peak guards still reject collapse or runaway output.
-			// The proper fix is Step 2 (pitch classification).
-			minOutCorr: -0.50,
+			// Stereo VAD must pass a live onset straight through. Waiting for its
+			// old five-frame majority vote marked the initial harmonic frames
+			// inactive, bypassed pitch analysis, and cost roughly 2-3 dB/channel.
+			// Keep both the recovered channel quality and stereo image locked.
+			minOutCorr: -0.25,
 			maxOutCorr: 0.95,
 			gen: func(rate, start, n int) []float64 {
 				out := make([]float64, n*2)
@@ -537,6 +608,12 @@ func assertOpusSILKQuality(t *testing.T, sig opusSILKQualitySignal, m opusSILKQu
 	}
 	if m.alignedSNR < sig.minSNR {
 		t.Fatalf("%s: aligned SNR %.2fdB below %.2fdB", sig.name, m.alignedSNR, sig.minSNR)
+	}
+	if sig.minScale > 0 && m.scale < sig.minScale {
+		t.Fatalf("%s: alignment scale %.4f below %.4f", sig.name, m.scale, sig.minScale)
+	}
+	if sig.maxScale > 0 && m.scale > sig.maxScale {
+		t.Fatalf("%s: alignment scale %.4f above %.4f", sig.name, m.scale, sig.maxScale)
 	}
 	if sig.pitchTracked {
 		if m.pitchMean <= 0 {

@@ -208,6 +208,22 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	return out, err
 }
 
+// EncodeRedundant encodes a standalone fullband CELT frame of exactly nbytes,
+// used for the 5 ms redundant frame that smooths a hybrid->CELT transition. The
+// caller resets the encoder first so the frame carries no overlap history, which
+// matches the decoder's freshly reset redundant-frame decoder. The output is a
+// fixed-size (CBR) packet padded to nbytes regardless of the encoder's rate mode.
+func (e *Encoder) EncodeRedundant(samples []float64, nbytes int) ([]byte, error) {
+	if nbytes < 2 {
+		return nil, errors.New("celt: invalid redundancy size")
+	}
+	saved := e.rateMode
+	e.rateMode = RateModeCBR
+	_, out, err := e.encodeRange(samples, nil, nbytes, 0, -1)
+	e.rateMode = saved
+	return out, err
+}
+
 // EncodeHybrid writes the CELT high-band layer of a hybrid frame into an
 // already-started range encoder. The SILK layer must already have written its
 // symbols. totalBytes is the full shared Opus frame payload size.
@@ -882,6 +898,81 @@ func (e *Encoder) Reset() {
 	e.vbrOffset = 0
 	e.vbrCount = 0
 	e.vbrDriftComp = 0
+}
+
+// CopyStateFrom copies the inter-frame prediction state from src into e, the
+// encoder-side mirror of the decoder's CopyStateFrom. libopus carries its single
+// celt_enc across mode transitions; this codebase uses a dedicated 5 ms encoder
+// for the redundant frame, so the state must be threaded explicitly:
+//
+//   - CELT->SILK leading redundancy: the redundant frame continues from the
+//     previous CELT-only state (seed = celtEncoder) so it matches the decoder,
+//     which decodes it with its previous CELT state.
+//   - SILK->CELT trailing redundancy: the next CELT-only packet continues from
+//     the trailing redundant frame's state (seed = redundancyCelt), matching the
+//     decoder's celtDec.CopyStateFrom(redDec).
+//
+// Only streaming/prediction state is copied; the configuration (mode, bitrate,
+// complexity, rate mode, end band) is left intact. The copy is channel/band
+// clamped so a 5 ms encoder and a longer-frame encoder (identical 48 kHz overlap
+// and band count) interoperate.
+func (e *Encoder) CopyStateFrom(src *Encoder) {
+	if src == nil || src == e {
+		return
+	}
+
+	for c := range e.overlap {
+		sc := c
+		if sc >= len(src.overlap) {
+			sc = len(src.overlap) - 1
+		}
+		if sc >= 0 {
+			copy(e.overlap[c], src.overlap[sc])
+		}
+	}
+
+	dstBands := e.mode.Bands.NumBands
+	srcBands := src.mode.Bands.NumBands
+	dstHistCh := 0
+	if dstBands > 0 {
+		dstHistCh = len(e.prevBandEnergies) / dstBands
+	}
+	srcHistCh := 0
+	if srcBands > 0 {
+		srcHistCh = len(src.prevBandEnergies) / srcBands
+	}
+	for c := 0; c < dstHistCh; c++ {
+		sc := c
+		if sc >= srcHistCh {
+			sc = srcHistCh - 1
+		}
+		for i := 0; i < dstBands; i++ {
+			di := c*dstBands + i
+			if i >= srcBands || sc < 0 {
+				e.prevBandEnergies[di] = 0
+				continue
+			}
+			e.prevBandEnergies[di] = src.prevBandEnergies[sc*srcBands+i]
+		}
+	}
+
+	for c := range e.preemphMem {
+		sc := c
+		if sc >= len(src.preemphMem) {
+			sc = len(src.preemphMem) - 1
+		}
+		if sc >= 0 {
+			e.preemphMem[c] = src.preemphMem[sc]
+		}
+	}
+
+	e.foldSeed = src.foldSeed
+	e.finalRange = src.finalRange
+	e.frameCount = src.frameCount
+	e.tonalAverage = src.tonalAverage
+	e.lastSpread = src.lastSpread
+	e.consecTransient = src.consecTransient
+	e.intensity = src.intensity
 }
 
 // SetBitrate sets the target bitrate.

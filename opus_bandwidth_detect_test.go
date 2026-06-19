@@ -68,6 +68,30 @@ func TestDetectSignalBandwidthSilence(t *testing.T) {
 	}
 }
 
+func TestHybridSpectralSparsity(t *testing.T) {
+	const (
+		sr = 48000
+		n  = 960
+	)
+	if !isSpectrallySparse(genTone(n, 1000, sr), 1) {
+		t.Fatal("pure tone should be spectrally sparse")
+	}
+	if !isSpectrallySparse(strictSpeechLikeFrame(sr, 1, 0, n), 1) {
+		t.Fatal("speech-like harmonics should be spectrally sparse")
+	}
+
+	lowpassNoise := make([]float64, n)
+	for i := range lowpassNoise {
+		for k := 3; k <= 67; k++ {
+			phase := float64((k*37)%101) * 0.061
+			lowpassNoise[i] += 0.01 * math.Sin(2*math.Pi*float64(k*i)/1024+phase)
+		}
+	}
+	if isSpectrallySparse(lowpassNoise, 1) {
+		t.Fatal("low-passed noise should not be spectrally sparse")
+	}
+}
+
 // TestDetectBandwidthHysteresis verifies the asymmetric hysteresis in tierForFreq:
 // a frequency just below a tier edge widens immediately from a narrower previous
 // decision but holds the wider previous decision rather than narrowing.

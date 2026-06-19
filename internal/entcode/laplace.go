@@ -59,7 +59,7 @@ func (enc *Encoder) EncodeLaplace(value *int, fs uint32, decay int) {
 
 		if fs == 0 {
 			// Clamp: compute maximum representable di and update value.
-			ndiMax := int((32768-fl+laplaceMinp-1) >> laplaceLogMinp)
+			ndiMax := int((32768 - fl + laplaceMinp - 1) >> laplaceLogMinp)
 			ndiMax = (ndiMax - s) >> 1
 			di := val - i
 			if di > ndiMax-1 {

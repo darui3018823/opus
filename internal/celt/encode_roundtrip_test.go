@@ -51,6 +51,83 @@ func TestCeltSilenceRoundTrip(t *testing.T) {
 	}
 }
 
+// TestCeltCopyStateFrom verifies that CopyStateFrom transfers the inter-frame
+// prediction state so a freshly seeded encoder produces byte-identical output to
+// the encoder it was seeded from. This underpins the redundancy state threading
+// in the top-level encoder (CELT->SILK leading and SILK->CELT trailing
+// redundancy), where a dedicated 5 ms encoder must continue from another
+// encoder's state exactly as libopus's single celt_enc does.
+func TestCeltCopyStateFrom(t *testing.T) {
+	const sr = 48000
+	const fs = 960
+	for _, ch := range []int{1, 2} {
+		cfg := DefaultEncoderConfig()
+		src, err := NewEncoder(fs, sr, ch, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dst, err := NewEncoder(fs, sr, ch, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		tone := func(start int) []float64 {
+			x := make([]float64, fs*ch)
+			for i := 0; i < fs; i++ {
+				v := 0.3 * math.Sin(2*math.Pi*1000*float64(start+i)/float64(sr))
+				for c := 0; c < ch; c++ {
+					x[i*ch+c] = v
+				}
+			}
+			return x
+		}
+
+		// Build inter-frame prediction history on src.
+		for f := 0; f < 4; f++ {
+			if _, err := src.Encode(tone(f * fs)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// Diverge dst with different content so a missed copy would show up.
+		for f := 0; f < 2; f++ {
+			noisy := make([]float64, fs*ch)
+			r := rand.New(rand.NewSource(int64(f + 1)))
+			for i := range noisy {
+				noisy[i] = r.Float64()*0.4 - 0.2
+			}
+			if _, err := dst.Encode(noisy); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		// Seed dst from src, then encode the same next frame on both. Identical
+		// output proves the prediction state (energy history, overlap, fold seed,
+		// frame count) was copied: the inter-coded coarse energy and PVQ folding
+		// both depend on it.
+		dst.CopyStateFrom(src)
+		next := tone(4 * fs)
+		srcOut, err := src.Encode(next)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dstOut, err := dst.Encode(next)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(srcOut) != len(dstOut) {
+			t.Fatalf("ch=%d: length mismatch after CopyStateFrom: src=%d dst=%d", ch, len(srcOut), len(dstOut))
+		}
+		for i := range srcOut {
+			if srcOut[i] != dstOut[i] {
+				t.Fatalf("ch=%d: byte %d differs after CopyStateFrom: src=%02x dst=%02x", ch, i, srcOut[i], dstOut[i])
+			}
+		}
+		if src.FinalRange() != dst.FinalRange() {
+			t.Fatalf("ch=%d: final range mismatch after CopyStateFrom: src=%08x dst=%08x", ch, src.FinalRange(), dst.FinalRange())
+		}
+	}
+}
+
 // TestCeltSilenceMinimalSize verifies that with DTX enabled, a silent frame
 // produces a minimal packet even in CBR mode, while a loud frame still fills
 // the target.

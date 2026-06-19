@@ -37,6 +37,13 @@ const bwDetectThreshold = 1e-5 // -50 dB
 // per-packet decision from flapping when a signal hovers right at a boundary.
 const bwDetectHysteresis = 0.9
 
+// hybridSparseBinLimit is the maximum effective number of occupied FFT bins for
+// a signal to be treated as tonal/harmonic by hybrid mode selection. The
+// participation ratio is close to 2 for a Hann-windowed pure tone and remains
+// small for a few harmonics, while low-passed noise occupies tens or hundreds
+// of effective bins.
+const hybridSparseBinLimit = 24
+
 // detectSignalBandwidth analyses a block of interleaved PCM at the caller's sample
 // rate and returns the narrowest internal framing bandwidth (framing.Bandwidth*:
 // NB/WB/SWB/FB) whose audio-frequency range still contains the signal's active
@@ -50,9 +57,79 @@ const bwDetectHysteresis = 0.9
 // framing bandwidth (or a negative value if there is no history) and drives a
 // small hysteresis margin via tierForFreq.
 func detectSignalBandwidth(pcm []float64, channels, sampleRate, prev int) int {
+	bw, _ := detectSignalBandwidthAndSparsity(pcm, channels, sampleRate, prev)
+	return bw
+}
+
+// detectSignalBandwidthAndSparsity performs the shared FFT analysis needed by
+// hybrid mode selection and returns both the detected bandwidth and whether the
+// spectrum is tonal/harmonic.
+func detectSignalBandwidthAndSparsity(pcm []float64, channels, sampleRate, prev int) (int, bool) {
+	power, nfft, ok := signalSpectrumPower(pcm, channels)
+	if !ok {
+		return framing.BandwidthFullband, false
+	}
+
+	// Per-bin power, ignoring DC (bin 0) so a constant offset cannot dominate.
+	var emax, sum, sumSquares float64
+	for k := 1; k < len(power); k++ {
+		sum += power[k]
+		sumSquares += power[k] * power[k]
+		if power[k] > emax {
+			emax = power[k]
+		}
+	}
+	if emax == 0 {
+		// Silence: nothing to narrow (the CELT silence/DTX path handles it anyway).
+		return framing.BandwidthFullband, false
+	}
+	sparse := sumSquares > 0 && sum*sum/sumSquares <= hybridSparseBinLimit
+
+	// Highest bin whose power exceeds the noise/leakage threshold.
+	thresh := emax * bwDetectThreshold
+	topBin := 0
+	for k := len(power) - 1; k >= 1; k-- {
+		if power[k] > thresh {
+			topBin = k
+			break
+		}
+	}
+	topHz := float64(topBin) * float64(sampleRate) / float64(nfft)
+
+	return tierForFreq(topHz, prev), sparse
+}
+
+// isSpectrallySparse reports whether the signal energy is concentrated in a
+// small number of FFT bins. Hybrid mode uses this to distinguish steady
+// voiced/harmonic input from genuinely low-bandwidth broadband input: the
+// former still benefits from retaining the SILK low band and must not fall out
+// of hybrid merely because its highest harmonic is below 4 kHz.
+func isSpectrallySparse(pcm []float64, channels int) bool {
+	power, _, ok := signalSpectrumPower(pcm, channels)
+	if !ok {
+		return false
+	}
+	var sum, sumSquares float64
+	for k := 1; k < len(power); k++ {
+		sum += power[k]
+		sumSquares += power[k] * power[k]
+	}
+	if sum == 0 || sumSquares == 0 {
+		return false
+	}
+	effectiveBins := sum * sum / sumSquares
+	return effectiveBins <= hybridSparseBinLimit
+}
+
+// signalSpectrumPower returns the Hann-windowed mono-downmix power spectrum and
+// FFT size shared by bandwidth and hybrid-tonality analysis.
+func signalSpectrumPower(pcm []float64, channels int) ([]float64, int, bool) {
+	if channels <= 0 {
+		return nil, 0, false
+	}
 	n := len(pcm) / channels
 	if n <= 1 {
-		return framing.BandwidthFullband
+		return nil, 0, false
 	}
 
 	// Mono downmix for the analysis.
@@ -81,37 +158,15 @@ func detectSignalBandwidth(pcm []float64, channels, sampleRate, prev int) int {
 
 	spec, err := dsp.RealFFT(buf)
 	if err != nil {
-		return framing.BandwidthFullband
+		return nil, 0, false
 	}
 
-	// Per-bin power, ignoring DC (bin 0) so a constant offset cannot dominate.
-	nbins := len(spec)
-	var emax float64
-	power := make([]float64, nbins)
-	for k := 1; k < nbins; k++ {
+	power := make([]float64, len(spec))
+	for k := 1; k < len(spec); k++ {
 		p := spec[k].Real*spec[k].Real + spec[k].Imag*spec[k].Imag
 		power[k] = p
-		if p > emax {
-			emax = p
-		}
 	}
-	if emax == 0 {
-		// Silence: nothing to narrow (the CELT silence/DTX path handles it anyway).
-		return framing.BandwidthFullband
-	}
-
-	// Highest bin whose power exceeds the noise/leakage threshold.
-	thresh := emax * bwDetectThreshold
-	topBin := 0
-	for k := nbins - 1; k >= 1; k-- {
-		if power[k] > thresh {
-			topBin = k
-			break
-		}
-	}
-	topHz := float64(topBin) * float64(sampleRate) / float64(nfft)
-
-	return tierForFreq(topHz, prev)
+	return power, nfft, true
 }
 
 // tierForFreq maps an active top frequency (Hz) to a framing bandwidth, applying

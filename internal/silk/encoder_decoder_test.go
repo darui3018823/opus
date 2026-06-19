@@ -1195,6 +1195,96 @@ func TestEncoderStereo(t *testing.T) {
 	}
 }
 
+func TestStereoOnlyMiddleStatePersistsAcrossPackets(t *testing.T) {
+	const rate = 16000
+	frameSize := rate / 50
+
+	enc, err := NewEncoder(rate, 2)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	reference, err := NewEncoder(rate, 2)
+	if err != nil {
+		t.Fatalf("NewEncoder reference: %v", err)
+	}
+
+	makeFrame := func(sideOn bool) []float64 {
+		pcm := make([]float64, frameSize*2)
+		for i := 0; i < frameSize; i++ {
+			tm := float64(i) / rate
+			mid := 0.25 * math.Sin(2*math.Pi*180*tm)
+			side := 0.0
+			if sideOn {
+				side = 0.18 * math.Sin(2*math.Pi*310*tm+0.4)
+			}
+			pcm[2*i] = mid + side
+			pcm[2*i+1] = mid - side
+		}
+		return pcm
+	}
+
+	middleOnly := makeFrame(false)
+	packet, err := enc.Encode(middleOnly)
+	if err != nil {
+		t.Fatalf("middle-only Encode: %v", err)
+	}
+	referencePacket, err := reference.Encode(middleOnly)
+	if err != nil {
+		t.Fatalf("middle-only reference Encode: %v", err)
+	}
+	if string(packet) != string(referencePacket) {
+		t.Fatal("identical middle-only encoders produced different packets")
+	}
+	if !enc.prevOnlyMiddle {
+		t.Fatal("middle-only state was not retained at the packet boundary")
+	}
+
+	// Model stale side synthesis/noise-shaping history from before the
+	// middle-only packet. The reference starts the next packet with the side
+	// encoder explicitly reset; the encoder under test must do the same based
+	// on its persisted prevOnlyMiddle flag.
+	enc.side.prevGainQ16 = 123456
+	enc.side.prevGainIdx = 31
+	enc.side.shapeHarmSmooth = 0.75
+	enc.side.shapeTiltSmooth = -0.5
+	for i := range enc.side.lpcState {
+		enc.side.lpcState[i] = int32(1000 + i)
+	}
+	for i := range enc.side.ltpState {
+		enc.side.ltpState[i] = int32(2000 - i)
+	}
+	for i := range enc.side.nsq.xq {
+		enc.side.nsq.xq[i] = int16(300 - i%600)
+	}
+	for i := range enc.side.nsq.sLTPShpQ14 {
+		enc.side.nsq.sLTPShpQ14[i] = int32(4000 - i)
+	}
+
+	reference.side.Reset()
+	reference.prevOnlyMiddle = false
+	sideActive := makeFrame(true)
+	packet, err = enc.Encode(sideActive)
+	if err != nil {
+		t.Fatalf("side-reactivation Encode: %v", err)
+	}
+	referencePacket, err = reference.Encode(sideActive)
+	if err != nil {
+		t.Fatalf("side-reactivation reference Encode: %v", err)
+	}
+	if string(packet) != string(referencePacket) {
+		t.Fatal("side reactivation did not start from reset side state")
+	}
+	if enc.prevOnlyMiddle {
+		t.Fatal("side-reactivation state was not retained")
+	}
+
+	enc.prevOnlyMiddle = true
+	enc.Reset()
+	if enc.prevOnlyMiddle {
+		t.Fatal("Reset did not clear prevOnlyMiddle")
+	}
+}
+
 // Test stereo decoding
 func TestDecoderStereo(t *testing.T) {
 	dec, err := NewDecoder(8000, 2)
@@ -1255,4 +1345,82 @@ func TestMultiRate(t *testing.T) {
 			t.Logf("Rate %d: encoded %d bytes, decoded %d samples", rate, len(packet), len(output))
 		})
 	}
+}
+
+func TestHomebrewToTrellisNSQStateHandoff(t *testing.T) {
+	for _, rate := range []int{8000, 12000} {
+		t.Run(fmt.Sprintf("%dHz", rate), func(t *testing.T) {
+			enc, err := NewEncoder(rate, 1)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(24000); err != nil {
+				t.Fatalf("SetBitrate: %v", err)
+			}
+			if err := enc.SetComplexity(5); err != nil {
+				t.Fatalf("SetComplexity: %v", err)
+			}
+			dec, err := NewDecoder(rate, 1)
+			if err != nil {
+				t.Fatalf("NewDecoder: %v", err)
+			}
+
+			frameSize := rate / 50
+			var signalTypes []int
+			for frame := 0; frame < 2; frame++ {
+				signal := speechHarmonicTransitionFrame(rate, frame*frameSize, frameSize)
+				packet, err := enc.Encode(signal)
+				if err != nil {
+					t.Fatalf("frame %d Encode: %v", frame, err)
+				}
+				trace := &decodeTrace{}
+				dec.trace = trace
+				decoded, err := dec.Decode(packet)
+				if err != nil {
+					t.Fatalf("frame %d Decode: %v", frame, err)
+				}
+				if len(trace.Frames) != 1 {
+					t.Fatalf("frame %d trace frames=%d, want 1", frame, len(trace.Frames))
+				}
+				signalTypes = append(signalTypes, trace.Frames[0].SignalType)
+
+				if frame == 1 {
+					historyStart := len(enc.ltpState) - frameSize
+					maxDiff := int32(0)
+					for i, sample := range decoded {
+						got := enc.ltpState[historyStart+i]
+						want := int32(math.Round(sample * 32768.0))
+						diff := got - want
+						if diff < 0 {
+							diff = -diff
+						}
+						if diff > maxDiff {
+							maxDiff = diff
+						}
+					}
+					if maxDiff > 1 {
+						t.Fatalf("unvoiced->voiced reconstruction diverged by %d int16 units", maxDiff)
+					}
+				}
+			}
+			if len(signalTypes) != 2 ||
+				signalTypes[0] != SignalTypeUnvoiced ||
+				signalTypes[1] != SignalTypeVoiced {
+				t.Fatalf("signal types=%v, want [unvoiced voiced]", signalTypes)
+			}
+		})
+	}
+}
+
+func speechHarmonicTransitionFrame(rate, start, n int) []float64 {
+	out := make([]float64, n)
+	for i := range out {
+		tm := float64(start+i) / float64(rate)
+		f0 := 145 + 24*math.Sin(2*math.Pi*1.7*tm)
+		env := 0.18 + 0.10*math.Sin(2*math.Pi*3.1*tm+0.2)
+		out[i] = env * (0.58*math.Sin(2*math.Pi*f0*tm) +
+			0.24*math.Sin(2*math.Pi*2*f0*tm+0.35) +
+			0.11*math.Sin(2*math.Pi*3*f0*tm+0.85))
+	}
+	return out
 }

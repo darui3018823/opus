@@ -482,21 +482,13 @@ func opusSILKStereoQualitySignals() []opusSILKStereoQualitySignal {
 		},
 		{
 			name:          "wide-speech-like",
-			minChannelSNR: 0,
+			minChannelSNR: 5,
 			minSideRMS:    0.012,
-			// This is two distinct harmonic tones (genuinely voiced) that the
-			// pitch analyzer currently misclassifies as unvoiced. After the Q5d
-			// excitation-gain fix those frames reconstruct at correct amplitude
-			// (per-channel SNR improved ~1 dB), but the louder per-channel PRNG
-			// quantization-offset noise pushes the L/R output correlation more
-			// negative (-0.15 -> -0.30). The Q3+Q4 delayed-decision NSQ adds
-			// independent per-channel winning-seed selection, decorrelating the
-			// unvoiced dither slightly further (-0.30 -> -0.34). Adaptive stereo
-			// prediction restores more side energy for this intentionally wide
-			// fixture, so the correlation can be a little more negative while the
-			// channel SNR/RMS/peak guards still reject collapse or runaway output.
-			// The proper fix is Step 2 (pitch classification).
-			minOutCorr: -0.50,
+			// Stereo VAD must pass a live onset straight through. Waiting for its
+			// old five-frame majority vote marked the initial harmonic frames
+			// inactive, bypassed pitch analysis, and cost roughly 2-3 dB/channel.
+			// Keep both the recovered channel quality and stereo image locked.
+			minOutCorr: -0.25,
 			maxOutCorr: 0.95,
 			gen: func(rate, start, n int) []float64 {
 				out := make([]float64, n*2)

@@ -121,7 +121,7 @@ func TestNLSFQuantization(t *testing.T) {
 	// reconstruction may not preserve exact stability properties.
 	// In production, trained codebooks would provide better stability.
 	// We verify the quantization/dequantization API works correctly.
-	
+
 	// Verify reconstructed values are in valid range
 	for i, val := range reconstructed {
 		if val < 0 || val > math.Pi {
@@ -505,6 +505,23 @@ func TestVADReset(t *testing.T) {
 			t.Error("History not cleared")
 			break
 		}
+	}
+}
+
+func TestStereoEncoderVADReportsLiveOnsetImmediately(t *testing.T) {
+	enc, err := NewEncoder(16000, 2)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	signal := make([]float64, enc.frameSize)
+	for i := range signal {
+		signal[i] = 0.2 * math.Sin(2*math.Pi*180*float64(i)/16000)
+	}
+	if !enc.vad.Detect(signal) {
+		t.Fatal("stereo mid VAD suppressed the first active frame")
+	}
+	if enc.side == nil || !enc.side.vad.Detect(signal) {
+		t.Fatal("stereo side VAD suppressed the first active frame")
 	}
 }
 

@@ -564,7 +564,11 @@ The SILK package contains:
   than libopus. `silk_VAD_GetSA_Q8` is now ported for encoder analysis as a
   four-band SILK VAD state feeding speech activity, input tilt, and input
   quality into pitch and noise-shape analysis, while the older homebrew VAD is
-  still used for the bitstream VAD flag decision.
+  still used for the bitstream VAD flag decision. Its live-onset decision
+  bypasses the five-frame majority-vote attack delay for mono and single-frame
+  stereo mid/side components, so initial harmonic stereo frames reach pitch
+  analysis. Multi-frame stereo streams retain smoothed flags to preserve their
+  shared conditional-gain entropy context.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single

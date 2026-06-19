@@ -16,10 +16,7 @@ type VAD struct {
 	hangoverCount   int     // Current hangover counter
 	// immediateAttack reports a live (post-hangover) active frame without waiting
 	// for the majority-vote smoother to accumulate history, so a silence->speech
-	// transition does not lose its first 1-2 attack frames. Enabled only for the
-	// mono SILK-only path; the stereo multi-frame conditional-coding stream is
-	// sensitive to VAD-flag changes (they shift the per-frame entropy context and
-	// break decoder/libopus bit-conformance), so stereo keeps the smoothed flag.
+	// transition does not lose its first active frames.
 	immediateAttack bool
 }
 

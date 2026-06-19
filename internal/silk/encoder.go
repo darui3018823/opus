@@ -198,15 +198,16 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		side.bitrate = enc.bitrate
 		enc.stereoComponent = true
 		side.stereoComponent = true
-		side.vad.immediateAttack = false
 		enc.side = side
 	}
-	// Only the mono SILK-only path enables the low-latency VAD attack (see VAD
-	// docs): stereo mid/side share a conditional-coding entropy stream whose
-	// bit-conformance is sensitive to per-frame VAD-flag changes. (The side
-	// encoder is built via this same constructor as a 1-channel encoder before
-	// stereoComponent is set, so its flag is cleared explicitly above.)
-	enc.vad.immediateAttack = enc.channels == 1 && !enc.stereoComponent
+	// Do not let the history smoother suppress a live onset. This applies to
+	// both mono and stereo components; the VAD flags are written before the
+	// per-frame symbols, so changing an accurately predicted flag does not alter
+	// the encoder/decoder entropy ordering.
+	enc.vad.immediateAttack = true
+	if enc.side != nil {
+		enc.side.vad.immediateAttack = true
+	}
 
 	return enc, nil
 }
@@ -312,6 +313,13 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 	if e.side == nil {
 		return fmt.Errorf("missing SILK side-channel encoder")
 	}
+
+	// A single-frame stereo packet can report a live onset immediately, which
+	// ensures the frame reaches pitch analysis. Multi-frame stereo streams keep
+	// the smoothed flags: their conditional-gain context is shared across all
+	// frames, and changing the precomputed VAD pattern breaks libopus parity.
+	e.vad.immediateAttack = nFrames == 1
+	e.side.vad.immediateAttack = nFrames == 1
 
 	midFrames := make([][]float64, nFrames)
 	sideFrames := make([][]float64, nFrames)

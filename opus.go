@@ -379,7 +379,10 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int) ([]byte, er
 	silkFrameSize := e.silkSampleRate * 20 / 1000
 	silkChunkLen := silkFrameSize * e.channels
 	celtEnd := celtEndBandForFramingBW(bw)
-	targetBytes := e.hybridFrameTargetBytes()
+	maxBytes := e.hybridFrameTargetBytes()
+	// CBR keeps every hybrid frame at the full per-frame ceiling; VBR/CVBR lets
+	// the per-frame target shrink for easy content (see hybridAdaptiveTargetBytes).
+	cbr := e.rateMode == celt.RateModeCBR
 
 	frames := make([][]byte, 0, nFrames)
 	for k := 0; k < nFrames; k++ {
@@ -391,7 +394,7 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int) ([]byte, er
 		}
 		celtInput := e.celtInputFrame(chunk)
 
-		enc := entcode.NewEncoder(targetBytes)
+		enc := entcode.NewEncoder(maxBytes)
 		e.silkEncoder.SetHybridMode(true)
 		err := e.silkEncoder.EncodeMultiWithEncoder(enc, silkPCM, 1)
 		e.silkEncoder.SetHybridMode(false)
@@ -399,8 +402,26 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int) ([]byte, er
 			return nil, fmt.Errorf("SILK hybrid encoding failed: %w", err)
 		}
 		// Hybrid redundancy is disabled in this first encoder slice.
-		if enc.ECTell()+37 <= targetBytes*8 {
+		if enc.ECTell()+37 <= maxBytes*8 {
 			enc.EncodeBitLogp(false, 12)
+		}
+
+		// Choose the per-frame coded size. The SILK low band has already been
+		// written; CELT fills the remainder of the high band up to targetBytes,
+		// and the frame is padded to exactly targetBytes so the decoder (which
+		// derives the CELT budget from the final packet length) stays
+		// bit-symmetric with the allocation the encoder used. In VBR the target
+		// shrinks toward the SILK size for frames with little high-band energy
+		// (silence, low tones), so easy hybrid frames are no longer padded to the
+		// full CBR ceiling.
+		targetBytes := maxBytes
+		if !cbr {
+			targetBytes = e.hybridAdaptiveTargetBytes(enc.ECTell(), celtInput, maxBytes)
+			// Shrink the shared range encoder to the chosen size before CELT writes
+			// so the raw-tail bits land at targetBytes (libopus ec_enc_shrink). The
+			// decoder derives the CELT budget from the final packet length, so the
+			// allocation CELT computes against targetBytes stays bit-symmetric.
+			enc.Shrink(targetBytes)
 		}
 		if err := e.celtEncoder.EncodeHybrid(celtInput, enc, targetBytes, 17, celtEnd); err != nil {
 			return nil, fmt.Errorf("CELT hybrid encoding failed: %w", err)
@@ -418,9 +439,10 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int) ([]byte, er
 		frames = append(frames, frame)
 	}
 
-	// Hybrid frames are always padded to targetBytes, so they are equal-size.
-	// Pass vbr=false so packOpusFrames selects code 1 (not code 2) for 2 frames.
-	payload, code, err := packOpusFramesPadded(frames, false, e.padBytes)
+	// Each frame is padded to its own targetBytes. In CBR those are equal, so
+	// pass vbr=false (compact code 1 for 2 frames); in VBR they vary, so the
+	// variable-length packing path (length prefixes / code 2/3) is required.
+	payload, code, err := packOpusFramesPadded(frames, !cbr, e.padBytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack hybrid stream: %w", err)
 	}
@@ -436,6 +458,65 @@ func (e *Encoder) hybridFrameTargetBytes() int {
 		tb = 1275
 	}
 	return tb
+}
+
+// hybridAdaptiveTargetBytes picks a per-frame hybrid packet size for VBR. The
+// SILK low band has already consumed silkBits; the CELT high band is given a
+// budget scaled by how much energy sits above the SILK cutoff, so frames with
+// little high-frequency content shrink below the CBR ceiling instead of padding
+// to it. The result is anchored above the SILK size (plus a small floor for the
+// mandatory high-band coarse energy) and capped at maxBytes.
+func (e *Encoder) hybridAdaptiveTargetBytes(silkBits int, celtInput []float64, maxBytes int) int {
+	silkBytes := (silkBits + 7) / 8
+	// Minimum room for the CELT high-band coarse energy + header symbols.
+	const minHighBandBytes = 10
+	maxHighBand := maxBytes - silkBytes
+	if maxHighBand <= minHighBandBytes {
+		// SILK is already near the ceiling; let CELT use whatever remains.
+		return maxBytes
+	}
+	frac := hybridHighBandActivity(celtInput, e.channels)
+	highBand := minHighBandBytes + int(frac*float64(maxHighBand-minHighBandBytes)+0.5)
+	target := silkBytes + highBand
+	if target > maxBytes {
+		target = maxBytes
+	}
+	return target
+}
+
+// hybridHighBandActivity estimates, in [0,1], how much of the signal's energy
+// sits at high frequencies, which is what the CELT high band of a hybrid packet
+// codes. It uses a first-difference (high-pass) energy ratio on the mono downmix:
+// the ratio is ~0 for low tones, small for band-limited speech, and ~2 for white
+// noise, so it is mapped through sqrt(ratio/2) to span the budget range.
+func hybridHighBandActivity(pcm []float64, channels int) float64 {
+	n := len(pcm) / channels
+	if n < 2 {
+		return 0
+	}
+	sample := func(i int) float64 {
+		if channels == 1 {
+			return pcm[i]
+		}
+		return 0.5 * (pcm[i*channels] + pcm[i*channels+1])
+	}
+	var energy, hpEnergy float64
+	prev := sample(0)
+	for i := 1; i < n; i++ {
+		s := sample(i)
+		d := s - prev
+		prev = s
+		hpEnergy += d * d
+		energy += s * s
+	}
+	if energy < 1e-9 {
+		return 0
+	}
+	frac := math.Sqrt(hpEnergy / energy / 2.0)
+	if frac > 1 {
+		frac = 1
+	}
+	return frac
 }
 
 func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int) ([]byte, error) {

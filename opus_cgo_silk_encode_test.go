@@ -381,6 +381,75 @@ func TestCGOEncodeRefHybridMultiFrameStrict(t *testing.T) {
 	}
 }
 
+// TestCGOEncodeRefHybridVBR guards the VBR hybrid path: libopus must decode our
+// constrained-VBR hybrid packets, and the per-frame coded size must drop below
+// the CBR ceiling on a silent frame (proving the adaptive target is active).
+func TestCGOEncodeRefHybridVBR(t *testing.T) {
+	t.Logf("libopus version: %s", cgoref.Version())
+
+	cases := []struct {
+		name       string
+		rate       int
+		channels   int
+		bitrate    int
+		wantConfig int
+	}{
+		{name: "swb-24k-mono", rate: 24000, channels: 1, bitrate: 64000, wantConfig: 13},
+		{name: "fb-48k-mono", rate: 48000, channels: 1, bitrate: 64000, wantConfig: 15},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			enc, err := opus.NewEncoder(tc.rate, tc.channels, opus.ApplicationVOIP)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(tc.bitrate); err != nil {
+				t.Fatalf("SetBitrate: %v", err)
+			}
+			enc.SetVBR(true)
+			ref, err := cgoref.NewDecoder(tc.rate, tc.channels)
+			if err != nil {
+				t.Fatalf("cgoref.NewDecoder: %v", err)
+			}
+			defer ref.Close()
+
+			frameSize := tc.rate * 20 / 1000
+			ceiling := tc.bitrate * 20 / 1000 / 8 // per-frame CBR ceiling in bytes
+			var sawShrink bool
+			for p := 0; p < 10; p++ {
+				var in []float64
+				if p == 5 {
+					in = make([]float64, frameSize*tc.channels) // silent frame
+				} else {
+					in = silkRefHybridFrame(tc.rate, p*frameSize, frameSize, tc.channels)
+				}
+				pkt, err := enc.EncodeFloat(in, frameSize)
+				if err != nil {
+					t.Fatalf("packet %d: EncodeFloat: %v", p, err)
+				}
+				if config := int((pkt[0] >> 3) & 0x1f); config != tc.wantConfig {
+					t.Fatalf("packet %d: TOC config=%d, want hybrid config %d", p, config, tc.wantConfig)
+				}
+				if len(pkt) < ceiling {
+					sawShrink = true
+				}
+				refOut, err := ref.DecodeFloat(pkt, tc.rate*120/1000)
+				if err != nil {
+					t.Fatalf("packet %d: libopus decode (VBR hybrid packet non-conformant): %v", p, err)
+				}
+				if want := frameSize * tc.channels; len(refOut) != want {
+					t.Fatalf("packet %d: libopus samples=%d, want %d", p, len(refOut), want)
+				}
+			}
+			if !sawShrink {
+				t.Fatalf("no hybrid frame coded below the %d-byte CBR ceiling; VBR target not active", ceiling)
+			}
+		})
+	}
+}
+
 func silkRefSpeechFrame(rate, start, n, channels int) []float64 {
 	out := make([]float64, n*channels)
 	for i := 0; i < n; i++ {

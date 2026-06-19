@@ -244,7 +244,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	bw := -1
 	hybrid := false
 	if e.shouldEncodeHybrid(nFrames) {
-		bw = e.narrowAutoBandwidth(pcm, e.selectHybridBandwidth())
+		bw = e.narrowAutoHybridBandwidth(pcm, e.selectHybridBandwidth())
 		hybrid = bw == framing.BandwidthSuperwideband || bw == framing.BandwidthFullband
 	}
 
@@ -358,7 +358,7 @@ func (e *Encoder) canDeferToHybrid(nFrames int) bool {
 // single transitional frame is clamped up to SWB so it remains a valid hybrid
 // packet, mirroring libopus reverting mode to the previous (hybrid) mode.
 func (e *Encoder) deferredHybridBandwidth(pcm []float64) int {
-	bw := e.narrowAutoBandwidth(pcm, e.selectHybridBandwidth())
+	bw := e.narrowAutoHybridBandwidth(pcm, e.selectHybridBandwidth())
 	if bw != framing.BandwidthSuperwideband && bw != framing.BandwidthFullband {
 		bw = framing.BandwidthSuperwideband
 	}
@@ -502,6 +502,22 @@ func (e *Encoder) narrowAutoBandwidth(pcm []float64, bw int) int {
 		return bw
 	}
 	det := detectSignalBandwidth(pcm, e.channels, e.sampleRate, e.lastDetectedBW)
+	e.lastDetectedBW = det
+	if det < bw {
+		return det
+	}
+	return bw
+}
+
+func (e *Encoder) narrowAutoHybridBandwidth(pcm []float64, bw int) int {
+	if e.forcedBandwidth != BandwidthAuto {
+		return bw
+	}
+	det, sparse := detectSignalBandwidthAndSparsity(pcm, e.channels, e.sampleRate, e.lastDetectedBW)
+	if det < framing.BandwidthSuperwideband && sparse {
+		e.lastDetectedBW = bw
+		return bw
+	}
 	e.lastDetectedBW = det
 	if det < bw {
 		return det

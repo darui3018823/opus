@@ -631,7 +631,7 @@ func TestEncoderHybridSelectionBoundariesStrict(t *testing.T) {
 			wantBW:     BandwidthFullband,
 		},
 		{
-			name:       "48k-voip-lowband-auto-falls-back-celt",
+			name:       "48k-voip-lowband-broadband-auto-falls-back-celt",
 			rate:       48000,
 			channels:   1,
 			app:        ApplicationVOIP,
@@ -736,8 +736,14 @@ func TestEncoderHybridSelectionBoundariesStrict(t *testing.T) {
 
 			frameSize := tc.rate * 20 / 1000
 			pcm := strictSpeechLikeFrame(tc.rate, tc.channels, 0, frameSize)
-			if tc.name == "48k-voip-lowband-auto-falls-back-celt" {
-				pcm = genTone(frameSize, 1000, float64(tc.rate))
+			if tc.name == "48k-voip-lowband-broadband-auto-falls-back-celt" {
+				for i := range pcm {
+					pcm[i] = 0
+					for k := 3; k <= 67; k++ {
+						phase := float64((k*37)%101) * 0.061
+						pcm[i] += 0.01 * math.Sin(2*math.Pi*float64(k*i)/1024+phase)
+					}
+				}
 			}
 			if tc.wantMode == "hybrid" {
 				pcm = strictHybridWidebandFrame(tc.rate, tc.channels, 0, frameSize)
@@ -752,6 +758,58 @@ func TestEncoderHybridSelectionBoundariesStrict(t *testing.T) {
 			}
 			if tc.wantConfig != 0 && config != tc.wantConfig {
 				t.Fatalf("TOC config=%d, want %d", config, tc.wantConfig)
+			}
+		})
+	}
+}
+
+func TestEncoderHybridKeepsSteadyAndHarmonicVoice(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		rate       int
+		gen        func(int) []float64
+		wantConfig int
+	}{
+		{
+			name: "48k-pure-tone",
+			rate: 48000,
+			gen: func(n int) []float64 {
+				return genTone(n, 1000, 48000)
+			},
+			wantConfig: 15,
+		},
+		{
+			name: "48k-speech-harmonic",
+			rate: 48000,
+			gen: func(n int) []float64 {
+				return strictSpeechLikeFrame(48000, 1, 0, n)
+			},
+			wantConfig: 15,
+		},
+		{
+			name: "24k-pure-tone",
+			rate: 24000,
+			gen: func(n int) []float64 {
+				return genTone(n, 1000, 24000)
+			},
+			wantConfig: 13,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			enc, err := NewEncoder(tc.rate, 1, ApplicationVOIP)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(64000); err != nil {
+				t.Fatalf("SetBitrate: %v", err)
+			}
+			frameSize := tc.rate * 20 / 1000
+			pkt, err := enc.EncodeFloat(tc.gen(frameSize), frameSize)
+			if err != nil {
+				t.Fatalf("EncodeFloat: %v", err)
+			}
+			if config := int(pkt[0] >> 3); config != tc.wantConfig {
+				t.Fatalf("TOC config=%d, want hybrid config %d", config, tc.wantConfig)
 			}
 		})
 	}

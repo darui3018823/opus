@@ -278,7 +278,11 @@ durations over the Opus 120 ms packet limit are rejected with
   content hint independently of `SetApplication`.
 - The same automatic bandwidth narrowing is applied before hybrid selection, so
   low-bandwidth 24/48 kHz voice input does not enter hybrid solely because the
-  sample rate and target bitrate would otherwise allow it.
+  sample rate and target bitrate would otherwise allow it. Hybrid selection
+  preserves the config-driven SWB/FB bandwidth for spectrally sparse
+  tonal/harmonic voice, preventing steady voiced frames from falling to NB
+  CELT-only merely because their highest harmonic is below 4 kHz; dense
+  low-bandwidth signals still narrow and fall back to CELT-only.
 - Mode-selection precedence now matches the public bandwidth controls:
   `SetBandwidth` is an explicit force and is not further restricted by a
   previously configured `SetMaxBandwidth` cap; the max cap applies only after

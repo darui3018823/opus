@@ -808,6 +808,22 @@ func TestEncoderCELTToHybridRedundancy(t *testing.T) {
 }
 
 func TestComputeRedundancyBytes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		frameRate int
+		channels  int
+	}{
+		{name: "zero-frame-rate", frameRate: 0, channels: 1},
+		{name: "negative-frame-rate", frameRate: -1, channels: 1},
+		{name: "zero-channels", frameRate: 50, channels: 0},
+		{name: "negative-channels", frameRate: 50, channels: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := computeRedundancyBytes(160, 64000, tc.frameRate, tc.channels); got != 0 {
+				t.Fatalf("computeRedundancyBytes invalid inputs=%d, want 0", got)
+			}
+		})
+	}
 	// 48 kHz mono 20 ms @ 64 kbps: frameRate=50, maxDataBytes=160. Redundancy must
 	// engage (the transition smoothing relies on it) and stay within [2,257].
 	got := computeRedundancyBytes(160, 64000, 50, 1)
@@ -822,6 +838,14 @@ func TestComputeRedundancyBytes(t *testing.T) {
 	// Larger budgets must never exceed the 257-byte cap.
 	if hi := computeRedundancyBytes(1275, 510000, 50, 2); hi > 257 {
 		t.Fatalf("computeRedundancyBytes high=%d, want <=257", hi)
+	}
+}
+
+func TestHybridHighBandActivityRejectsInvalidChannels(t *testing.T) {
+	for _, channels := range []int{0, -1} {
+		if got := hybridHighBandActivity([]float64{0.1, -0.1}, channels); got != 0 {
+			t.Fatalf("channels=%d activity=%v, want 0", channels, got)
+		}
 	}
 }
 

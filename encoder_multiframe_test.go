@@ -191,6 +191,52 @@ func TestPackOpusFramesPaddedRoundtrip(t *testing.T) {
 	}
 }
 
+func TestPackOpusFramesToPacketSizeMatchesPaddingSearch(t *testing.T) {
+	frames := [][]byte{
+		bytes.Repeat([]byte{0x11}, 17),
+		bytes.Repeat([]byte{0x22}, 23),
+		bytes.Repeat([]byte{0x33}, 31),
+	}
+	compact, compactCode, err := packOpusFrames(frames, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code3, err := packOpusFramesCode3(frames, true, false, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for target := 1 + len(compact); target <= 1275; target++ {
+		wantPayload, wantCode := compact, compactCode
+		if 1+len(code3) == target {
+			wantPayload, wantCode = code3, 3
+		} else {
+			for padBytes := 0; padBytes < target; padBytes++ {
+				padded, err := packOpusFramesCode3(frames, true, true, padBytes)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if 1+len(padded) == target {
+					wantPayload, wantCode = padded, 3
+					break
+				}
+				if 1+len(padded) > target {
+					break
+				}
+			}
+		}
+
+		gotPayload, gotCode, err := packOpusFramesToPacketSize(frames, true, target)
+		if err != nil {
+			t.Fatalf("target=%d: %v", target, err)
+		}
+		if gotCode != wantCode || !bytes.Equal(gotPayload, wantPayload) {
+			t.Fatalf("target=%d: got code=%d len=%d, want code=%d len=%d",
+				target, gotCode, len(gotPayload), wantCode, len(wantPayload))
+		}
+	}
+}
+
 func TestPackOpusFramesErrors(t *testing.T) {
 	if _, _, err := packOpusFrames(nil, false); err == nil {
 		t.Error("expected error for zero frames")

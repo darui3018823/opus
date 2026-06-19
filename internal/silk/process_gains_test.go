@@ -150,10 +150,20 @@ func TestLTPPredCodGainDB(t *testing.T) {
 		t.Fatalf("NewEncoder: %v", err)
 	}
 
+	// Prime the history with the preceding part of the same continuous tone.
+	// A reset encoder has zero history and genuinely cannot use LTP for its first
+	// frame; relying on floating-point tie-breaking there made this test
+	// architecture-dependent.
+	hist := len(enc.pitchHist)
+	tone := func(n int) float64 {
+		return 0.20 * math.Sin(2*math.Pi*200*float64(n)/rate)
+	}
+	for i := range enc.pitchHist {
+		enc.pitchHist[i] = tone(i - hist)
+	}
 	periodic := make([]float64, enc.frameSize)
 	for i := range periodic {
-		tm := float64(i) / rate
-		periodic[i] = 0.20 * math.Sin(2*math.Pi*200*tm)
+		periodic[i] = tone(i)
 	}
 	cb := getNLSFCB(enc.lpcOrder)
 	nlsf := enc.analyzeNLSF(periodic, cb, SignalTypeVoiced)

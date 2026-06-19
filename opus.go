@@ -371,6 +371,9 @@ func (e *Encoder) deferredHybridBandwidth(pcm []float64) int {
 // byte budget, returning 0 when too few bits are available for redundancy to be
 // worthwhile (the decoder then relies on PLC).
 func computeRedundancyBytes(maxDataBytes, bitrate, frameRate, channels int) int {
+	if frameRate <= 0 || channels <= 0 {
+		return 0
+	}
 	baseBits := 40*channels + 20
 	// Equivalent rate for 5 ms frames, then a 3/2 VBR boost (libopus).
 	redundancyRate := bitrate + baseBits*(200-frameRate)
@@ -744,6 +747,9 @@ func (e *Encoder) hybridAdaptiveTargetBytes(silkBits int, celtInput []float64, m
 // the ratio is ~0 for low tones, small for band-limited speech, and ~2 for white
 // noise, so it is mapped through sqrt(ratio/2) to span the budget range.
 func hybridHighBandActivity(pcm []float64, channels int) float64 {
+	if channels <= 0 {
+		return 0
+	}
 	n := len(pcm) / channels
 	if n < 2 {
 		return 0
@@ -1815,16 +1821,23 @@ func packOpusFramesToPacketSize(frames [][]byte, vbr bool, targetBytes int) ([]b
 	if 1+len(code3) == targetBytes {
 		return code3, 3, nil
 	}
-	for padBytes := 0; padBytes < targetBytes; padBytes++ {
-		padded, err := packOpusFramesCode3(frames, vbr, true, padBytes)
-		if err != nil {
-			return nil, 0, err
-		}
-		if 1+len(padded) == targetBytes {
-			return padded, 3, nil
-		}
-		if 1+len(padded) > targetBytes {
-			break
+
+	// A padded code-3 packet adds padBytes data bytes plus the padding-count
+	// run. Each continuation byte represents 254 padding bytes, so the run
+	// length is max(1, ceil(padBytes/254)). Invert that relationship in O(1)
+	// and validate the candidate because sizes immediately after each
+	// continuation boundary are not representable exactly.
+	requiredPadding := targetBytes - 1 - len(code3)
+	if requiredPadding >= 1 {
+		padBytes := requiredPadding - (requiredPadding+254)/255
+		if padBytes >= 0 && padBytes+len(encodePaddingCount(padBytes)) == requiredPadding {
+			padded, err := packOpusFramesCode3(frames, vbr, true, padBytes)
+			if err != nil {
+				return nil, 0, err
+			}
+			if 1+len(padded) == targetBytes {
+				return padded, 3, nil
+			}
 		}
 	}
 	return compact, code, nil

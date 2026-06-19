@@ -69,6 +69,7 @@ func TestOpusSILKStereoABAgainstLibopusEncoder(t *testing.T) {
 						"own peak": peakA, "libopus peak": peakB, "matched peak": peakM,
 					})
 					assertABPeak(t, sig.name, peakA, peakB, peakM)
+					assertABClips(t, sig.name, cfgA, clipsA)
 				})
 			}
 		})
@@ -131,6 +132,7 @@ func TestOpusSILKHybridABAgainstLibopusEncoder(t *testing.T) {
 						"own peak": peakA, "libopus peak": peakB, "matched peak": peakM,
 					})
 					assertABPeak(t, sig.name, peakA, peakB, peakM)
+					assertABClips(t, sig.name, cfgA, clipsA)
 				})
 			}
 		})
@@ -276,5 +278,16 @@ func assertABPeak(t *testing.T, name string, peaks ...float64) {
 		if p > 1.25 {
 			t.Fatalf("%s: decoded peak too large: %.4f", name, p)
 		}
+	}
+}
+
+// assertABClips fails when a SILK-only output (cfg < 12) contains any clipped
+// samples (|x| >= 1.0). Hybrid and CELT modes (cfg >= 12) are excluded because
+// the 48k hybrid speech-like-harmonic clipping is a known open issue tracked
+// separately and not yet resolved.
+func assertABClips(t *testing.T, name string, ownCfg, ownClips int) {
+	t.Helper()
+	if ownCfg < 12 && ownClips > 0 {
+		t.Errorf("%s: own SILK-only output has %d clipped samples (|x|>=1.0)", name, ownClips)
 	}
 }

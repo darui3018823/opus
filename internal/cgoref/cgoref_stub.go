@@ -27,6 +27,21 @@ func (e *Encoder) SetComplexity(complexity int) error {
 	return fmt.Errorf("cgoref encoder requires -tags opusref")
 }
 
+// SetVBR is unavailable in non-opusref builds.
+func (e *Encoder) SetVBR(enabled bool) error {
+	return fmt.Errorf("cgoref encoder requires -tags opusref")
+}
+
+// SetVBRConstraint is unavailable in non-opusref builds.
+func (e *Encoder) SetVBRConstraint(constrained bool) error {
+	return fmt.Errorf("cgoref encoder requires -tags opusref")
+}
+
+// SetBandwidth is unavailable in non-opusref builds.
+func (e *Encoder) SetBandwidth(bandwidth int) error {
+	return fmt.Errorf("cgoref encoder requires -tags opusref")
+}
+
 // SetVoiceMode is unavailable in non-opusref builds.
 func (e *Encoder) SetVoiceMode() error {
 	return fmt.Errorf("cgoref encoder requires -tags opusref")

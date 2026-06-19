@@ -6,6 +6,7 @@ import (
 	"math"
 	"testing"
 
+	framing "github.com/darui3018823/opus/internal"
 	"github.com/darui3018823/opus/internal/cgoref"
 )
 
@@ -29,6 +30,8 @@ func TestOpusSILKABAgainstLibopusEncoder(t *testing.T) {
 					if err := a.SetComplexity(5); err != nil {
 						t.Fatalf("SetComplexity: %v", err)
 					}
+					a.SetVBR(true)
+					a.SetVBRConstraint(true)
 					a.SetSignalType(SignalVoice)
 
 					b, err := cgoref.NewEncoder(rate, 1, ApplicationVOIP)
@@ -42,6 +45,7 @@ func TestOpusSILKABAgainstLibopusEncoder(t *testing.T) {
 					if err := b.SetComplexity(5); err != nil {
 						t.Fatalf("cgoref.SetComplexity: %v", err)
 					}
+					setCGORefCVBR(t, b)
 					if err := b.SetVoiceMode(); err != nil {
 						t.Fatalf("cgoref.SetVoiceMode: %v", err)
 					}
@@ -113,8 +117,13 @@ func TestOpusSILKABAgainstLibopusEncoder(t *testing.T) {
 					if err := matched.SetComplexity(5); err != nil {
 						t.Fatalf("cgoref.SetComplexity matched: %v", err)
 					}
+					setCGORefCVBR(t, matched)
 					if err := matched.SetVoiceMode(); err != nil {
 						t.Fatalf("cgoref.SetVoiceMode matched: %v", err)
+					}
+					matchedBandwidth := opusSILKABBandwidthForConfig(t, firstConfigA)
+					if err := matched.SetBandwidth(matchedBandwidth); err != nil {
+						t.Fatalf("cgoref.SetBandwidth matched: %v", err)
 					}
 					decMatched, err := NewDecoder(rate, 1)
 					if err != nil {
@@ -149,16 +158,33 @@ func TestOpusSILKABAgainstLibopusEncoder(t *testing.T) {
 					snrMatched, rmseMatched, delayMatched, scaleMatched := opusSILKABAlignedSNR(in, outMatched, frameSize)
 					gapSNRMatched := snrMatched - snrA
 					ratioBytesMatched := float64(bytesA) / float64(bytesMatched)
+					if sig.name != "silence" {
+						matchedPacketBandwidth := opusSILKABBandwidthForConfig(t, firstConfigMatched)
+						if matchedPacketBandwidth != matchedBandwidth {
+							t.Fatalf("%s: matched libopus bandwidth=%d, want own packet bandwidth=%d",
+								sig.name, matchedPacketBandwidth, matchedBandwidth)
+						}
+					}
 
 					rmsA, peakA, clipsA := opusSILKQualityStats(outA)
 					rmsB, peakB, clipsB := opusSILKQualityStats(outB)
 					rmsMatched, peakMatched, clipsMatched := opusSILKQualityStats(outMatched)
-					t.Logf("%s/%s: own cfg=%d bytes=%d rms=%.5f peak=%.4f clips=%d SNR=%.2fdB rmse=%.5f delay=%d scale=%.4f; libopus cfg=%d bytes=%d rms=%.5f peak=%.4f clips=%d SNR=%.2fdB rmse=%.5f delay=%d scale=%.4f; libopus_matched bitrate=%d cfg=%d bytes=%d rms=%.5f peak=%.4f clips=%d SNR=%.2fdB rmse=%.5f delay=%d scale=%.4f; gap_SNR=%.2fdB gap_SNR_matched=%.2fdB ratio_bytes=%.3f ratio_bytes_matched=%.3f",
+					t.Logf("%s/%s: own cfg=%d bytes=%d rms=%.5f peak=%.4f clips=%d SNR=%.2fdB rmse=%.5f delay=%d scale=%.4f; libopus cfg=%d bytes=%d rms=%.5f peak=%.4f clips=%d SNR=%.2fdB rmse=%.5f delay=%d scale=%.4f; libopus_matched bitrate=%d bandwidth=%d cfg=%d bytes=%d rms=%.5f peak=%.4f clips=%d SNR=%.2fdB rmse=%.5f delay=%d scale=%.4f; gap_SNR=%.2fdB gap_SNR_matched=%.2fdB ratio_bytes=%.3f ratio_bytes_matched=%.3f",
 						rateName(rate), sig.name,
 						firstConfigA, bytesA, rmsA, peakA, clipsA, snrA, rmseA, delayA, scaleA,
 						firstConfigB, bytesB, rmsB, peakB, clipsB, snrB, rmseB, delayB, scaleB,
-						matchedBitrate, firstConfigMatched, bytesMatched, rmsMatched, peakMatched, clipsMatched, snrMatched, rmseMatched, delayMatched, scaleMatched,
+						matchedBitrate, matchedBandwidth, firstConfigMatched, bytesMatched, rmsMatched, peakMatched, clipsMatched, snrMatched, rmseMatched, delayMatched, scaleMatched,
 						gapSNR, gapSNRMatched, ratioBytes, ratioBytesMatched)
+
+					if sig.name == "speech-like-harmonic" {
+						loudnessDiffDB := opusSILKABRMSDiffDB(rmsA, rmsB)
+						loudnessDiffMatchedDB := opusSILKABRMSDiffDB(rmsA, rmsMatched)
+						t.Logf("%s/%s: RMS loudness own-minus-libopus=%.2fdB, own-minus-libopus-matched=%.2fdB (positive means own is louder)",
+							rateName(rate), sig.name, loudnessDiffDB, loudnessDiffMatchedDB)
+						if math.Abs(loudnessDiffMatchedDB) > 1.5 {
+							t.Fatalf("%s: matched RMS loudness difference %.2fdB outside ±1.5dB", sig.name, loudnessDiffMatchedDB)
+						}
+					}
 
 					for name, value := range map[string]float64{
 						"own SNR":             snrA,
@@ -183,6 +209,40 @@ func TestOpusSILKABAgainstLibopusEncoder(t *testing.T) {
 			}
 		})
 	}
+}
+
+func setCGORefCVBR(t *testing.T, enc *cgoref.Encoder) {
+	t.Helper()
+	if err := enc.SetVBR(true); err != nil {
+		t.Fatalf("cgoref.SetVBR: %v", err)
+	}
+	if err := enc.SetVBRConstraint(true); err != nil {
+		t.Fatalf("cgoref.SetVBRConstraint: %v", err)
+	}
+}
+
+func opusSILKABBandwidthForConfig(t *testing.T, config int) int {
+	t.Helper()
+	mode, bandwidth, _ := framing.ParseTOCConfig(config)
+	if mode != framing.ModeSILKOnly {
+		t.Fatalf("own TOC config=%d is not SILK-only", config)
+	}
+	switch bandwidth {
+	case framing.BandwidthNarrowband:
+		return BandwidthNarrowband
+	case framing.BandwidthMediumband:
+		return BandwidthMediumband
+	case framing.BandwidthWideband:
+		return BandwidthWideband
+	default:
+		t.Fatalf("own SILK TOC config=%d has unsupported bandwidth=%d", config, bandwidth)
+		return BandwidthAuto
+	}
+}
+
+func opusSILKABRMSDiffDB(ownRMS, libopusRMS float64) float64 {
+	const eps = 1e-12
+	return 20 * math.Log10(math.Max(ownRMS, eps)/math.Max(libopusRMS, eps))
 }
 
 func float64ToFloat32(in []float64) []float32 {

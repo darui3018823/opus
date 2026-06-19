@@ -17,6 +17,18 @@ static int go_opus_encoder_set_complexity(OpusEncoder *enc, int complexity) {
 	return opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(complexity));
 }
 
+static int go_opus_encoder_set_vbr(OpusEncoder *enc, int enabled) {
+	return opus_encoder_ctl(enc, OPUS_SET_VBR(enabled));
+}
+
+static int go_opus_encoder_set_vbr_constraint(OpusEncoder *enc, int constrained) {
+	return opus_encoder_ctl(enc, OPUS_SET_VBR_CONSTRAINT(constrained));
+}
+
+static int go_opus_encoder_set_bandwidth(OpusEncoder *enc, int bandwidth) {
+	return opus_encoder_ctl(enc, OPUS_SET_BANDWIDTH(bandwidth));
+}
+
 static int go_opus_encoder_set_voice(OpusEncoder *enc) {
 	return opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
 }
@@ -96,6 +108,33 @@ func (e *Encoder) SetComplexity(complexity int) error {
 	return nil
 }
 
+// SetVBR enables or disables variable bitrate encoding.
+func (e *Encoder) SetVBR(enabled bool) error {
+	code := C.go_opus_encoder_set_vbr(e.enc, boolToCInt(enabled))
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_VBR: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
+// SetVBRConstraint enables or disables constrained VBR.
+func (e *Encoder) SetVBRConstraint(constrained bool) error {
+	code := C.go_opus_encoder_set_vbr_constraint(e.enc, boolToCInt(constrained))
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_VBR_CONSTRAINT: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
+// SetBandwidth forces the libopus encoder bandwidth.
+func (e *Encoder) SetBandwidth(bandwidth int) error {
+	code := C.go_opus_encoder_set_bandwidth(e.enc, C.int(bandwidth))
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_BANDWIDTH: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
 // SetVoiceMode biases libopus toward its voice/SILK mode decisions.
 func (e *Encoder) SetVoiceMode() error {
 	code := C.go_opus_encoder_set_voice(e.enc)
@@ -167,4 +206,11 @@ func (d *Decoder) Close() {
 // Version returns the libopus version string.
 func Version() string {
 	return C.GoString(C.opus_get_version_string())
+}
+
+func boolToCInt(v bool) C.int {
+	if v {
+		return 1
+	}
+	return 0
 }

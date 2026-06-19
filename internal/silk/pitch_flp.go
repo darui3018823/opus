@@ -694,10 +694,6 @@ func (e *Encoder) pitchEstParams() (peComplexity, order int, searchThres1 float6
 func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64) (voiced bool, lagIndex, contourIndex int, ltpCorr float64) {
 	fsKHz := e.sampleRate / 1000
 	nbSubfr := e.nSubframes
-	if e.firstFrameAfterReset {
-		e.ltpCorrState = 0
-		return false, 0, 0, 0
-	}
 
 	peComplexity, order, searchThres1 := e.pitchEstParams()
 

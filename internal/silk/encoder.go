@@ -68,7 +68,7 @@ type Encoder struct {
 	pitchHist            []float64 // Past ltp_mem_length input samples, [-1,1]
 	prevLagForPitch      int       // Previous frame pitch lag (0 if unvoiced)
 	ltpCorrState         float64   // Normalized LTP correlation from prev frame
-	firstFrameAfterReset bool      // Skip pitch search on the first frame
+	firstFrameAfterReset bool      // True until the first frame after reset is encoded
 	curPitchLagIndex     int       // Lag index selected for the current frame
 	curPitchContourIndex int       // Pitch contour index for the current frame
 
@@ -198,8 +198,15 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		side.bitrate = enc.bitrate
 		enc.stereoComponent = true
 		side.stereoComponent = true
+		side.vad.immediateAttack = false
 		enc.side = side
 	}
+	// Only the mono SILK-only path enables the low-latency VAD attack (see VAD
+	// docs): stereo mid/side share a conditional-coding entropy stream whose
+	// bit-conformance is sensitive to per-frame VAD-flag changes. (The side
+	// encoder is built via this same constructor as a 1-channel encoder before
+	// stereoComponent is set, so its flag is cleared explicitly above.)
+	enc.vad.immediateAttack = enc.channels == 1 && !enc.stereoComponent
 
 	return enc, nil
 }
@@ -507,7 +514,7 @@ func (e *Encoder) selectRateControlPlan(
 		_, _, ltpCoeffsQ14 := e.selectLTPGainsVQ(signal, nlsf.lpcQ12, pitchLags)
 		baseTargets = e.shapeGainIndices(signal, nlsf.lpcQ12, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
 	} else {
-		baseTargets = e.excitationGainIndices(signal)
+		baseTargets = e.excitationGainIndicesResidual(signal, nlsf.lpcQ12)
 	}
 	baseIndices = e.resolveGainIndices(baseTargets, conditionalGain)
 
@@ -1156,15 +1163,35 @@ func (e *Encoder) analysisGainIndices(signal []float64) []int {
 	return e.gainIndicesFromEnergy(signal, analysisGainIndexFromEnergy)
 }
 
-// excitationGainIndices derives per-subframe gains so that the quantized
-// excitation stays normalized (RMS ≈ 2 pulse-units). The legacy dB heuristic
-// used by analysisGainIndices is ~1000× too low for unpredicted signals, which
-// drives the NSQ pulses into the ±1024 clamp and blows the bit budget; rate
-// control then crushes the pulses to silence, leaving only the PRNG quantization
-// offset (decorrelated noise). This path is used for the unvoiced branch where
-// there is no LTP prediction to carry the waveform.
-func (e *Encoder) excitationGainIndices(signal []float64) []int {
-	return e.gainIndicesFromEnergy(signal, excitationGainIndexFromEnergy)
+// excitationGainIndicesResidual normalises the unvoiced excitation gain to the
+// short-term LPC *residual* energy rather than the raw signal energy. The gain
+// targets the quantized excitation level (RMS ≈ 2 pulse-units; the legacy dB
+// heuristic in analysisGainIndices is ~1000× too low and floods the shell coder).
+// For noise-like input the LPC predictor is nearly flat, so the residual matches
+// the signal energy and unvoiced-noise quality is preserved. For a harmonic frame
+// that the pitch analyser misclassifies as
+// unvoiced (e.g. the first frame after reset, where the zero-history pitch search
+// is unreliable), the LPC residual is far smaller than the signal: gating the
+// gain on the signal energy would set it for the full tonal amplitude while the
+// sharp LPC synthesis resonance amplifies further, producing a runaway (clipping)
+// output that then poisons every subsequent voiced frame's LTP state. Using the
+// residual energy keeps the synthesised level bounded.
+func (e *Encoder) excitationGainIndicesResidual(signal []float64, lpcQ12 []int16) []int {
+	targets := make([]int, e.nSubframes)
+	if e.nSubframes == 0 {
+		return targets
+	}
+	subLen := e.frameSize / e.nSubframes
+	resNrg := e.ltpResidualEnergyPerSubframe(signal, lpcQ12, SignalTypeUnvoiced, nil, nil)
+	const int16Scale = 32768.0 * 32768.0
+	for sf := 0; sf < e.nSubframes; sf++ {
+		energy := 0.0
+		if subLen > 0 {
+			energy = resNrg[sf] / (int16Scale * float64(subLen))
+		}
+		targets[sf] = excitationGainIndexFromEnergy(energy)
+	}
+	return targets
 }
 
 // shapeGainIndices derives per-subframe target gain indices from the libopus

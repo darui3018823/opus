@@ -14,6 +14,13 @@ type VAD struct {
 	energyThreshold float64 // Adaptive energy threshold
 	hangoverFrames  int     // Number of frames to keep active after speech
 	hangoverCount   int     // Current hangover counter
+	// immediateAttack reports a live (post-hangover) active frame without waiting
+	// for the majority-vote smoother to accumulate history, so a silence->speech
+	// transition does not lose its first 1-2 attack frames. Enabled only for the
+	// mono SILK-only path; the stereo multi-frame conditional-coding stream is
+	// sensitive to VAD-flag changes (they shift the per-frame entropy context and
+	// break decoder/libopus bit-conformance), so stereo keeps the smoothed flag.
+	immediateAttack bool
 }
 
 // NewVAD creates a new voice activity detector
@@ -52,7 +59,16 @@ func (v *VAD) Detect(signal []float64) bool {
 	// Update history
 	v.updateHistory(decision)
 
-	// Apply history-based smoothing
+	// Onset attack must not be delayed: when the current frame is active
+	// (directly, or kept active by hangover) report active immediately rather
+	// than waiting for the majority-vote smoother to accumulate enough history.
+	// The history smoother only acts as an additional activity floor that fills
+	// brief gaps in otherwise-active runs, so it can never *suppress* a live
+	// onset frame. Without this, a silence->speech transition lost its first
+	// 1-2 active frames (the attack), which were then coded as digital silence.
+	if v.immediateAttack {
+		return decision || v.smoothDecision()
+	}
 	return v.smoothDecision()
 }
 

@@ -26,25 +26,25 @@ const (
 
 // Number of bands for different configurations
 const (
-	MaxBands    = 21 // Maximum number of frequency bands
-	MaxPitch    = 1024
-	MaxPeriod   = 1024
-	MinPeriod   = 15
-	MaxOverlap  = 120
+	MaxBands   = 21 // Maximum number of frequency bands
+	MaxPitch   = 1024
+	MaxPeriod  = 1024
+	MinPeriod  = 15
+	MaxOverlap = 120
 )
 
 // Quantization constants
 const (
-	MaxFineEnergy = 7  // Maximum bits for fine energy
+	MaxFineEnergy = 7 // Maximum bits for fine energy
 	MinSpread     = 0
 	MaxSpread     = 3
 )
 
 // Band configuration defines how MDCT bins are grouped into bands
 type BandConfig struct {
-	NumBands  int      // Number of bands
-	BandSizes []int    // Number of bins in each band
-	BandStart []int    // Starting bin for each band
+	NumBands  int       // Number of bands
+	BandSizes []int     // Number of bins in each band
+	BandStart []int     // Starting bin for each band
 	Norm      []float64 // Normalization factors
 }
 
@@ -56,21 +56,21 @@ var (
 		BandSizes: []int{1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 3, 4},
 		BandStart: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 17},
 	}
-	
+
 	// Bands for 240-sample frames (5ms at 48kHz)
 	Bands240 = &BandConfig{
 		NumBands:  17,
 		BandSizes: []int{1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 3, 4, 5},
 		BandStart: []int{0, 1, 2, 3, 4, 5, 6, 7, 9, 11, 13, 15, 17, 19, 21, 24, 28},
 	}
-	
-	// Bands for 480-sample frames (10ms at 48kHz)  
+
+	// Bands for 480-sample frames (10ms at 48kHz)
 	Bands480 = &BandConfig{
 		NumBands:  19,
 		BandSizes: []int{1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 4, 4, 8, 8, 16},
 		BandStart: []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 18, 20, 24, 28, 36, 44},
 	}
-	
+
 	// Bands for 960-sample frames (20ms at 48kHz) - Most common
 	// Band boundaries from libopus eNBands48000[] = {0,1,2,...,100} (21 bands).
 	// BandSizes and BandStart are at LM=0 (2.5ms / 120-sample scale).
@@ -101,13 +101,13 @@ func GetBandConfig(frameSize int) *BandConfig {
 
 // Mode represents a CELT coding mode
 type Mode struct {
-	FrameSize   int         // Frame size in samples at this sample rate
-	SampleRate  int         // Sample rate in Hz (8000/12000/16000/24000/48000)
-	NBase       int         // Base frame size at LM=0 (= SampleRate/400 for 2.5ms)
-	LM          int         // log2(FrameSize/NBase): 0=2.5ms,1=5ms,2=10ms,3=20ms
-	Overlap     int         // Overlap size = NBase (fixed per sample rate)
-	Channels    int         // Number of channels
-	Bands       *BandConfig // Band configuration
+	FrameSize  int         // Frame size in samples at this sample rate
+	SampleRate int         // Sample rate in Hz (8000/12000/16000/24000/48000)
+	NBase      int         // Base frame size at LM=0 (= SampleRate/400 for 2.5ms)
+	LM         int         // log2(FrameSize/NBase): 0=2.5ms,1=5ms,2=10ms,3=20ms
+	Overlap    int         // Overlap size = NBase (fixed per sample rate)
+	Channels   int         // Number of channels
+	Bands      *BandConfig // Band configuration
 }
 
 // celtNumBands returns the number of CELT frequency bands for a given sample rate.

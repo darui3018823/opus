@@ -49,7 +49,7 @@ func (pa *PitchAnalyzer) Analyze(input []float64) (lag int, gain float64) {
 	// Autocorrelation-based pitch detection
 	for testLag := minLag; testLag <= maxLag; testLag++ {
 		var corr, energy float64
-		
+
 		// Compute normalized correlation
 		for i := 0; i < len(input)-testLag; i++ {
 			corr += input[i] * input[i+testLag]

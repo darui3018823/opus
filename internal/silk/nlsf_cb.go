@@ -302,15 +302,15 @@ var silkNLSFCB1WghtWBQ9 = [32][16]int16{
 
 // nlsfCBParams holds all parameters for one NLSF codebook (NB/MB or WB).
 type nlsfCBParams struct {
-	nEntries     int     // number of stage-1 entries (32)
-	order        int     // LPC order (10 or 16)
-	cb1Q8        []uint8 // stage-1 codebook, nEntries*order bytes
-	cb1WghtQ9    []int16 // stage-1 weights, nEntries*order int16s
-	cb1ICDF      []uint8 // stage-1 iCDF (64 bytes for 32+32)
-	cb2ICDF      []uint8 // stage-2 iCDF (72 bytes)
-	cb2Select    []uint8 // stage-2 selection table
-	predQ8       []uint8 // NLSF prediction coefficients
-	deltaMinQ15  []int16 // minimum delta constraints
+	nEntries    int     // number of stage-1 entries (32)
+	order       int     // LPC order (10 or 16)
+	cb1Q8       []uint8 // stage-1 codebook, nEntries*order bytes
+	cb1WghtQ9   []int16 // stage-1 weights, nEntries*order int16s
+	cb1ICDF     []uint8 // stage-1 iCDF (64 bytes for 32+32)
+	cb2ICDF     []uint8 // stage-2 iCDF (72 bytes)
+	cb2Select   []uint8 // stage-2 selection table
+	predQ8      []uint8 // NLSF prediction coefficients
+	deltaMinQ15 []int16 // minimum delta constraints
 }
 
 // nlsfCBNBMB is the NB/MB codebook (order=10).

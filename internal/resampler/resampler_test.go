@@ -230,20 +230,20 @@ func TestResamplerReset(t *testing.T) {
 func TestKaiserWindow(t *testing.T) {
 	// Test Kaiser window properties
 	beta := 5.0
-	
+
 	// Should be 1.0 at center
 	center := kaiserWindow(0.5, beta)
 	if math.Abs(center-1.0) > 0.01 {
 		t.Errorf("Kaiser window at center = %f, want ~1.0", center)
 	}
-	
+
 	// Should be symmetric
 	left := kaiserWindow(0.25, beta)
 	right := kaiserWindow(0.75, beta)
 	if math.Abs(left-right) > 0.01 {
 		t.Errorf("Kaiser window not symmetric: %f vs %f", left, right)
 	}
-	
+
 	// Should be near zero at edges
 	edge := kaiserWindow(0.0, beta)
 	if edge > 0.1 {
@@ -258,7 +258,7 @@ func TestBesselI0(t *testing.T) {
 	if math.Abs(val-1.0) > 1e-10 {
 		t.Errorf("I0(0) = %f, want 1.0", val)
 	}
-	
+
 	// I0(1) should be approximately 1.266
 	val = besselI0(1)
 	if math.Abs(val-1.266) > 0.01 {
@@ -276,7 +276,7 @@ func TestGCD(t *testing.T) {
 		{48000, 48000, 48000},
 		{13, 17, 1},
 	}
-	
+
 	for _, tt := range tests {
 		got := gcd(tt.a, tt.b)
 		if got != tt.want {

@@ -8,16 +8,16 @@ import (
 // Packet represents a decoded CELT packet header
 type Packet struct {
 	// TOC byte fields
-	Config      int  // Configuration number (0-31)
-	Stereo      bool // Stereo flag
-	FrameCount  int  // Number of frames (1, 2, or 3)
-	
+	Config     int  // Configuration number (0-31)
+	Stereo     bool // Stereo flag
+	FrameCount int  // Number of frames (1, 2, or 3)
+
 	// Derived fields
-	FrameSize   int  // Frame size in samples
-	Bandwidth   int  // Bandwidth mode
-	
+	FrameSize int // Frame size in samples
+	Bandwidth int // Bandwidth mode
+
 	// Frame data
-	Frames      [][]byte // Raw frame data for each frame
+	Frames [][]byte // Raw frame data for each frame
 }
 
 // ParseTOC parses the Table of Contents (TOC) byte from an Opus packet
@@ -27,16 +27,16 @@ type Packet struct {
 // - bits 6-7: frame count code
 func ParseTOC(toc byte) (*Packet, error) {
 	p := &Packet{}
-	
+
 	// Extract config (bits 0-4)
 	p.Config = int(toc & 0x1F)
-	
+
 	// Extract stereo flag (bit 5)
 	p.Stereo = (toc & 0x20) != 0
-	
+
 	// Extract frame count code (bits 6-7)
 	frameCode := (toc >> 6) & 0x03
-	
+
 	// Determine frame count from code
 	switch frameCode {
 	case 0:
@@ -48,24 +48,24 @@ func ParseTOC(toc byte) (*Packet, error) {
 		// For now, assume 2 frames (will be refined when parsing full packet)
 		p.FrameCount = 2
 	}
-	
+
 	// Derive frame size and bandwidth from config
 	p.deriveFromConfig()
-	
+
 	return p, nil
 }
 
 // deriveFromConfig derives frame size and bandwidth from config number
 func (p *Packet) deriveFromConfig() {
 	config := p.Config
-	
+
 	// Config mapping (simplified from RFC 6716 Table 2)
 	// Configs 0-15: SILK/Hybrid (not handled here)
 	// Configs 16-19: CELT narrowband (4kHz)
 	// Configs 20-23: CELT wideband (8kHz)
 	// Configs 24-27: CELT super-wideband (12kHz)
 	// Configs 28-31: CELT fullband (20kHz)
-	
+
 	if config >= 16 && config <= 19 {
 		// CELT narrowband
 		p.Bandwidth = BandwidthNarrowband
@@ -95,13 +95,13 @@ func ParsePacket(data []byte) (*Packet, error) {
 	if len(data) < 1 {
 		return nil, errors.New("celt: packet too short")
 	}
-	
+
 	// Parse TOC byte
 	packet, err := ParseTOC(data[0])
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// For single frame, the rest is the frame data
 	if packet.FrameCount == 1 {
 		if len(data) < 2 {
@@ -110,28 +110,28 @@ func ParsePacket(data []byte) (*Packet, error) {
 		packet.Frames = [][]byte{data[1:]}
 		return packet, nil
 	}
-	
+
 	// For multiple frames, we need to parse frame boundaries
 	// This is a simplified version - full implementation would handle CBR/VBR codes
 	if len(data) < 2 {
 		return nil, errors.New("celt: packet too short for multi-frame")
 	}
-	
+
 	// Simple equal-length frame split for now
 	frameDataLen := len(data) - 1
 	frameSizes := make([]int, packet.FrameCount)
 	bytesPerFrame := frameDataLen / packet.FrameCount
-	
+
 	for i := 0; i < packet.FrameCount; i++ {
 		frameSizes[i] = bytesPerFrame
 	}
-	
+
 	// Handle remainder
 	remainder := frameDataLen % packet.FrameCount
 	for i := 0; i < remainder; i++ {
 		frameSizes[i]++
 	}
-	
+
 	// Extract frames
 	packet.Frames = make([][]byte, packet.FrameCount)
 	offset := 1 // Skip TOC byte
@@ -142,7 +142,7 @@ func ParsePacket(data []byte) (*Packet, error) {
 		packet.Frames[i] = data[offset : offset+frameSizes[i]]
 		offset += frameSizes[i]
 	}
-	
+
 	return packet, nil
 }
 

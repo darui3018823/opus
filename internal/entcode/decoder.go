@@ -12,16 +12,16 @@ import "fmt"
 // The decoder reads bytes and combines them using the EC_CODE_EXTRA
 // (7-bit) overlap scheme from libopus.
 type Decoder struct {
-	buf       []byte
-	pos       int    // forward range-coded read position in buf
-	endOffs   int    // raw-bit bytes consumed from the end of buf
-	endWindow uint32 // raw-bit window, least-significant bits first
-	nendBits  uint   // number of valid bits in endWindow
-	rng       uint32 // current range
-	dif       uint32 // coded value complement (top-down)
-	rem       int    // remainder bits from previous byte read
-	nbitsTotal int   // bits consumed, tracked like libopus nbits_total (counts past buffer end)
-	err       error
+	buf        []byte
+	pos        int    // forward range-coded read position in buf
+	endOffs    int    // raw-bit bytes consumed from the end of buf
+	endWindow  uint32 // raw-bit window, least-significant bits first
+	nendBits   uint   // number of valid bits in endWindow
+	rng        uint32 // current range
+	dif        uint32 // coded value complement (top-down)
+	rem        int    // remainder bits from previous byte read
+	nbitsTotal int    // bits consumed, tracked like libopus nbits_total (counts past buffer end)
+	err        error
 }
 
 // NewDecoder creates a new range decoder from encoded data.
@@ -93,12 +93,12 @@ func (dec *Decoder) Error() error {
 }
 
 // Debug accessors for testing
-func (dec *Decoder) GetDif() uint32     { return dec.dif }
-func (dec *Decoder) GetRng() uint32     { return dec.rng }
-func (dec *Decoder) GetRem() int        { return dec.rem }
-func (dec *Decoder) GetPos() int        { return dec.pos }
-func (dec *Decoder) GetEndOffs() int    { return dec.endOffs }
-func (dec *Decoder) GetNendBits() uint  { return dec.nendBits }
+func (dec *Decoder) GetDif() uint32    { return dec.dif }
+func (dec *Decoder) GetRng() uint32    { return dec.rng }
+func (dec *Decoder) GetRem() int       { return dec.rem }
+func (dec *Decoder) GetPos() int       { return dec.pos }
+func (dec *Decoder) GetEndOffs() int   { return dec.endOffs }
+func (dec *Decoder) GetNendBits() uint { return dec.nendBits }
 
 // ShrinkStorage reduces the decoder's effective buffer length by n bytes,
 // matching libopus `dec->storage -= n`. Raw bits (DecodeBits) are read from the

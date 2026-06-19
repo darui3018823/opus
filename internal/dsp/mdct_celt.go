@@ -123,12 +123,12 @@ func (m *CELTMode) IMDCTRaw(X []float64) []float64 {
 // reconstruct x through overlap-add; it pairs with the "raw" (unnormalised)
 // IMDCTRaw used by the backward path.
 func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
-	N := m.N         // libopus N2 (e.g. 960)
-	nFull := 2 * N   // libopus N (e.g. 1920) — argument to the trig table
-	N2 := N          // 960
-	N4 := N / 2      // 480
-	ov := m.Overlap  // 120
-	w := m.Window    // length ov
+	N := m.N        // libopus N2 (e.g. 960)
+	nFull := 2 * N  // libopus N (e.g. 1920) — argument to the trig table
+	N2 := N         // 960
+	N4 := N / 2     // 480
+	ov := m.Overlap // 120
+	w := m.Window   // length ov
 	// The backward path (IMDCTRaw) is unnormalised; the forward/backward pair has
 	// intrinsic gain N, so 2/N here yields a unity-gain transform pair.
 	scale := 2.0 / float64(N)

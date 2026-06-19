@@ -103,10 +103,10 @@ func (sp *StereoProcessor) ComputeBalance(mid, side []float64) float64 {
 
 	// Balance parameter: ratio of mid energy to total
 	balance := midEnergy / totalEnergy
-	
+
 	// Update running average
 	sp.midSideBalance = 0.9*sp.midSideBalance + 0.1*balance
-	
+
 	return sp.midSideBalance
 }
 
@@ -148,14 +148,14 @@ func (sp *StereoProcessor) IntensityStereo(left, right []float64, threshold int)
 	for i := threshold; i < len(left) && i < len(right); i++ {
 		// Use average magnitude
 		mag := 0.5 * (math.Abs(left[i]) + math.Abs(right[i]))
-		
+
 		// Preserve signs
 		if left[i] < 0 {
 			left[i] = -mag
 		} else {
 			left[i] = mag
 		}
-		
+
 		if right[i] < 0 {
 			right[i] = -mag
 		} else {

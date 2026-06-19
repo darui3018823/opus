@@ -121,7 +121,7 @@ func TestEncoderCBRFixedSize(t *testing.T) {
 
 			// Expected CELT payload bytes = bitrate * 0.02 / 8
 			expectedPayload := bitrate * 20 / 1000 / 8 // bytes
-			expectedTotal := expectedPayload + 1        // + TOC byte
+			expectedTotal := expectedPayload + 1       // + TOC byte
 
 			pcm := make([]float64, frameSize*channels)
 			for i := range pcm {

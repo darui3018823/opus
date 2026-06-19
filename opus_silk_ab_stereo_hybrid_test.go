@@ -128,7 +128,7 @@ func TestOpusSILKHybridABAgainstLibopusEncoder(t *testing.T) {
 						"own SNR": snrA, "libopus SNR": snrB, "matched SNR": snrM,
 						"gap_SNR_matched": gapMatched,
 						"ratio_bytes":     ratioBytes, "ratio_bytes_matched": ratioBytesMatched,
-						"own peak":        peakA, "libopus peak": peakB, "matched peak": peakM,
+						"own peak": peakA, "libopus peak": peakB, "matched peak": peakM,
 					})
 					assertABPeak(t, sig.name, peakA, peakB, peakM)
 				})

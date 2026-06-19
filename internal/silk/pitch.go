@@ -101,7 +101,7 @@ func (pa *PitchAnalyzer) AnalyzeSubframes(signal []float64, numSubframes int) ([
 func (pa *PitchAnalyzer) RefinePitch(signal []float64, coarseLag int) (fineLag float64, gain float64) {
 	// Simple refinement around coarse lag
 	// Full implementation would use parabolic interpolation
-	
+
 	if coarseLag < pa.minLag || coarseLag > pa.maxLag || coarseLag >= len(signal) {
 		return float64(coarseLag), 0.0
 	}
@@ -204,7 +204,7 @@ func DetectPitch(signal []float64, minLag, maxLag int) (int, float64) {
 	if pa == nil {
 		return 100, 0.5 // Default values
 	}
-	
+
 	return pa.Analyze(signal)
 }
 
@@ -214,7 +214,7 @@ func ApplyPitchPrediction(signal []float64, lag int, gain float64) []float64 {
 	if pa == nil {
 		return signal
 	}
-	
+
 	return pa.ApplyPitchFilter(signal, lag, gain)
 }
 
@@ -223,17 +223,17 @@ func ComputeSubframeGains(signal []float64, numSubframes int) []float64 {
 	if numSubframes <= 0 {
 		return []float64{1.0}
 	}
-	
+
 	gains := make([]float64, numSubframes)
 	subframeLen := len(signal) / numSubframes
-	
+
 	for i := 0; i < numSubframes; i++ {
 		start := i * subframeLen
 		end := start + subframeLen
 		if end > len(signal) {
 			end = len(signal)
 		}
-		
+
 		// Compute RMS energy for subframe
 		energy := 0.0
 		for j := start; j < end; j++ {
@@ -241,12 +241,12 @@ func ComputeSubframeGains(signal []float64, numSubframes int) []float64 {
 		}
 		energy /= float64(end - start)
 		gains[i] = math.Sqrt(energy)
-		
+
 		// Ensure minimum gain
 		if gains[i] < 0.01 {
 			gains[i] = 0.01
 		}
 	}
-	
+
 	return gains
 }

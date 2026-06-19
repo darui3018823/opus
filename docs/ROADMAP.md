@@ -18,6 +18,9 @@ from the code state and takes precedence when this roadmap lags.
   packets that libopus decodes, but is not bit-exact and does not implement full
   libopus-equivalent SILK/hybrid mode selection.
 - Runtime CGO: none. CGO is used only by optional `opusref` reference tests.
+- Encoder quality has a dedicated Ubuntu `opusref` workflow. It installs
+  `libopus-dev`, obtains the distro-specific header path from `pkg-config`, and
+  runs the SILK A/B scoreboard plus encoder/decoder reference checks.
 
 ## Historical Milestones
 
@@ -285,6 +288,9 @@ go test -race ./...
 
 # Benchmarks
 go test -bench=. -benchmem ./...
+
+# Optional libopus encoder/decoder reference checks
+go test -tags opusref ./...
 ```
 
 ### Code Quality

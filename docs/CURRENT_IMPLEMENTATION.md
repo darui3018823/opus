@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-06-19
+Last reviewed: 2026-06-20
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -640,6 +640,11 @@ Notes:
 - Official-vector and `.bit`-based diagnostic tests `t.Skip` when `testdata/`
   (git-ignored) is absent; CI downloads `opus_testvectors-rfc8251.tar.gz` into
   `testdata/opus_newvectors/` so they run for real.
+- The dedicated Ubuntu `opusref` workflow installs `libopus-dev` and exports
+  the header search path reported by `pkg-config --cflags opus` through
+  `CGO_CFLAGS`. This is required because distro packages install `opus.h`
+  below an `opus/` include directory rather than at the compiler's default
+  include root.
 - The cgo/libopus reference comparison runs under `go test -tags opusref` and
   needs a C toolchain plus libopus (reported `libopus 1.6.1` locally); it passes
   all 12 vectors. Normal builds use a `!opusref` stub so the codec stays

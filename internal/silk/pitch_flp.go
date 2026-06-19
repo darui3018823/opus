@@ -233,7 +233,10 @@ func silkAutocorrelationFLP(results, input []float64, n, count int) {
 // silkSchurFLP returns the residual energy and fills reflection coefficients
 // (silk/float/schur_FLP.c).
 func silkSchurFLP(reflCoef, autoCorr []float64, order int) float64 {
-	var c [silkMaxLPCOrder + 1][2]float64
+	// order may be the shaping LPC order (up to silkMaxShapeLPCOrder at high
+	// complexity), which exceeds silkMaxLPCOrder, so size the scratch for the
+	// larger of the two callers (pitch whitening vs. noise-shape analysis).
+	var c [silkMaxShapeLPCOrder + 1][2]float64
 	for k := 0; k <= order; k++ {
 		c[k][0] = autoCorr[k]
 		c[k][1] = autoCorr[k]

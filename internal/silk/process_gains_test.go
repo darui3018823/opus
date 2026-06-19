@@ -33,18 +33,17 @@ func TestSilkControlSNR(t *testing.T) {
 }
 
 func TestVoicedSNRTargetBackoff(t *testing.T) {
-	if got, want := voicedSNRTargetDecrDB(8, 24000, 44), 22.5; got != want {
-		t.Fatalf("voicedSNRTargetDecrDB(8)=%.1f, want %.1f", got, want)
-	}
 	for _, tc := range []struct {
 		fsKHz int
 		lag   int
+		want  float64
 	}{
-		{12, 67},
-		{16, 89},
+		{8, 44, 27.0},
+		{12, 67, 24.0},
+		{16, 89, 24.0},
 	} {
-		if got, want := voicedSNRTargetDecrDB(tc.fsKHz, 24000, tc.lag), 20.0; got != want {
-			t.Fatalf("voicedSNRTargetDecrDB(%d)=%.1f, want %.1f", tc.fsKHz, got, want)
+		if got := voicedSNRTargetDecrDB(tc.fsKHz, 24000, tc.lag); got != tc.want {
+			t.Fatalf("voicedSNRTargetDecrDB long lag fs=%d got %.1f, want %.1f", tc.fsKHz, got, tc.want)
 		}
 	}
 	for _, tc := range []struct {

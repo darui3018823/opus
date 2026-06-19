@@ -1389,13 +1389,12 @@ func TestEncoderSILKOnlyCBRPacketSizeTracksBitrateAndDuration(t *testing.T) {
 	}
 }
 
-func TestEncoderSILKOnlyStereoCBRUsesFixedPacketSize(t *testing.T) {
+func TestEncoderSILKOnlyStereoSingleFrameCBRKeepsCode0(t *testing.T) {
 	const (
 		rate      = 16000
 		channels  = 2
 		bitrate   = 32000
 		frameSize = rate * 20 / 1000
-		wantBytes = 1 + bitrate*20/1000/8
 	)
 	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
 	if err != nil {
@@ -1432,11 +1431,8 @@ func TestEncoderSILKOnlyStereoCBRUsesFixedPacketSize(t *testing.T) {
 		if err != nil {
 			t.Fatalf("frame %d EncodeFloat: %v", i, err)
 		}
-		if len(pkt) != wantBytes {
-			t.Fatalf("frame %d packet bytes=%d, want fixed CBR size %d", i, len(pkt), wantBytes)
-		}
-		if code := int(pkt[0] & 0x03); code != 3 {
-			t.Fatalf("frame %d count code=%d, want code 3 packet padding", i, code)
+		if code := int(pkt[0] & 0x03); code != 0 {
+			t.Fatalf("frame %d count code=%d, want compact single-frame code 0", i, code)
 		}
 		if _, err := dec.DecodeFloat(pkt); err != nil {
 			t.Fatalf("frame %d DecodeFloat: %v", i, err)

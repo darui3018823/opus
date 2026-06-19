@@ -919,6 +919,9 @@ func (e *Encoder) shouldPadSILKPacket(streams [][]byte, celtToSilk bool) bool {
 	if e.rateMode != celt.RateModeCBR || e.padBytes > 0 || celtToSilk {
 		return false
 	}
+	if len(streams) <= 1 {
+		return false
+	}
 	if e.channels != 2 || e.silkEncoder == nil || !e.silkEncoder.TrellisNSQ() {
 		return false
 	}

@@ -14,6 +14,8 @@ type opusSILKQualitySignal struct {
 	silent        bool
 	pitchTracked  bool
 	minSNR        float64
+	minScale      float64
+	maxScale      float64
 	maxSilenceRMS float64
 }
 
@@ -421,6 +423,8 @@ func opusSILKQualitySignals() []opusSILKQualitySignal {
 			name:         "speech-like-harmonic",
 			pitchTracked: true,
 			minSNR:       -20,
+			minScale:     0.80,
+			maxScale:     1.25,
 			gen: func(rate, start, n int) []float64 {
 				out := make([]float64, n)
 				for i := range out {
@@ -582,6 +586,12 @@ func assertOpusSILKQuality(t *testing.T, sig opusSILKQualitySignal, m opusSILKQu
 	}
 	if m.alignedSNR < sig.minSNR {
 		t.Fatalf("%s: aligned SNR %.2fdB below %.2fdB", sig.name, m.alignedSNR, sig.minSNR)
+	}
+	if sig.minScale > 0 && m.scale < sig.minScale {
+		t.Fatalf("%s: alignment scale %.4f below %.4f", sig.name, m.scale, sig.minScale)
+	}
+	if sig.maxScale > 0 && m.scale > sig.maxScale {
+		t.Fatalf("%s: alignment scale %.4f above %.4f", sig.name, m.scale, sig.maxScale)
 	}
 	if sig.pitchTracked {
 		if m.pitchMean <= 0 {

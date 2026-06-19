@@ -636,3 +636,38 @@ func (e *Encoder) syncLegacyNSQState() {
 	}
 	e.prevGainQ16 = e.nsq.prevGainQ16
 }
+
+// syncTrellisNSQState mirrors the legacy/homebrew NSQ reconstruction into the
+// delayed-decision state. Unvoiced and inactive frames use the homebrew NSQ,
+// while voiced frames use the trellis; without this reverse handoff an
+// unvoiced-to-voiced transition re-whitens zero/stale trellis history even
+// though the decoder uses the actual previous reconstruction.
+func (e *Encoder) syncTrellisNSQState() {
+	ltpMemLen := len(e.ltpState)
+	if len(e.nsq.xq) != ltpMemLen+e.frameSize {
+		e.nsq = newSilkNSQState(e.frameSize, ltpMemLen)
+	}
+	for i := 0; i < ltpMemLen; i++ {
+		e.nsq.xq[i] = clamp16(e.ltpState[i])
+	}
+	for i := ltpMemLen; i < len(e.nsq.xq); i++ {
+		e.nsq.xq[i] = 0
+	}
+	for i := range e.nsq.sLPCQ14 {
+		e.nsq.sLPCQ14[i] = 0
+	}
+	copy(e.nsq.sLPCQ14[:silkMaxLPCOrder], e.lpcState)
+	for i := range e.nsq.sLTPShpQ14 {
+		e.nsq.sLTPShpQ14[i] = 0
+	}
+	for i := range e.nsq.sAR2Q14 {
+		e.nsq.sAR2Q14[i] = 0
+	}
+	e.nsq.sLFARShpQ14 = 0
+	e.nsq.sDiffShpQ14 = 0
+	e.nsq.lagPrev = e.prevPitchLag
+	e.nsq.sLTPBufIdx = ltpMemLen
+	e.nsq.sLTPShpBufIdx = ltpMemLen
+	e.nsq.prevGainQ16 = e.prevGainQ16
+	e.nsq.rewhiteFlag = false
+}

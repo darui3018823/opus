@@ -2173,6 +2173,7 @@ func (e *Encoder) closedLoopNSQHomebrew(
 	pulses := make([]int16, e.frameSize)
 	if signalType == SignalTypeInactive || len(signal) == 0 {
 		e.updateSilentSynthesisState()
+		e.syncTrellisNSQState()
 		return pulses
 	}
 	if rateScale < 1 {
@@ -2332,6 +2333,7 @@ func (e *Encoder) closedLoopNSQHomebrew(
 			e.ltpState[mvLen+i] = int32(output[i])
 		}
 	}
+	e.syncTrellisNSQState()
 	return pulses
 }
 

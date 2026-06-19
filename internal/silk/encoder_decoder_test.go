@@ -1256,3 +1256,81 @@ func TestMultiRate(t *testing.T) {
 		})
 	}
 }
+
+func TestHomebrewToTrellisNSQStateHandoff(t *testing.T) {
+	for _, rate := range []int{8000, 12000} {
+		t.Run(fmt.Sprintf("%dHz", rate), func(t *testing.T) {
+			enc, err := NewEncoder(rate, 1)
+			if err != nil {
+				t.Fatalf("NewEncoder: %v", err)
+			}
+			if err := enc.SetBitrate(24000); err != nil {
+				t.Fatalf("SetBitrate: %v", err)
+			}
+			if err := enc.SetComplexity(5); err != nil {
+				t.Fatalf("SetComplexity: %v", err)
+			}
+			dec, err := NewDecoder(rate, 1)
+			if err != nil {
+				t.Fatalf("NewDecoder: %v", err)
+			}
+
+			frameSize := rate / 50
+			var signalTypes []int
+			for frame := 0; frame < 2; frame++ {
+				signal := speechHarmonicTransitionFrame(rate, frame*frameSize, frameSize)
+				packet, err := enc.Encode(signal)
+				if err != nil {
+					t.Fatalf("frame %d Encode: %v", frame, err)
+				}
+				trace := &decodeTrace{}
+				dec.trace = trace
+				decoded, err := dec.Decode(packet)
+				if err != nil {
+					t.Fatalf("frame %d Decode: %v", frame, err)
+				}
+				if len(trace.Frames) != 1 {
+					t.Fatalf("frame %d trace frames=%d, want 1", frame, len(trace.Frames))
+				}
+				signalTypes = append(signalTypes, trace.Frames[0].SignalType)
+
+				if frame == 1 {
+					historyStart := len(enc.ltpState) - frameSize
+					maxDiff := int32(0)
+					for i, sample := range decoded {
+						got := enc.ltpState[historyStart+i]
+						want := int32(math.Round(sample * 32768.0))
+						diff := got - want
+						if diff < 0 {
+							diff = -diff
+						}
+						if diff > maxDiff {
+							maxDiff = diff
+						}
+					}
+					if maxDiff > 1 {
+						t.Fatalf("unvoiced->voiced reconstruction diverged by %d int16 units", maxDiff)
+					}
+				}
+			}
+			if len(signalTypes) != 2 ||
+				signalTypes[0] != SignalTypeUnvoiced ||
+				signalTypes[1] != SignalTypeVoiced {
+				t.Fatalf("signal types=%v, want [unvoiced voiced]", signalTypes)
+			}
+		})
+	}
+}
+
+func speechHarmonicTransitionFrame(rate, start, n int) []float64 {
+	out := make([]float64, n)
+	for i := range out {
+		tm := float64(start+i) / float64(rate)
+		f0 := 145 + 24*math.Sin(2*math.Pi*1.7*tm)
+		env := 0.18 + 0.10*math.Sin(2*math.Pi*3.1*tm+0.2)
+		out[i] = env * (0.58*math.Sin(2*math.Pi*f0*tm) +
+			0.24*math.Sin(2*math.Pi*2*f0*tm+0.35) +
+			0.11*math.Sin(2*math.Pi*3*f0*tm+0.85))
+	}
+	return out
+}

@@ -568,7 +568,12 @@ The SILK package contains:
   bypasses the five-frame majority-vote attack delay for mono and single-frame
   stereo mid/side components, so initial harmonic stereo frames reach pitch
   analysis. Multi-frame stereo streams retain smoothed flags to preserve their
-  shared conditional-gain entropy context.
+  shared conditional-gain entropy context. The homebrew NSQ used by
+  inactive/unvoiced frames now hands its reconstructed LPC, LTP, gain, and lag
+  state to the delayed-decision trellis before a voiced frame. This keeps
+  encoder and decoder synthesis aligned across unvoiced-to-voiced transitions;
+  the 8/12 kHz speech-harmonic alignment-scale regression is covered by
+  sample-level state and public quality guards.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single

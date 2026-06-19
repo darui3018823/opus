@@ -157,6 +157,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 			return nil, fmt.Errorf("failed to create SILK encoder: %w", err)
 		}
 		_ = silkEnc.SetComplexity(enc.complexity)
+		silkEnc.SetRateMode(silk.RateModeCBR)
 		enc.silkEncoder = silkEnc
 		enc.silkSampleRate = silkRate
 		if silkRate != sampleRate {
@@ -834,7 +835,7 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int, celtToSilk bo
 				return nil, fmt.Errorf("SILK encoding failed: %w", err)
 			}
 		}
-		if !frameRedundancy && e.shouldPadSILKStream(silkPCM, e.silkEncoder.LastStreamSNRVBR()) {
+		if !frameRedundancy && e.shouldPadSILKStream(silkPCM) {
 			targetBytes := e.silkStreamTargetBytes(group)
 			if len(stream) < targetBytes {
 				padded := make([]byte, targetBytes)
@@ -859,14 +860,11 @@ func (e *Encoder) shouldUseConservativeSILKNSQ(groupFrames int) bool {
 		groupFrames == 1
 }
 
-func (e *Encoder) shouldPadSILKStream(pcm []float64, snrVBR bool) bool {
+func (e *Encoder) shouldPadSILKStream(pcm []float64) bool {
 	if e.rateMode != celt.RateModeCBR {
 		return false
 	}
 	if isSilentPCM(pcm) {
-		return false
-	}
-	if snrVBR {
 		return false
 	}
 	if e.channels == 2 && e.silkEncoder != nil && e.silkEncoder.TrellisNSQ() {
@@ -1090,6 +1088,7 @@ func (e *Encoder) SetVBR(vbr bool) {
 		e.rateMode = celt.RateModeCBR
 	}
 	e.celtEncoder.SetRateMode(e.rateMode)
+	e.syncSILKRateMode()
 }
 
 // SetVBRConstraint controls the VBR constraint. When true (default), CVBR is
@@ -1104,6 +1103,21 @@ func (e *Encoder) SetVBRConstraint(constrained bool) {
 		e.rateMode = celt.RateModeVBR
 	}
 	e.celtEncoder.SetRateMode(e.rateMode)
+	e.syncSILKRateMode()
+}
+
+func (e *Encoder) syncSILKRateMode() {
+	if e.silkEncoder == nil {
+		return
+	}
+	switch e.rateMode {
+	case celt.RateModeVBR:
+		e.silkEncoder.SetRateMode(silk.RateModeVBR)
+	case celt.RateModeCVBR:
+		e.silkEncoder.SetRateMode(silk.RateModeCVBR)
+	default:
+		e.silkEncoder.SetRateMode(silk.RateModeCBR)
+	}
 }
 
 // SetPacketPadding sets the number of code-3 padding-data bytes appended to each

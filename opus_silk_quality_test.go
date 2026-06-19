@@ -122,11 +122,11 @@ func TestEncoderSILKOnlyQualityBaseline(t *testing.T) {
 	}
 }
 
-func TestEncoderSILKOnlyVoicedSNRVBRSkipsCBRPadding(t *testing.T) {
+func TestEncoderSILKOnlyVoicedRateModeContract(t *testing.T) {
 	const rate = 16000
 	const frames = 12
 	frameSize := rate * 20 / 1000
-	totalBytes := func(rcSNR string) int {
+	packetSizes := func(rcSNR string, vbr bool, constrained bool) []int {
 		t.Helper()
 		t.Setenv("OPUS_SILK_TRELLIS", "1")
 		t.Setenv("OPUS_SILK_RC_SNR", rcSNR)
@@ -138,30 +138,52 @@ func TestEncoderSILKOnlyVoicedSNRVBRSkipsCBRPadding(t *testing.T) {
 			t.Fatalf("SetBitrate: %v", err)
 		}
 		enc.SetSignalType(SignalVoice)
+		enc.SetVBR(vbr)
+		if vbr {
+			enc.SetVBRConstraint(constrained)
+		}
 
-		total := 0
+		sizes := make([]int, 0, frames)
 		for frame := 0; frame < frames; frame++ {
 			pcm := opusSILKHarmonicFrame(rate, frame*frameSize, frameSize, 180, 0.20)
 			pkt, err := enc.EncodeFloat(pcm, frameSize)
 			if err != nil {
 				t.Fatalf("frame %d: EncodeFloat: %v", frame, err)
 			}
-			total += len(pkt)
+			sizes = append(sizes, len(pkt))
+		}
+		return sizes
+	}
+
+	const nominalPacketBytes = 1 + 24000*20/1000/8
+	cbrSizes := packetSizes("1", false, true)
+	for frame, size := range cbrSizes {
+		if size != nominalPacketBytes {
+			t.Fatalf("CBR frame %d packet=%d bytes, want %d", frame, size, nominalPacketBytes)
+		}
+	}
+
+	sum := func(sizes []int) int {
+		total := 0
+		for _, size := range sizes {
+			total += size
 		}
 		return total
 	}
+	cbrTotal := sum(cbrSizes)
+	for name, sizes := range map[string][]int{
+		"VBR":  packetSizes("1", true, false),
+		"CVBR": packetSizes("1", true, true),
+	} {
+		if got := sum(sizes); got >= cbrTotal {
+			t.Fatalf("%s steady voiced bytes=%d, want below CBR bytes=%d (sizes=%v)", name, got, cbrTotal, sizes)
+		}
+	}
 
-	snrVBRBytes := totalBytes("1")
-	budgetBytes := totalBytes("0")
-	nominalCBRBytes := frames * (1 + int(float64(24000)*0.020/8.0))
-	if snrVBRBytes >= nominalCBRBytes {
-		t.Fatalf("SNR VBR voiced bytes=%d, want below nominal padded CBR %d", snrVBRBytes, nominalCBRBytes)
-	}
-	if budgetBytes < nominalCBRBytes {
-		t.Fatalf("legacy RC bytes=%d, want at least nominal padded CBR %d", budgetBytes, nominalCBRBytes)
-	}
-	if snrVBRBytes >= budgetBytes {
-		t.Fatalf("SNR VBR bytes=%d, want below legacy budget bytes=%d", snrVBRBytes, budgetBytes)
+	snrVBRTotal := sum(packetSizes("1", true, false))
+	legacyVBRTotal := sum(packetSizes("0", true, false))
+	if snrVBRTotal >= legacyVBRTotal {
+		t.Fatalf("OPUS_SILK_RC_SNR=1 VBR bytes=%d, want below A/B legacy bytes=%d", snrVBRTotal, legacyVBRTotal)
 	}
 }
 

@@ -8,6 +8,17 @@ import (
 	"github.com/darui3018823/opus/internal/entcode"
 )
 
+// RateMode describes the packet-size contract supplied by the top-level Opus
+// encoder. Both VBR modes may use the natural SNR-target size; CBR must stay on
+// the budget-fitting path so packetization can pad every active stream equally.
+type RateMode int
+
+const (
+	RateModeCBR RateMode = iota
+	RateModeVBR
+	RateModeCVBR
+)
+
 // Encoder represents a SILK encoder instance
 type Encoder struct {
 	sampleRate     int  // Sample rate (8000, 12000, 16000, 24000)
@@ -44,9 +55,10 @@ type Encoder struct {
 	// single-state homebrew quantizer. On by default; unvoiced/inactive frames
 	// always use the homebrew path (the trellis shaping hurts broadband noise).
 	useTrellisNSQ bool
-	// useSNRTargetVBR lets mono voiced SILK-only frames keep the natural packet
-	// size produced by the SNR-derived gains. OPUS_SILK_RC_SNR=0 restores the
-	// previous budget-fitting/padding behaviour for A/B comparisons.
+	// snrTargetEnabled records the OPUS_SILK_RC_SNR A/B selection.
+	// useSNRTargetVBR is its rate-mode-gated effective value.
+	rateMode         RateMode
+	snrTargetEnabled bool
 	useSNRTargetVBR  bool
 	lastSNRVBRFrame  bool
 	lastSNRVBRStream bool
@@ -183,9 +195,11 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		// Step 4: voiced frames use the delayed-decision trellis NSQ with gains
 		// co-designed by silk_process_gains_FLP. OPUS_SILK_TRELLIS=0 forces the
 		// legacy homebrew quantizer everywhere for A/B comparison.
-		useTrellisNSQ:   os.Getenv("OPUS_SILK_TRELLIS") != "0",
-		useSNRTargetVBR: os.Getenv("OPUS_SILK_RC_SNR") != "0",
+		useTrellisNSQ:    os.Getenv("OPUS_SILK_TRELLIS") != "0",
+		rateMode:         RateModeVBR,
+		snrTargetEnabled: os.Getenv("OPUS_SILK_RC_SNR") != "0",
 	}
+	enc.useSNRTargetVBR = enc.snrTargetEnabled
 	for i := range enc.inputQualityB {
 		enc.inputQualityB[i] = 1.0
 	}
@@ -234,6 +248,17 @@ func (e *Encoder) SetBitrate(bitrate int) error {
 		return e.side.SetBitrate(bitrate)
 	}
 	return nil
+}
+
+// SetRateMode supplies the top-level Opus packet-size contract. The
+// SNR-target natural-size path is available only in VBR/CVBR and remains
+// independently disableable with OPUS_SILK_RC_SNR=0.
+func (e *Encoder) SetRateMode(mode RateMode) {
+	e.rateMode = mode
+	e.useSNRTargetVBR = e.snrTargetEnabled && mode != RateModeCBR
+	if e.side != nil {
+		e.side.SetRateMode(mode)
+	}
 }
 
 // Encode encodes a frame of audio samples using the range encoder.
@@ -2034,9 +2059,8 @@ func (e *Encoder) SetTrellisNSQ(enabled bool) {
 	e.useTrellisNSQ = enabled
 }
 
-// LastStreamSNRVBR reports whether the most recently encoded SILK stream
-// used the voiced SNR-target VBR path. Opus packetization uses this to avoid
-// CBR padding after a voiced stream has already landed below the byte ceiling.
+// LastStreamSNRVBR reports whether the most recently encoded SILK stream used
+// the voiced SNR-target natural-size path.
 func (e *Encoder) LastStreamSNRVBR() bool {
 	return e.lastSNRVBRStream
 }

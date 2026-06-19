@@ -290,9 +290,19 @@ func TestEncoderVoiceModeTransitionsStrict(t *testing.T) {
 			wantMode: "hybrid",
 		},
 		{
-			name: "music-hint-celt",
+			name: "music-hint-transition-hybrid",
 			configure: func(e *Encoder) error {
 				e.SetSignalType(SignalMusic)
+				return nil
+			},
+			// A hybrid->CELT switch is deferred by one packet: this transitional
+			// frame stays hybrid and carries a trailing redundant CELT frame whose
+			// state seeds the next CELT-only packet (libopus opus_encode_native).
+			wantMode: "hybrid",
+		},
+		{
+			name: "music-hint-celt",
+			configure: func(e *Encoder) error {
 				return nil
 			},
 			wantMode: "celt",
@@ -352,6 +362,103 @@ func TestEncoderVoiceModeTransitionsStrict(t *testing.T) {
 				t.Fatalf("decoded samples=%d, want %d", len(decoded), frameSize*channels)
 			}
 		})
+	}
+}
+
+// TestEncoderHybridToCELTRedundancy verifies the libopus-faithful hybrid->CELT
+// transition: when the encoder would switch from hybrid to CELT-only, it defers
+// the switch by one packet. The transitional packet stays hybrid and carries a
+// trailing 5 ms redundant CELT frame; the following packet is genuinely CELT.
+// Both must decode cleanly to non-trivial output (a corrupt redundant tail would
+// truncate the CELT main layer's budget and wreck the reconstruction).
+func TestEncoderHybridToCELTRedundancy(t *testing.T) {
+	const (
+		rate     = 48000
+		channels = 1
+	)
+	frameSize := rate * 20 / 1000
+
+	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	if err := enc.SetBitrate(64000); err != nil {
+		t.Fatalf("SetBitrate: %v", err)
+	}
+	dec, err := NewDecoder(rate, channels)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+
+	decodeOK := func(name string, pkt []byte) {
+		decoded, err := dec.DecodeFloat(pkt)
+		if err != nil {
+			t.Fatalf("%s: DecodeFloat: %v", name, err)
+		}
+		if len(decoded) != frameSize*channels {
+			t.Fatalf("%s: decoded samples=%d, want %d", name, len(decoded), frameSize*channels)
+		}
+		rms, _ := strictSignalStats(decoded)
+		if math.IsNaN(rms) || rms < 1e-3 {
+			t.Fatalf("%s: decoded output is silent/garbage (rms=%g)", name, rms)
+		}
+	}
+
+	// Establish a hybrid run so prevMode == hybrid.
+	frame := 0
+	for ; frame < 3; frame++ {
+		pcm := strictHybridWidebandFrame(rate, channels, frame*frameSize, frameSize)
+		pkt, err := enc.EncodeFloat(pcm, frameSize)
+		if err != nil {
+			t.Fatalf("hybrid warmup EncodeFloat: %v", err)
+		}
+		if got := strictOpusMode(int(pkt[0] >> 3)); got != "hybrid" {
+			t.Fatalf("warmup frame %d mode=%s, want hybrid", frame, got)
+		}
+		decodeOK("hybrid-warmup", pkt)
+	}
+
+	// Switch to music: the encoder wants CELT-only, but the transition is deferred
+	// one packet, so this packet must still be hybrid (carrying redundancy).
+	enc.SetSignalType(SignalMusic)
+	transPCM := strictHybridWidebandFrame(rate, channels, frame*frameSize, frameSize)
+	transPkt, err := enc.EncodeFloat(transPCM, frameSize)
+	if err != nil {
+		t.Fatalf("transition EncodeFloat: %v", err)
+	}
+	if got := strictOpusMode(int(transPkt[0] >> 3)); got != "hybrid" {
+		t.Fatalf("transition packet mode=%s, want hybrid (deferred switch)", got)
+	}
+	decodeOK("transition-hybrid", transPkt)
+	frame++
+
+	// The next packet is the genuine CELT-only switch.
+	celtPCM := strictSpeechLikeFrame(rate, channels, frame*frameSize, frameSize)
+	celtPkt, err := enc.EncodeFloat(celtPCM, frameSize)
+	if err != nil {
+		t.Fatalf("post-transition EncodeFloat: %v", err)
+	}
+	if got := strictOpusMode(int(celtPkt[0] >> 3)); got != "celt" {
+		t.Fatalf("post-transition packet mode=%s, want celt", got)
+	}
+	decodeOK("post-transition-celt", celtPkt)
+}
+
+func TestComputeRedundancyBytes(t *testing.T) {
+	// 48 kHz mono 20 ms @ 64 kbps: frameRate=50, maxDataBytes=160. Redundancy must
+	// engage (the transition smoothing relies on it) and stay within [2,257].
+	got := computeRedundancyBytes(160, 64000, 50, 1)
+	if got < 5 || got > 257 {
+		t.Fatalf("computeRedundancyBytes(160,64000,50,1)=%d, want a usable size in [5,257]", got)
+	}
+	// At a tiny budget redundancy is not worthwhile and must return 0 so the
+	// encoder falls back to a plain hybrid frame (decoder relies on PLC).
+	if z := computeRedundancyBytes(8, 64000, 50, 1); z != 0 {
+		t.Fatalf("computeRedundancyBytes with tiny budget=%d, want 0", z)
+	}
+	// Larger budgets must never exceed the 257-byte cap.
+	if hi := computeRedundancyBytes(1275, 510000, 50, 2); hi > 257 {
+		t.Fatalf("computeRedundancyBytes high=%d, want <=257", hi)
 	}
 }
 

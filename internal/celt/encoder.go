@@ -208,6 +208,22 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	return out, err
 }
 
+// EncodeRedundant encodes a standalone fullband CELT frame of exactly nbytes,
+// used for the 5 ms redundant frame that smooths a hybrid->CELT transition. The
+// caller resets the encoder first so the frame carries no overlap history, which
+// matches the decoder's freshly reset redundant-frame decoder. The output is a
+// fixed-size (CBR) packet padded to nbytes regardless of the encoder's rate mode.
+func (e *Encoder) EncodeRedundant(samples []float64, nbytes int) ([]byte, error) {
+	if nbytes < 2 {
+		return nil, errors.New("celt: invalid redundancy size")
+	}
+	saved := e.rateMode
+	e.rateMode = RateModeCBR
+	_, out, err := e.encodeRange(samples, nil, nbytes, 0, -1)
+	e.rateMode = saved
+	return out, err
+}
+
 // EncodeHybrid writes the CELT high-band layer of a hybrid frame into an
 // already-started range encoder. The SILK layer must already have written its
 // symbols. totalBytes is the full shared Opus frame payload size.

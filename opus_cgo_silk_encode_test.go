@@ -450,6 +450,90 @@ func TestCGOEncodeRefHybridVBR(t *testing.T) {
 	}
 }
 
+// TestCGOEncodeRefHybridRedundancyTransition drives a hybrid->CELT mode
+// transition and verifies that libopus decodes the transitional packet, which
+// carries a trailing 5 ms redundant CELT frame. A malformed redundancy header or
+// frame would make libopus reject the packet or truncate the CELT main layer's
+// budget, so a clean decode to non-trivial output confirms the wire format is
+// conformant.
+func TestCGOEncodeRefHybridRedundancyTransition(t *testing.T) {
+	t.Logf("libopus version: %s", cgoref.Version())
+
+	const (
+		rate     = 48000
+		channels = 1
+		bitrate  = 64000
+	)
+	frameSize := rate * 20 / 1000
+	maxSPC := rate * 120 / 1000
+
+	enc, err := opus.NewEncoder(rate, channels, opus.ApplicationVOIP)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	if err := enc.SetBitrate(bitrate); err != nil {
+		t.Fatalf("SetBitrate: %v", err)
+	}
+	ref, err := cgoref.NewDecoder(rate, channels)
+	if err != nil {
+		t.Fatalf("cgoref.NewDecoder: %v", err)
+	}
+	defer ref.Close()
+
+	refDecode := func(name string, pkt []byte) {
+		out, err := ref.DecodeFloat(pkt, maxSPC)
+		if err != nil {
+			t.Fatalf("%s: libopus decode (non-conformant packet): %v", name, err)
+		}
+		if len(out) != frameSize*channels {
+			t.Fatalf("%s: libopus samples=%d, want %d", name, len(out), frameSize*channels)
+		}
+		out64 := make([]float64, len(out))
+		for i, v := range out {
+			out64[i] = float64(v)
+		}
+		rms, peak := silkRefStats(out64)
+		if peak > 1.5 || rms < 1e-5 {
+			t.Fatalf("%s: libopus output suspect (rms=%g peak=%g)", name, rms, peak)
+		}
+	}
+
+	frame := 0
+	for ; frame < 4; frame++ {
+		pkt, err := enc.EncodeFloat(silkRefHybridFrame(rate, frame*frameSize, frameSize, channels), frameSize)
+		if err != nil {
+			t.Fatalf("hybrid warmup %d: EncodeFloat: %v", frame, err)
+		}
+		if config := int((pkt[0] >> 3) & 0x1f); config < 12 || config > 15 {
+			t.Fatalf("hybrid warmup %d: config=%d, want hybrid", frame, config)
+		}
+		refDecode("hybrid-warmup", pkt)
+	}
+
+	// Switch to music: the transitional packet must remain hybrid and carry the
+	// redundant CELT frame.
+	enc.SetSignalType(opus.SignalMusic)
+	transPkt, err := enc.EncodeFloat(silkRefHybridFrame(rate, frame*frameSize, frameSize, channels), frameSize)
+	if err != nil {
+		t.Fatalf("transition: EncodeFloat: %v", err)
+	}
+	if config := int((transPkt[0] >> 3) & 0x1f); config < 12 || config > 15 {
+		t.Fatalf("transition packet config=%d, want hybrid (deferred switch)", config)
+	}
+	refDecode("transition-hybrid", transPkt)
+	frame++
+
+	// The genuine CELT-only switch follows.
+	celtPkt, err := enc.EncodeFloat(silkRefSpeechFrame(rate, frame*frameSize, frameSize, channels), frameSize)
+	if err != nil {
+		t.Fatalf("post-transition: EncodeFloat: %v", err)
+	}
+	if config := int((celtPkt[0] >> 3) & 0x1f); config < 16 {
+		t.Fatalf("post-transition packet config=%d, want CELT-only", config)
+	}
+	refDecode("post-transition-celt", celtPkt)
+}
+
 func silkRefSpeechFrame(rate, start, n, channels int) []float64 {
 	out := make([]float64, n*channels)
 	for i := 0; i < n; i++ {

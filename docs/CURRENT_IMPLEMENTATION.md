@@ -73,7 +73,7 @@ requested.
 As of SILK Encoder slice 13, high-bitrate 24/48 kHz voice input can emit hybrid
 packets. The encoder writes a 16 kHz SILK low band and CELT high band into one
 shared range stream in decoder-compatible order (`SILK -> hybrid redundancy flag
--> CELT start=17`), with redundancy disabled. 24 kHz voice emits SWB hybrid
+-> CELT start=17`). 24 kHz voice emits SWB hybrid
 config 13; 48 kHz voice emits FB hybrid config 15 when the selected bandwidth is
 fullband. Automatic signal-content bandwidth narrowing runs before hybrid mode
 selection; if the analysed signal narrows below SWB, the encoder falls back to a
@@ -81,6 +81,18 @@ CELT-only packet using that narrower bandwidth. Explicit forced bandwidths still
 take precedence over max-bandwidth caps. Hybrid is currently limited to 20 ms
 Opus frames, optionally packed as standard multi-frame packets for longer public
 frame sizes.
+
+The encoder also implements libopus-faithful hybrid->CELT transition redundancy.
+It tracks the previous packet's coding mode; when a hybrid run would switch to
+CELT-only, the switch is deferred by one packet (`Encoder.prevMode`). That
+transitional packet stays hybrid and appends a trailing 5 ms (240 @ 48 kHz)
+fullband CELT redundant frame (`celt_to_silk=0`) to the last sub-frame, sized via
+`computeRedundancyBytes` (libopus `compute_redundancy_bytes`). The redundant
+frame is encoded on a dedicated, reset CELT encoder so it carries no overlap
+history, matching the decoder's freshly reset redundant-frame decoder; its state
+seeds the next CELT-only packet. The next packet is then genuinely CELT-only.
+libopus 1.6.1 decodes these transitional packets (verified by
+`TestCGOEncodeRefHybridRedundancyTransition`).
 
 Supported public encode packet durations are exact 20 ms multiples from 20 ms
 through 120 ms (`frameSize == base20ms * 1..6`). Unsupported frame sizes and

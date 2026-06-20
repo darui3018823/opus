@@ -61,6 +61,9 @@ func (pf *PostFilter) Reset() {
 	pf.prevTapset = 0
 }
 
+// Period returns the current decoded post-filter pitch period at 48 kHz.
+func (pf *PostFilter) Period() int { return pf.period }
+
 func (pf *PostFilter) copyFrom(src *PostFilter) {
 	if src == nil || src == pf {
 		return

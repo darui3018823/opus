@@ -39,7 +39,12 @@ Implemented public entry points:
 - `(*Encoder).EffectiveBitrate() int`
 - `(*Encoder).Complexity() int`
 - `(*Encoder).VBR() bool`
+- `(*Encoder).VBRConstraint() bool`
 - `(*Encoder).Application() Application`
+- `(*Encoder).SampleRate() int` / `(*Encoder).Channels() int`
+- `(*Encoder).Lookahead() int`
+- `(*Encoder).FinalRange() uint32`
+- `(*Encoder).InDTX() bool`
 - `(*Encoder).SetBitrate(bitrate int) error`
 - `(*Encoder).SetComplexity(complexity int) error`
 - `(*Encoder).SetVBR(vbr bool)`
@@ -52,6 +57,7 @@ Implemented public entry points:
 - `(*Encoder).SetSignalType(signal SignalType)`
 - `(*Encoder).SignalType() SignalType`
 - `(*Encoder).SetMaxBandwidth(bw int) error`
+- `(*Encoder).MaxBandwidth() int`
 - `(*Encoder).SetBandwidth(bw int) error` / `(*Encoder).Bandwidth() int`
 - `(*Encoder).Reset() error`
 
@@ -67,6 +73,10 @@ Public packet inspection entry points:
 
 These helpers validate the complete RFC 6716 packet framing and return
 `ErrInvalidPacket` for malformed or over-duration packets.
+
+The decoder exposes `SampleRate`, `Channels`, `FinalRange`, and `Pitch`
+getters. `FinalRange` is the XOR of the constituent frame entropy ranges, as
+for the libopus single-stream CTL. `Pitch` is reported in output-rate samples.
 
 Accepted sample rates are `8000`, `12000`, `16000`, `24000`, and `48000`.
 Accepted channel counts are mono and stereo.

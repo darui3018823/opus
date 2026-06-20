@@ -98,6 +98,80 @@ func TestNewEncoderWithProfile(t *testing.T) {
 	}
 }
 
+func TestCommonEncoderDecoderGetters(t *testing.T) {
+	enc, err := NewEncoder(48000, 2, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := NewDecoder(48000, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if enc.SampleRate() != 48000 || dec.SampleRate() != 48000 {
+		t.Fatalf("sample rates = encoder %d decoder %d", enc.SampleRate(), dec.SampleRate())
+	}
+	if enc.Channels() != 2 || dec.Channels() != 2 {
+		t.Fatalf("channels = encoder %d decoder %d", enc.Channels(), dec.Channels())
+	}
+	if enc.Lookahead() != 120 {
+		t.Fatalf("lookahead = %d, want 120", enc.Lookahead())
+	}
+	if enc.VBRConstraint() {
+		t.Fatal("legacy CBR encoder reports constrained VBR")
+	}
+	enc.SetVBR(true)
+	if !enc.VBRConstraint() {
+		t.Fatal("constrained VBR getter did not track SetVBR(true)")
+	}
+	enc.SetVBRConstraint(false)
+	if enc.VBRConstraint() {
+		t.Fatal("VBR constraint getter did not track SetVBRConstraint(false)")
+	}
+	if err := enc.SetMaxBandwidth(BandwidthWideband); err != nil {
+		t.Fatal(err)
+	}
+	if enc.MaxBandwidth() != BandwidthWideband {
+		t.Fatalf("max bandwidth = %d, want %d", enc.MaxBandwidth(), BandwidthWideband)
+	}
+
+	pcm := make([]int16, 960*2)
+	packet, err := enc.Encode(pcm, 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]int16, len(pcm))
+	if _, err := dec.Decode(packet, out); err != nil {
+		t.Fatal(err)
+	}
+	if enc.FinalRange() != dec.FinalRange() {
+		t.Fatalf("final range mismatch: encoder=%08x decoder=%08x", enc.FinalRange(), dec.FinalRange())
+	}
+	if dec.Pitch() < 0 {
+		t.Fatalf("pitch = %d, want non-negative", dec.Pitch())
+	}
+
+	enc.SetDTX(true)
+	if _, err := enc.Encode(pcm, 960); err != nil {
+		t.Fatal(err)
+	}
+	if !enc.InDTX() {
+		t.Fatal("silent DTX packet did not set InDTX")
+	}
+	if err := enc.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if enc.FinalRange() != 0 || enc.InDTX() {
+		t.Fatalf("encoder observable state survived reset: range=%08x dtx=%v", enc.FinalRange(), enc.InDTX())
+	}
+	if err := dec.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if dec.FinalRange() != 0 || dec.Pitch() != 0 {
+		t.Fatalf("decoder observable state survived reset: range=%08x pitch=%d", dec.FinalRange(), dec.Pitch())
+	}
+}
+
 func TestEncoderApplicationValidation(t *testing.T) {
 	if _, err := NewEncoder(48000, 1, Application(9999)); !errors.Is(err, ErrBadArg) {
 		t.Fatalf("NewEncoder invalid application error = %v, want ErrBadArg", err)

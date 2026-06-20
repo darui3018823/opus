@@ -104,6 +104,10 @@ type Encoder struct {
 	// frame used to smooth mode transitions. It is created lazily and reset
 	// before each use so the redundant frame carries no overlap history.
 	redundancyCelt *celt.Encoder
+
+	// CTL-style observable state from the most recently encoded packet.
+	lastFinalRange uint32
+	inDTX          bool
 }
 
 // isValidOpusRate returns true if the sample rate is one of the five valid Opus rates.
@@ -304,6 +308,7 @@ func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
 // that are exact multiples (1..6) of the 20 ms base are split into consecutive
 // 20 ms frames and packed as one Opus packet (RFC 6716 §3.2).
 func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
+	e.inDTX = e.dtx && isSilentPCM(pcm)
 	if err := e.selectCELTEncoder(frameSize); err != nil {
 		return nil, err
 	}
@@ -387,6 +392,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 			return nil, err
 		}
 		e.prevMode = framing.ModeCELTOnly
+		e.lastFinalRange = e.celtEncoder.FinalRange()
 		return append([]byte{toc}, compressed...), nil
 	}
 
@@ -396,6 +402,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	// a code-3 packet (the only count code that carries padding).
 	chunkLen := base * e.channels
 	frames := make([][]byte, 0, nFrames)
+	var rangeFinal uint32
 	for k := 0; k < nFrames; k++ {
 		chunk := pcm[k*chunkLen : (k+1)*chunkLen]
 		f, err := e.encodeOneCELTFrame(chunk)
@@ -403,6 +410,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 			return nil, err
 		}
 		frames = append(frames, f)
+		rangeFinal ^= e.celtEncoder.FinalRange()
 	}
 
 	// CBR packs frames of equal size with the most compact code; VBR/CVBR
@@ -416,6 +424,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("failed to pack %d frames: %w", nFrames, err)
 	}
 	e.prevMode = framing.ModeCELTOnly
+	e.lastFinalRange = rangeFinal
 	return append([]byte{toc | byte(code)}, payload...), nil
 }
 
@@ -431,6 +440,7 @@ func (e *Encoder) encodeShortCELTPacket(pcm []float64) ([]byte, error) {
 		return nil, err
 	}
 	e.prevMode = framing.ModeCELTOnly
+	e.lastFinalRange = e.celtEncoder.FinalRange()
 	if e.padBytes <= 0 {
 		return append([]byte{toc}, compressed...), nil
 	}
@@ -658,6 +668,7 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy,
 	cbr := e.rateMode == celt.RateModeCBR
 
 	frames := make([][]byte, 0, nFrames)
+	var rangeFinal uint32
 	redundancyEmitted := false
 	for k := 0; k < nFrames; k++ {
 		chunk := pcm[k*inputChunkLen : (k+1)*inputChunkLen]
@@ -756,6 +767,7 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy,
 		if err := e.celtEncoder.EncodeHybrid(celtInput, enc, targetBytes, 17, celtEnd); err != nil {
 			return nil, false, fmt.Errorf("CELT hybrid encoding failed: %w", err)
 		}
+		rangeFinal ^= enc.GetRng()
 		enc.Flush()
 		frame := enc.Bytes()
 		if len(frame) > targetBytes {
@@ -805,6 +817,7 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy,
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to pack hybrid stream: %w", err)
 	}
+	e.lastFinalRange = rangeFinal
 	return append([]byte{toc | byte(code)}, payload...), redundancyEmitted, nil
 }
 
@@ -901,6 +914,7 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int, celtToSilk bo
 	silkFrameSize := e.silkSampleRate * 20 / 1000
 	silkChunkLen := silkFrameSize * e.channels
 	streams := make([][]byte, 0, len(groups))
+	var rangeFinal uint32
 	pos := 0
 	for gi, group := range groups {
 		inputSamples := group * inputChunkLen
@@ -987,6 +1001,9 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int, celtToSilk bo
 			}
 		}
 		streams = append(streams, stream)
+		if !isSilentPCM(silkPCM) {
+			rangeFinal ^= e.silkEncoder.LastFinalRange()
+		}
 		pos += inputSamples
 	}
 	payload, code, err := packOpusFramesPadded(streams, true, e.padBytes)
@@ -997,6 +1014,7 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int, celtToSilk bo
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack SILK stream: %w", err)
 	}
+	e.lastFinalRange = rangeFinal
 	return append([]byte{toc | byte(code)}, payload...), nil
 }
 
@@ -1263,6 +1281,30 @@ func (e *Encoder) Complexity() int { return e.complexity }
 // VBR reports whether variable bitrate is enabled.
 func (e *Encoder) VBR() bool { return e.rateMode != celt.RateModeCBR }
 
+// VBRConstraint reports whether constrained VBR is enabled.
+func (e *Encoder) VBRConstraint() bool { return e.rateMode == celt.RateModeCVBR }
+
+// SampleRate returns the encoder input sample rate in Hz.
+func (e *Encoder) SampleRate() int { return e.sampleRate }
+
+// Channels returns the encoder input channel count.
+func (e *Encoder) Channels() int { return e.channels }
+
+// Lookahead returns the codec lookahead in samples at the encoder input rate.
+func (e *Encoder) Lookahead() int {
+	// CELT uses a 120-sample overlap at 48 kHz. The public encoder's current
+	// paths do not add a separate analysis delay beyond that overlap.
+	return e.sampleRate / 400
+}
+
+// FinalRange returns the XOR of the entropy coder final ranges for the most
+// recently encoded packet's constituent Opus frames.
+func (e *Encoder) FinalRange() uint32 { return e.lastFinalRange }
+
+// InDTX reports whether the most recently encoded packet used the encoder's
+// DTX silence path.
+func (e *Encoder) InDTX() bool { return e.inDTX }
+
 // Application returns the current application mode.
 func (e *Encoder) Application() Application { return e.application }
 
@@ -1472,6 +1514,9 @@ func (e *Encoder) SetMaxBandwidth(bw int) error {
 	return nil
 }
 
+// MaxBandwidth returns the configured automatic bandwidth cap.
+func (e *Encoder) MaxBandwidth() int { return e.maxBandwidth }
+
 // SetBandwidth forces a specific coded bandwidth, overriding the automatic
 // selection (it is still clamped to the input sample rate's Nyquist limit). Pass
 // BandwidthAuto to return to automatic selection (the default). bw must be
@@ -1660,6 +1705,8 @@ func (e *Encoder) Reset() error {
 	}
 	e.lastDetectedBW = -1
 	e.prevMode = -1
+	e.lastFinalRange = 0
+	e.inDTX = false
 	if e.redundancyCelt != nil {
 		e.redundancyCelt.Reset()
 	}
@@ -1735,6 +1782,8 @@ type Decoder struct {
 	frameSize          int // frame size in samples at sampleRate
 	internalFrameSize  int // always 960 (20ms at 48kHz)
 	lastPacketDuration int // samples per channel decoded by the last packet
+	lastFinalRange     uint32
+	lastPitch          int
 }
 
 // silkRateIdx maps a SILK rate in kHz to an index 0-2.
@@ -2432,6 +2481,7 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 	}
 
 	var allPCM []float64
+	var rangeFinal uint32
 	for _, frame := range frames {
 		if d.lastCeltDec != nil && d.lastCeltDec != activeCeltDec {
 			activeCeltDec.CopyStateFrom(d.lastCeltDec)
@@ -2441,6 +2491,8 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 			return nil, fmt.Errorf("CELT decoding failed: %w", err)
 		}
 		d.lastCeltDec = activeCeltDec
+		rangeFinal ^= activeCeltDec.LastFinalRange()
+		d.lastPitch = activeCeltDec.Pitch() * d.sampleRate / 48000
 
 		// Resample from 48kHz to output sample rate if needed
 		if d.celtResampler != nil {
@@ -2455,6 +2507,7 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 	}
 
 	d.lastPacketDuration = duration
+	d.lastFinalRange = rangeFinal
 	d.prevMode = framing.ModeCELTOnly
 	return allPCM, nil
 }
@@ -2594,6 +2647,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		d.silkRS[1] != nil && d.silkRSInKHz[1] == rateKHz
 
 	var allPCM []float64
+	var rangeFinal uint32
 	for si, stream := range silkStreams {
 		if len(stream) < 2 {
 			pcm, err := info.dec.DecodeMulti(stream, nSilkFramesPerStream)
@@ -2604,6 +2658,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 			pcm = d.resampleSILK(pcm, nSilkFramesPerStream, pktChannels, stereoToMono && si == 0)
 			pcm = padOrTrim(pcm, samplesPerStream)
 			allPCM = append(allPCM, pcm...)
+			rangeFinal ^= info.dec.LastFinalRange()
 			continue
 		}
 		dec := entcode.NewDecoder(stream)
@@ -2650,7 +2705,10 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 			}
 		}
 		allPCM = append(allPCM, pcm...)
+		rangeFinal ^= dec.GetRng()
 	}
+	d.lastFinalRange = rangeFinal
+	d.lastPitch = info.dec.Pitch() * d.sampleRate / (rateKHz * 1000)
 	d.prevSilkInternalCh = pktChannels
 
 	if pktChannels == 1 && stereoPeer != nil && stereoPeer.dec != nil {
@@ -2806,6 +2864,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 	samplesPerFrame := (d.sampleRate * frameDurationMs / 1000) * d.channels
 
 	var allPCM []float64
+	var rangeFinal uint32
 	for si, stream := range silkStreams {
 		// One shared range decoder per Opus frame: SILK reads first, CELT after.
 		dec := entcode.NewDecoder(stream)
@@ -2901,7 +2960,10 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 			}
 		}
 		allPCM = append(allPCM, silkOut...)
+		rangeFinal ^= dec.GetRng()
 	}
+	d.lastFinalRange = rangeFinal
+	d.lastPitch = info.dec.Pitch() * d.sampleRate / (rateKHz * 1000)
 	d.prevSilkInternalCh = pktChannels
 
 	if pktChannels == 1 && stereoPeer != nil && stereoPeer.dec != nil {
@@ -3209,6 +3271,8 @@ func (d *Decoder) Reset() error {
 	}
 	d.lastCeltDec = nil
 	d.prevMode = -1
+	d.lastFinalRange = 0
+	d.lastPitch = 0
 	return nil
 }
 
@@ -3219,3 +3283,17 @@ func (d *Decoder) GetLastPacketDuration() int {
 	}
 	return d.frameSize
 }
+
+// SampleRate returns the decoder output sample rate in Hz.
+func (d *Decoder) SampleRate() int { return d.sampleRate }
+
+// Channels returns the decoder output channel count.
+func (d *Decoder) Channels() int { return d.channels }
+
+// FinalRange returns the XOR of the entropy decoder final ranges for the most
+// recently decoded packet's constituent Opus frames.
+func (d *Decoder) FinalRange() uint32 { return d.lastFinalRange }
+
+// Pitch returns the most recently reported decoder pitch period in samples at
+// the decoder output rate. Zero means no pitch period is currently available.
+func (d *Decoder) Pitch() int { return d.lastPitch }

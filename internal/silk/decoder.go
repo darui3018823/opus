@@ -208,6 +208,7 @@ type Decoder struct {
 	prevGainIndex  int8    // previous gain index for conditional coding
 	prevSignalType int     // previous signal type
 	firstFrame     bool    // true until the first decoded frame after reset
+	lastFinalRange uint32
 
 	// LPC synthesis state: last MAX_LPC_ORDER samples
 	lpcState []int32 // Q14
@@ -403,6 +404,7 @@ func (d *Decoder) DecodeMulti(packet []byte, nFrames int) ([]float64, error) {
 
 	// Single-byte silence packet
 	if len(packet) == 1 && packet[0] == 0x00 {
+		d.lastFinalRange = 0
 		result := make([]float64, d.frameSize*d.channels*nFrames)
 		return result, nil
 	}
@@ -416,7 +418,9 @@ func (d *Decoder) DecodeMulti(packet []byte, nFrames int) ([]float64, error) {
 	if dec.Error() != nil {
 		return d.concealPacketLoss()
 	}
-	return d.decodeMultiMonoEC(dec, nFrames)
+	pcm, err := d.decodeMultiMonoEC(dec, nFrames)
+	d.lastFinalRange = dec.GetRng()
+	return pcm, err
 }
 
 // DecodeMultiWithDecoder decodes nFrames SILK frames from an already-initialised
@@ -428,11 +432,23 @@ func (d *Decoder) DecodeMultiWithDecoder(dec *entcode.Decoder, nFrames int) ([]f
 	if nFrames < 1 {
 		nFrames = 1
 	}
+	var pcm []float64
+	var err error
 	if d.channels == 2 {
-		return d.decodeMultiStereoEC(dec, nFrames)
+		pcm, err = d.decodeMultiStereoEC(dec, nFrames)
+	} else {
+		pcm, err = d.decodeMultiMonoEC(dec, nFrames)
 	}
-	return d.decodeMultiMonoEC(dec, nFrames)
+	d.lastFinalRange = dec.GetRng()
+	return pcm, err
 }
+
+// LastFinalRange returns the entropy decoder range after the most recent
+// standalone or shared-stream decode.
+func (d *Decoder) LastFinalRange() uint32 { return d.lastFinalRange }
+
+// Pitch returns the most recent SILK pitch period at the internal sample rate.
+func (d *Decoder) Pitch() int { return d.lagPrev }
 
 // DecodeFEC decodes mono LBRR data carried in the packet following a loss.
 // nFrames is the number of 10 or 20 ms SILK frames represented by the packet.
@@ -2173,6 +2189,7 @@ func (d *Decoder) Reset() {
 	d.prevGainIndex = 10
 	d.prevSignalType = SignalTypeUnvoiced
 	d.firstFrame = true
+	d.lastFinalRange = 0
 	for i := range d.lpcState {
 		d.lpcState[i] = 0
 	}

@@ -171,7 +171,13 @@ func (e *Encoder) Bitrate() int
 func (e *Encoder) EffectiveBitrate() int
 func (e *Encoder) Complexity() int
 func (e *Encoder) VBR() bool
+func (e *Encoder) VBRConstraint() bool
 func (e *Encoder) Application() Application
+func (e *Encoder) SampleRate() int
+func (e *Encoder) Channels() int
+func (e *Encoder) Lookahead() int
+func (e *Encoder) FinalRange() uint32
+func (e *Encoder) InDTX() bool
 
 func (e *Encoder) SetBitrate(bitrate int) error       // 6000–510000 bps
 func (e *Encoder) SetComplexity(complexity int) error // 0–10
@@ -182,6 +188,7 @@ func (e *Encoder) SetSignalType(signal SignalType)
 func (e *Encoder) SignalType() SignalType
 func (e *Encoder) SetBandwidth(bw int) error          // Auto/NB/WB/SWB/FB
 func (e *Encoder) SetMaxBandwidth(bw int) error
+func (e *Encoder) MaxBandwidth() int
 func (e *Encoder) Bandwidth() int
 func (e *Encoder) SetDTX(dtx bool)
 func (e *Encoder) DTX() bool
@@ -209,6 +216,10 @@ func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) // CELT-onl
 func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error)   // mono SILK LBRR
 func (d *Decoder) Reset() error
 func (d *Decoder) GetLastPacketDuration() int
+func (d *Decoder) SampleRate() int
+func (d *Decoder) Channels() int
+func (d *Decoder) FinalRange() uint32
+func (d *Decoder) Pitch() int
 ```
 
 ## アーキテクチャ

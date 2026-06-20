@@ -7,6 +7,7 @@ package cgoref
 #cgo CFLAGS: -I${SRCDIR}/../../libopus/include -IC:/msys64/mingw64/include/opus
 #cgo LDFLAGS: -LC:/msys64/mingw64/lib -lopus
 #include <opus.h>
+#include <opus_multistream.h>
 #include <stdlib.h>
 
 static int go_opus_encoder_set_bitrate(OpusEncoder *enc, int bps) {
@@ -73,6 +74,18 @@ type Decoder struct {
 	channels int
 }
 
+// MultistreamEncoder wraps a libopus OpusMSEncoder.
+type MultistreamEncoder struct {
+	enc      *C.OpusMSEncoder
+	channels int
+}
+
+// MultistreamDecoder wraps a libopus OpusMSDecoder.
+type MultistreamDecoder struct {
+	dec      *C.OpusMSDecoder
+	channels int
+}
+
 // NewEncoder creates a libopus encoder.
 func NewEncoder(sampleRate, channels, application int) (*Encoder, error) {
 	var code C.int
@@ -96,6 +109,36 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 		return nil, fmt.Errorf("OPUS_SET_OSCE_BWE(0): %s", C.GoString(C.opus_strerror(code)))
 	}
 	return &Decoder{dec: dec, channels: channels}, nil
+}
+
+// NewMultistreamEncoder creates a libopus multistream encoder.
+func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, mapping []byte, application int) (*MultistreamEncoder, error) {
+	if len(mapping) != channels || len(mapping) == 0 {
+		return nil, fmt.Errorf("invalid mapping length %d for %d channels", len(mapping), channels)
+	}
+	var code C.int
+	enc := C.opus_multistream_encoder_create(
+		C.opus_int32(sampleRate), C.int(channels), C.int(streams), C.int(coupledStreams),
+		(*C.uchar)(unsafe.Pointer(&mapping[0])), C.int(application), &code)
+	if code != 0 {
+		return nil, fmt.Errorf("opus_multistream_encoder_create: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return &MultistreamEncoder{enc: enc, channels: channels}, nil
+}
+
+// NewMultistreamDecoder creates a libopus multistream decoder.
+func NewMultistreamDecoder(sampleRate, channels, streams, coupledStreams int, mapping []byte) (*MultistreamDecoder, error) {
+	if len(mapping) != channels || len(mapping) == 0 {
+		return nil, fmt.Errorf("invalid mapping length %d for %d channels", len(mapping), channels)
+	}
+	var code C.int
+	dec := C.opus_multistream_decoder_create(
+		C.opus_int32(sampleRate), C.int(channels), C.int(streams), C.int(coupledStreams),
+		(*C.uchar)(unsafe.Pointer(&mapping[0])), &code)
+	if code != 0 {
+		return nil, fmt.Errorf("opus_multistream_decoder_create: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return &MultistreamDecoder{dec: dec, channels: channels}, nil
 }
 
 // SetBitrate sets the libopus encoder target bitrate in bits per second.
@@ -196,6 +239,30 @@ func (e *Encoder) Close() {
 	}
 }
 
+// Encode encodes one float32 frame with libopus multistream.
+func (e *MultistreamEncoder) Encode(pcm []float32, frameSize int) ([]byte, error) {
+	need := frameSize * e.channels
+	if len(pcm) < need {
+		return nil, fmt.Errorf("insufficient PCM data: got %d, need %d", len(pcm), need)
+	}
+	out := make([]byte, 65536)
+	n := C.opus_multistream_encode_float(e.enc,
+		(*C.float)(unsafe.Pointer(&pcm[0])), C.int(frameSize),
+		(*C.uchar)(unsafe.Pointer(&out[0])), C.opus_int32(len(out)))
+	if n < 0 {
+		return nil, fmt.Errorf("opus_multistream_encode_float: %s", C.GoString(C.opus_strerror(n)))
+	}
+	return out[:int(n)], nil
+}
+
+// Close frees the libopus multistream encoder.
+func (e *MultistreamEncoder) Close() {
+	if e.enc != nil {
+		C.opus_multistream_encoder_destroy(e.enc)
+		e.enc = nil
+	}
+}
+
 // DecodeFloat decodes one packet to float32. Returns samples per channel.
 func (d *Decoder) DecodeFloat(packet []byte, maxSPC int) ([]float32, error) {
 	pcm := make([]float32, maxSPC*d.channels)
@@ -243,6 +310,29 @@ func (d *Decoder) FinalRange() (uint32, error) {
 func (d *Decoder) Close() {
 	if d.dec != nil {
 		C.opus_decoder_destroy(d.dec)
+		d.dec = nil
+	}
+}
+
+// DecodeFloat decodes one packet with libopus multistream.
+func (d *MultistreamDecoder) DecodeFloat(packet []byte, maxSPC int) ([]float32, error) {
+	if len(packet) == 0 {
+		return nil, fmt.Errorf("empty multistream packet")
+	}
+	pcm := make([]float32, maxSPC*d.channels)
+	n := C.opus_multistream_decode_float(d.dec,
+		(*C.uchar)(unsafe.Pointer(&packet[0])), C.opus_int32(len(packet)),
+		(*C.float)(unsafe.Pointer(&pcm[0])), C.int(maxSPC), 0)
+	if n < 0 {
+		return nil, fmt.Errorf("opus_multistream_decode_float: %s", C.GoString(C.opus_strerror(n)))
+	}
+	return pcm[:int(n)*d.channels], nil
+}
+
+// Close frees the libopus multistream decoder.
+func (d *MultistreamDecoder) Close() {
+	if d.dec != nil {
+		C.opus_multistream_decoder_destroy(d.dec)
 		d.dec = nil
 	}
 }

@@ -212,6 +212,18 @@ func (e *Encoder) Reset() error
 Use `EncoderProfileLibopus` for automatic bitrate, complexity 9, and constrained
 VBR defaults.
 
+### Concurrency and ownership
+
+`Encoder` and `Decoder` are stateful and are not safe for concurrent use.
+Create one instance per logical Opus stream and preserve packet order. All
+methods on the same instance, including getters, configuration methods, and
+`Reset`, must be serialized by the caller, for example with a mutex. Separate
+instances may be used concurrently.
+
+Do not copy an `Encoder` or `Decoder` after first use. Encode and decode methods
+borrow caller-provided PCM, packet, and destination slices only until the method
+returns. Returned encoded packets and PCM slices are owned by the caller.
+
 ### Decoder
 
 ```go

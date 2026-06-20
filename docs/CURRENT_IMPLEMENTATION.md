@@ -109,6 +109,14 @@ and the maximum policy is bounded by the RFC per-frame byte limit.
 complexity 9, and constrained VBR without imposing a behavior change on
 existing callers.
 
+Encoder and decoder instances are stateful and are not safe for concurrent
+use. One instance owns the codec history for one logical Opus stream; packets
+must be processed in order, and callers must serialize all methods on a shared
+instance, including getters, controls, and `Reset`. Distinct instances may run
+concurrently. Instances must not be copied after first use. Caller-provided
+PCM, packet, and destination slices are borrowed only for the duration of a
+method call; returned packet and PCM slices are caller-owned.
+
 The top-level encoder uses internal CELT encoders at 48 kHz for 2.5, 5, 10,
 and 20 ms transform geometries. Non-48 kHz CELT input is resampled to 48 kHz
 before CELT encoding. The CELT emitted TOC byte uses the requested valid frame

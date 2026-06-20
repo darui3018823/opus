@@ -44,7 +44,15 @@ const (
 	SignalMusic SignalType = celt.SignalMusic
 )
 
-// Encoder represents an Opus encoder instance
+// Encoder represents the state of one Opus stream encoder.
+//
+// An Encoder is stateful, must not be copied after first use, and is not safe
+// for concurrent use. Calls to Encode, configuration methods, getters, and
+// Reset on the same instance must be serialized by the caller. Separate
+// Encoder instances may be used concurrently.
+//
+// Encode methods borrow the input PCM only for the duration of the call and
+// return a packet owned by the caller.
 type Encoder struct {
 	sampleRate  int
 	channels    int
@@ -1886,7 +1894,17 @@ type silkRateInfo struct {
 	silkResamplerR *silk.Resampler
 }
 
-// Decoder represents an Opus decoder instance
+// Decoder represents the state of one Opus stream decoder.
+//
+// A Decoder is stateful, must not be copied after first use, and is not safe
+// for concurrent use. Packets for a logical stream must be supplied in decode
+// order, and calls to Decode, DecodePLC, DecodeFEC, getters, SetGain, and Reset
+// on the same instance must be serialized by the caller. Separate Decoder
+// instances may be used concurrently.
+//
+// Decode methods borrow packet and destination slices only for the duration of
+// the call. Slices returned by DecodeFloat and DecodeFloat32 are owned by the
+// caller.
 type Decoder struct {
 	sampleRate int
 	channels   int

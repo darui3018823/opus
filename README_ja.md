@@ -208,6 +208,19 @@ func (e *Encoder) Reset() error
 自動 bitrate・complexity 9・constrained VBR の既定値には
 `EncoderProfileLibopus` を指定します。
 
+### 並行利用と所有権
+
+`Encoder` と `Decoder` は状態を保持し、同一インスタンスを複数 goroutine
+から同時に利用することはできません。論理 Opus ストリームごとに1つの
+インスタンスを作成し、パケット順序を維持してください。同一インスタンスの
+getter、設定変更、`Reset` を含む全メソッドは、必要に応じて mutex などを使い
+呼び出し側で直列化します。別々のインスタンスは並行して利用できます。
+
+初回利用後の `Encoder` / `Decoder` を値コピーしないでください。エンコード・
+デコードメソッドが呼び出し側の PCM、packet、出力先 slice を借用するのは
+メソッドが戻るまでです。返された圧縮 packet と PCM slice の所有権は
+呼び出し側にあります。
+
 ### デコーダー
 
 ```go

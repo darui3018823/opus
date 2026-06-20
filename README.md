@@ -136,13 +136,11 @@ _ = packet
   from 20 ms through 120 ms (multi-frame, RFC 6716 §3.2).
 - **Encoder bandwidth**: automatic (signal-content-driven FFT detection) or
   manual (`SetBandwidth`/`SetMaxBandwidth`). Ranges: NB/WB/SWB/FB.
-- **Encoder mode selection**: CELT is the default for general audio, music,
-  restricted-low-delay, and bitrates above 40 kbps. The limited SILK-only path
-  is selected for mono or stereo speech when `ApplicationVOIP` or `SignalVoice`
-  is active, bitrate is at most 40 kbps, and `SetBandwidth`/`SetMaxBandwidth`
-  allow the selected SILK bandwidth. Native 8/12/16 kHz input maps to NB/MB/WB;
-  24/48 kHz voice input is downsampled to WB SILK. `SignalMusic` keeps the
-  encoder on CELT.
+- **Encoder mode selection**: CELT is used for general audio, music,
+  restricted-low-delay, and voice above the useful hybrid range. Voice
+  boundaries account for channel count and active LBRR: SILK-only extends to
+  40 kbps mono or 48 kbps stereo, with extra headroom when FEC is active;
+  24/48 kHz voice can use hybrid at intermediate rates, then returns to CELT.
 - **Application types** (drive bandwidth and transient-detection behaviour):
   - `opus.ApplicationVOIP` — narrower bandwidth tiers, eager short-block switching
   - `opus.ApplicationAudio` — music/general defaults
@@ -332,9 +330,8 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
 
 ## Limitations
 
-- SILK-only encode is limited to low-bitrate speech; 24/48 kHz input is
-  downsampled to WB SILK, so high-band preservation requires future hybrid
-  encode work.
+- SILK/hybrid encode remains voice-oriented and does not yet reproduce every
+  libopus mode boundary or quality decision.
 - The encoder is not bit-exact with libopus, but produces standards-conformant
   packets that any compliant decoder (including libopus) can decode.
 - VBR/CVBR and application/signal hints shape the CELT encoder heuristics, but

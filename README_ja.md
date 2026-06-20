@@ -134,13 +134,11 @@ _ = packet
   （20ms〜120ms）。
 - **エンコーダー帯域**: 信号内容に基づく自動検出、または
   `SetBandwidth` / `SetMaxBandwidth` による明示指定。NB/WB/SWB/FB に対応。
-- **エンコーダーモード選択**: 通常の音声・音楽、restricted-low-delay、
-  40 kbps 超のビットレートでは CELT を使います。限定的な SILK-only 経路は、
-  モノラルまたはステレオの音声で、`ApplicationVOIP` または `SignalVoice` が有効、
-  ビットレートが 40 kbps 以下、かつ `SetBandwidth` / `SetMaxBandwidth` が選択
-  された SILK 帯域を許す場合に選択されます。8/12/16 kHz 入力は NB/MB/WB に対応し、
-  24/48 kHz の音声入力は WB SILK へダウンサンプリングされます。`SignalMusic` は
-  CELT を維持します。
+- **エンコーダーモード選択**: 通常音声・音楽・restricted-low-delay、および
+  hybridの有効範囲を超える高レート音声ではCELTを使います。voice境界は
+  チャンネル数とLBRRを考慮し、SILK-onlyはmono 40 kbps、stereo 48 kbps
+  までを基本とし、FEC有効時は範囲を拡張します。24/48 kHz音声は中間レートで
+  hybridを使い、それ以上ではCELTへ戻ります。
 - **アプリケーションタイプ**（帯域しきい値や transient 判定を調整）:
   - `opus.ApplicationVOIP` — voice 向け、狭めの帯域しきい値
   - `opus.ApplicationAudio` — music/general 向け
@@ -327,9 +325,8 @@ GitHub Actions ワークフロー 4 本。いずれも **amd64（`ubuntu-latest`
 
 ## 制限事項
 
-- SILK-only エンコードは低ビットレート音声に限定されています。24/48 kHz 入力は
-  WB SILK へダウンサンプリングされるため、高域保持には今後のハイブリッド
-  エンコード対応が必要です。
+- SILK/hybridエンコードはvoice向けであり、libopusの全mode境界・品質判断との
+  完全な一致には未到達です。
 - エンコーダーは libopus とビット精度一致ではありませんが、準拠デコーダー
   （libopus を含む）がデコードできる標準 Opus パケットを出力します。
 - SILK-only と hybrid エンコードは、`SetInbandFEC(true)` と 0 より大きい

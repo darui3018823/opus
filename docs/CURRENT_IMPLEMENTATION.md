@@ -118,16 +118,17 @@ and signal-content detector** (see Slice 2-6 and the post-2-6 notes below); it
 is no longer always fullband.
 
 As of SILK Encoder slices 11 and 12, the top-level encoder can also emit a
-limited SILK-only path for low-bitrate speech: `ApplicationVOIP` or an explicit
-voice signal hint, mono or stereo input, and target bitrates up to and including
-40 kbps. Native 8/12/16 kHz input maps to SILK NB/MB/WB; 24/48 kHz voice input
+SILK-only path for low-bitrate speech: `ApplicationVOIP` or an explicit voice
+signal hint, with channel- and FEC-aware bitrate boundaries. The base upper
+bound is 40 kbps mono or 48 kbps stereo; active LBRR extends it by 8 kbps per
+channel. Native 8/12/16 kHz input maps to SILK NB/MB/WB; 24/48 kHz voice input
 is downsampled to a 16 kHz WB SILK layer and emits a WB SILK-only TOC config.
 That path uses the internal SILK encoder, emits SILK-only duration configs for
 20/40/60 ms Opus frames for mono, and packs longer supported durations as
 standard multiple Opus frame streams. Stereo SILK packets use 20 ms streams for
 60 ms and longer public packet durations to keep individual Opus frame payloads
 inside the 1275-byte framing limit. Explicit `SignalMusic`,
-restricted-low-delay, bitrates above 40 kbps, a forced bandwidth that cannot be
+restricted-low-delay, bitrates outside the predictive-mode policy, a forced bandwidth that cannot be
 represented by the selected SILK layer, or, while bandwidth selection is
 automatic, a max-bandwidth cap below the SILK bandwidth keep the encoder out of
 the SILK-only path. An explicit forced bandwidth takes precedence over the
@@ -149,6 +150,12 @@ CELT-only packet using that narrower bandwidth. Explicit forced bandwidths still
 take precedence over max-bandwidth caps. Hybrid is currently limited to 20 ms
 Opus frames, optionally packed as standard multi-frame packets for longer public
 frame sizes.
+
+The mode policy has an upper hybrid boundary as well as the SILK-to-hybrid
+boundary. Mono hybrid is selected through 112 kbps and stereo through 192 kbps;
+active LBRR extends those limits by 16 kbps per channel. Above the boundary,
+voice returns to CELT so the transform layer receives the full packet budget.
+Tests cover channel, CVBR, bandwidth, FEC/loss, and transition cases.
 
 The encoder implements both directions of libopus-style SILK/hybrid↔CELT
 transition redundancy. It tracks the previous packet's coding mode with
@@ -574,7 +581,7 @@ The SILK package contains:
   against silence regressions, dead output, energy runaway, duration errors,
   side-channel collapse, and severe quality drops. Slice 10 hardens the public
   mode/rate boundary with tests for
-  the 40 kbps SILK limit, application and signal hints, pre-Slice-11/12
+  the original 40 kbps mono SILK limit, application and signal hints, pre-Slice-11/12
   channel/input-rate exclusions, forced/max bandwidth interaction, and
   VBR/DTX/padding interaction. The public SILK-only integration now also pads
   undersized CBR streams to the nominal bitrate target while leaving VBR/CVBR
@@ -785,10 +792,9 @@ reference comparison.
 - No public multistream, surround, or Ogg Opus container API.
 - Public PLC currently covers CELT-only streams; SILK-only and hybrid PLC are
   not implemented.
-- Top-level SILK-only encoder selection exists only for low-bitrate VOIP/voice.
-- Top-level hybrid encoder selection exists only for high-bitrate 24/48 kHz
-  VOIP/voice; there is no full libopus-equivalent hybrid mode/rate-control
-  coverage.
+- Top-level SILK/hybrid encoder selection is voice-oriented and now accounts
+  for rate, channels, bandwidth, CVBR, and active FEC, but it is not yet a full
+  libopus-equivalent mode/rate/quality policy.
 - SILK-only and hybrid LBRR/FEC encoding and decoding are available for mono
   and stereo. Hybrid FEC reconstructs the redundant SILK low band.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired

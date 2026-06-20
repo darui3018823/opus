@@ -1296,6 +1296,60 @@ func TestEncoderSILKOnlyModeSelectionMatrix(t *testing.T) {
 	}
 }
 
+func TestEncoderModeRatePolicy(t *testing.T) {
+	tests := []struct {
+		name        string
+		rate        int
+		channels    int
+		bitrate     int
+		fec         bool
+		constrained bool
+		wantMode    string
+	}{
+		{"mono-silk-boundary", 16000, 1, 40000, false, false, "silk"},
+		{"mono-above-silk-boundary", 16000, 1, 40001, false, false, "celt"},
+		{"stereo-expanded-silk-boundary", 16000, 2, 48000, false, true, "silk"},
+		{"stereo-above-silk-boundary", 16000, 2, 48001, false, false, "celt"},
+		{"fec-extends-mono-silk", 48000, 1, 44000, true, true, "silk"},
+		{"mono-hybrid-midrate", 48000, 1, 96000, false, true, "hybrid"},
+		{"mono-highrate-celt", 48000, 1, 112001, false, false, "celt"},
+		{"stereo-hybrid-midrate", 48000, 2, 160000, false, true, "hybrid"},
+		{"stereo-highrate-celt", 48000, 2, 192001, false, false, "celt"},
+		{"fec-extends-stereo-hybrid", 48000, 2, 208000, true, true, "hybrid"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			enc, err := NewEncoder(tc.rate, tc.channels, ApplicationVOIP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := enc.SetBitrate(tc.bitrate); err != nil {
+				t.Fatal(err)
+			}
+			if tc.constrained {
+				enc.SetVBR(true)
+				enc.SetVBRConstraint(true)
+			}
+			if tc.fec {
+				enc.SetPacketLossPerc(20)
+				enc.SetInbandFEC(true)
+			}
+			frameSize := tc.rate / 50
+			pcm := strictSpeechLikeFrame(tc.rate, tc.channels, 0, frameSize)
+			if tc.wantMode == "hybrid" {
+				pcm = strictHybridWidebandFrame(tc.rate, tc.channels, 0, frameSize)
+			}
+			packet, err := enc.EncodeFloat(pcm, frameSize)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strictOpusMode(int(packet[0] >> 3)); got != tc.wantMode {
+				t.Fatalf("mode = %s, want %s (TOC=%02x)", got, tc.wantMode, packet[0])
+			}
+		})
+	}
+}
+
 func TestEncoderSILKOnlyDownsampledVoiceRoundTrip(t *testing.T) {
 	for _, tc := range []struct {
 		rate     int

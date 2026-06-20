@@ -600,7 +600,7 @@ func (e *Encoder) shouldEncodeSILKOnly() bool {
 	if !e.hasVoiceIntent() {
 		return false
 	}
-	if e.bitrate > 40000 {
+	if e.bitrate > e.silkOnlyBitrateLimit() {
 		return false
 	}
 	nativeBW, ok := nativeSilkFramingBandwidth(e.silkSampleRate)
@@ -633,11 +633,41 @@ func (e *Encoder) shouldEncodeHybrid(nFrames int) bool {
 	if e.application == ApplicationRestrictedLowDelay {
 		return false
 	}
-	if !e.hasVoiceIntent() || e.bitrate <= 40000 {
+	if !e.hasVoiceIntent() || e.bitrate <= e.silkOnlyBitrateLimit() ||
+		e.bitrate > e.hybridBitrateLimit() {
 		return false
 	}
 	bw := e.selectHybridBandwidth()
 	return bw == framing.BandwidthSuperwideband || bw == framing.BandwidthFullband
+}
+
+// silkOnlyBitrateLimit is the upper mode boundary for the current channel/loss
+// configuration. Stereo receives a larger aggregate budget; active in-band FEC
+// extends the predictive-mode region because CELT-only cannot carry LBRR.
+func (e *Encoder) silkOnlyBitrateLimit() int {
+	limit := 40000
+	if e.channels == 2 {
+		limit = 48000
+	}
+	if e.useInbandFEC && e.packetLossPerc > 0 {
+		limit += 8000 * e.channels
+	}
+	return limit
+}
+
+// hybridBitrateLimit is the upper useful hybrid boundary. Above it the full
+// bandwidth CELT path gets the entire packet budget instead of retaining a
+// fixed 16 kHz SILK low band. FEC extends the boundary because hybrid can carry
+// LBRR while CELT-only cannot.
+func (e *Encoder) hybridBitrateLimit() int {
+	limit := 112000
+	if e.channels == 2 {
+		limit = 192000
+	}
+	if e.useInbandFEC && e.packetLossPerc > 0 {
+		limit += 16000 * e.channels
+	}
+	return limit
 }
 
 func (e *Encoder) hasVoiceIntent() bool {
@@ -1546,8 +1576,8 @@ func (e *Encoder) DTX() bool { return e.dtx }
 // When enabled together with a non-zero packet-loss percentage, SILK-only
 // packets carry a low-bitrate redundant copy of the previous packet's frame(s),
 // which a decoder can recover via its decode_fec path after a lost packet.
-// FEC applies only to the SILK-only speech path; it is off by default and has no
-// effect on CELT-only packets. Stereo and hybrid LBRR are not yet implemented.
+// FEC applies to SILK-only and hybrid speech paths; it is off by default and has
+// no effect on CELT-only packets.
 func (e *Encoder) SetInbandFEC(enabled bool) {
 	e.useInbandFEC = enabled
 	e.syncSILKFEC()

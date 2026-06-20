@@ -106,6 +106,63 @@ func TestDecodeReturnsBufferTooSmall(t *testing.T) {
 	}
 }
 
+func TestDecodeBufferTooSmallDoesNotAdvanceState(t *testing.T) {
+	const sampleRate = 48000
+	const frameSize = 960
+
+	enc, err := NewEncoder(sampleRate, 1, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeFrame := func(freq, phase float64) []float64 {
+		pcm := make([]float64, frameSize)
+		for i := range pcm {
+			pcm[i] = 0.3 * math.Sin(2*math.Pi*freq*float64(i)/sampleRate+phase)
+		}
+		return pcm
+	}
+	firstPacket, err := enc.EncodeFloat(makeFrame(440, 0), frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPacket, err := enc.EncodeFloat(makeFrame(733, 0.7), frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	retryDecoder, err := NewDecoder(sampleRate, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlDecoder, err := NewDecoder(sampleRate, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dec := range []*Decoder{retryDecoder, controlDecoder} {
+		if _, err := dec.Decode(firstPacket, make([]int16, frameSize)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := retryDecoder.Decode(secondPacket, make([]int16, frameSize-1)); !errors.Is(err, ErrBufferTooSmall) {
+		t.Fatalf("Decode small buffer error = %v, want ErrBufferTooSmall", err)
+	}
+
+	retried := make([]int16, frameSize)
+	if _, err := retryDecoder.Decode(secondPacket, retried); err != nil {
+		t.Fatal(err)
+	}
+	control := make([]int16, frameSize)
+	if _, err := controlDecoder.Decode(secondPacket, control); err != nil {
+		t.Fatal(err)
+	}
+	for i := range retried {
+		if retried[i] != control[i] {
+			t.Fatalf("retry output differs at sample %d: got %d, want %d", i, retried[i], control[i])
+		}
+	}
+}
+
 func TestLastPacketDurationTracksDecodedPacket(t *testing.T) {
 	const sampleRate = 48000
 	const frameSize = 960

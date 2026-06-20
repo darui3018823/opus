@@ -1,6 +1,7 @@
 package opus
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -15,8 +16,10 @@ func TestNewEncoder(t *testing.T) {
 		{"Valid 48kHz stereo", 48000, 2, ApplicationAudio, false},
 		{"Valid 48kHz mono", 48000, 1, ApplicationAudio, false},
 		{"Valid 16kHz stereo", 16000, 2, ApplicationVOIP, false},
+		{"Valid restricted low delay", 48000, 2, ApplicationRestrictedLowDelay, false},
 		{"Invalid sample rate", 44100, 2, ApplicationAudio, true},
 		{"Invalid channels", 48000, 5, ApplicationAudio, true},
+		{"Invalid application", 48000, 2, Application(9999), true},
 	}
 
 	for _, tt := range tests {
@@ -30,6 +33,38 @@ func TestNewEncoder(t *testing.T) {
 				t.Error("NewEncoder() returned nil encoder")
 			}
 		})
+	}
+}
+
+func TestEncoderApplicationValidation(t *testing.T) {
+	if _, err := NewEncoder(48000, 1, Application(9999)); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("NewEncoder invalid application error = %v, want ErrBadArg", err)
+	}
+
+	enc, err := NewEncoder(48000, 1, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetApplication(Application(9999)); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("SetApplication invalid application error = %v, want ErrBadArg", err)
+	}
+	if got := enc.Application(); got != ApplicationAudio {
+		t.Fatalf("application changed after rejected setter: got %d, want %d", got, ApplicationAudio)
+	}
+	if got := enc.SignalType(); got != SignalMusic {
+		t.Fatalf("signal type changed after rejected setter: got %d, want %d", got, SignalMusic)
+	}
+	for _, application := range []Application{
+		ApplicationVOIP,
+		ApplicationAudio,
+		ApplicationRestrictedLowDelay,
+	} {
+		if err := enc.SetApplication(application); err != nil {
+			t.Fatalf("SetApplication(%d) failed: %v", application, err)
+		}
+		if got := enc.Application(); got != application {
+			t.Fatalf("Application() = %d, want %d", got, application)
+		}
 	}
 }
 

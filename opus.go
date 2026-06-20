@@ -99,6 +99,14 @@ func isValidOpusRate(rate int) bool {
 	return false
 }
 
+func isValidApplication(application Application) bool {
+	switch application {
+	case ApplicationVOIP, ApplicationAudio, ApplicationRestrictedLowDelay:
+		return true
+	}
+	return false
+}
+
 // NewEncoder creates a new Opus encoder
 //
 // sampleRate must be one of: 8000, 12000, 16000, 24000, 48000 Hz
@@ -112,6 +120,9 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 
 	if channels != 1 && channels != 2 {
 		return nil, fmt.Errorf("invalid channel count: %d (must be 1 or 2)", channels)
+	}
+	if !isValidApplication(application) {
+		return nil, fmt.Errorf("%w: unsupported application %d", ErrBadArg, application)
 	}
 
 	// Frame size at the caller's sample rate (20ms)
@@ -1262,9 +1273,14 @@ func (e *Encoder) syncSILKFEC() {
 // SetApplication changes the application mode. This re-derives the CELT content
 // hint (voice for VOIP, music otherwise), which influences bandwidth selection
 // and transient sensitivity; it does not affect already-emitted packets.
-func (e *Encoder) SetApplication(application Application) {
+// Invalid application values return ErrBadArg and leave the encoder unchanged.
+func (e *Encoder) SetApplication(application Application) error {
+	if !isValidApplication(application) {
+		return fmt.Errorf("%w: unsupported application %d", ErrBadArg, application)
+	}
 	e.application = application
 	e.celtEncoder.SetSignalType(signalTypeForApplication(application))
+	return nil
 }
 
 // SetSignalType overrides the content hint used by encoder heuristics.
@@ -1676,17 +1692,22 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 //
 // data is the compressed Opus packet
 // pcm is the output buffer for 16-bit PCM samples
-// Returns the number of samples per channel decoded (clamped to buffer size)
+// Returns the number of samples per channel decoded.
 func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
+	required, err := d.packetOutputSamples(data)
+	if err != nil {
+		return 0, err
+	}
+	if len(pcm) < required {
+		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
+	}
+
 	floatPCM, err := d.DecodeFloat(data)
 	if err != nil {
 		return 0, err
 	}
 
 	n := len(floatPCM)
-	if n > len(pcm) {
-		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), n)
-	}
 
 	// Convert float64 to int16
 	for i := 0; i < n; i++ {
@@ -1702,6 +1723,24 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 
 	samplesPerChannel := n / d.channels
 	return samplesPerChannel, nil
+}
+
+// packetOutputSamples returns the interleaved output sample count without
+// mutating decoder state.
+func (d *Decoder) packetOutputSamples(data []byte) (int, error) {
+	if len(data) == 0 {
+		return 0, fmt.Errorf("empty packet")
+	}
+	config, _, countCode := framing.ParseTOC(data[0])
+	frameCount, err := opusFrameCount(data[1:], countCode)
+	if err != nil {
+		return 0, err
+	}
+	duration, err := packetDurationSamples(config, frameCount, d.sampleRate)
+	if err != nil {
+		return 0, err
+	}
+	return duration * d.channels, nil
 }
 
 func parseOpusFrameLength(data []byte) (int, int, error) {

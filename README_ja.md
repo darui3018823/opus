@@ -165,7 +165,7 @@ func (e *Encoder) SetBitrate(bitrate int) error       // 6000–510000 bps
 func (e *Encoder) SetComplexity(complexity int) error // 0–10
 func (e *Encoder) SetVBR(vbr bool)
 func (e *Encoder) SetVBRConstraint(constrained bool)  // true = CVBR
-func (e *Encoder) SetApplication(application Application)
+func (e *Encoder) SetApplication(application Application) error
 func (e *Encoder) SetSignalType(signal SignalType)
 func (e *Encoder) SignalType() SignalType
 func (e *Encoder) SetBandwidth(bw int) error          // Auto/NB/WB/SWB/FB
@@ -188,13 +188,13 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error)
 
 func (d *Decoder) Decode(data []byte, pcm []int16) (int, error)
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error)
-func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) // 現状は CELT PLC フォールバック
+func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) // CELT-only
+func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error)   // ErrUnimplemented
 func (d *Decoder) Reset() error
 func (d *Decoder) GetLastPacketDuration() int
 ```
 
-`EncodeFloat32` / `DecodeFloat32` / `DecodePLC(pcm, frameSize)` は**ありません**。
-float64 版を使用してください。
+`EncodeFloat32` / `DecodeFloat32` は**ありません**。float64 版を使用してください。
 
 ## アーキテクチャ
 
@@ -289,7 +289,8 @@ GitHub Actions ワークフロー 4 本。いずれも **amd64（`ubuntu-latest`
 - mono SILK-only エンコードは、`SetInbandFEC(true)` と 0 より大きい
   `SetPacketLossPerc` により、準拠した LBRR/in-band FEC を送出できます。
   stereo/hybrid LBRR は未実装です。
-- `DecodeFEC` は現状 PLC フォールバックで、ローカルのパケット FEC 抽出ではありません。
+- `DecodePLC` は現状 CELT-only ストリームに対応します。SILK/hybrid PLC と
+  パケット FEC 抽出は未実装で、`DecodeFEC` は `ErrUnimplemented` を返します。
 - マルチストリーム・サラウンド・Ogg Opus コンテナ API はありません。
 - VBR/CVBR と application/signal hint は CELT エンコーダーの判断を調整しますが、
   libopus と同等の完全なモード選択・レート制御ではありません。

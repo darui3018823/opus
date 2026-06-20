@@ -237,20 +237,72 @@ func TestEncodeFloatDecodeFloat(t *testing.T) {
 }
 
 func TestDecoderPLC(t *testing.T) {
-	dec, err := NewDecoder(48000, 2)
+	const (
+		sampleRate = 48000
+		channels   = 2
+		frameSize  = 960
+	)
+	enc, err := NewEncoder(sampleRate, channels, ApplicationAudio)
 	if err != nil {
-		t.Fatalf("Failed to create decoder: %v", err)
+		t.Fatal(err)
+	}
+	pcm := make([]int16, frameSize*channels)
+	for i := 0; i < frameSize; i++ {
+		pcm[2*i] = int16(12000 * i / frameSize)
+		pcm[2*i+1] = -pcm[2*i]
+	}
+	packet, err := enc.Encode(pcm, frameSize)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// Test packet loss concealment
-	pcm := make([]int16, 960*2)
-	n, err := dec.DecodeFEC(nil, pcm)
+	dec, err := NewDecoder(sampleRate, channels)
 	if err != nil {
-		t.Fatalf("DecodeFEC failed: %v", err)
+		t.Fatal(err)
 	}
+	if _, err := dec.Decode(packet, make([]int16, frameSize*channels)); err != nil {
+		t.Fatal(err)
+	}
+	plc := make([]int16, 2*frameSize*channels)
+	n, err := dec.DecodePLC(plc, 2*frameSize)
+	if err != nil {
+		t.Fatalf("DecodePLC failed: %v", err)
+	}
+	if n != 2*frameSize {
+		t.Errorf("DecodePLC returned %d samples, want %d", n, 2*frameSize)
+	}
+	if got := dec.GetLastPacketDuration(); got != 2*frameSize {
+		t.Errorf("last packet duration = %d, want %d", got, 2*frameSize)
+	}
+}
 
-	if n != 960 {
-		t.Errorf("PLC returned %d samples, expected 960", n)
+func TestDecoderPLCValidation(t *testing.T) {
+	dec, err := NewDecoder(48000, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dec.DecodePLC(make([]int16, 960), 960); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("DecodePLC without history error = %v, want ErrInvalidState", err)
+	}
+	if _, err := dec.DecodePLC(make([]int16, 959), 960); !errors.Is(err, ErrBufferTooSmall) {
+		t.Fatalf("DecodePLC small buffer error = %v, want ErrBufferTooSmall", err)
+	}
+	if _, err := dec.DecodePLC(make([]int16, 1000), 1000); !errors.Is(err, ErrUnsupportedFrameSize) {
+		t.Fatalf("DecodePLC invalid duration error = %v, want ErrUnsupportedFrameSize", err)
+	}
+}
+
+func TestDecodeFECIsExplicitlyUnimplemented(t *testing.T) {
+	dec, err := NewDecoder(48000, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcm := []int16{1234}
+	if _, err := dec.DecodeFEC([]byte{0xff}, pcm); !errors.Is(err, ErrUnimplemented) {
+		t.Fatalf("DecodeFEC error = %v, want ErrUnimplemented", err)
+	}
+	if pcm[0] != 1234 {
+		t.Fatalf("DecodeFEC modified output buffer: got %d", pcm[0])
 	}
 }
 

@@ -627,6 +627,16 @@ func (d *Decoder) DecodePLC() ([]float64, error) {
 	return d.decodeLoss(), nil
 }
 
+// FrameSize returns the decoder's frame size in samples per channel at 48 kHz.
+func (d *Decoder) FrameSize() int {
+	return d.mode.FrameSize
+}
+
+// Channels returns the number of coded channels handled by the decoder.
+func (d *Decoder) Channels() int {
+	return d.mode.Channels
+}
+
 // Reset resets the decoder state
 func (d *Decoder) Reset() {
 	// Clear overlap buffers

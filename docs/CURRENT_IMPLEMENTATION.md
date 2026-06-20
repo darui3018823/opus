@@ -33,7 +33,7 @@ Implemented public entry points:
 - `(*Encoder).SetInbandFEC(enabled bool)` / `(*Encoder).InbandFEC() bool`
 - `(*Encoder).SetPacketLossPerc(perc int)` / `(*Encoder).PacketLossPerc() int`
 - `(*Encoder).SetPacketPadding(n int)`
-- `(*Encoder).SetApplication(application Application)`
+- `(*Encoder).SetApplication(application Application) error`
 - `(*Encoder).SetSignalType(signal SignalType)`
 - `(*Encoder).SignalType() SignalType`
 - `(*Encoder).SetMaxBandwidth(bw int) error`
@@ -322,6 +322,7 @@ Implemented public entry points:
 - `NewDecoder(sampleRate, channels int) (*Decoder, error)`
 - `(*Decoder).Decode(data []byte, pcm []int16) (int, error)`
 - `(*Decoder).DecodeFloat(data []byte) ([]float64, error)`
+- `(*Decoder).DecodePLC(pcm []int16, frameSize int) (int, error)`
 - `(*Decoder).DecodeFEC(data []byte, pcm []int16) (int, error)`
 - `(*Decoder).Reset() error`
 - `(*Decoder).GetLastPacketDuration() int`
@@ -344,11 +345,13 @@ Packets whose decoded duration exceeds 120 ms are rejected as invalid.
 
 Current decoder limitations:
 
-- `DecodeFEC` currently uses CELT packet-loss concealment from the fullband
-  20 ms decoder and does not decode FEC data from the supplied packet.
+- `DecodePLC` supports CELT-only streams after a successful CELT packet decode.
+  The requested duration must be a valid Opus duration, an integer multiple of
+  the active CELT frame duration, and no more than 120 ms. SILK-only and hybrid
+  PLC return `ErrUnimplemented`.
+- `DecodeFEC` returns `ErrUnimplemented`; it does not silently substitute PLC
+  for packet FEC extraction.
 - There is no public `DecodeFloat32` method.
-- There is no public `DecodePLC(pcm, frameSize)` method; CELT PLC exists
-  internally and is reached through `DecodeFEC`.
 - `GetLastPacketDuration` reports the duration in output samples per channel of
   the last successfully decoded packet; before any decode it reports the default
   20 ms duration for the decoder sample rate.
@@ -709,14 +712,15 @@ reference comparison.
 
 - No public multistream, surround, or Ogg Opus container API.
 - No public float32 encode/decode API.
-- No public `DecodePLC(pcm, frameSize)` API matching the README examples.
+- Public PLC currently covers CELT-only streams; SILK-only and hybrid PLC are
+  not implemented.
 - Top-level SILK-only encoder selection exists only for low-bitrate VOIP/voice.
 - Top-level hybrid encoder selection exists only for high-bitrate 24/48 kHz
   VOIP/voice; there is no full libopus-equivalent hybrid mode/rate-control
   coverage.
-- Mono SILK-only LBRR/FEC encoding is available, but public `DecodeFEC` is
-  currently a PLC fallback rather than packet FEC extraction. Stereo and hybrid
-  LBRR encoding are not implemented.
+- Mono SILK-only LBRR/FEC encoding is available, but public `DecodeFEC` returns
+  `ErrUnimplemented` because packet FEC extraction is not implemented. Stereo
+  and hybrid LBRR encoding are also not implemented.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
   to full libopus-compatible mode/rate-control behavior.
 - Decoder parity is achieved on the official vectors and the libopus reference;

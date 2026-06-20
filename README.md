@@ -168,7 +168,7 @@ func (e *Encoder) SetBitrate(bitrate int) error       // 6000–510000 bps
 func (e *Encoder) SetComplexity(complexity int) error  // 0–10
 func (e *Encoder) SetVBR(vbr bool)
 func (e *Encoder) SetVBRConstraint(constrained bool)   // true = CVBR
-func (e *Encoder) SetApplication(application Application)
+func (e *Encoder) SetApplication(application Application) error
 func (e *Encoder) SetSignalType(signal SignalType)
 func (e *Encoder) SignalType() SignalType
 func (e *Encoder) SetBandwidth(bw int) error           // Auto/NB/WB/SWB/FB
@@ -191,13 +191,14 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error)
 
 func (d *Decoder) Decode(data []byte, pcm []int16) (int, error)
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error)
-func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) // currently a CELT PLC fallback
+func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) // CELT-only after a successful CELT decode
+func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error)   // returns ErrUnimplemented
 func (d *Decoder) Reset() error
 func (d *Decoder) GetLastPacketDuration() int
 ```
 
-There is intentionally **no** `EncodeFloat32`, `DecodeFloat32`, or
-`DecodePLC(pcm, frameSize)` API. Use the float64 variants above.
+There is intentionally **no** `EncodeFloat32` or `DecodeFloat32` API. Use the
+float64 variants above.
 
 ## Architecture
 
@@ -295,7 +296,8 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
 - Mono SILK-only encoding can emit standards-compliant LBRR/in-band FEC via
   `SetInbandFEC(true)` and a non-zero `SetPacketLossPerc`. Stereo/hybrid LBRR is
   not implemented.
-- `DecodeFEC` is currently a PLC fallback, not local packet FEC extraction.
+- `DecodePLC` currently supports CELT-only streams. SILK/hybrid PLC and packet
+  FEC extraction are not implemented; `DecodeFEC` returns `ErrUnimplemented`.
 - No multistream, surround, or Ogg Opus container API.
 
 ## Contributing

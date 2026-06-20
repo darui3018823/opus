@@ -230,6 +230,18 @@ func (d *Decoder) SetGain(gainQ8 int) error
 func (d *Decoder) Gain() int
 ```
 
+### パケット操作
+
+```go
+func NewRepacketizer() *Repacketizer
+func (r *Repacketizer) Cat(packet []byte) error
+func (r *Repacketizer) NumFrames() int
+func (r *Repacketizer) Out() ([]byte, error)
+func (r *Repacketizer) OutRange(begin, end int) ([]byte, error)
+func PacketPad(packet []byte, newLen int) ([]byte, error)
+func PacketUnpad(packet []byte) ([]byte, error)
+```
+
 ## アーキテクチャ
 
 ```

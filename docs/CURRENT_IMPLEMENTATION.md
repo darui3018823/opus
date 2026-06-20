@@ -73,9 +73,17 @@ Public packet inspection entry points:
 - `PacketGetNumFrames(packet []byte) (int, error)`
 - `PacketGetSamplesPerFrame(packet []byte, sampleRate int) (int, error)`
 - `PacketGetNumSamples(packet []byte, sampleRate int) (int, error)`
+- `NewRepacketizer() *Repacketizer`
+- `(*Repacketizer).Cat(packet []byte) error`
+- `(*Repacketizer).Out() ([]byte, error)`
+- `(*Repacketizer).OutRange(begin, end int) ([]byte, error)`
+- `PacketPad(packet []byte, newLen int) ([]byte, error)`
+- `PacketUnpad(packet []byte) ([]byte, error)`
 
 These helpers validate the complete RFC 6716 packet framing and return
 `ErrInvalidPacket` for malformed or over-duration packets.
+The repacketizer combines matching single-stream frames without transcoding,
+enforces the 120 ms limit, and supports canonical padding removal.
 
 The decoder exposes `SampleRate`, `Channels`, `FinalRange`, and `Pitch`
 getters. `FinalRange` is the XOR of the constituent frame entropy ranges, as

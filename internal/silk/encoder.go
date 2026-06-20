@@ -556,6 +556,14 @@ func (e *Encoder) selectRateControlPlan(
 		_, _, ltpCoeffsQ14 := e.selectLTPGainsVQ(signal, nlsf.lpcQ12, pitchLags)
 		baseTargets = e.shapeGainIndices(signal, nlsf.lpcQ12, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
 	} else {
+		// Unvoiced keeps the Q5d excitation-normalised gains whether it runs the
+		// homebrew or the trellis NSQ. The trellis is used with *neutral* shaping
+		// for unvoiced (see closedLoopNSQWithRateScale), so its objective is
+		// broadband error like homebrew's; the excitation-RMS gain (RMS ≈ 2
+		// pulse-units) is the operating point tuned for that — it sets the right
+		// pulse density to spend the rate budget on broadband SNR. The
+		// spectral-envelope shape gains would normalise the excitation sparser and
+		// leave the budget search under-spending the noise frame.
 		baseTargets = e.excitationGainIndicesResidual(signal, nlsf.lpcQ12)
 	}
 	baseIndices = e.resolveGainIndices(baseTargets, conditionalGain)
@@ -2166,6 +2174,22 @@ func (e *Encoder) voicedUsesTrellis() bool {
 	return e.useTrellisNSQ
 }
 
+// unvoicedUsesTrellis reports whether unvoiced frames take the full
+// delayed-decision trellis NSQ instead of the single-state homebrew quantizer.
+// Like voiced, unvoiced is paired with the co-designed noise-shape envelope
+// gains (shapeGainIndices); the trellis perceptual shaping only beats homebrew's
+// broadband SNR when the gains are co-designed with it (Step 3/4 lesson).
+//
+// Gated to mono SILK-only for now: stereo and hybrid carry separate conformance
+// constraints (tighter shared budgets, per-channel PRNG-dither decorrelation),
+// so those frames keep the proven homebrew + excitation-RMS-gain path, exactly
+// as the earlier SILK quality steps were staged. Frame-to-frame handoff between
+// the homebrew and trellis paths is already supported and tested
+// (TestHomebrewToTrellisNSQStateHandoff), so a mixed stream is safe.
+func (e *Encoder) unvoicedUsesTrellis() bool {
+	return e.useTrellisNSQ && !e.stereoComponent && !e.hybridMode
+}
+
 // TrellisNSQ reports whether voiced SILK-only frames may use the trellis NSQ.
 func (e *Encoder) TrellisNSQ() bool {
 	return e.useTrellisNSQ
@@ -2217,14 +2241,22 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 	rateScale float64,
 ) []int16 {
 	// The delayed-decision trellis with the co-designed process_gains gains is a
-	// clear win for voiced frames (Step 4), but its perceptual shaping lowers
-	// broadband SNR on noise, so unvoiced/inactive frames stay on the homebrew
-	// quantizer with the excitation-normalized gains (Q5d). Dispatch by type.
-	if signalType != SignalTypeVoiced || !e.voicedUsesTrellis() {
+	// clear win when its perceptual shaping is paired with the co-designed
+	// noise-shape envelope gains (Step 4). Both voiced and unvoiced take it with
+	// those gains; inactive frames produce no excitation (the near-silent path)
+	// and stay on the homebrew zero-pulse branch. Dispatch by type.
+	useTrellis := false
+	switch signalType {
+	case SignalTypeVoiced:
+		useTrellis = e.voicedUsesTrellis()
+	case SignalTypeUnvoiced:
+		useTrellis = e.unvoicedUsesTrellis()
+	}
+	if !useTrellis {
 		return e.closedLoopNSQHomebrew(signal, lpcQ12, lpcQ12Interp, gainIndices,
 			signalType, quantOffset, seed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, rateScale)
 	}
-	if signalType == SignalTypeInactive || len(signal) == 0 {
+	if len(signal) == 0 {
 		e.updateSilentSynthesisState()
 		e.updateSilentNSQState()
 		return make([]int16, e.frameSize)
@@ -2259,12 +2291,22 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 
 	pitchGain := estimatePitchGainFromLTP(ltpCoeffsQ14)
 	shape := e.analyzeNoiseShapeFLP(signal, lpcQ12, signalType, quantOffset, pitchLags, pitchGain, e.speechActivity)
-	if e.stereoComponent {
-		// Mid/side components are later reconstructed and, for 24/48 kHz
-		// inputs, resampled as a coupled stereo signal. Aggressive component-
-		// domain spectral shaping concentrates quantization noise near the SILK
-		// layer edge, where decoder resampler differences dominate. Keep the
-		// delayed-decision trellis and its rate term, but use neutral shaping.
+	if e.stereoComponent || signalType == SignalTypeUnvoiced {
+		// Stereo mid/side components are later reconstructed and resampled as a
+		// coupled signal, where component-domain spectral shaping concentrates
+		// quantization noise near the SILK layer edge.
+		//
+		// Unvoiced/noise: the perceptual AR/tilt/LF shaping is what libopus uses,
+		// but it deliberately spreads quantization noise to perceptually masked
+		// bands, which lowers the broadband SNR this project scores against (the
+		// reason unvoiced previously stayed on homebrew). Running the
+		// delayed-decision trellis with *neutral* shaping keeps the lookahead
+		// rate-distortion win — strictly stronger than the greedy single-state
+		// homebrew quantizer — while optimising broadband error, so the trellis
+		// can match or beat homebrew on noise instead of regressing it.
+		//
+		// In both cases keep the delayed-decision trellis and its rate term but
+		// drop the spectral shaping.
 		shape.AR_Q13 = [silkMaxNBSubframes][silkMaxShapeLPCOrder]int16{}
 		shape.LF_shp_Q14 = [silkMaxNBSubframes]int32{}
 		shape.Tilt_Q14 = [silkMaxNBSubframes]int32{}

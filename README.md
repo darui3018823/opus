@@ -166,6 +166,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 func NewEncoderWithProfile(sampleRate, channels int, application Application, profile EncoderProfile) (*Encoder, error)
 
 func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error)
+func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error)
 func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error)
 func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error)
 
@@ -205,6 +206,8 @@ func (e *Encoder) SetLSBDepth(depth int) error
 func (e *Encoder) LSBDepth() int
 func (e *Encoder) SetPredictionDisabled(disabled bool)
 func (e *Encoder) PredictionDisabled() bool
+func (e *Encoder) SetPhaseInversionDisabled(disabled bool)
+func (e *Encoder) PhaseInversionDisabled() bool
 func (e *Encoder) Reset() error
 ```
 
@@ -230,6 +233,7 @@ returns. Returned encoded packets and PCM slices are owned by the caller.
 func NewDecoder(sampleRate, channels int) (*Decoder, error)
 
 func (d *Decoder) Decode(data []byte, pcm []int16) (int, error)
+func (d *Decoder) Decode24(data []byte, pcm []int32) (int, error)
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error)
 func (d *Decoder) DecodeFloat32(data []byte) ([]float32, error)
 func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) // CELT-only after a successful CELT decode
@@ -242,7 +246,23 @@ func (d *Decoder) FinalRange() uint32
 func (d *Decoder) Pitch() int
 func (d *Decoder) SetGain(gainQ8 int) error
 func (d *Decoder) Gain() int
+func (d *Decoder) SetPhaseInversionDisabled(disabled bool)
+func (d *Decoder) PhaseInversionDisabled() bool
 ```
+
+### Multistream and surround
+
+```go
+func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, mapping []byte, application Application) (*MultistreamEncoder, error)
+func NewMultistreamDecoder(sampleRate, channels, streams, coupledStreams int, mapping []byte) (*MultistreamDecoder, error)
+
+func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application Application) (*SurroundEncoder, error)
+func NewSurroundDecoder(sampleRate, channels, mappingFamily int) (*SurroundDecoder, error)
+```
+
+Multistream packets use RFC 6716 self-delimited framing and interoperate with
+libopus 1.6.1. Surround supports mapping families 0, 1 (Vorbis order, up to
+7.1), and 255. Mapping family 2 projection/ambisonics is not yet implemented.
 
 ### Packet operations
 
@@ -260,7 +280,7 @@ func PacketUnpad(packet []byte) ([]byte, error)
 
 ```
 github.com/darui3018823/opus/
-├── opus.go / constants.go / errors.go  # Public API (Encoder/Decoder)
+├── opus.go / multistream.go / surround.go  # Codec public APIs
 ├── internal/
 │   ├── opus_framing.go                  # TOC byte parsing/generation (RFC 6716 §3)
 │   ├── dsp/                             # FFT, MDCT/IMDCT, windows, math
@@ -353,7 +373,9 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
 - `DecodeFEC` recovers SILK-only and hybrid packets from LBRR in the following
   packet. Hybrid recovery contains the redundant SILK low band. `DecodePLC`
   currently supports CELT-only streams.
-- No multistream, surround, or Ogg Opus container API.
+- Projection/ambisonics and Ogg Opus container APIs are not implemented.
+- Multistream/surround do not yet expose every libopus multistream CTL or the
+  complete libopus surround energy-mask analysis.
 
 ## Contributing
 

@@ -162,6 +162,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 func NewEncoderWithProfile(sampleRate, channels int, application Application, profile EncoderProfile) (*Encoder, error)
 
 func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error)
+func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error)
 func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error)
 func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error)
 
@@ -201,6 +202,8 @@ func (e *Encoder) SetLSBDepth(depth int) error
 func (e *Encoder) LSBDepth() int
 func (e *Encoder) SetPredictionDisabled(disabled bool)
 func (e *Encoder) PredictionDisabled() bool
+func (e *Encoder) SetPhaseInversionDisabled(disabled bool)
+func (e *Encoder) PhaseInversionDisabled() bool
 func (e *Encoder) Reset() error
 ```
 
@@ -227,6 +230,7 @@ getter、設定変更、`Reset` を含む全メソッドは、必要に応じて
 func NewDecoder(sampleRate, channels int) (*Decoder, error)
 
 func (d *Decoder) Decode(data []byte, pcm []int16) (int, error)
+func (d *Decoder) Decode24(data []byte, pcm []int32) (int, error)
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error)
 func (d *Decoder) DecodeFloat32(data []byte) ([]float32, error)
 func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) // CELT-only
@@ -239,7 +243,24 @@ func (d *Decoder) FinalRange() uint32
 func (d *Decoder) Pitch() int
 func (d *Decoder) SetGain(gainQ8 int) error
 func (d *Decoder) Gain() int
+func (d *Decoder) SetPhaseInversionDisabled(disabled bool)
+func (d *Decoder) PhaseInversionDisabled() bool
 ```
+
+### マルチストリームとサラウンド
+
+```go
+func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, mapping []byte, application Application) (*MultistreamEncoder, error)
+func NewMultistreamDecoder(sampleRate, channels, streams, coupledStreams int, mapping []byte) (*MultistreamDecoder, error)
+
+func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application Application) (*SurroundEncoder, error)
+func NewSurroundDecoder(sampleRate, channels, mappingFamily int) (*SurroundDecoder, error)
+```
+
+マルチストリーム packet は RFC 6716 の self-delimited framing を使用し、
+libopus 1.6.1 との相互運用テストを通過しています。サラウンドは mapping
+family 0、1（Vorbis順、最大7.1）、255に対応します。mapping family 2の
+Projection/Ambisonicsは未実装です。
 
 ### パケット操作
 
@@ -257,7 +278,7 @@ func PacketUnpad(packet []byte) ([]byte, error)
 
 ```
 github.com/darui3018823/opus/
-├── opus.go / constants.go / errors.go  # 公開 API（Encoder/Decoder）
+├── opus.go / multistream.go / surround.go  # codec 公開 API
 ├── internal/
 │   ├── opus_framing.go                  # TOC バイトの解析/生成（RFC 6716 §3）
 │   ├── dsp/                             # FFT、MDCT/IMDCT、窓関数、数学
@@ -347,7 +368,9 @@ GitHub Actions ワークフロー 4 本。いずれも **amd64（`ubuntu-latest`
 - `DecodeFEC` は次のパケットの LBRR から SILK-only/hybrid を回復します。
   hybrid の回復内容は冗長 SILK low band です。`DecodePLC` は現状 CELT-only
   に対応します。
-- マルチストリーム・サラウンド・Ogg Opus コンテナ API はありません。
+- Projection/Ambisonics と Ogg Opus コンテナ API は未実装です。
+- マルチストリーム/サラウンドは、libopus の全 multistream CTL と完全な
+  surround energy-mask analysis には未対応です。
 - VBR/CVBR と application/signal hint は CELT エンコーダーの判断を調整しますが、
   libopus と同等の完全なモード選択・レート制御ではありません。
 

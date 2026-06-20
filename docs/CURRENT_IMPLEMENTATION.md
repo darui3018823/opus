@@ -11,7 +11,8 @@ code-derived status.
 
 Module: `github.com/darui3018823/opus`
 
-The public API is concentrated in `opus.go`, with constants in `constants.go`
+The single-stream API is concentrated in `opus.go`; multistream and surround
+APIs are in `multistream.go` and `surround.go`, with constants in `constants.go`
 and package-level error values in `errors.go`. Public version constants are
 generated into `version_gen.go` from the repository-level `VERSION` file;
 `go generate ./...` refreshes them and CI rejects generated-file drift.
@@ -33,6 +34,7 @@ Implemented public entry points:
 - `NewEncoder(sampleRate, channels int, application Application) (*Encoder, error)`
 - `NewEncoderWithProfile(sampleRate, channels int, application Application, profile EncoderProfile) (*Encoder, error)`
 - `(*Encoder).Encode(pcm []int16, frameSize int) ([]byte, error)`
+- `(*Encoder).Encode24(pcm []int32, frameSize int) ([]byte, error)`
 - `(*Encoder).EncodeFloat(pcm []float64, frameSize int) ([]byte, error)`
 - `(*Encoder).EncodeFloat32(pcm []float32, frameSize int) ([]byte, error)`
 - `(*Encoder).Bitrate() int`
@@ -56,6 +58,7 @@ Implemented public entry points:
 - `(*Encoder).SetForceChannels(channels int) error` / `(*Encoder).ForceChannels() int`
 - `(*Encoder).SetLSBDepth(depth int) error` / `(*Encoder).LSBDepth() int`
 - `(*Encoder).SetPredictionDisabled(bool)` / `(*Encoder).PredictionDisabled() bool`
+- `(*Encoder).SetPhaseInversionDisabled(bool)` / `(*Encoder).PhaseInversionDisabled() bool`
 - `(*Encoder).SetApplication(application Application) error`
 - `(*Encoder).SetSignalType(signal SignalType)`
 - `(*Encoder).SignalType() SignalType`
@@ -85,10 +88,34 @@ These helpers validate the complete RFC 6716 packet framing and return
 The repacketizer combines matching single-stream frames without transcoding,
 enforces the 120 ms limit, and supports canonical padding removal.
 
+Public multistream and surround entry points:
+
+- `NewMultistreamEncoder(...) (*MultistreamEncoder, error)`
+- `NewMultistreamDecoder(...) (*MultistreamDecoder, error)`
+- int16, signed-24-bit-in-int32, float32, and float64 encode/decode methods
+- per-stream encoder/decoder access, aggregate bitrate control, reset, mapping,
+  stream-count, coupled-stream-count, and final-range getters
+- `NewSurroundEncoder(...) (*SurroundEncoder, error)`
+- `NewSurroundDecoder(...) (*SurroundDecoder, error)`
+- mapping families 0 (mono/stereo), 1 (Vorbis order, 1 through 8 channels), and
+  255 (discrete uncoupled channels)
+
+Multistream packets use RFC 6716 Appendix B self-delimited framing for every
+elementary stream except the last. Tests cover Go encode/decode round trips,
+duplicate and silent mappings, duration validation, and bidirectional libopus
+1.6.1 interoperability. Surround mapping-family 1 uses the libopus/Vorbis
+stream layouts, identifies the LFE stream for 5.1/6.1/7.1, applies
+frame-duration-dependent stream bitrate allocation, and keeps coupled streams
+on stereo CELT to preserve the spatial image. Mapping family 2 is reserved for
+the not-yet-implemented projection/ambisonics API.
+
 The decoder exposes `SampleRate`, `Channels`, `FinalRange`, and `Pitch`
 getters. `FinalRange` is the XOR of the constituent frame entropy ranges, as
 for the libopus single-stream CTL. `Pitch` is reported in output-rate samples.
 Decoder output gain is available through `SetGain` and `Gain`, using Q8 dB.
+Single-stream encode/decode also supports signed 24-bit PCM stored in `int32`
+through `Encode24` and `Decode24`. Encoder and decoder phase-inversion controls
+are wired to CELT intensity-stereo processing.
 
 A stereo encoder can force a mono Opus stream; input is downmixed before a
 stateful mono codec instance. LSB depth is retained as the libopus-style input
@@ -109,8 +136,9 @@ and the maximum policy is bounded by the RFC per-frame byte limit.
 complexity 9, and constrained VBR without imposing a behavior change on
 existing callers.
 
-Encoder and decoder instances are stateful and are not safe for concurrent
-use. One instance owns the codec history for one logical Opus stream; packets
+Encoder, decoder, multistream, and surround instances are stateful and are not
+safe for concurrent use. One instance owns the codec history for one logical
+Opus stream set; packets
 must be processed in order, and callers must serialize all methods on a shared
 instance, including getters, controls, and `Reset`. Distinct instances may run
 concurrently. Instances must not be copied after first use. Caller-provided
@@ -409,12 +437,15 @@ Implemented public entry points:
 
 - `NewDecoder(sampleRate, channels int) (*Decoder, error)`
 - `(*Decoder).Decode(data []byte, pcm []int16) (int, error)`
+- `(*Decoder).Decode24(data []byte, pcm []int32) (int, error)`
 - `(*Decoder).DecodeFloat(data []byte) ([]float64, error)`
 - `(*Decoder).DecodeFloat32(data []byte) ([]float32, error)`
 - `(*Decoder).DecodePLC(pcm []int16, frameSize int) (int, error)`
 - `(*Decoder).DecodeFEC(data []byte, pcm []int16) (int, error)`
 - `(*Decoder).Reset() error`
 - `(*Decoder).GetLastPacketDuration() int`
+- `(*Decoder).SetPhaseInversionDisabled(bool)` /
+  `(*Decoder).PhaseInversionDisabled() bool`
 
 Accepted sample rates are `8000`, `12000`, `16000`, `24000`, and `48000`.
 Accepted channel counts are mono and stereo.
@@ -438,9 +469,9 @@ Current decoder limitations:
   The requested duration must be a valid Opus duration, an integer multiple of
   the active CELT frame duration, and no more than 120 ms. SILK-only and hybrid
   PLC return `ErrUnimplemented`.
-- `DecodeFEC` extracts mono SILK LBRR for 10/20/40/60 ms SILK-only packets,
-  using SILK PLC for any missing redundant sub-frame. Stereo SILK, hybrid, and
-  CELT packets return `ErrUnimplemented`.
+- `DecodeFEC` extracts SILK LBRR for mono/stereo SILK-only and hybrid packets.
+  Hybrid recovery reconstructs the redundant SILK low band; CELT-only packets
+  do not carry SILK LBRR.
 - Both float32 and float64 PCM decoding APIs are available.
 - `GetLastPacketDuration` reports the duration in output samples per channel of
   the last successfully decoded packet; before any decode it reports the default
@@ -726,6 +757,11 @@ Mono SILK LBRR/FEC encoding verification on 2026-06-20: passing
 `go test -count=1 -tags opusref ./...`). The libopus sequence tests cover
 normal decoding plus `decode_fec=1` recovery for 20/40/60 ms packets.
 
+P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
+inversion controls, multistream, and surround tests pass in the normal suite.
+`TestCGOMultistreamInteroperability` verifies both Go-encoded packets decoded
+by libopus 1.6.1 and libopus-encoded packets decoded by Go.
+
 Passing package-level tests:
 
 - root package `opus` (including `TestOfficialVectors`, 12/12)
@@ -797,7 +833,12 @@ reference comparison.
 
 ## Known Gaps
 
-- No public multistream, surround, or Ogg Opus container API.
+- No public projection/ambisonics or Ogg Opus container API. Surround mapping
+  families 0, 1, and 255 are implemented; mapping family 2 remains deferred to
+  projection.
+- Multistream/surround provide core encode/decode, mapping, aggregate bitrate,
+  and per-stream state access, but do not yet mirror every libopus multistream
+  CTL or its full surround psychoacoustic energy-mask analysis.
 - Public PLC currently covers CELT-only streams; SILK-only and hybrid PLC are
   not implemented.
 - Top-level SILK/hybrid encoder selection is voice-oriented and now accounts
@@ -817,5 +858,6 @@ The codebase is a Pure Go Opus implementation with a decoder that passes all 12
 official RFC 8251 vectors and the libopus 1.6.1 reference comparison. The
 encoder has a CELT path with the current quality pipeline, standard packet
 output, and libopus decode cross-checks, plus a narrow low-bitrate SILK-only
-speech path, and an initial high-bitrate 24/48 kHz hybrid voice path. It is not
+speech path, an initial high-bitrate 24/48 kHz hybrid voice path, and public
+multistream/surround packet support cross-checked with libopus. It is not
 bit-exact with libopus and does not yet provide full SILK/hybrid mode selection.

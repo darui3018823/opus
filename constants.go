@@ -3,13 +3,7 @@
 // and aims for complete compatibility without using CGO.
 package opus
 
-// Opus version constants
-const (
-	Version      = "0.1.0"
-	VersionMajor = 0
-	VersionMinor = 1
-	VersionPatch = 0
-)
+//go:generate go run ./internal/cmd/genversion -version VERSION -out version_gen.go
 
 // Sample rates supported by Opus
 const (

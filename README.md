@@ -151,6 +151,9 @@ _ = packet
 
 ## Public API
 
+The public version constants are generated from the repository's
+[`VERSION`](VERSION) file.
+
 ### Encoder
 
 ```go

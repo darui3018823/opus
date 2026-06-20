@@ -2,8 +2,16 @@ package opus
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 )
+
+func TestVersionMetadata(t *testing.T) {
+	want := fmt.Sprintf("%d.%d.%d", VersionMajor, VersionMinor, VersionPatch)
+	if Version != want {
+		t.Fatalf("Version = %q, components produce %q", Version, want)
+	}
+}
 
 func TestNewEncoder(t *testing.T) {
 	tests := []struct {

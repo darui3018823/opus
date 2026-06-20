@@ -12,7 +12,9 @@ code-derived status.
 Module: `github.com/darui3018823/opus`
 
 The public API is concentrated in `opus.go`, with constants in `constants.go`
-and package-level error values in `errors.go`.
+and package-level error values in `errors.go`. Public version constants are
+generated into `version_gen.go` from the repository-level `VERSION` file;
+`go generate ./...` refreshes them and CI rejects generated-file drift.
 
 ### Encoder
 

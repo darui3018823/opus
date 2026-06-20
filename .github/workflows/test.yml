@@ -40,6 +40,11 @@ jobs:
           go version
           go env GOARCH GOOS
 
+      - name: Verify generated files
+        run: |
+          go generate ./...
+          git diff --exit-code
+
       - name: go vet
         run: go vet ./...
 

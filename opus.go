@@ -51,12 +51,13 @@ type Encoder struct {
 	silkResampler  *resampler.Resampler // input sampleRate -> silkSampleRate
 
 	// Configuration
-	bitrate    int
-	complexity int
-	rateMode   celt.RateMode // CBR/VBR/CVBR
-	frameSize  int           // frame size in samples at sampleRate
-	padBytes   int           // code-3 padding-data bytes to append (0 = none)
-	dtx        bool          // discontinuous transmission: minimal silence packets
+	bitrateSetting int // requested bitrate or BitrateAuto/BitrateMax
+	bitrate        int // effective numeric bitrate for the current frame size
+	complexity     int
+	rateMode       celt.RateMode // CBR/VBR/CVBR
+	frameSize      int           // frame size in samples at sampleRate
+	padBytes       int           // code-3 padding-data bytes to append (0 = none)
+	dtx            bool          // discontinuous transmission: minimal silence packets
 
 	// Inband FEC (SILK LBRR). useInbandFEC requests redundant coding; the SILK
 	// encoder only emits LBRR when this is on and packetLossPerc > 0.
@@ -142,6 +143,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		channels:          channels,
 		application:       application,
 		celtEncoder:       celtEnc,
+		bitrateSetting:    64000,
 		bitrate:           64000,            // Default bitrate
 		complexity:        5,                // Default complexity
 		rateMode:          celt.RateModeCBR, // Default CBR (backward compatible)
@@ -249,6 +251,9 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 // (RFC 6716 §3.2, count codes 1/2/3). Otherwise a single-frame (code 0) packet
 // is produced.
 func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
+	if err := e.applyBitrateSetting(frameSize); err != nil {
+		return nil, err
+	}
 	nFrames := frameSize / e.frameSize
 	if e.shouldEncodeSILKOnly() {
 		celtToSilk := e.prevMode == framing.ModeCELTOnly
@@ -1109,8 +1114,13 @@ func padOrTrim(data []float64, targetLen int) []float64 {
 	return result
 }
 
-// Bitrate returns the current target bitrate in bits per second.
-func (e *Encoder) Bitrate() int { return e.bitrate }
+// Bitrate returns the configured target bitrate. It returns BitrateAuto or
+// BitrateMax when that policy is configured.
+func (e *Encoder) Bitrate() int { return e.bitrateSetting }
+
+// EffectiveBitrate returns the numeric bitrate currently applied internally.
+// For BitrateAuto and BitrateMax this is updated for each encoded frame size.
+func (e *Encoder) EffectiveBitrate() int { return e.bitrate }
 
 // Complexity returns the current complexity setting (0–10).
 func (e *Encoder) Complexity() int { return e.complexity }
@@ -1123,13 +1133,30 @@ func (e *Encoder) Application() Application { return e.application }
 
 // SetBitrate sets the target bitrate in bits per second
 func (e *Encoder) SetBitrate(bitrate int) error {
-	if bitrate < 6000 || bitrate > 510000 {
+	if bitrate != BitrateAuto && bitrate != BitrateMax && (bitrate < 6000 || bitrate > 510000) {
 		return fmt.Errorf("%w: invalid bitrate %d (must be between 6000 and 510000)", ErrBadArg, bitrate)
 	}
+	e.bitrateSetting = bitrate
+	return e.applyBitrateSetting(e.frameSize)
+}
+
+func (e *Encoder) applyBitrateSetting(frameSize int) error {
+	bitrate := e.bitrateSetting
+	switch bitrate {
+	case BitrateAuto:
+		// libopus user_bitrate_to_bitrate(): framing overhead plus one bit per
+		// input sample and channel.
+		bitrate = 60*e.sampleRate/frameSize + e.sampleRate*e.channels
+	case BitrateMax:
+		bitrate = MaxFrameBytes * 8 * e.sampleRate / frameSize
+		if bitrate > 1500000 {
+			bitrate = 1500000
+		}
+	}
 	e.bitrate = bitrate
-	e.celtEncoder.SetBitrate(bitrate)
+	e.celtEncoder.SetBitrate(e.bitrate)
 	if e.silkEncoder != nil {
-		silkBitrate := bitrate
+		silkBitrate := e.bitrate
 		if silkBitrate > 40000 {
 			silkBitrate = 40000
 		}

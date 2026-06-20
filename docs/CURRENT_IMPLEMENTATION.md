@@ -34,6 +34,7 @@ Implemented public entry points:
 - `(*Encoder).Encode(pcm []int16, frameSize int) ([]byte, error)`
 - `(*Encoder).EncodeFloat(pcm []float64, frameSize int) ([]byte, error)`
 - `(*Encoder).Bitrate() int`
+- `(*Encoder).EffectiveBitrate() int`
 - `(*Encoder).Complexity() int`
 - `(*Encoder).VBR() bool`
 - `(*Encoder).Application() Application`
@@ -67,6 +68,12 @@ These helpers validate the complete RFC 6716 packet framing and return
 
 Accepted sample rates are `8000`, `12000`, `16000`, `24000`, and `48000`.
 Accepted channel counts are mono and stereo.
+
+`SetBitrate` accepts numeric rates from 6000 through 510000 bit/s as well as
+`BitrateAuto` and `BitrateMax`. `Bitrate` returns the configured value or
+policy sentinel; `EffectiveBitrate` returns the numeric rate currently applied.
+The automatic policy follows libopus' frame-size/sample-rate/channel formula,
+and the maximum policy is bounded by the RFC per-frame byte limit.
 
 The top-level encoder always creates an internal CELT encoder at 48 kHz and
 uses a 20 ms internal CELT frame (`960` samples per channel) for the general

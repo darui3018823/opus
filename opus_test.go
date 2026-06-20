@@ -135,6 +135,8 @@ func TestEncoderSetBitrate(t *testing.T) {
 	}{
 		{"Valid 64kbps", 64000, false},
 		{"Valid 128kbps", 128000, false},
+		{"Automatic", BitrateAuto, false},
+		{"Maximum", BitrateMax, false},
 		{"Too low", 5000, true},
 		{"Too high", 600000, true},
 	}
@@ -146,6 +148,53 @@ func TestEncoderSetBitrate(t *testing.T) {
 				t.Errorf("SetBitrate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestEncoderBitratePolicies(t *testing.T) {
+	mono, err := NewEncoder(48000, 1, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mono.SetBitrate(BitrateAuto); err != nil {
+		t.Fatal(err)
+	}
+	if got := mono.Bitrate(); got != BitrateAuto {
+		t.Fatalf("Bitrate() = %d, want BitrateAuto", got)
+	}
+	if _, err := mono.Encode(make([]int16, 960), 960); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := mono.EffectiveBitrate(), 51000; got != want {
+		t.Fatalf("mono automatic effective bitrate = %d, want %d", got, want)
+	}
+
+	stereo, err := NewEncoder(48000, 2, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stereo.SetBitrate(BitrateAuto); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stereo.Encode(make([]int16, 960*2), 960); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := stereo.EffectiveBitrate(), 99000; got != want {
+		t.Fatalf("stereo automatic effective bitrate = %d, want %d", got, want)
+	}
+
+	if err := mono.SetBitrate(BitrateMax); err != nil {
+		t.Fatal(err)
+	}
+	packet, err := mono.Encode(make([]int16, 960), 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := mono.EffectiveBitrate(), 510000; got != want {
+		t.Fatalf("maximum effective bitrate = %d, want %d", got, want)
+	}
+	if len(packet) != MaxFrameBytes+1 {
+		t.Fatalf("maximum bitrate packet size = %d, want %d", len(packet), MaxFrameBytes+1)
 	}
 }
 

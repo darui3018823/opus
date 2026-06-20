@@ -30,6 +30,8 @@ Implemented public entry points:
 - `(*Encoder).SetVBR(vbr bool)`
 - `(*Encoder).SetVBRConstraint(constrained bool)`
 - `(*Encoder).SetDTX(enabled bool)` / `(*Encoder).DTX() bool`
+- `(*Encoder).SetInbandFEC(enabled bool)` / `(*Encoder).InbandFEC() bool`
+- `(*Encoder).SetPacketLossPerc(perc int)` / `(*Encoder).PacketLossPerc() int`
 - `(*Encoder).SetPacketPadding(n int)`
 - `(*Encoder).SetApplication(application Application)`
 - `(*Encoder).SetSignalType(signal SignalType)`
@@ -587,6 +589,16 @@ The SILK package contains:
   explicit RMS loudness difference in dB. On the speech-harmonic fixture the
   matched loudness differences are within 0.75 dB at 8/12/16 kHz; the former
   approximately 0.57 alignment scale is no longer present.
+  Mono SILK-only encoding now supports standards-compliant one-packet-delayed
+  LBRR/in-band FEC when `SetInbandFEC(true)` is combined with a non-zero
+  `SetPacketLossPerc`. The encoder re-quantizes active previous-packet frames at
+  a lower rate, writes the 1/2/3-frame LBRR flag grammar and redundant bodies
+  before the current regular frames, and subtracts the emitted LBRR cost from
+  the current regular-frame rate-control target. The normal SILK decoder
+  consumes mono LBRR bodies without synthesizing them, preserving range
+  alignment. libopus 1.6.1 `decode_fec=1` sequence tests recover dropped
+  20/40/60 ms packets. Stereo/hybrid LBRR and public Go-side FEC extraction are
+  not part of this slice.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single
@@ -619,6 +631,10 @@ Q5a verification on 2026-06-17: passing (`go vet ./...`,
 Voiced SNR-VBR rate-control verification on 2026-06-18: passing
 (`go test ./...` and
 `go test -tags opusref -run TestOpusSILKABAgainstLibopusEncoder -v .`).
+Mono SILK LBRR/FEC encoding verification on 2026-06-20: passing
+(`go vet ./...`, `go test -count=1 ./...`, and
+`go test -count=1 -tags opusref ./...`). The libopus sequence tests cover
+normal decoding plus `decode_fec=1` recovery for 20/40/60 ms packets.
 
 Passing package-level tests:
 
@@ -698,7 +714,9 @@ reference comparison.
 - Top-level hybrid encoder selection exists only for high-bitrate 24/48 kHz
   VOIP/voice; there is no full libopus-equivalent hybrid mode/rate-control
   coverage.
-- FEC decode is currently a PLC fallback, not packet FEC extraction.
+- Mono SILK-only LBRR/FEC encoding is available, but public `DecodeFEC` is
+  currently a PLC fallback rather than packet FEC extraction. Stereo and hybrid
+  LBRR encoding are not implemented.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
   to full libopus-compatible mode/rate-control behavior.
 - Decoder parity is achieved on the official vectors and the libopus reference;

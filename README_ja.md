@@ -173,6 +173,10 @@ func (e *Encoder) SetMaxBandwidth(bw int) error
 func (e *Encoder) Bandwidth() int
 func (e *Encoder) SetDTX(dtx bool)
 func (e *Encoder) DTX() bool
+func (e *Encoder) SetInbandFEC(enabled bool)             // mono SILK-only
+func (e *Encoder) InbandFEC() bool
+func (e *Encoder) SetPacketLossPerc(perc int)            // 0〜100 にクランプ
+func (e *Encoder) PacketLossPerc() int
 func (e *Encoder) SetPacketPadding(n int)
 func (e *Encoder) Reset() error
 ```
@@ -282,7 +286,10 @@ GitHub Actions ワークフロー 4 本。いずれも **amd64（`ubuntu-latest`
   エンコード対応が必要です。
 - エンコーダーは libopus とビット精度一致ではありませんが、準拠デコーダー
   （libopus を含む）がデコードできる標準 Opus パケットを出力します。
-- `DecodeFEC` は現状 PLC フォールバックで、パケット FEC 抽出ではありません。
+- mono SILK-only エンコードは、`SetInbandFEC(true)` と 0 より大きい
+  `SetPacketLossPerc` により、準拠した LBRR/in-band FEC を送出できます。
+  stereo/hybrid LBRR は未実装です。
+- `DecodeFEC` は現状 PLC フォールバックで、ローカルのパケット FEC 抽出ではありません。
 - マルチストリーム・サラウンド・Ogg Opus コンテナ API はありません。
 - VBR/CVBR と application/signal hint は CELT エンコーダーの判断を調整しますが、
   libopus と同等の完全なモード選択・レート制御ではありません。

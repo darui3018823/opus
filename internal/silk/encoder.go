@@ -89,6 +89,34 @@ type Encoder struct {
 	// ltpSumLogGainQ7 is the cumulative log prediction gain across subframes
 	// (silk sum_log_gain_Q7), limiting the total LTP gain for stability.
 	ltpSumLogGainQ7 float64
+
+	// ── Inband Low Bitrate Redundancy (LBRR / in-band FEC) ──────────────────
+	// lbrrEnabled is the SILK LBRR_coded gate (set by the top-level FEC
+	// decision); packetLossPerc feeds the LBRR gain-increase schedule.
+	lbrrEnabled    bool
+	packetLossPerc int
+	// lbrrInPrevPacket records whether the previous packet generated LBRR data,
+	// selecting the LBRR_GainIncreases schedule (silk_setup_LBRR).
+	lbrrInPrevPacket bool
+	// pendingLBRR holds the LBRR frames generated while encoding the previous
+	// packet; they are emitted at the front of the current packet (the cross-
+	// packet one-packet FEC delay). curLBRR accumulates the current packet's
+	// LBRR frames. lbrrPlanned is set when curLBRR has at least one frame.
+	pendingLBRR        []lbrrFrameData
+	curLBRR            []lbrrFrameData
+	pendingLBRRFrames  int // frame count the pending LBRR data was generated for
+	lbrrRunPrevGainIdx int // running gain index within the current LBRR run
+	// lbrrBitsPerFrame is the current packet's emitted LBRR cost divided across
+	// its regular frames. silkFrameTargetBits subtracts it so CBR/CVBR do not
+	// simply add redundancy on top of the configured bitrate.
+	lbrrBitsPerFrame int
+	// Capture of the current voiced frame's coded pitch/LTP indices, populated
+	// by encodePitchAndLTP so the LBRR generator can replay them.
+	capLagHigh    int
+	capLagLow     int
+	capContour    int
+	capLTPPerIdx  int
+	capLTPGainIdx []int
 }
 
 type nlsfAnalysis struct {
@@ -319,13 +347,28 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 	for _, active := range vadFlags {
 		enc.EncodeBitLogp(active, 1)
 	}
-	enc.EncodeBitLogp(false, 1) // No LBRR data in this encoder slice.
+	// LBRR flag + redundant frames carried over from the previous packet (the
+	// one-packet FEC delay). When FEC is disabled this writes a single 0 bit,
+	// identical to the previous hardcoded behaviour.
+	lbrrStartBits := enc.ECTell()
+	e.emitPendingLBRR(enc, nFrames)
+	lbrrBits := enc.ECTell() - lbrrStartBits
+	e.lbrrBitsPerFrame = 0
+	if lbrrBits > 1 {
+		e.lbrrBitsPerFrame = (lbrrBits + nFrames - 1) / nFrames
+	}
+	if lbrrDebug {
+		fmt.Fprintf(os.Stderr, "[LBRR budget] bits=%d perFrame=%d base=%d adjusted=%d\n",
+			lbrrBits, e.lbrrBitsPerFrame, e.bitrate*e.frameMs/1000, e.silkFrameTargetBits())
+	}
 
+	e.beginLBRRPacket()
 	e.lastSNRVBRStream = false
 	for i, signal := range frames {
 		e.encodeRangeFrame(enc, signal, vadFlags[i], i > 0)
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 	}
+	e.finishLBRRPacket(nFrames)
 	return nil
 }
 
@@ -472,6 +515,22 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	enc.EncodeIcdf(int(e.nsqSeed), silkUniform4ICDF[:], 8)
 	e.encodePulses(enc, pulses, signalType, quantOffset)
 
+	// Low-Bitrate Redundancy: generate (but do not yet emit) a coarse redundant
+	// copy of this frame. It is buffered and written at the front of the next
+	// packet (the one-packet FEC delay). Mirrors silk_LBRR_encode_FLP: reuse the
+	// regular side information, bump the gains, and re-run the quantizer.
+	var leakBefore string
+	if lbrrDebug {
+		leakBefore = e.leakFingerprint()
+	}
+	e.generateLBRRFrame(signal, signalType, quantOffset, gainIndices, nlsf,
+		pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale, initialState)
+	if lbrrDebug {
+		if after := e.leakFingerprint(); after != leakBefore {
+			fmt.Fprintf(os.Stderr, "[LBRR LEAK]\n  before=%s\n  after =%s\n", leakBefore, after)
+		}
+	}
+
 	e.prevNLSF = nlsfQ15ToRadians(nlsf.nlsfQ15)
 	if len(e.prevNLSFQ15) == len(nlsf.nlsfQ15) {
 		copy(e.prevNLSFQ15, nlsf.nlsfQ15)
@@ -614,6 +673,12 @@ func (e *Encoder) selectBudgetRateControlPlan(
 		// control permits, so keep searching until a compact fallback is found.
 		gainBoosts = []int{0, 4, 8, 12, 16, 20, 24, 32, 40, 48}
 		rateScales = []float64{1, 4, 16, 64, 256, 1024, 4096}
+	} else if e.lbrrBitsPerFrame > 0 {
+		// LBRR is part of the configured SILK packet budget, not additive
+		// overhead. Search beyond the ordinary quality-control range when the
+		// redundant copy leaves a small regular-frame budget.
+		gainBoosts = []int{0, 2, 4, 6, 8, 10, 12, 16, 20, 24}
+		rateScales = []float64{1, 2, 4, 8, 16, 32, 64, 128, 512, 1024, 4096}
 	}
 
 	best := rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
@@ -747,6 +812,7 @@ func (e *Encoder) silkFrameTargetBits() int {
 	if e.channels == 2 || e.stereoComponent {
 		bits /= 2
 	}
+	bits -= e.lbrrBitsPerFrame
 	if bits < 16 {
 		bits = 16
 	}
@@ -913,6 +979,15 @@ func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, signal []float64, lpcQ
 
 	e.prevPitchLag = pitchLags[e.nSubframes-1]
 	e.prevLagIndex = recLag
+
+	// Capture the coded pitch/LTP indices so the LBRR generator can replay this
+	// frame's side information into the next packet without recomputation.
+	e.capLagHigh = lagIndex
+	e.capLagLow = lagLowBits
+	e.capContour = contourIndex
+	e.capLTPPerIdx = ltpPerIdx
+	e.capLTPGainIdx = append([]int(nil), ltpGainIndices...)
+
 	return ltpCoeffsQ14, silkLTPScalesTable[0], pitchLags
 }
 
@@ -2889,6 +2964,17 @@ func (e *Encoder) Reset() {
 	e.lastSNRVBRFrame = false
 	e.lastSNRVBRStream = false
 	e.lastFinalRange = 0
+	e.pendingLBRR = nil
+	e.curLBRR = nil
+	e.pendingLBRRFrames = 0
+	e.lbrrInPrevPacket = false
+	e.lbrrRunPrevGainIdx = 0
+	e.lbrrBitsPerFrame = 0
+	e.capLagHigh = 0
+	e.capLagLow = 0
+	e.capContour = 0
+	e.capLTPPerIdx = 0
+	e.capLTPGainIdx = nil
 	e.stereoState.reset()
 	e.prevOnlyMiddle = false
 	if e.side != nil {

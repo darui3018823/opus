@@ -33,6 +33,14 @@ static int go_opus_encoder_set_voice(OpusEncoder *enc) {
 	return opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
 }
 
+static int go_opus_encoder_set_inband_fec(OpusEncoder *enc, int enabled) {
+	return opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(enabled));
+}
+
+static int go_opus_encoder_set_packet_loss(OpusEncoder *enc, int perc) {
+	return opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(perc));
+}
+
 static int go_opus_decoder_disable_osce_bwe(OpusDecoder *dec) {
 #ifdef OPUS_SET_OSCE_BWE_REQUEST
 	int ret = opus_decoder_ctl(dec, OPUS_SET_OSCE_BWE(0));
@@ -144,6 +152,24 @@ func (e *Encoder) SetVoiceMode() error {
 	return nil
 }
 
+// SetInbandFEC enables or disables libopus inband FEC (LBRR).
+func (e *Encoder) SetInbandFEC(enabled bool) error {
+	code := C.go_opus_encoder_set_inband_fec(e.enc, boolToCInt(enabled))
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_INBAND_FEC: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
+// SetPacketLossPerc sets the libopus expected packet-loss percentage (0..100).
+func (e *Encoder) SetPacketLossPerc(perc int) error {
+	code := C.go_opus_encoder_set_packet_loss(e.enc, C.int(perc))
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_PACKET_LOSS_PERC: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
 // Encode encodes one interleaved float32 PCM frame with libopus.
 func (e *Encoder) Encode(pcm []float32, frameSize int) ([]byte, error) {
 	need := frameSize * e.channels
@@ -181,6 +207,24 @@ func (d *Decoder) DecodeFloat(packet []byte, maxSPC int) ([]float32, error) {
 		(*C.float)(unsafe.Pointer(&pcm[0])), C.int(maxSPC), 0)
 	if n < 0 {
 		return nil, fmt.Errorf("opus_decode_float: %s", C.GoString(C.opus_strerror(n)))
+	}
+	return pcm[:int(n)*d.channels], nil
+}
+
+// DecodeFloatFEC reconstructs the lost frame preceding packet via libopus'
+// in-band FEC path (opus_decode_float with decode_fec=1). packet must be the
+// next received packet (which carries the LBRR redundancy); frameSize is the
+// number of samples per channel of the lost frame. Returns samples per channel.
+func (d *Decoder) DecodeFloatFEC(packet []byte, frameSize int) ([]float32, error) {
+	if len(packet) == 0 {
+		return nil, fmt.Errorf("empty packet for FEC decode")
+	}
+	pcm := make([]float32, frameSize*d.channels)
+	n := C.opus_decode_float(d.dec,
+		(*C.uchar)(unsafe.Pointer(&packet[0])), C.opus_int32(len(packet)),
+		(*C.float)(unsafe.Pointer(&pcm[0])), C.int(frameSize), 1)
+	if n < 0 {
+		return nil, fmt.Errorf("opus_decode_float(FEC): %s", C.GoString(C.opus_strerror(n)))
 	}
 	return pcm[:int(n)*d.channels], nil
 }

@@ -175,6 +175,11 @@ func (e *Encoder) SetBandwidth(bw int) error           // Auto/NB/WB/SWB/FB
 func (e *Encoder) SetMaxBandwidth(bw int) error
 func (e *Encoder) Bandwidth() int
 func (e *Encoder) SetDTX(dtx bool)
+func (e *Encoder) DTX() bool
+func (e *Encoder) SetInbandFEC(enabled bool)             // mono SILK-only
+func (e *Encoder) InbandFEC() bool
+func (e *Encoder) SetPacketLossPerc(perc int)            // clamped to 0–100
+func (e *Encoder) PacketLossPerc() int
 func (e *Encoder) SetPacketPadding(n int)
 func (e *Encoder) Reset() error
 ```
@@ -287,7 +292,10 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
   packets that any compliant decoder (including libopus) can decode.
 - VBR/CVBR and application/signal hints shape the CELT encoder heuristics, but
   do not provide full libopus-equivalent mode/rate-control behavior.
-- `DecodeFEC` is currently a PLC fallback, not packet FEC extraction.
+- Mono SILK-only encoding can emit standards-compliant LBRR/in-band FEC via
+  `SetInbandFEC(true)` and a non-zero `SetPacketLossPerc`. Stereo/hybrid LBRR is
+  not implemented.
+- `DecodeFEC` is currently a PLC fallback, not local packet FEC extraction.
 - No multistream, surround, or Ogg Opus container API.
 
 ## Contributing

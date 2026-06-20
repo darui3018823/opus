@@ -58,6 +58,11 @@ type Encoder struct {
 	padBytes   int           // code-3 padding-data bytes to append (0 = none)
 	dtx        bool          // discontinuous transmission: minimal silence packets
 
+	// Inband FEC (SILK LBRR). useInbandFEC requests redundant coding; the SILK
+	// encoder only emits LBRR when this is on and packetLossPerc > 0.
+	useInbandFEC   bool
+	packetLossPerc int
+
 	// Bandwidth control (CELT-only path). maxBandwidth caps the automatic
 	// selection; forcedBandwidth pins an exact bandwidth (BandwidthAuto means
 	// automatic). Both use the public Bandwidth* constants.
@@ -1211,6 +1216,48 @@ func (e *Encoder) SetDTX(enabled bool) {
 
 // DTX reports whether discontinuous transmission is enabled.
 func (e *Encoder) DTX() bool { return e.dtx }
+
+// SetInbandFEC enables or disables SILK inband forward error correction (LBRR).
+// When enabled together with a non-zero packet-loss percentage, SILK-only
+// packets carry a low-bitrate redundant copy of the previous packet's frame(s),
+// which a decoder can recover via its decode_fec path after a lost packet.
+// FEC applies only to the SILK-only speech path; it is off by default and has no
+// effect on CELT-only packets. Stereo and hybrid LBRR are not yet implemented.
+func (e *Encoder) SetInbandFEC(enabled bool) {
+	e.useInbandFEC = enabled
+	e.syncSILKFEC()
+}
+
+// InbandFEC reports whether inband FEC is enabled.
+func (e *Encoder) InbandFEC() bool { return e.useInbandFEC }
+
+// SetPacketLossPerc sets the expected packet-loss percentage (0..100) used to
+// tune the FEC redundancy (higher loss → smaller, more frequent LBRR frames).
+// With FEC enabled, a value of 0 disables LBRR emission.
+func (e *Encoder) SetPacketLossPerc(perc int) {
+	if perc < 0 {
+		perc = 0
+	}
+	if perc > 100 {
+		perc = 100
+	}
+	e.packetLossPerc = perc
+	e.syncSILKFEC()
+}
+
+// PacketLossPerc reports the configured expected packet-loss percentage.
+func (e *Encoder) PacketLossPerc() int { return e.packetLossPerc }
+
+// syncSILKFEC pushes the FEC configuration to the SILK encoder. LBRR is gated on
+// both the request flag and a non-zero loss estimate, mirroring libopus'
+// decide_fec (which never codes redundancy at 0% loss).
+func (e *Encoder) syncSILKFEC() {
+	if e.silkEncoder == nil {
+		return
+	}
+	e.silkEncoder.SetPacketLossPerc(e.packetLossPerc)
+	e.silkEncoder.SetInbandFEC(e.useInbandFEC && e.packetLossPerc > 0)
+}
 
 // SetApplication changes the application mode. This re-derives the CELT content
 // hint (voice for VOIP, music otherwise), which influences bandwidth selection

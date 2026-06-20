@@ -454,11 +454,19 @@ func (d *Decoder) decodeMultiMonoEC(dec *entcode.Decoder, nFrames int) ([]float6
 			d.trace.LBRRFlags = append(d.trace.LBRRFlags, 0)
 		}
 	}
+	lbrrMask := 0
 	if lbrrFlag && nFrames > 1 {
 		if nFrames == 2 {
-			_ = dec.DecodeIcdf(silkLBRRFlags2ICDF[:], 8)
+			lbrrMask = dec.DecodeIcdf(silkLBRRFlags2ICDF[:], 8) + 1
 		} else {
-			_ = dec.DecodeIcdf(silkLBRRFlags3ICDF[:], 8)
+			lbrrMask = dec.DecodeIcdf(silkLBRRFlags3ICDF[:], 8) + 1
+		}
+	} else if lbrrFlag {
+		lbrrMask = 1
+	}
+	if lbrrMask != 0 {
+		if err := d.consumeLBRRFrames(dec, nFrames, lbrrMask); err != nil {
+			return d.concealPacketLoss()
 		}
 	}
 
@@ -473,6 +481,33 @@ func (d *Decoder) decodeMultiMonoEC(dec *entcode.Decoder, nFrames int) ([]float6
 		allPCM = append(allPCM, pcm...)
 	}
 	return allPCM, nil
+}
+
+// consumeLBRRFrames advances dec over the redundant frame bodies that precede
+// the regular SILK frames. LBRR indices use their own decoder-state timeline:
+// the first frame in each contiguous run is independent, and later frames in
+// that run are conditional on the preceding LBRR frame. Decode them with a
+// temporary SILK decoder so their gain/pitch history is available while the
+// regular decoder's synthesis and predictor state remains untouched.
+func (d *Decoder) consumeLBRRFrames(dec *entcode.Decoder, nFrames, mask int) error {
+	frameMs := d.frameSize * 1000 / d.sampleRate
+	tmp, err := NewDecoderWithFrameMs(d.sampleRate, 1, frameMs)
+	if err != nil {
+		return err
+	}
+	prevPresent := false
+	for i := 0; i < nFrames; i++ {
+		present := mask&(1<<uint(i)) != 0
+		if !present {
+			prevPresent = false
+			continue
+		}
+		if _, err := tmp.decodeFrame(dec, 1, prevPresent); err != nil {
+			return err
+		}
+		prevPresent = true
+	}
+	return nil
 }
 
 func (d *Decoder) decodeMultiStereo(packet []byte, nFrames int) ([]float64, error) {

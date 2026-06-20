@@ -109,6 +109,7 @@ _ = packet
 
 // float64 入力も可能:
 //   packet, err := enc.EncodeFloat(make([]float64, 960*2), 960)
+// float32 入力には EncodeFloat32 を使用できる。
 
 // 帯域は信号内容から自動検出される。必要なら明示指定できる:
 //   enc.SetBandwidth(opus.BandwidthWideband) // wideband に固定
@@ -117,7 +118,8 @@ _ = packet
 // Application とは独立した信号種別ヒント:
 //   enc.SetSignalType(opus.SignalVoice)
 
-// 20ms の整数倍、最大 120ms まで multi-frame packet として出力可能:
+// 短い CELT packet と multi-frame packet を出力可能:
+//   packet, err := enc.Encode(pcm480, 480)   // 48 kHz で 10ms
 //   packet, err := enc.Encode(pcm1920, 1920) // 40ms
 ```
 
@@ -128,8 +130,8 @@ _ = packet
 - **チャンネル**: モノラル・ステレオ。
 - **デコーダーのフレームサイズ**: 全 Opus 長（2.5/5/10/20/40/60 ms）を TOC バイトに
   従いパケット単位で選択。
-- **エンコーダーのフレームサイズ**: 20ms の整数倍（20ms〜120ms）。それ以外は
-  エラーになります。
+- **エンコーダーのフレームサイズ**: CELT の 2.5/5/10ms、および 20ms の整数倍
+  （20ms〜120ms）。
 - **エンコーダー帯域**: 信号内容に基づく自動検出、または
   `SetBandwidth` / `SetMaxBandwidth` による明示指定。NB/WB/SWB/FB に対応。
 - **エンコーダーモード選択**: 通常の音声・音楽、restricted-low-delay、

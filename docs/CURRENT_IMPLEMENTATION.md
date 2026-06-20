@@ -76,10 +76,10 @@ policy sentinel; `EffectiveBitrate` returns the numeric rate currently applied.
 The automatic policy follows libopus' frame-size/sample-rate/channel formula,
 and the maximum policy is bounded by the RFC per-frame byte limit.
 
-The top-level encoder always creates an internal CELT encoder at 48 kHz and
-uses a 20 ms internal CELT frame (`960` samples per channel) for the general
-audio path. Non-48 kHz CELT input is resampled to 48 kHz before CELT encoding.
-The CELT emitted TOC byte is CELT-only 20 ms, with the **coded bandwidth
+The top-level encoder uses internal CELT encoders at 48 kHz for 2.5, 5, 10,
+and 20 ms transform geometries. Non-48 kHz CELT input is resampled to 48 kHz
+before CELT encoding. The CELT emitted TOC byte uses the requested valid frame
+duration, with the **coded bandwidth
 selected per the input sample rate, target bitrate, explicit bandwidth settings,
 and signal-content detector** (see Slice 2-6 and the post-2-6 notes below); it
 is no longer always fullband.
@@ -133,8 +133,8 @@ all three transition forms (verified by
 `TestCGOEncodeRefHybridRedundancyTransition` and
 `TestCGOEncodeRefCELTToSILKRedundancyTransition`).
 
-Supported public encode packet durations are exact 20 ms multiples from 20 ms
-through 120 ms (`frameSize == base20ms * 1..6`). Unsupported frame sizes and
+Supported public encode packet durations are 2.5, 5, and 10 ms CELT packets,
+plus exact 20 ms multiples from 20 through 120 ms. Unsupported frame sizes and
 durations over the Opus 120 ms packet limit are rejected with
 `ErrUnsupportedFrameSize`.
 

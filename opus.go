@@ -37,8 +37,10 @@ type Encoder struct {
 	channels    int
 	application Application
 
-	// CELT encoder (always operates at 48kHz internally)
-	celtEncoder *celt.Encoder
+	// CELT encoders always operate at 48 kHz internally. Separate instances
+	// retain the mode-specific transform geometry for 2.5/5/10/20 ms frames.
+	celtEncoder  *celt.Encoder
+	celtEncoders [4]*celt.Encoder
 
 	// SILK encoder for the speech/low-bitrate path. It operates at the packet's
 	// SILK internal rate (8/12/16 kHz); 24/48 kHz voice input is downsampled to
@@ -76,7 +78,7 @@ type Encoder struct {
 	// boundary. Only updated while bandwidth is automatic (forcedBandwidth==Auto).
 	lastDetectedBW int
 
-	// Internal 48kHz frame size (always 960 for 20ms)
+	// Active internal CELT frame size at 48 kHz (120/240/480/960).
 	internalFrameSize int
 
 	// prevMode is the coding mode (framing.Mode*) of the previously emitted
@@ -129,7 +131,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 	// Frame size at the caller's sample rate (20ms)
 	frameSize := (sampleRate * 20) / 1000
 
-	// Internal CELT frame size is always 960 samples (20ms at 48kHz)
+	// Start with the 20 ms CELT geometry; shorter modes are created lazily.
 	internalFrameSize := 960
 
 	// Create CELT encoder at 48kHz
@@ -154,6 +156,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		internalFrameSize: internalFrameSize,
 		prevMode:          -1, // no previous packet yet
 	}
+	enc.celtEncoders[3] = celtEnc
 
 	// Create resampler if needed (non-48kHz rates)
 	if sampleRate != 48000 {
@@ -261,15 +264,18 @@ func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
 
 // encodeFloat is the internal encoding path shared by Encode and EncodeFloat.
 //
-// The encoder always emits 20 ms CELT-only fullband frames internally. When the
-// requested frameSize is an exact multiple (2..6) of the 20 ms base, the input
-// is split into that many consecutive 20 ms chunks, each is encoded into its own
-// CELT frame, and the frames are packed into a single multi-frame Opus packet
-// (RFC 6716 §3.2, count codes 1/2/3). Otherwise a single-frame (code 0) packet
-// is produced.
+// Short 2.5/5/10 ms requests use their corresponding CELT geometry. Requests
+// that are exact multiples (1..6) of the 20 ms base are split into consecutive
+// 20 ms frames and packed as one Opus packet (RFC 6716 §3.2).
 func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
+	if err := e.selectCELTEncoder(frameSize); err != nil {
+		return nil, err
+	}
 	if err := e.applyBitrateSetting(frameSize); err != nil {
 		return nil, err
+	}
+	if frameSize < e.frameSize {
+		return e.encodeShortCELTPacket(pcm)
 	}
 	nFrames := frameSize / e.frameSize
 	if e.shouldEncodeSILKOnly() {
@@ -374,6 +380,28 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("failed to pack %d frames: %w", nFrames, err)
 	}
 	e.prevMode = framing.ModeCELTOnly
+	return append([]byte{toc | byte(code)}, payload...), nil
+}
+
+func (e *Encoder) encodeShortCELTPacket(pcm []float64) ([]byte, error) {
+	bw := e.narrowAutoBandwidth(pcm, e.selectCeltBandwidth())
+	e.celtEncoder.SetEndBand(celtEndBandForFramingBW(bw))
+	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, bw, e.channels, e.internalFrameSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate short-frame TOC: %w", err)
+	}
+	compressed, err := e.encodeOneCELTFrame(pcm)
+	if err != nil {
+		return nil, err
+	}
+	e.prevMode = framing.ModeCELTOnly
+	if e.padBytes <= 0 {
+		return append([]byte{toc}, compressed...), nil
+	}
+	payload, code, err := packOpusFramesPadded([][]byte{compressed}, e.rateMode != celt.RateModeCBR || e.dtx, e.padBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pad short CELT frame: %w", err)
+	}
 	return append([]byte{toc | byte(code)}, payload...), nil
 }
 
@@ -1084,14 +1112,68 @@ func bandwidthRank(bw int) int {
 
 func (e *Encoder) validateFrameSize(frameSize int) (int, error) {
 	base := e.frameSize
-	if base <= 0 || frameSize <= 0 || frameSize%base != 0 {
-		return 0, fmt.Errorf("%w: frameSize %d is not a 20 ms multiple at %d Hz", ErrUnsupportedFrameSize, frameSize, e.sampleRate)
+	if base <= 0 || frameSize <= 0 {
+		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, e.sampleRate)
+	}
+	for _, divisor := range []int{8, 4, 2} {
+		if frameSize*divisor == base {
+			return 1, nil
+		}
+	}
+	if frameSize%base != 0 {
+		return 0, fmt.Errorf("%w: frameSize %d is not a valid Opus duration at %d Hz", ErrUnsupportedFrameSize, frameSize, e.sampleRate)
 	}
 	nFrames := frameSize / base
 	if nFrames < 1 || nFrames > 6 {
 		return 0, fmt.Errorf("%w: packet duration %d ms exceeds Opus maximum 120 ms", ErrUnsupportedFrameSize, nFrames*20)
 	}
 	return nFrames, nil
+}
+
+func (e *Encoder) selectCELTEncoder(frameSize int) error {
+	internalSize := celt.FrameSize20ms
+	if frameSize < e.frameSize {
+		internalSize = frameSize * SampleRate48kHz / e.sampleRate
+	}
+	idx := celtEncoderIndex(internalSize)
+	if idx < 0 {
+		return fmt.Errorf("%w: CELT frameSize %d", ErrUnsupportedFrameSize, frameSize)
+	}
+	next := e.celtEncoders[idx]
+	if next == nil {
+		var err error
+		next, err = celt.NewEncoder(internalSize, SampleRate48kHz, e.channels, celt.DefaultEncoderConfig())
+		if err != nil {
+			return fmt.Errorf("failed to create %d-sample CELT encoder: %w", internalSize, err)
+		}
+		e.celtEncoders[idx] = next
+	}
+	next.SetBitrate(e.bitrate)
+	next.SetComplexity(e.complexity)
+	next.SetRateMode(e.rateMode)
+	next.SetDTX(e.dtx)
+	next.SetSignalType(e.celtEncoder.SignalTypeHint())
+	if next != e.celtEncoder {
+		next.CopyStateFrom(e.celtEncoder)
+		e.celtEncoder = next
+	}
+	e.internalFrameSize = internalSize
+	return nil
+}
+
+func celtEncoderIndex(frameSize int) int {
+	switch frameSize {
+	case celt.FrameSize2_5ms:
+		return 0
+	case celt.FrameSize5ms:
+		return 1
+	case celt.FrameSize10ms:
+		return 2
+	case celt.FrameSize20ms:
+		return 3
+	default:
+		return -1
+	}
 }
 
 // encodeOneCELTFrame resamples one 20 ms PCM chunk (if needed) and encodes it
@@ -1526,7 +1608,11 @@ func celtEndBandForFramingBW(bw int) int {
 
 // Reset resets the encoder state
 func (e *Encoder) Reset() error {
-	e.celtEncoder.Reset()
+	for _, enc := range e.celtEncoders {
+		if enc != nil {
+			enc.Reset()
+		}
+	}
 	if e.silkEncoder != nil {
 		e.silkEncoder.Reset()
 	}
@@ -1541,8 +1627,16 @@ func (e *Encoder) Reset() error {
 	if e.redundancyCelt != nil {
 		e.redundancyCelt.Reset()
 	}
-	e.celtEncoder.SetBitrate(e.bitrate)
-	e.celtEncoder.SetComplexity(e.complexity)
+	e.celtEncoder = e.celtEncoders[3]
+	e.internalFrameSize = celt.FrameSize20ms
+	for _, enc := range e.celtEncoders {
+		if enc != nil {
+			enc.SetBitrate(e.bitrate)
+			enc.SetComplexity(e.complexity)
+			enc.SetRateMode(e.rateMode)
+			enc.SetDTX(e.dtx)
+		}
+	}
 	return nil
 }
 

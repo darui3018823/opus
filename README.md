@@ -110,6 +110,7 @@ _ = packet
 
 // Float64 input is also supported:
 //   packet, err := enc.EncodeFloat(make([]float64, 960*2), 960)
+// Float32 input is supported with EncodeFloat32.
 
 // Bandwidth is detected automatically from signal content; override if needed:
 //   enc.SetBandwidth(opus.BandwidthWideband) // force wideband
@@ -118,7 +119,8 @@ _ = packet
 // Optional content hint independent of Application:
 //   enc.SetSignalType(opus.SignalVoice)
 
-// Multi-frame packets use exact 20 ms multiples up to 120 ms:
+// Short CELT packets and multi-frame packets are supported:
+//   packet, err := enc.Encode(pcm480, 480)   // 10 ms at 48 kHz
 //   packet, err := enc.Encode(pcm1920, 1920) // 40 ms
 ```
 
@@ -130,8 +132,8 @@ _ = packet
 - **Channels**: mono and stereo.
 - **Decoder frame sizes**: all Opus durations (2.5/5/10/20/40/60 ms), selected
   per packet by the TOC byte.
-- **Encoder frame sizes**: exact 20 ms multiples from 20 ms through 120 ms
-  (multi-frame, RFC 6716 §3.2). Other sizes are rejected.
+- **Encoder frame sizes**: 2.5/5/10 ms CELT packets and exact 20 ms multiples
+  from 20 ms through 120 ms (multi-frame, RFC 6716 §3.2).
 - **Encoder bandwidth**: automatic (signal-content-driven FFT detection) or
   manual (`SetBandwidth`/`SetMaxBandwidth`). Ranges: NB/WB/SWB/FB.
 - **Encoder mode selection**: CELT is the default for general audio, music,

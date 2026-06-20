@@ -65,8 +65,8 @@ func TestEncoderRejectsInvalidPacketDurations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := enc48.EncodeFloat(make([]float64, 480), 480); !errors.Is(err, ErrUnsupportedFrameSize) {
-		t.Fatalf("48 kHz 10 ms encode error = %v, want ErrUnsupportedFrameSize", err)
+	if _, err := enc48.EncodeFloat(make([]float64, 720), 720); !errors.Is(err, ErrUnsupportedFrameSize) {
+		t.Fatalf("48 kHz 15 ms encode error = %v, want ErrUnsupportedFrameSize", err)
 	}
 	if _, err := enc48.EncodeFloat(make([]float64, 7*960), 7*960); !errors.Is(err, ErrUnsupportedFrameSize) {
 		t.Fatalf("140 ms encode error = %v, want ErrUnsupportedFrameSize", err)

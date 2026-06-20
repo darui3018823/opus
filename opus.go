@@ -117,10 +117,11 @@ type Encoder struct {
 	lastFinalRange uint32
 	inDTX          bool
 
-	forceChannels      int
-	lsbDepth           int
-	predictionDisabled bool
-	forcedMono         *Encoder
+	forceChannels          int
+	lsbDepth               int
+	predictionDisabled     bool
+	phaseInversionDisabled bool
+	forcedMono             *Encoder
 }
 
 // isValidOpusRate returns true if the sample rate is one of the five valid Opus rates.
@@ -566,6 +567,7 @@ func (e *Encoder) redundancyEncoder() (*celt.Encoder, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to create redundancy CELT encoder: %w", err)
 		}
+		c.SetPhaseInversionDisabled(e.phaseInversionDisabled)
 		e.redundancyCelt = c
 	}
 	return e.redundancyCelt, nil
@@ -605,6 +607,7 @@ func (e *Encoder) encodeRedundantFrame(celtInput []float64, nbytes int, leading 
 	}
 	red.SetEndBand(endBand)
 	red.SetBitrate(e.bitrate)
+	red.SetPhaseInversionDisabled(e.phaseInversionDisabled)
 	return red.EncodeRedundant(part, nbytes)
 }
 
@@ -1293,6 +1296,7 @@ func (e *Encoder) selectCELTEncoder(frameSize int) error {
 	next.SetComplexity(e.complexity)
 	next.SetRateMode(e.rateMode)
 	next.SetDTX(e.dtx)
+	next.SetPhaseInversionDisabled(e.phaseInversionDisabled)
 	next.SetSignalType(e.celtEncoder.SignalTypeHint())
 	if next != e.celtEncoder {
 		next.CopyStateFrom(e.celtEncoder)
@@ -1433,6 +1437,24 @@ func (e *Encoder) SetPredictionDisabled(disabled bool) {
 // PredictionDisabled reports whether predictive mode routing is disabled.
 func (e *Encoder) PredictionDisabled() bool { return e.predictionDisabled }
 
+// SetPhaseInversionDisabled disables CELT intensity-stereo phase inversion.
+func (e *Encoder) SetPhaseInversionDisabled(disabled bool) {
+	e.phaseInversionDisabled = disabled
+	for _, enc := range e.celtEncoders {
+		if enc != nil {
+			enc.SetPhaseInversionDisabled(disabled)
+		}
+	}
+	if e.redundancyCelt != nil {
+		e.redundancyCelt.SetPhaseInversionDisabled(disabled)
+	}
+}
+
+// PhaseInversionDisabled reports the encoder phase-inversion setting.
+func (e *Encoder) PhaseInversionDisabled() bool {
+	return e.phaseInversionDisabled
+}
+
 func (e *Encoder) monoEncoder() (*Encoder, error) {
 	if e.forcedMono == nil {
 		enc, err := NewEncoder(e.sampleRate, ChannelsMono, e.application)
@@ -1470,6 +1492,7 @@ func (e *Encoder) monoEncoder() (*Encoder, error) {
 	m.SetPacketPadding(e.padBytes)
 	_ = m.SetLSBDepth(e.lsbDepth)
 	m.SetPredictionDisabled(e.predictionDisabled)
+	m.SetPhaseInversionDisabled(e.phaseInversionDisabled)
 	return m, nil
 }
 
@@ -1888,6 +1911,7 @@ func (e *Encoder) Reset() error {
 			enc.SetComplexity(e.complexity)
 			enc.SetRateMode(e.rateMode)
 			enc.SetDTX(e.dtx)
+			enc.SetPhaseInversionDisabled(e.phaseInversionDisabled)
 		}
 	}
 	return nil
@@ -1959,12 +1983,13 @@ type Decoder struct {
 	// Resampler for non-48kHz CELT output rates
 	celtResampler *resampler.Resampler // 48kHz -> outRate
 
-	frameSize          int // frame size in samples at sampleRate
-	internalFrameSize  int // always 960 (20ms at 48kHz)
-	lastPacketDuration int // samples per channel decoded by the last packet
-	lastFinalRange     uint32
-	lastPitch          int
-	gainQ8             int
+	frameSize              int // frame size in samples at sampleRate
+	internalFrameSize      int // always 960 (20ms at 48kHz)
+	lastPacketDuration     int // samples per channel decoded by the last packet
+	lastFinalRange         uint32
+	lastPitch              int
+	gainQ8                 int
+	phaseInversionDisabled bool
 }
 
 // silkRateIdx maps a SILK rate in kHz to an index 0-2.
@@ -3009,6 +3034,7 @@ func (d *Decoder) decodeLeadingRedundancy(frame []byte, pktChannels, endBand int
 	if err != nil {
 		return nil
 	}
+	redDec.SetPhaseInversionDisabled(d.phaseInversionDisabled)
 	if d.lastCeltDec != nil {
 		redDec.CopyStateFrom(d.lastCeltDec)
 	}
@@ -3168,6 +3194,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 			// coarse energy from the right baseline (matches libopus).
 			if redundancy && !celtToSilk && redundancyBytes >= 2 && celtLen+redundancyBytes <= len(stream) {
 				if redDec, rerr := celt.NewDecoderEx(240, 48000, 21, celtActualCh); rerr == nil {
+					redDec.SetPhaseInversionDisabled(d.phaseInversionDisabled)
 					if redPCM, derr := redDec.Decode(stream[celtLen : celtLen+redundancyBytes]); derr == nil {
 						if d.celtResampler != nil {
 							redPCM = d.celtResampler.Process(redPCM)
@@ -3537,3 +3564,24 @@ func (d *Decoder) SetGain(gainQ8 int) error {
 
 // Gain returns the configured decoder output gain in Q8 dB.
 func (d *Decoder) Gain() int { return d.gainQ8 }
+
+// SetPhaseInversionDisabled disables intensity-stereo phase inversion while
+// decoding CELT. This is intended for compatibility with downmixing pipelines;
+// disabling it is not compliant with the Opus specification.
+func (d *Decoder) SetPhaseInversionDisabled(disabled bool) {
+	d.phaseInversionDisabled = disabled
+	for bw := range d.celtDecoders {
+		for lm := range d.celtDecoders[bw] {
+			for ch := range d.celtDecoders[bw][lm] {
+				if dec := d.celtDecoders[bw][lm][ch]; dec != nil {
+					dec.SetPhaseInversionDisabled(disabled)
+				}
+			}
+		}
+	}
+}
+
+// PhaseInversionDisabled reports the decoder phase-inversion setting.
+func (d *Decoder) PhaseInversionDisabled() bool {
+	return d.phaseInversionDisabled
+}

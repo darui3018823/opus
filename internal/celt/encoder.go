@@ -76,6 +76,7 @@ type Encoder struct {
 	rateMode   RateMode
 	dtx        bool       // discontinuous transmission: minimal packets for silence
 	signalType SignalType // content hint (voice/music) for application-driven heuristics
+	disableInv bool       // disable intensity-stereo phase inversion
 	// endBand is the number of coded bands (the CELT "end" band). 0 means full
 	// band (mode.Bands.NumBands). A smaller value limits the coded bandwidth
 	// (NB=13, WB=17, SWB=19, FB=21), matching the decoder's per-config band count.
@@ -729,7 +730,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	totalBitsQ3 := totalBits<<3 - antiCollapseRsv
 	e.foldSeed = QuantAllBandsEncode(enc, bandE, start, end, X[:frameLen], Y, collapse,
 		pulses, isTransient, spread, dualStereo, intensity, tfRes,
-		totalBitsQ3, balance, lm, codedBands, e.foldSeed, false)
+		totalBitsQ3, balance, lm, codedBands, e.foldSeed, e.disableInv)
 
 	// Anti-collapse bit (raw, reserved only on transients with LM>=2). libopus
 	// enables anti-collapse while the run of consecutive transients is short
@@ -898,6 +899,16 @@ func (e *Encoder) Reset() {
 	e.vbrOffset = 0
 	e.vbrCount = 0
 	e.vbrDriftComp = 0
+}
+
+// SetPhaseInversionDisabled controls intensity-stereo phase inversion.
+func (e *Encoder) SetPhaseInversionDisabled(disabled bool) {
+	e.disableInv = disabled
+}
+
+// PhaseInversionDisabled reports the intensity-stereo phase inversion setting.
+func (e *Encoder) PhaseInversionDisabled() bool {
+	return e.disableInv
 }
 
 // CopyStateFrom copies the inter-frame prediction state from src into e, the

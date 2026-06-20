@@ -154,6 +154,11 @@ _ = packet
 The public version constants are generated from the repository's
 [`VERSION`](VERSION) file.
 
+`MaxFrameSize` is 5760 samples per channel at 48 kHz (120 ms).
+`MaxFrameBytes` is the 1275-byte compressed-frame limit. `MaxPacketSize` is a
+conservative unpadded single-stream packet storage bound; explicit packet
+padding can exceed it.
+
 ### Encoder
 
 ```go

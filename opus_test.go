@@ -13,6 +13,24 @@ func TestVersionMetadata(t *testing.T) {
 	}
 }
 
+func TestPublicMaximumConstants(t *testing.T) {
+	if MaxFrameSize != 5760 {
+		t.Fatalf("MaxFrameSize = %d, want 5760", MaxFrameSize)
+	}
+	if MaxFrameSize != FrameSize120ms {
+		t.Fatalf("MaxFrameSize = %d, want FrameSize120ms (%d)", MaxFrameSize, FrameSize120ms)
+	}
+	if MaxFrameBytes != 1275 {
+		t.Fatalf("MaxFrameBytes = %d, want 1275", MaxFrameBytes)
+	}
+	if MaxPacketFrames != 48 {
+		t.Fatalf("MaxPacketFrames = %d, want 48", MaxPacketFrames)
+	}
+	if MaxPacketSize != (MaxFrameBytes+2)*MaxPacketFrames {
+		t.Fatalf("MaxPacketSize = %d, want %d", MaxPacketSize, (MaxFrameBytes+2)*MaxPacketFrames)
+	}
+}
+
 func TestNewEncoder(t *testing.T) {
 	tests := []struct {
 		name        string

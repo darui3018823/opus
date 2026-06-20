@@ -16,6 +16,16 @@ and package-level error values in `errors.go`. Public version constants are
 generated into `version_gen.go` from the repository-level `VERSION` file;
 `go generate ./...` refreshes them and CI rejects generated-file drift.
 
+Public size constants distinguish separate limits:
+
+- `MaxFrameSize` / `FrameSize120ms`: 5760 samples per channel at 48 kHz,
+  representing the maximum 120 ms packet duration.
+- `MaxFrameBytes`: the RFC 6716 maximum of 1275 compressed bytes for one frame.
+- `MaxPacketFrames`: the RFC 6716 maximum of 48 frames per packet.
+- `MaxPacketSize`: `(MaxFrameBytes + 2) * MaxPacketFrames`, a conservative
+  storage bound for an unpadded single-stream packet. Explicit
+  `SetPacketPadding` can intentionally produce a larger packet.
+
 ### Encoder
 
 Implemented public entry points:

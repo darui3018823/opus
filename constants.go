@@ -22,6 +22,9 @@ const (
 	FrameSize20ms  = 960  // 20ms at 48kHz (most common)
 	FrameSize40ms  = 1920 // 40ms at 48kHz
 	FrameSize60ms  = 2880 // 60ms at 48kHz
+	FrameSize80ms  = 3840 // 80ms at 48kHz
+	FrameSize100ms = 4800 // 100ms at 48kHz
+	FrameSize120ms = 5760 // 120ms at 48kHz (maximum packet duration)
 )
 
 // Application types
@@ -109,8 +112,21 @@ const (
 	PacketLossPercMax = 100
 )
 
-// Maximum packet size
+// Public single-stream size limits.
 const (
-	MaxPacketSize = 1500 // bytes
-	MaxFrameSize  = 2880 // samples at 48kHz for 60ms
+	// MaxFrameSize is the maximum decoded packet duration in samples per
+	// channel at 48 kHz (120 ms).
+	MaxFrameSize = FrameSize120ms
+
+	// MaxFrameBytes is the RFC 6716 maximum compressed payload size of one
+	// Opus frame.
+	MaxFrameBytes = 1275
+
+	// MaxPacketFrames is the maximum number of frames in one Opus packet.
+	MaxPacketFrames = 48
+
+	// MaxPacketSize is a conservative storage bound for an unpadded
+	// single-stream Opus packet: up to two framing bytes plus MaxFrameBytes
+	// for each frame. Explicit SetPacketPadding can produce larger packets.
+	MaxPacketSize = (MaxFrameBytes + 2) * MaxPacketFrames
 )

@@ -150,6 +150,11 @@ _ = packet
 
 公開バージョン定数はリポジトリの [`VERSION`](VERSION) から生成されます。
 
+`MaxFrameSize` は48 kHz・1チャンネル当たり5760サンプル（120 ms）です。
+`MaxFrameBytes` は圧縮済み1フレームの1275バイト上限、`MaxPacketSize` は
+paddingなしsingle-streamパケット用の保守的な格納上限です。明示的なpacket
+paddingを追加した場合はこれを超え得ます。
+
 ### エンコーダー
 
 ```go

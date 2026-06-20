@@ -115,11 +115,11 @@ func isValidApplication(application Application) bool {
 func NewEncoder(sampleRate, channels int, application Application) (*Encoder, error) {
 	// Validate parameters
 	if !isValidOpusRate(sampleRate) {
-		return nil, fmt.Errorf("invalid sample rate %d: must be 8000, 12000, 16000, 24000, or 48000", sampleRate)
+		return nil, fmt.Errorf("%w: %w: %d", ErrBadArg, ErrUnsupportedSampleRate, sampleRate)
 	}
 
 	if channels != 1 && channels != 2 {
-		return nil, fmt.Errorf("invalid channel count: %d (must be 1 or 2)", channels)
+		return nil, fmt.Errorf("%w: %w: %d", ErrBadArg, ErrUnsupportedChannels, channels)
 	}
 	if !isValidApplication(application) {
 		return nil, fmt.Errorf("%w: unsupported application %d", ErrBadArg, application)
@@ -212,7 +212,7 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	}
 	expectedSize := frameSize * e.channels
 	if len(pcm) < expectedSize {
-		return nil, fmt.Errorf("insufficient PCM data: got %d, need %d", len(pcm), expectedSize)
+		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
 
 	// Convert int16 to float64
@@ -234,7 +234,7 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	}
 	expectedSize := frameSize * e.channels
 	if len(pcm) < expectedSize {
-		return nil, fmt.Errorf("insufficient PCM data: got %d, need %d", len(pcm), expectedSize)
+		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
 
 	return e.encodeFloat(pcm[:expectedSize], frameSize)
@@ -1124,7 +1124,7 @@ func (e *Encoder) Application() Application { return e.application }
 // SetBitrate sets the target bitrate in bits per second
 func (e *Encoder) SetBitrate(bitrate int) error {
 	if bitrate < 6000 || bitrate > 510000 {
-		return fmt.Errorf("invalid bitrate: %d (must be between 6000 and 510000)", bitrate)
+		return fmt.Errorf("%w: invalid bitrate %d (must be between 6000 and 510000)", ErrBadArg, bitrate)
 	}
 	e.bitrate = bitrate
 	e.celtEncoder.SetBitrate(bitrate)
@@ -1144,7 +1144,7 @@ func (e *Encoder) SetBitrate(bitrate int) error {
 // Higher values use more CPU but may provide better quality
 func (e *Encoder) SetComplexity(complexity int) error {
 	if complexity < 0 || complexity > 10 {
-		return fmt.Errorf("invalid complexity: %d (must be 0-10)", complexity)
+		return fmt.Errorf("%w: invalid complexity %d (must be 0-10)", ErrBadArg, complexity)
 	}
 	e.complexity = complexity
 	e.celtEncoder.SetComplexity(complexity)
@@ -1304,7 +1304,7 @@ func (e *Encoder) SignalType() SignalType {
 // forced via SetBandwidth.
 func (e *Encoder) SetMaxBandwidth(bw int) error {
 	if !isValidBandwidth(bw) {
-		return fmt.Errorf("invalid bandwidth: %d", bw)
+		return fmt.Errorf("%w: %w: %d", ErrBadArg, ErrUnsupportedBandwidth, bw)
 	}
 	e.maxBandwidth = bw
 	return nil
@@ -1317,7 +1317,7 @@ func (e *Encoder) SetMaxBandwidth(bw int) error {
 // medium-band mode, so BandwidthMediumband is rounded up to BandwidthWideband.
 func (e *Encoder) SetBandwidth(bw int) error {
 	if bw != BandwidthAuto && !isValidBandwidth(bw) {
-		return fmt.Errorf("invalid bandwidth: %d", bw)
+		return fmt.Errorf("%w: %w: %d", ErrBadArg, ErrUnsupportedBandwidth, bw)
 	}
 	e.forcedBandwidth = bw
 	return nil
@@ -1598,11 +1598,11 @@ func celtConfigLMIdx(config int) int {
 func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 	// Validate parameters
 	if !isValidOpusRate(sampleRate) {
-		return nil, fmt.Errorf("invalid sample rate %d: must be 8000, 12000, 16000, 24000, or 48000", sampleRate)
+		return nil, fmt.Errorf("%w: %w: %d", ErrBadArg, ErrUnsupportedSampleRate, sampleRate)
 	}
 
 	if channels != 1 && channels != 2 {
-		return nil, fmt.Errorf("invalid channel count: %d (must be 1 or 2)", channels)
+		return nil, fmt.Errorf("%w: %w: %d", ErrBadArg, ErrUnsupportedChannels, channels)
 	}
 
 	// Frame size at the caller's sample rate (20ms)
@@ -1728,15 +1728,7 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 // packetOutputSamples returns the interleaved output sample count without
 // mutating decoder state.
 func (d *Decoder) packetOutputSamples(data []byte) (int, error) {
-	if len(data) == 0 {
-		return 0, fmt.Errorf("empty packet")
-	}
-	config, _, countCode := framing.ParseTOC(data[0])
-	frameCount, err := opusFrameCount(data[1:], countCode)
-	if err != nil {
-		return 0, err
-	}
-	duration, err := packetDurationSamples(config, frameCount, d.sampleRate)
+	duration, err := PacketGetNumSamples(data, d.sampleRate)
 	if err != nil {
 		return 0, err
 	}
@@ -2201,22 +2193,16 @@ func is10msConfig(config int) bool {
 // data is the compressed Opus packet
 // Returns float64 samples in range [-1.0, 1.0]
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
-	if len(data) == 0 {
-		return nil, fmt.Errorf("empty packet")
+	info, err := inspectPacket(data, d.sampleRate)
+	if err != nil {
+		return nil, err
 	}
 
 	toc := data[0]
 	config, stereo, countCode := framing.ParseTOC(toc)
 
 	payload := data[1:]
-	frameCount, err := opusFrameCount(payload, countCode)
-	if err != nil {
-		return nil, err
-	}
-	duration, err := packetDurationSamples(config, frameCount, d.sampleRate)
-	if err != nil {
-		return nil, err
-	}
+	duration := info.totalSamples
 
 	if config < 16 {
 		pktChannels := 1

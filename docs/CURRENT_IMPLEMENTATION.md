@@ -52,6 +52,19 @@ Implemented public entry points:
 - `(*Encoder).SetBandwidth(bw int) error` / `(*Encoder).Bandwidth() int`
 - `(*Encoder).Reset() error`
 
+Public packet inspection entry points:
+
+- `PacketGetConfig(packet []byte) (int, error)`
+- `PacketGetMode(packet []byte) (int, error)`
+- `PacketGetBandwidth(packet []byte) (int, error)`
+- `PacketGetNumChannels(packet []byte) (int, error)`
+- `PacketGetNumFrames(packet []byte) (int, error)`
+- `PacketGetSamplesPerFrame(packet []byte, sampleRate int) (int, error)`
+- `PacketGetNumSamples(packet []byte, sampleRate int) (int, error)`
+
+These helpers validate the complete RFC 6716 packet framing and return
+`ErrInvalidPacket` for malformed or over-duration packets.
+
 Accepted sample rates are `8000`, `12000`, `16000`, `24000`, and `48000`.
 Accepted channel counts are mono and stereo.
 

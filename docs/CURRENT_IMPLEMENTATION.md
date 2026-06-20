@@ -383,8 +383,9 @@ Current decoder limitations:
   The requested duration must be a valid Opus duration, an integer multiple of
   the active CELT frame duration, and no more than 120 ms. SILK-only and hybrid
   PLC return `ErrUnimplemented`.
-- `DecodeFEC` returns `ErrUnimplemented`; it does not silently substitute PLC
-  for packet FEC extraction.
+- `DecodeFEC` extracts mono SILK LBRR for 10/20/40/60 ms SILK-only packets,
+  using SILK PLC for any missing redundant sub-frame. Stereo SILK, hybrid, and
+  CELT packets return `ErrUnimplemented`.
 - Both float32 and float64 PCM decoding APIs are available.
 - `GetLastPacketDuration` reports the duration in output samples per channel of
   the last successfully decoded packet; before any decode it reports the default
@@ -632,10 +633,11 @@ The SILK package contains:
   a lower rate, writes the 1/2/3-frame LBRR flag grammar and redundant bodies
   before the current regular frames, and subtracts the emitted LBRR cost from
   the current regular-frame rate-control target. The normal SILK decoder
-  consumes mono LBRR bodies without synthesizing them, preserving range
-  alignment. libopus 1.6.1 `decode_fec=1` sequence tests recover dropped
-  20/40/60 ms packets. Stereo/hybrid LBRR and public Go-side FEC extraction are
-  not part of this slice.
+  consumes mono LBRR bodies without synthesizing them during normal decode,
+  preserving range alignment. The public decoder separately synthesizes those
+  bodies through `DecodeFEC`; libopus 1.6.1 cross-checks cover dropped
+  20/40/60 ms packets and subsequent normal decode alignment. Stereo/hybrid
+  LBRR is not part of this slice.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single
@@ -751,9 +753,8 @@ reference comparison.
 - Top-level hybrid encoder selection exists only for high-bitrate 24/48 kHz
   VOIP/voice; there is no full libopus-equivalent hybrid mode/rate-control
   coverage.
-- Mono SILK-only LBRR/FEC encoding is available, but public `DecodeFEC` returns
-  `ErrUnimplemented` because packet FEC extraction is not implemented. Stereo
-  and hybrid LBRR encoding are also not implemented.
+- Mono SILK-only LBRR/FEC encoding and decoding are available. Stereo and
+  hybrid LBRR encoding/decoding are not implemented.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
   to full libopus-compatible mode/rate-control behavior.
 - Decoder parity is achieved on the official vectors and the libopus reference;

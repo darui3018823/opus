@@ -416,17 +416,76 @@ func TestDecoderPLCValidation(t *testing.T) {
 	}
 }
 
-func TestDecodeFECIsExplicitlyUnimplemented(t *testing.T) {
+func TestDecodeFECRejectsUnsupportedModes(t *testing.T) {
 	dec, err := NewDecoder(48000, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	pcm := []int16{1234}
-	if _, err := dec.DecodeFEC([]byte{0xff}, pcm); !errors.Is(err, ErrUnimplemented) {
-		t.Fatalf("DecodeFEC error = %v, want ErrUnimplemented", err)
+	if _, err := dec.DecodeFEC([]byte{byte(31 << 3), 0}, pcm); !errors.Is(err, ErrUnimplemented) {
+		t.Fatalf("CELT DecodeFEC error = %v, want ErrUnimplemented", err)
 	}
 	if pcm[0] != 1234 {
 		t.Fatalf("DecodeFEC modified output buffer: got %d", pcm[0])
+	}
+}
+
+func TestDecodeFECMonoSILK(t *testing.T) {
+	const (
+		rate    = 16000
+		bitrate = 24000
+	)
+	for _, packetMs := range []int{20, 40, 60} {
+		t.Run(fmt.Sprintf("%dms", packetMs), func(t *testing.T) {
+			frameSize := rate * packetMs / 1000
+			enc, err := NewEncoder(rate, 1, ApplicationVOIP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := enc.SetBitrate(bitrate); err != nil {
+				t.Fatal(err)
+			}
+			enc.SetPacketLossPerc(20)
+			enc.SetInbandFEC(true)
+
+			packets := make([][]byte, 8)
+			for p := range packets {
+				input := strictSpeechLikeFrame(rate, 1, p*frameSize, frameSize)
+				packets[p], err = enc.EncodeFloat(input, frameSize)
+				if err != nil {
+					t.Fatalf("packet %d: %v", p, err)
+				}
+			}
+
+			dec, err := NewDecoder(rate, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const lost = 4
+			for p := 0; p < lost; p++ {
+				if _, err := dec.Decode(packets[p], make([]int16, frameSize)); err != nil {
+					t.Fatalf("prime packet %d: %v", p, err)
+				}
+			}
+			recovered := make([]int16, frameSize)
+			n, err := dec.DecodeFEC(packets[lost+1], recovered)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n != frameSize {
+				t.Fatalf("DecodeFEC samples = %d, want %d", n, frameSize)
+			}
+			var energy int64
+			for _, sample := range recovered {
+				energy += int64(sample) * int64(sample)
+			}
+			if energy == 0 {
+				t.Fatal("DecodeFEC returned silent recovery")
+			}
+			if _, err := dec.Decode(packets[lost+1], make([]int16, frameSize)); err != nil {
+				t.Fatalf("normal decode after FEC: %v", err)
+			}
+		})
 	}
 }
 

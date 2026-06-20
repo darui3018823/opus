@@ -3065,10 +3065,68 @@ func isValidPacketFrameSize(frameSize, sampleRate int) bool {
 	return false
 }
 
-// DecodeFEC decodes in-band forward-error-correction data from the packet
-// following a loss. SILK LBRR extraction is not implemented yet.
+// DecodeFEC decodes mono SILK in-band forward-error-correction data from the
+// packet following a loss. The recovered duration is inferred from the packet.
+// Stereo SILK, hybrid, and CELT packets currently return ErrUnimplemented.
 func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
-	return 0, fmt.Errorf("%w: packet FEC extraction", ErrUnimplemented)
+	info, err := inspectPacket(data, d.sampleRate)
+	if err != nil {
+		return 0, err
+	}
+	if info.mode != ModeSILKOnly || info.channels != 1 {
+		return 0, fmt.Errorf("%w: FEC supports mono SILK-only packets", ErrUnimplemented)
+	}
+	required := info.totalSamples * d.channels
+	if len(pcm) < required {
+		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
+	}
+
+	config, _, countCode := framing.ParseTOC(data[0])
+	streams, err := splitOpusFrames(data[1:], countCode)
+	if err != nil {
+		return 0, fmt.Errorf("%w: %v", ErrInvalidPacket, err)
+	}
+	if len(streams) != 1 {
+		return 0, fmt.Errorf("%w: FEC for multi-stream Opus packets", ErrUnimplemented)
+	}
+
+	rateKHz := silkConfigRateKHz(config)
+	ri := silkRateIdx(rateKHz)
+	infoDec := d.silkDecoders[ri][0]
+	if infoDec == nil || infoDec.dec == nil {
+		return 0, fmt.Errorf("%w: SILK decoder for %d kHz", ErrInvalidState, rateKHz)
+	}
+	frameMs := 20
+	if is10msConfig(config) {
+		frameMs = 10
+	}
+	infoDec.dec.SetFrameMs(frameMs)
+	nSilkFrames := silkSubframesPerOpusFrame(config)
+
+	silkPCM, err := infoDec.dec.DecodeFEC(streams[0], nSilkFrames)
+	if err != nil {
+		return 0, fmt.Errorf("%w: SILK LBRR decode: %v", ErrInvalidPacket, err)
+	}
+	d.ensureSilkResampler(0, rateKHz)
+	silkPCM = d.resampleSILK(silkPCM, nSilkFrames, 1, false)
+	silkPCM = padOrTrim(silkPCM, required)
+	for i, sample := range silkPCM {
+		sample *= 32768.0
+		if sample > 32767.0 {
+			sample = 32767.0
+		} else if sample < -32768.0 {
+			sample = -32768.0
+		}
+		pcm[i] = int16(sample)
+	}
+
+	d.prevSilkInternalCh = 1
+	if peer := d.silkDecoders[ri][1]; peer != nil && peer.dec != nil {
+		peer.dec.CopyPrimaryStateFrom(infoDec.dec)
+	}
+	d.lastPacketDuration = info.totalSamples
+	d.prevMode = framing.ModeSILKOnly
+	return info.totalSamples, nil
 }
 
 // Reset resets the decoder state

@@ -60,8 +60,8 @@ func sumFloats(xs []float64) float64 {
 // at a lower bitrate (gains bumped up) and buffered. The buffered redundancy is
 // then written at the front of the *next* packet — the one-packet FEC delay.
 //
-// This file is encoder-only. The repository's public DecodeFEC remains a PLC
-// fallback; genuine local (Go) FEC extraction is a separate decoder task.
+// This file contains the encoder-side buffering and replay path. Decoder-side
+// LBRR extraction is implemented in decoder.go.
 
 // lbrrSpeechActivityThres mirrors LBRR_SPEECH_ACTIVITY_THRES (tuning_parameters.h):
 // LBRR is only coded for frames with sufficient speech activity.

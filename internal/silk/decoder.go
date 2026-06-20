@@ -434,6 +434,75 @@ func (d *Decoder) DecodeMultiWithDecoder(dec *entcode.Decoder, nFrames int) ([]f
 	return d.decodeMultiMonoEC(dec, nFrames)
 }
 
+// DecodeFEC decodes mono LBRR data carried in the packet following a loss.
+// nFrames is the number of 10 or 20 ms SILK frames represented by the packet.
+// If no LBRR frame is present for a slot, packet-loss concealment is used for
+// that slot, matching libopus decode_fec behaviour.
+func (d *Decoder) DecodeFEC(packet []byte, nFrames int) ([]float64, error) {
+	if d.channels != 1 {
+		return nil, fmt.Errorf("SILK LBRR decode only supports mono")
+	}
+	if nFrames < 1 {
+		nFrames = 1
+	}
+	if len(packet) < 2 {
+		return d.concealFECFrames(nFrames)
+	}
+	dec := entcode.NewDecoder(packet)
+	if dec.Error() != nil {
+		return d.concealFECFrames(nFrames)
+	}
+
+	// Regular-frame VAD flags precede the packet-level LBRR flag.
+	for i := 0; i < nFrames; i++ {
+		_ = dec.DecodeBitLogp(1)
+	}
+	lbrrFlag := dec.DecodeBitLogp(1)
+	if !lbrrFlag {
+		return d.concealFECFrames(nFrames)
+	}
+	mask := 1
+	if nFrames == 2 {
+		mask = dec.DecodeIcdf(silkLBRRFlags2ICDF[:], 8) + 1
+	} else if nFrames >= 3 {
+		mask = dec.DecodeIcdf(silkLBRRFlags3ICDF[:], 8) + 1
+	}
+
+	allPCM := make([]float64, 0, d.frameSize*nFrames)
+	prevPresent := false
+	for i := 0; i < nFrames; i++ {
+		present := mask&(1<<uint(i)) != 0
+		if !present {
+			pcm, err := d.concealPacketLoss()
+			if err != nil {
+				return nil, err
+			}
+			allPCM = append(allPCM, pcm...)
+			prevPresent = false
+			continue
+		}
+		pcm, err := d.decodeFrame(dec, 1, prevPresent)
+		if err != nil {
+			return nil, err
+		}
+		allPCM = append(allPCM, pcm...)
+		prevPresent = true
+	}
+	return allPCM, nil
+}
+
+func (d *Decoder) concealFECFrames(nFrames int) ([]float64, error) {
+	allPCM := make([]float64, 0, d.frameSize*nFrames)
+	for i := 0; i < nFrames; i++ {
+		pcm, err := d.concealPacketLoss()
+		if err != nil {
+			return nil, err
+		}
+		allPCM = append(allPCM, pcm...)
+	}
+	return allPCM, nil
+}
+
 // decodeMultiMonoEC decodes the mono SILK frames from a shared range decoder.
 func (d *Decoder) decodeMultiMonoEC(dec *entcode.Decoder, nFrames int) ([]float64, error) {
 	// Per libopus dec_API.c: decode VAD flags for all frames first, then LBRR flag

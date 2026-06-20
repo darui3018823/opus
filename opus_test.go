@@ -713,6 +713,7 @@ func BenchmarkEncode(b *testing.B) {
 	}
 
 	pcm := make([]int16, 960*2)
+	b.ReportAllocs()
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
@@ -734,11 +735,52 @@ func BenchmarkDecode(b *testing.B) {
 	compressed, _ := enc.Encode(pcm, 960)
 	output := make([]int16, 960*2)
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, err := dec.Decode(compressed, output)
 		if err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func TestCoreAllocationRegression(t *testing.T) {
+	enc, err := NewEncoder(48000, 2, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcm := make([]int16, 960*2)
+	if _, err := enc.Encode(pcm, 960); err != nil {
+		t.Fatal(err)
+	}
+	encodeAllocs := testing.AllocsPerRun(20, func() {
+		if _, err := enc.Encode(pcm, 960); err != nil {
+			panic(err)
+		}
+	})
+	if encodeAllocs > 35 {
+		t.Fatalf("Encode allocations = %.1f, want <= 35", encodeAllocs)
+	}
+
+	packet, err := enc.Encode(pcm, 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := NewDecoder(48000, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := make([]int16, 960*2)
+	if _, err := dec.Decode(packet, output); err != nil {
+		t.Fatal(err)
+	}
+	decodeAllocs := testing.AllocsPerRun(20, func() {
+		if _, err := dec.Decode(packet, output); err != nil {
+			panic(err)
+		}
+	})
+	if decodeAllocs > 38 {
+		t.Fatalf("Decode allocations = %.1f, want <= 38", decodeAllocs)
 	}
 }

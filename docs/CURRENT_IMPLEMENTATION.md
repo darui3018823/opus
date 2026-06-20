@@ -171,6 +171,13 @@ plus exact 20 ms multiples from 20 through 120 ms. Unsupported frame sizes and
 durations over the Opus 120 ms packet limit are rejected with
 `ErrUnsupportedFrameSize`.
 
+The arbitrary-length FFT path caches immutable Bluestein plans and performs the
+convolution FFTs in place. On the Windows amd64 audit machine this reduced the
+20 ms stereo CELT benchmark from approximately 458 KB/48 allocations to
+229 KB/30 allocations for encode, and from approximately 422 KB/51 allocations
+to 192 KB/33 allocations for decode. `TestCoreAllocationRegression` guards the
+allocation counts after plan warm-up.
+
 ### Phase 2: Production CELT Encoder (In Progress)
 
 #### Slice 2-1: VBR/CVBR Rate Control (Complete)

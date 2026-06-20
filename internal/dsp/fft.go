@@ -180,12 +180,24 @@ func (cfg *FFTConfig) Execute(input []Complex) ([]Complex, error) {
 	// Create output array
 	output := make([]Complex, n)
 	copy(output, input)
+	if err := cfg.ExecuteInPlace(output); err != nil {
+		return nil, err
+	}
+	return output, nil
+}
+
+// ExecuteInPlace performs the configured FFT directly in data.
+func (cfg *FFTConfig) ExecuteInPlace(data []Complex) error {
+	n := cfg.size
+	if len(data) != n {
+		return errors.New("dsp: input size does not match FFT config size")
+	}
 
 	// Bit-reverse ordering
 	for i := 0; i < n; i++ {
 		j := BitReverse(i, cfg.bits)
 		if j > i {
-			output[i], output[j] = output[j], output[i]
+			data[i], data[j] = data[j], data[i]
 		}
 	}
 
@@ -198,31 +210,28 @@ func (cfg *FFTConfig) Execute(input []Complex) ([]Complex, error) {
 			for k := 0; k < halfSize; k++ {
 				twiddle := cfg.twiddles[k*tableStep]
 
-				even := output[start+k]
-				odd := output[start+k+halfSize].Mul(twiddle)
+				even := data[start+k]
+				odd := data[start+k+halfSize].Mul(twiddle)
 
-				output[start+k] = even.Add(odd)
-				output[start+k+halfSize] = even.Sub(odd)
+				data[start+k] = even.Add(odd)
+				data[start+k+halfSize] = even.Sub(odd)
 			}
 		}
 	}
 
-	return output, nil
+	return nil
 }
 
 // ExecuteInverse performs inverse FFT using precomputed twiddle factors.
 func (cfg *FFTConfig) ExecuteInverse(input []Complex) ([]Complex, error) {
 	n := cfg.size
 
-	// Conjugate the input
-	conjugated := make([]Complex, n)
+	output := make([]Complex, n)
 	for i, c := range input {
-		conjugated[i] = c.Conj()
+		output[i] = c.Conj()
 	}
 
-	// Perform FFT
-	output, err := cfg.Execute(conjugated)
-	if err != nil {
+	if err := cfg.ExecuteInPlace(output); err != nil {
 		return nil, err
 	}
 

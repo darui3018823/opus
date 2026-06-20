@@ -165,6 +165,7 @@ padding can exceed it.
 
 ```go
 func NewEncoder(sampleRate, channels int, application Application) (*Encoder, error)
+func NewEncoderWithProfile(sampleRate, channels int, application Application, profile EncoderProfile) (*Encoder, error)
 
 func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error)
 func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error)
@@ -195,6 +196,10 @@ func (e *Encoder) PacketLossPerc() int
 func (e *Encoder) SetPacketPadding(n int)
 func (e *Encoder) Reset() error
 ```
+
+`NewEncoder` preserves the historical 64 kbit/s, complexity 5, CBR defaults.
+Use `EncoderProfileLibopus` for automatic bitrate, complexity 9, and constrained
+VBR defaults.
 
 ### Decoder
 

@@ -31,6 +31,7 @@ Public size constants distinguish separate limits:
 Implemented public entry points:
 
 - `NewEncoder(sampleRate, channels int, application Application) (*Encoder, error)`
+- `NewEncoderWithProfile(sampleRate, channels int, application Application, profile EncoderProfile) (*Encoder, error)`
 - `(*Encoder).Encode(pcm []int16, frameSize int) ([]byte, error)`
 - `(*Encoder).EncodeFloat(pcm []float64, frameSize int) ([]byte, error)`
 - `(*Encoder).EncodeFloat32(pcm []float32, frameSize int) ([]byte, error)`
@@ -75,6 +76,11 @@ Accepted channel counts are mono and stereo.
 policy sentinel; `EffectiveBitrate` returns the numeric rate currently applied.
 The automatic policy follows libopus' frame-size/sample-rate/channel formula,
 and the maximum policy is bounded by the RFC per-frame byte limit.
+
+`NewEncoder` preserves the historical defaults (64 kbit/s, complexity 5, CBR).
+`NewEncoderWithProfile(..., EncoderProfileLibopus)` selects automatic bitrate,
+complexity 9, and constrained VBR without imposing a behavior change on
+existing callers.
 
 The top-level encoder uses internal CELT encoders at 48 kHz for 2.5, 5, 10,
 and 20 ms transform geometries. Non-48 kHz CELT input is resampled to 48 kHz

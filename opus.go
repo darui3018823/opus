@@ -14,6 +14,19 @@ import (
 // Application specifies the encoding mode (use constants from package)
 type Application = int
 
+// EncoderProfile selects constructor defaults without changing the encoded
+// Opus format or the available controls.
+type EncoderProfile int
+
+const (
+	// EncoderProfileLegacy preserves NewEncoder's historical defaults:
+	// 64 kbit/s, complexity 5, and CBR.
+	EncoderProfileLegacy EncoderProfile = iota
+	// EncoderProfileLibopus uses libopus-style defaults: automatic bitrate,
+	// complexity 9, and constrained VBR.
+	EncoderProfileLibopus
+)
+
 // SignalType is a content hint that lets the encoder tune heuristics for the
 // dominant signal type without changing the bitstream format.
 type SignalType = celt.SignalType
@@ -190,6 +203,29 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		}
 	}
 
+	return enc, nil
+}
+
+// NewEncoderWithProfile creates an encoder with an explicit defaults profile.
+// NewEncoder remains equivalent to EncoderProfileLegacy for compatibility.
+func NewEncoderWithProfile(sampleRate, channels int, application Application, profile EncoderProfile) (*Encoder, error) {
+	if profile != EncoderProfileLegacy && profile != EncoderProfileLibopus {
+		return nil, fmt.Errorf("%w: unsupported encoder profile %d", ErrBadArg, profile)
+	}
+	enc, err := NewEncoder(sampleRate, channels, application)
+	if err != nil {
+		return nil, err
+	}
+	if profile == EncoderProfileLibopus {
+		if err := enc.SetBitrate(BitrateAuto); err != nil {
+			return nil, err
+		}
+		if err := enc.SetComplexity(ComplexityDefault); err != nil {
+			return nil, err
+		}
+		enc.SetVBR(true)
+		enc.SetVBRConstraint(true)
+	}
 	return enc, nil
 }
 

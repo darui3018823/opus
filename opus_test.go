@@ -63,6 +63,41 @@ func TestNewEncoder(t *testing.T) {
 	}
 }
 
+func TestNewEncoderWithProfile(t *testing.T) {
+	legacy, err := NewEncoderWithProfile(48000, 1, ApplicationAudio, EncoderProfileLegacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.Bitrate() != 64000 || legacy.Complexity() != 5 || legacy.VBR() {
+		t.Fatalf("legacy defaults = bitrate %d complexity %d VBR %v", legacy.Bitrate(), legacy.Complexity(), legacy.VBR())
+	}
+
+	compatible, err := NewEncoderWithProfile(48000, 1, ApplicationAudio, EncoderProfileLibopus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if compatible.Bitrate() != BitrateAuto {
+		t.Fatalf("libopus profile bitrate = %d, want BitrateAuto", compatible.Bitrate())
+	}
+	if compatible.Complexity() != ComplexityDefault {
+		t.Fatalf("libopus profile complexity = %d, want %d", compatible.Complexity(), ComplexityDefault)
+	}
+	if !compatible.VBR() {
+		t.Fatal("libopus profile VBR = false")
+	}
+	packet, err := compatible.Encode(make([]int16, 960), 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(packet) == 0 {
+		t.Fatal("libopus profile produced empty packet")
+	}
+
+	if _, err := NewEncoderWithProfile(48000, 1, ApplicationAudio, EncoderProfile(99)); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("invalid profile error = %v, want ErrBadArg", err)
+	}
+}
+
 func TestEncoderApplicationValidation(t *testing.T) {
 	if _, err := NewEncoder(48000, 1, Application(9999)); !errors.Is(err, ErrBadArg) {
 		t.Fatalf("NewEncoder invalid application error = %v, want ErrBadArg", err)

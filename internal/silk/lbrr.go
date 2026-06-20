@@ -107,9 +107,7 @@ func (e *Encoder) SetInbandFEC(enabled bool) {
 		e.lbrrRunPrevGainIdx = 0
 	}
 	if e.side != nil {
-		// Stereo LBRR is not yet implemented; keep the side channel disabled so
-		// the stereo path stays on the no-LBRR grammar.
-		e.side.lbrrEnabled = false
+		e.side.SetInbandFEC(enabled)
 	}
 }
 
@@ -222,9 +220,7 @@ func (e *Encoder) generateLBRRFrame(
 	rateScale float64,
 	preFrame encoderFrameState,
 ) {
-	// LBRR is currently scoped to the mono SILK-only path. Stereo and the WIP
-	// hybrid SILK layer stay on the no-LBRR grammar.
-	if !e.lbrrEnabled || e.stereoComponent || e.hybridMode {
+	if !e.lbrrEnabled {
 		return
 	}
 	// LBRR is coded only for active frames with sufficient speech activity. The
@@ -291,21 +287,7 @@ func (e *Encoder) generateLBRRFrame(
 // disabled (or no pending data) it writes a single 0 bit, identical to the prior
 // hardcoded behaviour.
 func (e *Encoder) emitPendingLBRR(enc *entcode.Encoder, nFrames int) {
-	pend := e.pendingLBRR
-	// Only emit on the mono SILK-only path, and only when the pending redundancy
-	// matches the current packet geometry (frame size is constant in normal use).
-	// Otherwise signal "no LBRR" — identical to the previous hardcoded behaviour.
-	if !e.lbrrEnabled || e.hybridMode || len(pend) != nFrames || e.pendingLBRRFrames != nFrames {
-		enc.EncodeBitLogp(false, 1)
-		return
-	}
-
-	symbol := 0
-	for i := range pend {
-		if pend[i].present {
-			symbol |= 1 << uint(i)
-		}
-	}
+	symbol := e.pendingLBRRSymbol(nFrames)
 	lbrrFlag := symbol > 0
 	enc.EncodeBitLogp(lbrrFlag, 1)
 	if !lbrrFlag {
@@ -320,6 +302,7 @@ func (e *Encoder) emitPendingLBRR(enc *entcode.Encoder, nFrames int) {
 	}
 
 	if lbrrDebug {
+		pend := e.pendingLBRR
 		fmt.Fprintf(os.Stderr, "[LBRR emit] nFrames=%d symbol=%#b flag=%v\n", nFrames, symbol, lbrrFlag)
 		for i := range pend {
 			fmt.Fprintf(os.Stderr, "  frame %d: present=%v condIndep=%v sig=%d qoff=%d gainSym0=%d nDeltas=%d nPulses=%d seed=%d\n",
@@ -328,13 +311,47 @@ func (e *Encoder) emitPendingLBRR(enc *entcode.Encoder, nFrames int) {
 		}
 	}
 
+	e.writePendingLBRRBodies(enc, symbol)
+}
+
+func (e *Encoder) pendingLBRRSymbol(nFrames int) int {
+	if !e.lbrrEnabled || len(e.pendingLBRR) != nFrames || e.pendingLBRRFrames != nFrames {
+		return 0
+	}
+	symbol := 0
+	for i := range e.pendingLBRR {
+		if e.pendingLBRR[i].present {
+			symbol |= 1 << uint(i)
+		}
+	}
+	return symbol
+}
+
+func (e *Encoder) writePendingLBRRMask(enc *entcode.Encoder, nFrames, symbol int) {
+	if symbol == 0 || nFrames <= 1 {
+		return
+	}
+	if nFrames == 2 {
+		enc.EncodeIcdf(symbol-1, silkLBRRFlags2ICDF[:], 8)
+	} else {
+		enc.EncodeIcdf(symbol-1, silkLBRRFlags3ICDF[:], 8)
+	}
+}
+
+func (e *Encoder) writePendingLBRRBodies(enc *entcode.Encoder, symbol int) {
 	prevSignalType := -1
-	for i := range pend {
-		if !pend[i].present {
+	for i := range e.pendingLBRR {
+		if symbol&(1<<uint(i)) == 0 {
 			continue
 		}
-		e.writeLBRRFrame(enc, pend[i], prevSignalType)
-		prevSignalType = pend[i].signalType
+		e.writeLBRRFrame(enc, e.pendingLBRR[i], prevSignalType)
+		prevSignalType = e.pendingLBRR[i].signalType
+	}
+}
+
+func (e *Encoder) appendMissingLBRRFrame() {
+	if e.lbrrEnabled {
+		e.curLBRR = append(e.curLBRR, lbrrFrameData{})
 	}
 }
 

@@ -192,7 +192,7 @@ func (e *Encoder) MaxBandwidth() int
 func (e *Encoder) Bandwidth() int
 func (e *Encoder) SetDTX(dtx bool)
 func (e *Encoder) DTX() bool
-func (e *Encoder) SetInbandFEC(enabled bool)             // mono SILK-only
+func (e *Encoder) SetInbandFEC(enabled bool)             // SILK-only/hybrid
 func (e *Encoder) InbandFEC() bool
 func (e *Encoder) SetPacketLossPerc(perc int)            // 0〜100 にクランプ
 func (e *Encoder) PacketLossPerc() int
@@ -219,7 +219,7 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error)
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error)
 func (d *Decoder) DecodeFloat32(data []byte) ([]float32, error)
 func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) // CELT-only
-func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error)   // mono SILK LBRR
+func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error)   // SILK LBRR
 func (d *Decoder) Reset() error
 func (d *Decoder) GetLastPacketDuration() int
 func (d *Decoder) SampleRate() int
@@ -332,12 +332,11 @@ GitHub Actions ワークフロー 4 本。いずれも **amd64（`ubuntu-latest`
   エンコード対応が必要です。
 - エンコーダーは libopus とビット精度一致ではありませんが、準拠デコーダー
   （libopus を含む）がデコードできる標準 Opus パケットを出力します。
-- mono SILK-only エンコードは、`SetInbandFEC(true)` と 0 より大きい
-  `SetPacketLossPerc` により、準拠した LBRR/in-band FEC を送出できます。
-  stereo/hybrid LBRR は未実装です。
-- `DecodeFEC` は次のパケットの LBRR から mono SILK-only の
-  10/20/40/60ms パケットを回復できます。`DecodePLC` は現状 CELT-only に
-  対応し、stereo SILK と hybrid FEC は未対応です。
+- SILK-only と hybrid エンコードは、`SetInbandFEC(true)` と 0 より大きい
+  `SetPacketLossPerc` により、mono/stereo の LBRR/in-band FEC を送出できます。
+- `DecodeFEC` は次のパケットの LBRR から SILK-only/hybrid を回復します。
+  hybrid の回復内容は冗長 SILK low band です。`DecodePLC` は現状 CELT-only
+  に対応します。
 - マルチストリーム・サラウンド・Ogg Opus コンテナ API はありません。
 - VBR/CVBR と application/signal hint は CELT エンコーダーの判断を調整しますが、
   libopus と同等の完全なモード選択・レート制御ではありません。

@@ -3,6 +3,7 @@
 package opus_test
 
 import (
+	"math"
 	"testing"
 
 	opus "github.com/darui3018823/opus"
@@ -384,6 +385,81 @@ func TestCGODecodeFECMatchesLibopus(t *testing.T) {
 			nextSNR, _, _, _ := silkRefAlignedSNR(toFloat64(refNext), goNextF, frameSize/2)
 			if nextSNR < 6 {
 				t.Fatalf("normal decode alignment after FEC diverged: %.2f dB", nextSNR)
+			}
+		})
+	}
+}
+
+func TestCGODecodeFECStereoAndHybrid(t *testing.T) {
+	tests := []struct {
+		name     string
+		rate     int
+		channels int
+		bitrate  int
+	}{
+		{"stereo-silk", 16000, 2, 32000},
+		{"mono-hybrid", 48000, 1, 64000},
+		{"stereo-hybrid", 48000, 2, 160000},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			frameSize := tc.rate / 50
+			enc, err := opus.NewEncoder(tc.rate, tc.channels, opus.ApplicationVOIP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := enc.SetBitrate(tc.bitrate); err != nil {
+				t.Fatal(err)
+			}
+			enc.SetPacketLossPerc(20)
+			enc.SetInbandFEC(true)
+			packets := make([][]byte, 7)
+			for p := range packets {
+				input := silkRefSpeechFrame(tc.rate, p*frameSize, frameSize, tc.channels)
+				if tc.rate == 48000 {
+					for i := 0; i < frameSize; i++ {
+						for ch := 0; ch < tc.channels; ch++ {
+							input[i*tc.channels+ch] += 0.025 * math.Sin(2*math.Pi*10000*float64(p*frameSize+i)/float64(tc.rate))
+						}
+					}
+				}
+				packets[p], err = enc.EncodeFloat(input, frameSize)
+				if err != nil {
+					t.Fatalf("packet %d: %v", p, err)
+				}
+			}
+
+			goDec, _ := opus.NewDecoder(tc.rate, tc.channels)
+			refDec, err := cgoref.NewDecoder(tc.rate, tc.channels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer refDec.Close()
+			const lost = 4
+			for p := 0; p < lost; p++ {
+				if _, err := goDec.Decode(packets[p], make([]int16, frameSize*tc.channels)); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := refDec.DecodeFloat(packets[p], frameSize); err != nil {
+					t.Fatal(err)
+				}
+			}
+			goPCM := make([]int16, frameSize*tc.channels)
+			if _, err := goDec.DecodeFEC(packets[lost+1], goPCM); err != nil {
+				t.Fatal(err)
+			}
+			refPCM, err := refDec.DecodeFloatFEC(packets[lost+1], frameSize)
+			if err != nil {
+				t.Fatal(err)
+			}
+			goF := make([]float64, len(goPCM))
+			for i := range goPCM {
+				goF[i] = float64(goPCM[i]) / 32768
+			}
+			snr, _, _, _ := silkRefAlignedSNR(toFloat64(refPCM), goF, frameSize*tc.channels/2)
+			t.Logf("Go/libopus FEC aligned SNR: %.2f dB", snr)
+			if snr < -2 {
+				t.Fatalf("FEC reconstruction diverged: %.2f dB", snr)
 			}
 		})
 	}

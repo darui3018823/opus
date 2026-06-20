@@ -450,14 +450,11 @@ func (d *Decoder) LastFinalRange() uint32 { return d.lastFinalRange }
 // Pitch returns the most recent SILK pitch period at the internal sample rate.
 func (d *Decoder) Pitch() int { return d.lagPrev }
 
-// DecodeFEC decodes mono LBRR data carried in the packet following a loss.
+// DecodeFEC decodes LBRR data carried in the packet following a loss.
 // nFrames is the number of 10 or 20 ms SILK frames represented by the packet.
 // If no LBRR frame is present for a slot, packet-loss concealment is used for
 // that slot, matching libopus decode_fec behaviour.
 func (d *Decoder) DecodeFEC(packet []byte, nFrames int) ([]float64, error) {
-	if d.channels != 1 {
-		return nil, fmt.Errorf("SILK LBRR decode only supports mono")
-	}
 	if nFrames < 1 {
 		nFrames = 1
 	}
@@ -467,6 +464,9 @@ func (d *Decoder) DecodeFEC(packet []byte, nFrames int) ([]float64, error) {
 	dec := entcode.NewDecoder(packet)
 	if dec.Error() != nil {
 		return d.concealFECFrames(nFrames)
+	}
+	if d.channels == 2 {
+		return d.decodeFECStereo(dec, nFrames)
 	}
 
 	// Regular-frame VAD flags precede the packet-level LBRR flag.
@@ -484,6 +484,10 @@ func (d *Decoder) DecodeFEC(packet []byte, nFrames int) ([]float64, error) {
 		mask = dec.DecodeIcdf(silkLBRRFlags3ICDF[:], 8) + 1
 	}
 
+	return d.decodeFECChannel(dec, nFrames, mask)
+}
+
+func (d *Decoder) decodeFECChannel(dec *entcode.Decoder, nFrames, mask int) ([]float64, error) {
 	allPCM := make([]float64, 0, d.frameSize*nFrames)
 	prevPresent := false
 	for i := 0; i < nFrames; i++ {
@@ -505,6 +509,50 @@ func (d *Decoder) DecodeFEC(packet []byte, nFrames int) ([]float64, error) {
 		prevPresent = true
 	}
 	return allPCM, nil
+}
+
+func (d *Decoder) decodeFECStereo(dec *entcode.Decoder, nFrames int) ([]float64, error) {
+	if d.side == nil {
+		return nil, fmt.Errorf("missing SILK side-channel decoder")
+	}
+	lbrrFlags := [2]bool{}
+	for ch := 0; ch < 2; ch++ {
+		for i := 0; i < nFrames; i++ {
+			_ = dec.DecodeBitLogp(1)
+		}
+		lbrrFlags[ch] = dec.DecodeBitLogp(1)
+	}
+	masks := [2]int{}
+	for ch := 0; ch < 2; ch++ {
+		if !lbrrFlags[ch] {
+			continue
+		}
+		if nFrames == 1 {
+			masks[ch] = 1
+		} else if nFrames == 2 {
+			masks[ch] = dec.DecodeIcdf(silkLBRRFlags2ICDF[:], 8) + 1
+		} else {
+			masks[ch] = dec.DecodeIcdf(silkLBRRFlags3ICDF[:], 8) + 1
+		}
+	}
+	mid, err := d.decodeFECChannel(dec, nFrames, masks[0])
+	if err != nil {
+		return nil, err
+	}
+	side, err := d.side.decodeFECChannel(dec, nFrames, masks[1])
+	if err != nil {
+		return nil, err
+	}
+	out := make([]float64, 0, d.frameSize*nFrames*2)
+	for frame := 0; frame < nFrames; frame++ {
+		start := frame * d.frameSize
+		out = append(out, d.stereoMSToLR(
+			mid[start:start+d.frameSize],
+			side[start:start+d.frameSize],
+			d.stereoPredPrevQ13,
+		)...)
+	}
+	return out, nil
 }
 
 func (d *Decoder) concealFECFrames(nFrames int) ([]float64, error) {
@@ -643,17 +691,27 @@ func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]floa
 		d.trace.LBRRFlags = append(d.trace.LBRRFlags, lbrrFlags[0], lbrrFlags[1])
 	}
 
-	// LBRR side data precedes regular frame data when present. The official
-	// vectors used here rarely exercise it, but consuming the per-channel flag
-	// symbols keeps the normal payload aligned for multi-frame stereo packets.
+	lbrrMasks := [2]int{}
 	for ch := 0; ch < 2; ch++ {
-		if lbrrFlags[ch] == 0 || nFrames == 1 {
+		if lbrrFlags[ch] == 0 {
 			continue
 		}
-		if nFrames == 2 {
-			_ = dec.DecodeIcdf(silkLBRRFlags2ICDF[:], 8)
+		if nFrames == 1 {
+			lbrrMasks[ch] = 1
+		} else if nFrames == 2 {
+			lbrrMasks[ch] = dec.DecodeIcdf(silkLBRRFlags2ICDF[:], 8) + 1
 		} else {
-			_ = dec.DecodeIcdf(silkLBRRFlags3ICDF[:], 8)
+			lbrrMasks[ch] = dec.DecodeIcdf(silkLBRRFlags3ICDF[:], 8) + 1
+		}
+	}
+	if lbrrMasks[0] != 0 {
+		if err := d.consumeLBRRFrames(dec, nFrames, lbrrMasks[0]); err != nil {
+			return nil, err
+		}
+	}
+	if lbrrMasks[1] != 0 {
+		if err := d.side.consumeLBRRFrames(dec, nFrames, lbrrMasks[1]); err != nil {
+			return nil, err
 		}
 	}
 

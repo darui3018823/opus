@@ -682,6 +682,83 @@ func TestDecodeFECMonoSILK(t *testing.T) {
 	}
 }
 
+func TestDecodeFECStereoAndHybrid(t *testing.T) {
+	tests := []struct {
+		name     string
+		rate     int
+		channels int
+		bitrate  int
+		wantMode int
+	}{
+		{"stereo-silk", 16000, 2, 32000, ModeSILKOnly},
+		{"mono-hybrid", 48000, 1, 64000, ModeHybrid},
+		{"stereo-hybrid", 48000, 2, 160000, ModeHybrid},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			frameSize := tc.rate / 50
+			enc, err := NewEncoder(tc.rate, tc.channels, ApplicationVOIP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := enc.SetBitrate(tc.bitrate); err != nil {
+				t.Fatal(err)
+			}
+			enc.SetPacketLossPerc(20)
+			enc.SetInbandFEC(true)
+
+			packets := make([][]byte, 7)
+			for p := range packets {
+				input := strictSpeechLikeFrame(tc.rate, tc.channels, p*frameSize, frameSize)
+				// Keep the hybrid fixtures broadband enough to retain SWB/FB.
+				if tc.wantMode == ModeHybrid {
+					for i := 0; i < frameSize; i++ {
+						for ch := 0; ch < tc.channels; ch++ {
+							input[i*tc.channels+ch] += 0.025 * math.Sin(2*math.Pi*10000*float64(p*frameSize+i)/float64(tc.rate))
+						}
+					}
+				}
+				packets[p], err = enc.EncodeFloat(input, frameSize)
+				if err != nil {
+					t.Fatalf("packet %d: %v", p, err)
+				}
+			}
+			if mode, err := PacketGetMode(packets[5]); err != nil || mode != tc.wantMode {
+				t.Fatalf("packet mode = %d, err=%v, want %d", mode, err, tc.wantMode)
+			}
+
+			dec, err := NewDecoder(tc.rate, tc.channels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const lost = 4
+			for p := 0; p < lost; p++ {
+				if _, err := dec.Decode(packets[p], make([]int16, frameSize*tc.channels)); err != nil {
+					t.Fatalf("prime packet %d: %v", p, err)
+				}
+			}
+			recovered := make([]int16, frameSize*tc.channels)
+			n, err := dec.DecodeFEC(packets[lost+1], recovered)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n != frameSize {
+				t.Fatalf("DecodeFEC samples = %d, want %d", n, frameSize)
+			}
+			var energy int64
+			for _, sample := range recovered {
+				energy += int64(sample) * int64(sample)
+			}
+			if energy == 0 {
+				t.Fatal("DecodeFEC returned silent recovery")
+			}
+			if _, err := dec.Decode(packets[lost+1], make([]int16, frameSize*tc.channels)); err != nil {
+				t.Fatalf("normal decode after FEC: %v", err)
+			}
+		})
+	}
+}
+
 func TestEncoderReset(t *testing.T) {
 	enc, err := NewEncoder(48000, 2, ApplicationAudio)
 	if err != nil {

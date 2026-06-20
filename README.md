@@ -196,7 +196,7 @@ func (e *Encoder) MaxBandwidth() int
 func (e *Encoder) Bandwidth() int
 func (e *Encoder) SetDTX(dtx bool)
 func (e *Encoder) DTX() bool
-func (e *Encoder) SetInbandFEC(enabled bool)             // mono SILK-only
+func (e *Encoder) SetInbandFEC(enabled bool)             // SILK-only/hybrid
 func (e *Encoder) InbandFEC() bool
 func (e *Encoder) SetPacketLossPerc(perc int)            // clamped to 0–100
 func (e *Encoder) PacketLossPerc() int
@@ -223,7 +223,7 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error)
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error)
 func (d *Decoder) DecodeFloat32(data []byte) ([]float32, error)
 func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) // CELT-only after a successful CELT decode
-func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error)   // mono SILK LBRR
+func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error)   // SILK LBRR
 func (d *Decoder) Reset() error
 func (d *Decoder) GetLastPacketDuration() int
 func (d *Decoder) SampleRate() int
@@ -339,12 +339,11 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
   packets that any compliant decoder (including libopus) can decode.
 - VBR/CVBR and application/signal hints shape the CELT encoder heuristics, but
   do not provide full libopus-equivalent mode/rate-control behavior.
-- Mono SILK-only encoding can emit standards-compliant LBRR/in-band FEC via
-  `SetInbandFEC(true)` and a non-zero `SetPacketLossPerc`. Stereo/hybrid LBRR is
-  not implemented.
-- `DecodeFEC` recovers mono SILK-only 10/20/40/60 ms packets from LBRR in the
-  following packet. `DecodePLC` currently supports CELT-only streams; stereo
-  SILK and hybrid FEC remain unsupported.
+- SILK-only and hybrid encoding can emit LBRR/in-band FEC for mono and stereo
+  via `SetInbandFEC(true)` and a non-zero `SetPacketLossPerc`.
+- `DecodeFEC` recovers SILK-only and hybrid packets from LBRR in the following
+  packet. Hybrid recovery contains the redundant SILK low band. `DecodePLC`
+  currently supports CELT-only streams.
 - No multistream, surround, or Ogg Opus container API.
 
 ## Contributing

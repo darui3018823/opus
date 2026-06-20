@@ -415,9 +415,33 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		for _, active := range vadFlags[ch] {
 			enc.EncodeBitLogp(active, 1)
 		}
-		enc.EncodeBitLogp(false, 1) // No LBRR data in this encoder slice.
+		symbol := e.pendingLBRRSymbol(nFrames)
+		if ch == 1 {
+			symbol = e.side.pendingLBRRSymbol(nFrames)
+		}
+		enc.EncodeBitLogp(symbol != 0, 1)
+	}
+	lbrrSymbols := [2]int{
+		e.pendingLBRRSymbol(nFrames),
+		e.side.pendingLBRRSymbol(nFrames),
+	}
+	for ch, symbol := range lbrrSymbols {
+		component := e
+		if ch == 1 {
+			component = e.side
+		}
+		component.writePendingLBRRMask(enc, nFrames, symbol)
+	}
+	for ch, symbol := range lbrrSymbols {
+		component := e
+		if ch == 1 {
+			component = e.side
+		}
+		component.writePendingLBRRBodies(enc, symbol)
 	}
 
+	e.beginLBRRPacket()
+	e.side.beginLBRRPacket()
 	e.lastSNRVBRStream = false
 	for i := 0; i < nFrames; i++ {
 		encodeStereoPred(enc, stereoPredIx[i])
@@ -434,9 +458,13 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 			}
 			e.side.encodeRangeFrame(enc, sideFrames[i], vadFlags[1][i], i > 0 && !e.prevOnlyMiddle)
 			e.lastSNRVBRStream = e.lastSNRVBRStream || e.side.lastSNRVBRFrame
+		} else {
+			e.side.appendMissingLBRRFrame()
 		}
 		e.prevOnlyMiddle = onlyMiddle
 	}
+	e.finishLBRRPacket(nFrames)
+	e.side.finishLBRRPacket(nFrames)
 	return nil
 }
 

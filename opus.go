@@ -3293,16 +3293,16 @@ func isValidPacketFrameSize(frameSize, sampleRate int) bool {
 	return false
 }
 
-// DecodeFEC decodes mono SILK in-band forward-error-correction data from the
-// packet following a loss. The recovered duration is inferred from the packet.
-// Stereo SILK, hybrid, and CELT packets currently return ErrUnimplemented.
+// DecodeFEC decodes SILK in-band forward-error-correction data from the packet
+// following a loss. The recovered duration is inferred from the packet.
+// SILK-only and hybrid packets are supported; CELT-only packets have no LBRR.
 func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 	info, err := inspectPacket(data, d.sampleRate)
 	if err != nil {
 		return 0, err
 	}
-	if info.mode != ModeSILKOnly || info.channels != 1 {
-		return 0, fmt.Errorf("%w: FEC supports mono SILK-only packets", ErrUnimplemented)
+	if info.mode != ModeSILKOnly && info.mode != ModeHybrid {
+		return 0, fmt.Errorf("%w: CELT-only packets do not carry SILK LBRR", ErrUnimplemented)
 	}
 	required := info.totalSamples * d.channels
 	if len(pcm) < required {
@@ -3320,7 +3320,8 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 
 	rateKHz := silkConfigRateKHz(config)
 	ri := silkRateIdx(rateKHz)
-	infoDec := d.silkDecoders[ri][0]
+	ci := info.channels - 1
+	infoDec := d.silkDecoders[ri][ci]
 	if infoDec == nil || infoDec.dec == nil {
 		return 0, fmt.Errorf("%w: SILK decoder for %d kHz", ErrInvalidState, rateKHz)
 	}
@@ -3336,7 +3337,10 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 		return 0, fmt.Errorf("%w: SILK LBRR decode: %v", ErrInvalidPacket, err)
 	}
 	d.ensureSilkResampler(0, rateKHz)
-	silkPCM = d.resampleSILK(silkPCM, nSilkFrames, 1, false)
+	if info.channels == 2 {
+		d.ensureSilkResampler(1, rateKHz)
+	}
+	silkPCM = d.resampleSILK(silkPCM, nSilkFrames, info.channels, false)
 	silkPCM = padOrTrim(silkPCM, required)
 	d.applyGain(silkPCM)
 	for i, sample := range silkPCM {
@@ -3349,8 +3353,9 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 		pcm[i] = int16(sample)
 	}
 
-	d.prevSilkInternalCh = 1
-	if peer := d.silkDecoders[ri][1]; peer != nil && peer.dec != nil {
+	d.prevSilkInternalCh = info.channels
+	peerCI := 1 - ci
+	if peer := d.silkDecoders[ri][peerCI]; peer != nil && peer.dec != nil {
 		peer.dec.CopyPrimaryStateFrom(infoDec.dec)
 	}
 	d.lastPacketDuration = info.totalSamples

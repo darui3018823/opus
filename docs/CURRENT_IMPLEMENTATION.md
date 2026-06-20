@@ -667,17 +667,13 @@ The SILK package contains:
   explicit RMS loudness difference in dB. On the speech-harmonic fixture the
   matched loudness differences are within 0.75 dB at 8/12/16 kHz; the former
   approximately 0.57 alignment scale is no longer present.
-  Mono SILK-only encoding now supports standards-compliant one-packet-delayed
-  LBRR/in-band FEC when `SetInbandFEC(true)` is combined with a non-zero
-  `SetPacketLossPerc`. The encoder re-quantizes active previous-packet frames at
-  a lower rate, writes the 1/2/3-frame LBRR flag grammar and redundant bodies
-  before the current regular frames, and subtracts the emitted LBRR cost from
-  the current regular-frame rate-control target. The normal SILK decoder
-  consumes mono LBRR bodies without synthesizing them during normal decode,
-  preserving range alignment. The public decoder separately synthesizes those
-  bodies through `DecodeFEC`; libopus 1.6.1 cross-checks cover dropped
-  20/40/60 ms packets and subsequent normal decode alignment. Stereo/hybrid
-  LBRR is not part of this slice.
+SILK encoding supports standards-compliant one-packet-delayed LBRR/in-band FEC
+when `SetInbandFEC(true)` is combined with a non-zero `SetPacketLossPerc`.
+Mono, stereo mid/side, and hybrid SILK layers buffer redundant channel bodies,
+write the per-channel 1/2/3-frame flag grammar before regular frames, and keep
+normal decode entropy alignment. `DecodeFEC` reconstructs SILK-only and hybrid
+packets; hybrid recovery uses the redundant SILK low band because LBRR does not
+carry a separate CELT high-band copy.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single
@@ -793,8 +789,8 @@ reference comparison.
 - Top-level hybrid encoder selection exists only for high-bitrate 24/48 kHz
   VOIP/voice; there is no full libopus-equivalent hybrid mode/rate-control
   coverage.
-- Mono SILK-only LBRR/FEC encoding and decoding are available. Stereo and
-  hybrid LBRR encoding/decoding are not implemented.
+- SILK-only and hybrid LBRR/FEC encoding and decoding are available for mono
+  and stereo. Hybrid FEC reconstructs the redundant SILK low band.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
   to full libopus-compatible mode/rate-control behavior.
 - Decoder parity is achieved on the official vectors and the libopus reference;

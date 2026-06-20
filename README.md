@@ -201,6 +201,12 @@ func (e *Encoder) InbandFEC() bool
 func (e *Encoder) SetPacketLossPerc(perc int)            // clamped to 0–100
 func (e *Encoder) PacketLossPerc() int
 func (e *Encoder) SetPacketPadding(n int)
+func (e *Encoder) SetForceChannels(channels int) error
+func (e *Encoder) ForceChannels() int
+func (e *Encoder) SetLSBDepth(depth int) error
+func (e *Encoder) LSBDepth() int
+func (e *Encoder) SetPredictionDisabled(disabled bool)
+func (e *Encoder) PredictionDisabled() bool
 func (e *Encoder) Reset() error
 ```
 
@@ -224,6 +230,8 @@ func (d *Decoder) SampleRate() int
 func (d *Decoder) Channels() int
 func (d *Decoder) FinalRange() uint32
 func (d *Decoder) Pitch() int
+func (d *Decoder) SetGain(gainQ8 int) error
+func (d *Decoder) Gain() int
 ```
 
 ## Architecture

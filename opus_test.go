@@ -172,6 +172,90 @@ func TestCommonEncoderDecoderGetters(t *testing.T) {
 	}
 }
 
+func TestProductionControls(t *testing.T) {
+	enc, err := NewEncoder(48000, 2, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetForceChannels(ChannelsMono); err != nil {
+		t.Fatal(err)
+	}
+	if enc.ForceChannels() != ChannelsMono {
+		t.Fatalf("force channels = %d", enc.ForceChannels())
+	}
+	if err := enc.SetLSBDepth(16); err != nil {
+		t.Fatal(err)
+	}
+	if enc.LSBDepth() != 16 {
+		t.Fatalf("LSB depth = %d", enc.LSBDepth())
+	}
+	if err := enc.SetLSBDepth(7); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("invalid LSB depth error = %v", err)
+	}
+
+	pcm := make([]int16, 960*2)
+	for i := 0; i < 960; i++ {
+		pcm[2*i] = int16(8000 * math.Sin(2*math.Pi*440*float64(i)/48000))
+		pcm[2*i+1] = int16(4000 * math.Sin(2*math.Pi*440*float64(i)/48000))
+	}
+	packet, err := enc.Encode(pcm, 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if channels, err := PacketGetNumChannels(packet); err != nil || channels != 1 {
+		t.Fatalf("forced-mono packet channels = %d, err=%v", channels, err)
+	}
+
+	enc.SetPredictionDisabled(true)
+	if !enc.PredictionDisabled() {
+		t.Fatal("prediction-disabled getter = false")
+	}
+	packet, err = enc.Encode(pcm, 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode, err := PacketGetMode(packet); err != nil || mode != ModeCELTOnly {
+		t.Fatalf("prediction-disabled mode = %d, err=%v", mode, err)
+	}
+
+	mono, err := NewEncoder(48000, 1, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tone := make([]int16, 960)
+	for i := range tone {
+		tone[i] = int16(5000 * math.Sin(2*math.Pi*1000*float64(i)/48000))
+	}
+	packet, err = mono.Encode(tone, 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, _ := NewDecoder(48000, 1)
+	boosted, _ := NewDecoder(48000, 1)
+	if err := boosted.SetGain(6 * 256); err != nil {
+		t.Fatal(err)
+	}
+	if boosted.Gain() != 6*256 {
+		t.Fatalf("gain = %d", boosted.Gain())
+	}
+	basePCM, err := base.DecodeFloat(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boostedPCM, err := boosted.DecodeFloat(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var baseEnergy, boostedEnergy float64
+	for i := range basePCM {
+		baseEnergy += basePCM[i] * basePCM[i]
+		boostedEnergy += boostedPCM[i] * boostedPCM[i]
+	}
+	if boostedEnergy <= baseEnergy*3.5 {
+		t.Fatalf("decoder gain did not boost energy: base=%g boosted=%g", baseEnergy, boostedEnergy)
+	}
+}
+
 func TestEncoderApplicationValidation(t *testing.T) {
 	if _, err := NewEncoder(48000, 1, Application(9999)); !errors.Is(err, ErrBadArg) {
 		t.Fatalf("NewEncoder invalid application error = %v, want ErrBadArg", err)

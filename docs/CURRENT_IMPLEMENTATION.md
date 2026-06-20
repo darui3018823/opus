@@ -53,6 +53,9 @@ Implemented public entry points:
 - `(*Encoder).SetInbandFEC(enabled bool)` / `(*Encoder).InbandFEC() bool`
 - `(*Encoder).SetPacketLossPerc(perc int)` / `(*Encoder).PacketLossPerc() int`
 - `(*Encoder).SetPacketPadding(n int)`
+- `(*Encoder).SetForceChannels(channels int) error` / `(*Encoder).ForceChannels() int`
+- `(*Encoder).SetLSBDepth(depth int) error` / `(*Encoder).LSBDepth() int`
+- `(*Encoder).SetPredictionDisabled(bool)` / `(*Encoder).PredictionDisabled() bool`
 - `(*Encoder).SetApplication(application Application) error`
 - `(*Encoder).SetSignalType(signal SignalType)`
 - `(*Encoder).SignalType() SignalType`
@@ -77,6 +80,12 @@ These helpers validate the complete RFC 6716 packet framing and return
 The decoder exposes `SampleRate`, `Channels`, `FinalRange`, and `Pitch`
 getters. `FinalRange` is the XOR of the constituent frame entropy ranges, as
 for the libopus single-stream CTL. `Pitch` is reported in output-rate samples.
+Decoder output gain is available through `SetGain` and `Gain`, using Q8 dB.
+
+A stereo encoder can force a mono Opus stream; input is downmixed before a
+stateful mono codec instance. LSB depth is retained as the libopus-style input
+precision hint. Prediction disabling currently prevents predictive SILK and
+hybrid routing, keeping the stream on CELT.
 
 Accepted sample rates are `8000`, `12000`, `16000`, `24000`, and `48000`.
 Accepted channel counts are mono and stereo.

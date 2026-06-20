@@ -46,8 +46,22 @@ const (
 
 // Channel modes
 const (
+	ChannelsAuto   = -1000
 	ChannelsMono   = 1
 	ChannelsStereo = 2
+)
+
+// Decoder gain is expressed in Q8 dB, matching OPUS_SET_GAIN.
+const (
+	GainQ8Min = -32768
+	GainQ8Max = 32767
+)
+
+// Encoder input precision hints accepted by SetLSBDepth.
+const (
+	LSBDepthMin     = 8
+	LSBDepthMax     = 24
+	LSBDepthDefault = 24
 )
 
 // Opus modes (internal)

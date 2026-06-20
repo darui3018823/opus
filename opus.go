@@ -108,6 +108,11 @@ type Encoder struct {
 	// CTL-style observable state from the most recently encoded packet.
 	lastFinalRange uint32
 	inDTX          bool
+
+	forceChannels      int
+	lsbDepth           int
+	predictionDisabled bool
+	forcedMono         *Encoder
 }
 
 // isValidOpusRate returns true if the sample rate is one of the five valid Opus rates.
@@ -172,6 +177,8 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		lastDetectedBW:    -1, // no detection history yet
 		internalFrameSize: internalFrameSize,
 		prevMode:          -1, // no previous packet yet
+		forceChannels:     ChannelsAuto,
+		lsbDepth:          LSBDepthDefault,
 	}
 	enc.celtEncoders[3] = celtEnc
 
@@ -308,6 +315,22 @@ func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
 // that are exact multiples (1..6) of the 20 ms base are split into consecutive
 // 20 ms frames and packed as one Opus packet (RFC 6716 §3.2).
 func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
+	if e.forceChannels == ChannelsMono && e.channels == ChannelsStereo {
+		mono := make([]float64, frameSize)
+		for i := 0; i < frameSize; i++ {
+			mono[i] = 0.5 * (pcm[2*i] + pcm[2*i+1])
+		}
+		child, err := e.monoEncoder()
+		if err != nil {
+			return nil, err
+		}
+		packet, err := child.encodeFloat(mono, frameSize)
+		if err == nil {
+			e.lastFinalRange = child.lastFinalRange
+			e.inDTX = child.inDTX
+		}
+		return packet, err
+	}
 	e.inDTX = e.dtx && isSilentPCM(pcm)
 	if err := e.selectCELTEncoder(frameSize); err != nil {
 		return nil, err
@@ -456,6 +479,9 @@ func (e *Encoder) encodeShortCELTPacket(pcm []float64) ([]byte, error) {
 // The hybrid SILK layer is always the 16 kHz wideband encoder, so the SILK
 // encoder must exist at that internal rate; low-delay never uses hybrid.
 func (e *Encoder) canDeferToHybrid(nFrames int) bool {
+	if e.predictionDisabled {
+		return false
+	}
 	if e.silkEncoder == nil || e.silkSampleRate != 16000 {
 		return false
 	}
@@ -558,6 +584,9 @@ func (e *Encoder) encodeRedundantFrame(celtInput []float64, nbytes int, leading 
 }
 
 func (e *Encoder) shouldEncodeSILKOnly() bool {
+	if e.predictionDisabled {
+		return false
+	}
 	if e.silkEncoder == nil {
 		return false
 	}
@@ -592,6 +621,9 @@ func (e *Encoder) shouldEncodeSILKOnly() bool {
 }
 
 func (e *Encoder) shouldEncodeHybrid(nFrames int) bool {
+	if e.predictionDisabled {
+		return false
+	}
 	if e.silkEncoder == nil || e.silkSampleRate != 16000 {
 		return false
 	}
@@ -1308,6 +1340,84 @@ func (e *Encoder) InDTX() bool { return e.inDTX }
 // Application returns the current application mode.
 func (e *Encoder) Application() Application { return e.application }
 
+// SetForceChannels controls the channel count written to the Opus stream.
+// ChannelsAuto uses the constructor channel count. A stereo encoder may be
+// forced to mono; forcing stereo from a mono input is invalid.
+func (e *Encoder) SetForceChannels(channels int) error {
+	if channels != ChannelsAuto && channels != ChannelsMono && channels != ChannelsStereo {
+		return fmt.Errorf("%w: invalid forced channel count %d", ErrBadArg, channels)
+	}
+	if channels == ChannelsStereo && e.channels != ChannelsStereo {
+		return fmt.Errorf("%w: cannot force stereo from mono input", ErrBadArg)
+	}
+	e.forceChannels = channels
+	return nil
+}
+
+// ForceChannels returns the configured forced stream channel count.
+func (e *Encoder) ForceChannels() int { return e.forceChannels }
+
+// SetLSBDepth sets the input precision hint in bits per sample.
+func (e *Encoder) SetLSBDepth(depth int) error {
+	if depth < LSBDepthMin || depth > LSBDepthMax {
+		return fmt.Errorf("%w: invalid LSB depth %d", ErrBadArg, depth)
+	}
+	e.lsbDepth = depth
+	return nil
+}
+
+// LSBDepth returns the configured input precision hint.
+func (e *Encoder) LSBDepth() int { return e.lsbDepth }
+
+// SetPredictionDisabled disables predictive SILK/hybrid mode routing. CELT
+// remains available for all supported frame durations.
+func (e *Encoder) SetPredictionDisabled(disabled bool) {
+	e.predictionDisabled = disabled
+}
+
+// PredictionDisabled reports whether predictive mode routing is disabled.
+func (e *Encoder) PredictionDisabled() bool { return e.predictionDisabled }
+
+func (e *Encoder) monoEncoder() (*Encoder, error) {
+	if e.forcedMono == nil {
+		enc, err := NewEncoder(e.sampleRate, ChannelsMono, e.application)
+		if err != nil {
+			return nil, err
+		}
+		e.forcedMono = enc
+	}
+	m := e.forcedMono
+	if err := m.SetBitrate(e.bitrateSetting); err != nil {
+		return nil, err
+	}
+	if err := m.SetComplexity(e.complexity); err != nil {
+		return nil, err
+	}
+	if e.rateMode == celt.RateModeCBR {
+		m.SetVBR(false)
+	} else {
+		m.SetVBR(true)
+		m.SetVBRConstraint(e.rateMode == celt.RateModeCVBR)
+	}
+	if err := m.SetApplication(e.application); err != nil {
+		return nil, err
+	}
+	m.SetSignalType(e.SignalType())
+	if err := m.SetMaxBandwidth(e.maxBandwidth); err != nil {
+		return nil, err
+	}
+	if err := m.SetBandwidth(e.forcedBandwidth); err != nil {
+		return nil, err
+	}
+	m.SetDTX(e.dtx)
+	m.SetInbandFEC(e.useInbandFEC)
+	m.SetPacketLossPerc(e.packetLossPerc)
+	m.SetPacketPadding(e.padBytes)
+	_ = m.SetLSBDepth(e.lsbDepth)
+	m.SetPredictionDisabled(e.predictionDisabled)
+	return m, nil
+}
+
 // SetBitrate sets the target bitrate in bits per second
 func (e *Encoder) SetBitrate(bitrate int) error {
 	if bitrate != BitrateAuto && bitrate != BitrateMax && (bitrate < 6000 || bitrate > 510000) {
@@ -1707,6 +1817,11 @@ func (e *Encoder) Reset() error {
 	e.prevMode = -1
 	e.lastFinalRange = 0
 	e.inDTX = false
+	if e.forcedMono != nil {
+		if err := e.forcedMono.Reset(); err != nil {
+			return err
+		}
+	}
 	if e.redundancyCelt != nil {
 		e.redundancyCelt.Reset()
 	}
@@ -1784,6 +1899,7 @@ type Decoder struct {
 	lastPacketDuration int // samples per channel decoded by the last packet
 	lastFinalRange     uint32
 	lastPitch          int
+	gainQ8             int
 }
 
 // silkRateIdx maps a SILK rate in kHz to an index 0-2.
@@ -2438,6 +2554,7 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 			if err == nil {
 				d.lastPacketDuration = duration
 				d.prevMode = framing.ModeHybrid
+				d.applyGain(out)
 			}
 			return out, err
 		}
@@ -2446,6 +2563,7 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 		if err == nil {
 			d.lastPacketDuration = duration
 			d.prevMode = framing.ModeSILKOnly
+			d.applyGain(out)
 		}
 		return out, err
 	}
@@ -2509,7 +2627,18 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 	d.lastPacketDuration = duration
 	d.lastFinalRange = rangeFinal
 	d.prevMode = framing.ModeCELTOnly
+	d.applyGain(allPCM)
 	return allPCM, nil
+}
+
+func (d *Decoder) applyGain(pcm []float64) {
+	if d.gainQ8 == 0 {
+		return
+	}
+	scale := math.Pow(10, float64(d.gainQ8)/(20*256))
+	for i := range pcm {
+		pcm[i] *= scale
+	}
 }
 
 // DecodeFloat32 decodes an Opus packet to interleaved float32 PCM samples.
@@ -3138,6 +3267,7 @@ func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
 		}
 		floatPCM = adjustChannels(floatPCM, d.lastCeltDec.Channels(), d.channels)
 		floatPCM = padOrTrim(floatPCM, activeFrameSize*d.channels)
+		d.applyGain(floatPCM)
 		for i, sample := range floatPCM {
 			sample *= 32768.0
 			if sample > 32767.0 {
@@ -3208,6 +3338,7 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 	d.ensureSilkResampler(0, rateKHz)
 	silkPCM = d.resampleSILK(silkPCM, nSilkFrames, 1, false)
 	silkPCM = padOrTrim(silkPCM, required)
+	d.applyGain(silkPCM)
 	for i, sample := range silkPCM {
 		sample *= 32768.0
 		if sample > 32767.0 {
@@ -3297,3 +3428,15 @@ func (d *Decoder) FinalRange() uint32 { return d.lastFinalRange }
 // Pitch returns the most recently reported decoder pitch period in samples at
 // the decoder output rate. Zero means no pitch period is currently available.
 func (d *Decoder) Pitch() int { return d.lastPitch }
+
+// SetGain sets the decoder output gain in Q8 dB.
+func (d *Decoder) SetGain(gainQ8 int) error {
+	if gainQ8 < GainQ8Min || gainQ8 > GainQ8Max {
+		return fmt.Errorf("%w: invalid decoder gain %d", ErrBadArg, gainQ8)
+	}
+	d.gainQ8 = gainQ8
+	return nil
+}
+
+// Gain returns the configured decoder output gain in Q8 dB.
+func (d *Decoder) Gain() int { return d.gainQ8 }

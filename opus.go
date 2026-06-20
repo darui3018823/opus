@@ -242,6 +242,23 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	return e.encodeFloat(pcm[:expectedSize], frameSize)
 }
 
+// EncodeFloat32 encodes interleaved float32 PCM samples in range [-1.0, 1.0].
+// frameSize is the number of samples per channel at the encoder sample rate.
+func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
+	if _, err := e.validateFrameSize(frameSize); err != nil {
+		return nil, err
+	}
+	expectedSize := frameSize * e.channels
+	if len(pcm) < expectedSize {
+		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
+	}
+	floatPCM := make([]float64, expectedSize)
+	for i := range floatPCM {
+		floatPCM[i] = float64(pcm[i])
+	}
+	return e.encodeFloat(floatPCM, frameSize)
+}
+
 // encodeFloat is the internal encoding path shared by Encode and EncodeFloat.
 //
 // The encoder always emits 20 ms CELT-only fullband frames internally. When the
@@ -2310,6 +2327,19 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 	d.lastPacketDuration = duration
 	d.prevMode = framing.ModeCELTOnly
 	return allPCM, nil
+}
+
+// DecodeFloat32 decodes an Opus packet to interleaved float32 PCM samples.
+func (d *Decoder) DecodeFloat32(data []byte) ([]float32, error) {
+	pcm, err := d.DecodeFloat(data)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]float32, len(pcm))
+	for i := range pcm {
+		out[i] = float32(pcm[i])
+	}
+	return out, nil
 }
 
 // celtFrameDurationMs returns the frame duration in ms for CELT configs (16-31).

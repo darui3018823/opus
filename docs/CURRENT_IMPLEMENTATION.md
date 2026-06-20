@@ -33,6 +33,7 @@ Implemented public entry points:
 - `NewEncoder(sampleRate, channels int, application Application) (*Encoder, error)`
 - `(*Encoder).Encode(pcm []int16, frameSize int) ([]byte, error)`
 - `(*Encoder).EncodeFloat(pcm []float64, frameSize int) ([]byte, error)`
+- `(*Encoder).EncodeFloat32(pcm []float32, frameSize int) ([]byte, error)`
 - `(*Encoder).Bitrate() int`
 - `(*Encoder).EffectiveBitrate() int`
 - `(*Encoder).Complexity() int`
@@ -341,7 +342,7 @@ Current encoder limitations:
 - VBR/CVBR affects CELT target sizing and packet sizes, but the rate controller
   is still a simplified CELT-only implementation rather than libopus-equivalent
   full mode/rate control.
-- `EncodeFloat` uses `float64`; there is no public `EncodeFloat32` method.
+- Both float32 and float64 PCM encoding APIs are available.
 - The public encoder exposes limited SILK-only and hybrid speech paths; it does
   not yet expose full libopus-equivalent SILK/hybrid mode selection.
 - The CELT encoder path is functional but not verified as bit-exact against
@@ -354,6 +355,7 @@ Implemented public entry points:
 - `NewDecoder(sampleRate, channels int) (*Decoder, error)`
 - `(*Decoder).Decode(data []byte, pcm []int16) (int, error)`
 - `(*Decoder).DecodeFloat(data []byte) ([]float64, error)`
+- `(*Decoder).DecodeFloat32(data []byte) ([]float32, error)`
 - `(*Decoder).DecodePLC(pcm []int16, frameSize int) (int, error)`
 - `(*Decoder).DecodeFEC(data []byte, pcm []int16) (int, error)`
 - `(*Decoder).Reset() error`
@@ -383,7 +385,7 @@ Current decoder limitations:
   PLC return `ErrUnimplemented`.
 - `DecodeFEC` returns `ErrUnimplemented`; it does not silently substitute PLC
   for packet FEC extraction.
-- There is no public `DecodeFloat32` method.
+- Both float32 and float64 PCM decoding APIs are available.
 - `GetLastPacketDuration` reports the duration in output samples per channel of
   the last successfully decoded packet; before any decode it reports the default
   20 ms duration for the decoder sample rate.
@@ -743,7 +745,6 @@ reference comparison.
 ## Known Gaps
 
 - No public multistream, surround, or Ogg Opus container API.
-- No public float32 encode/decode API.
 - Public PLC currently covers CELT-only streams; SILK-only and hybrid PLC are
   not implemented.
 - Top-level SILK-only encoder selection exists only for low-bitrate VOIP/voice.

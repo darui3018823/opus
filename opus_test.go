@@ -3,6 +3,7 @@ package opus
 import (
 	"errors"
 	"fmt"
+	"math"
 	"testing"
 )
 
@@ -308,6 +309,54 @@ func TestEncodeFloatDecodeFloat(t *testing.T) {
 
 	if len(decoded) != frameSize*channels {
 		t.Errorf("Decoded %d samples, expected %d", len(decoded), frameSize*channels)
+	}
+}
+
+func TestEncodeFloat32DecodeFloat32(t *testing.T) {
+	const (
+		sampleRate = 48000
+		frameSize  = 960
+	)
+	enc, err := NewEncoder(sampleRate, 2, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := make([]float32, frameSize*2)
+	for i := 0; i < frameSize; i++ {
+		input[2*i] = float32(0.4 * math.Sin(2*math.Pi*440*float64(i)/sampleRate))
+		input[2*i+1] = float32(0.3 * math.Sin(2*math.Pi*880*float64(i)/sampleRate))
+	}
+	packet, err := enc.EncodeFloat32(input, frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := NewDecoder(sampleRate, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := dec.DecodeFloat32(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(output) != len(input) {
+		t.Fatalf("DecodeFloat32 length = %d, want %d", len(output), len(input))
+	}
+	var energy float64
+	for _, sample := range output {
+		energy += float64(sample) * float64(sample)
+	}
+	if energy == 0 {
+		t.Fatal("DecodeFloat32 returned silent output for non-silent input")
+	}
+}
+
+func TestEncodeFloat32Errors(t *testing.T) {
+	enc, err := NewEncoder(48000, 1, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enc.EncodeFloat32(make([]float32, 959), 960); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("short float32 PCM error = %v, want ErrBadArg", err)
 	}
 }
 

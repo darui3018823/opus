@@ -284,6 +284,23 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	return e.encodeFloat(floatPCM, frameSize)
 }
 
+// Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
+// The nominal input range is [-8388608, 8388607].
+func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
+	if _, err := e.validateFrameSize(frameSize); err != nil {
+		return nil, err
+	}
+	expectedSize := frameSize * e.channels
+	if len(pcm) < expectedSize {
+		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
+	}
+	floatPCM := make([]float64, expectedSize)
+	for i := range floatPCM {
+		floatPCM[i] = float64(pcm[i]) / 8388608.0
+	}
+	return e.encodeFloat(floatPCM, frameSize)
+}
+
 // EncodeFloat encodes floating-point PCM samples
 //
 // pcm contains interleaved float64 samples in range [-1.0, 1.0]
@@ -2110,6 +2127,33 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 
 	samplesPerChannel := n / d.channels
 	return samplesPerChannel, nil
+}
+
+// Decode24 decodes an Opus packet to interleaved signed 24-bit PCM stored in
+// int32 values. Output is saturated to [-8388608, 8388607].
+func (d *Decoder) Decode24(data []byte, pcm []int32) (int, error) {
+	required, err := d.packetOutputSamples(data)
+	if err != nil {
+		return 0, err
+	}
+	if len(pcm) < required {
+		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
+	}
+
+	floatPCM, err := d.DecodeFloat(data)
+	if err != nil {
+		return 0, err
+	}
+	for i, sample := range floatPCM {
+		scaled := sample * 8388608.0
+		if scaled > 8388607.0 {
+			scaled = 8388607.0
+		} else if scaled < -8388608.0 {
+			scaled = -8388608.0
+		}
+		pcm[i] = int32(math.Round(scaled))
+	}
+	return len(floatPCM) / d.channels, nil
 }
 
 // packetOutputSamples returns the interleaved output sample count without

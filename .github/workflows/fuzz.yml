@@ -25,15 +25,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Full cross product: both target and arch are base dimensions so the
-        # include entries only attach the runner label to each arch.
-        target: [FuzzDecode, FuzzDecodeFloat]
+        # Full cross product: target and arch are base dimensions. Include
+        # entries attach the runner and the one non-root package path.
+        target:
+          - FuzzDecode
+          - FuzzDecodeFloat
+          - FuzzPacketExtensions
+          - FuzzMultistreamDecode
+          - FuzzRepacketizer
+          - FuzzOggParsers
         arch: [amd64, arm64]
         include:
           - arch: amd64
             runner: ubuntu-latest
           - arch: arm64
             runner: ubuntu-24.04-arm
+          - target: FuzzOggParsers
+            package: ./oggopus
     steps:
       - uses: actions/checkout@v6
 
@@ -52,12 +60,15 @@ jobs:
         run: |
           go test -run='^$' \
             -fuzz="^${{ matrix.target }}$" \
-            -fuzztime="${{ github.event.inputs.fuzztime || '120s' }}" .
+            -fuzztime="${{ github.event.inputs.fuzztime || '120s' }}" \
+            "${{ matrix.package || '.' }}"
 
       - name: Upload crashers on failure
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-crashers-${{ matrix.target }}-${{ matrix.arch }}
-          path: testdata/fuzz/
+          path: |
+            testdata/fuzz/
+            oggopus/testdata/fuzz/
           if-no-files-found: ignore

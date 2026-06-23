@@ -358,6 +358,22 @@ func TestCGODecodeFECMatchesLibopus(t *testing.T) {
 			}
 			snr, _, _, _ := silkRefAlignedSNR(toFloat64(refFEC), goFEC, frameSize/2)
 			t.Logf("FEC Go/libopus aligned SNR: %.2f dB", snr)
+			if packetMs > 20 {
+				subframeSize := rate / 50
+				for f := 0; f < packetMs/20; f++ {
+					start := f * subframeSize
+					end := start + subframeSize
+					frameSNR, _, _, _ := silkRefAlignedSNR(
+						toFloat64(refFEC)[start:end],
+						goFEC[start:end],
+						subframeSize/2,
+					)
+					t.Logf("FEC subframe %d aligned SNR: %.2f dB", f, frameSNR)
+					if !(packetMs == 60 && f == 0) && frameSNR < 6 {
+						t.Fatalf("present LBRR subframe %d diverged: %.2f dB", f, frameSNR)
+					}
+				}
+			}
 			minSNR := 6.0
 			if packetMs == 60 {
 				// The deterministic 60 ms fixture carries only a subset of its
@@ -458,8 +474,38 @@ func TestCGODecodeFECStereoAndHybrid(t *testing.T) {
 			}
 			snr, _, _, _ := silkRefAlignedSNR(toFloat64(refPCM), goF, frameSize*tc.channels/2)
 			t.Logf("Go/libopus FEC aligned SNR: %.2f dB", snr)
-			if snr < -2 {
+			if tc.channels == 2 {
+				for ch := 0; ch < 2; ch++ {
+					refCh := make([]float64, frameSize)
+					goCh := make([]float64, frameSize)
+					for i := 0; i < frameSize; i++ {
+						refCh[i] = float64(refPCM[i*2+ch])
+						goCh[i] = goF[i*2+ch]
+					}
+					channelSNR, _, _, _ := silkRefAlignedSNR(refCh, goCh, frameSize/2)
+					t.Logf("channel %d FEC aligned SNR: %.2f dB", ch, channelSNR)
+				}
+			}
+			if snr < 6 {
 				t.Fatalf("FEC reconstruction diverged: %.2f dB", snr)
+			}
+
+			goNext := make([]int16, frameSize*tc.channels)
+			if _, err := goDec.Decode(packets[lost+1], goNext); err != nil {
+				t.Fatalf("Go normal decode after FEC: %v", err)
+			}
+			refNext, err := refDec.DecodeFloat(packets[lost+1], frameSize)
+			if err != nil {
+				t.Fatalf("libopus normal decode after FEC: %v", err)
+			}
+			goNextF := make([]float64, len(goNext))
+			for i := range goNext {
+				goNextF[i] = float64(goNext[i]) / 32768
+			}
+			nextSNR, _, _, _ := silkRefAlignedSNR(toFloat64(refNext), goNextF, frameSize*tc.channels/2)
+			t.Logf("normal decode after FEC aligned SNR: %.2f dB", nextSNR)
+			if nextSNR < -2 {
+				t.Fatalf("normal decode after FEC diverged: %.2f dB", nextSNR)
 			}
 		})
 	}

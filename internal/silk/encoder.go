@@ -106,6 +106,10 @@ type Encoder struct {
 	curLBRR            []lbrrFrameData
 	pendingLBRRFrames  int // frame count the pending LBRR data was generated for
 	lbrrRunPrevGainIdx int // running gain index within the current LBRR run
+	// pendingLBRRStereoPred carries the M/S predictor indices for the frames in
+	// pendingLBRR. Stereo LBRR syntax writes these controls frame-by-frame
+	// before the corresponding mid/side redundant bodies.
+	pendingLBRRStereoPred [][2][3]int8
 	// lbrrBitsPerFrame is the current packet's emitted LBRR cost divided across
 	// its regular frames. silkFrameTargetBits subtracts it so CBR/CVBR do not
 	// simply add redundancy on top of the configured bitrate.
@@ -432,12 +436,26 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		}
 		component.writePendingLBRRMask(enc, nFrames, symbol)
 	}
-	for ch, symbol := range lbrrSymbols {
-		component := e
-		if ch == 1 {
-			component = e.side
+	// libopus writes stereo LBRR frame-major. A mid-channel redundant frame is
+	// preceded by its stereo predictor and, when side LBRR is absent, the
+	// mid-only flag. The channel bodies then follow mid before side.
+	for frame := 0; frame < nFrames; frame++ {
+		midPresent := lbrrSymbols[0]&(1<<uint(frame)) != 0
+		sidePresent := lbrrSymbols[1]&(1<<uint(frame)) != 0
+		if midPresent {
+			var pred [2][3]int8
+			if frame < len(e.pendingLBRRStereoPred) {
+				pred = e.pendingLBRRStereoPred[frame]
+			}
+			encodeStereoPred(enc, pred)
+			if !sidePresent {
+				enc.EncodeIcdf(1, silkStereoOnlyCodeMidICDF[:], 8)
+			}
+			e.writeLBRRFrame(enc, e.pendingLBRR[frame], previousLBRRSignalType(e.pendingLBRR, lbrrSymbols[0], frame))
 		}
-		component.writePendingLBRRBodies(enc, symbol)
+		if sidePresent {
+			e.side.writeLBRRFrame(enc, e.side.pendingLBRR[frame], previousLBRRSignalType(e.side.pendingLBRR, lbrrSymbols[1], frame))
+		}
 	}
 
 	e.beginLBRRPacket()
@@ -465,7 +483,17 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 	}
 	e.finishLBRRPacket(nFrames)
 	e.side.finishLBRRPacket(nFrames)
+	e.pendingLBRRStereoPred = append(e.pendingLBRRStereoPred[:0], stereoPredIx...)
 	return nil
+}
+
+func previousLBRRSignalType(frames []lbrrFrameData, symbol, frame int) int {
+	for i := frame - 1; i >= 0; i-- {
+		if symbol&(1<<uint(i)) != 0 {
+			return frames[i].signalType
+		}
+	}
+	return -1
 }
 
 func encodeStereoPred(enc *entcode.Encoder, ix [2][3]int8) {
@@ -2995,6 +3023,7 @@ func (e *Encoder) Reset() {
 	e.pendingLBRR = nil
 	e.curLBRR = nil
 	e.pendingLBRRFrames = 0
+	e.pendingLBRRStereoPred = nil
 	e.lbrrInPrevPacket = false
 	e.lbrrRunPrevGainIdx = 0
 	e.lbrrBitsPerFrame = 0

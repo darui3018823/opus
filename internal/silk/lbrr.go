@@ -103,6 +103,7 @@ func (e *Encoder) SetInbandFEC(enabled bool) {
 		e.pendingLBRR = nil
 		e.curLBRR = nil
 		e.pendingLBRRFrames = 0
+		e.pendingLBRRStereoPred = nil
 		e.lbrrInPrevPacket = false
 		e.lbrrRunPrevGainIdx = 0
 	}

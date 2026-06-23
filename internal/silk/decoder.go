@@ -535,24 +535,58 @@ func (d *Decoder) decodeFECStereo(dec *entcode.Decoder, nFrames int) ([]float64,
 			masks[ch] = dec.DecodeIcdf(silkLBRRFlags3ICDF[:], 8) + 1
 		}
 	}
-	mid, err := d.decodeFECChannel(dec, nFrames, masks[0])
-	if err != nil {
-		return nil, err
-	}
-	side, err := d.side.decodeFECChannel(dec, nFrames, masks[1])
-	if err != nil {
-		return nil, err
-	}
 	out := make([]float64, 0, d.frameSize*nFrames*2)
 	for frame := 0; frame < nFrames; frame++ {
-		start := frame * d.frameSize
-		out = append(out, d.stereoMSToLR(
-			mid[start:start+d.frameSize],
-			side[start:start+d.frameSize],
-			d.stereoPredPrevQ13,
-		)...)
+		midPresent := masks[0]&(1<<uint(frame)) != 0
+		sidePresent := masks[1]&(1<<uint(frame)) != 0
+		predQ13 := d.stereoPredPrevQ13
+		decodeOnlyMiddle := false
+		if midPresent {
+			predQ13 = decodeStereoPredQ13(dec)
+			if !sidePresent {
+				decodeOnlyMiddle = dec.DecodeIcdf(silkStereoOnlyCodeMidICDF[:], 8) != 0
+			}
+		}
+
+		var mid []float64
+		var err error
+		if midPresent {
+			mid, err = d.decodeFrameMono(dec, 1, frame > 0 && masks[0]&(1<<uint(frame-1)) != 0)
+		} else {
+			mid, err = d.concealPacketLossMono()
+		}
+		if err != nil {
+			return nil, err
+		}
+
+		hasSide := !d.prevDecodeOnlyMiddle || sidePresent
+		side := make([]float64, d.frameSize)
+		if hasSide {
+			if sidePresent {
+				if d.prevDecodeOnlyMiddle {
+					d.side.Reset()
+				}
+				side, err = d.side.decodeFrame(dec, 1, frame > 0 && masks[1]&(1<<uint(frame-1)) != 0)
+			} else {
+				side, err = d.side.concealPacketLoss()
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		out = append(out, d.stereoMSToLR(mid, side, predQ13)...)
+		d.prevDecodeOnlyMiddle = decodeOnlyMiddle
 	}
 	return out, nil
+}
+
+func (d *Decoder) concealPacketLossMono() ([]float64, error) {
+	channels := d.channels
+	d.channels = 1
+	pcm, err := d.concealPacketLoss()
+	d.channels = channels
+	return pcm, err
 }
 
 func (d *Decoder) concealFECFrames(nFrames int) ([]float64, error) {

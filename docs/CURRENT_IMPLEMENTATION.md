@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-06-20
+Last reviewed: 2026-06-23
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -11,11 +11,14 @@ code-derived status.
 
 Module: `github.com/darui3018823/opus`
 
-The single-stream API is concentrated in `opus.go`; multistream and surround
-APIs are in `multistream.go` and `surround.go`, with constants in `constants.go`
-and package-level error values in `errors.go`. Public version constants are
-generated into `version_gen.go` from the repository-level `VERSION` file;
-`go generate ./...` refreshes them and CI rejects generated-file drift.
+The single-stream API is concentrated in `opus.go`; multistream, surround, and
+projection APIs are in `multistream.go`, `surround.go`, and `projection.go`.
+Packet transformation APIs are in `repacketizer.go` and `extensions.go`.
+The `oggopus` subpackage implements Ogg page and Ogg Opus container APIs.
+Constants are in `constants.go` and package-level error values in `errors.go`.
+Public version constants are generated into `version_gen.go` from the
+repository-level `VERSION` file; `go generate ./...` refreshes them and CI
+rejects generated-file drift.
 
 Public size constants distinguish separate limits:
 
@@ -82,11 +85,17 @@ Public packet inspection entry points:
 - `(*Repacketizer).OutRange(begin, end int) ([]byte, error)`
 - `PacketPad(packet []byte, newLen int) ([]byte, error)`
 - `PacketUnpad(packet []byte) ([]byte, error)`
+- `PacketExtensionsCount(packet []byte) (int, error)`
+- `PacketExtensionsParse(packet []byte) ([]PacketExtension, error)`
+- `PacketExtensionsGenerate(packet []byte, extensions []PacketExtension, paddingBytes int) ([]byte, error)`
 
 These helpers validate the complete RFC 6716 packet framing and return
 `ErrInvalidPacket` for malformed or over-duration packets.
 The repacketizer combines matching single-stream frames without transcoding,
-enforces the 120 ms limit, and supports canonical padding removal.
+enforces the 120 ms limit, and supports canonical padding removal. Packet
+extensions are parsed and generated in code-3 padding with repeat expansion.
+DRED and QEXT payloads are transported opaquely; their codecs are outside this
+package.
 
 Public multistream and surround entry points:
 
@@ -106,8 +115,30 @@ duplicate and silent mappings, duration validation, and bidirectional libopus
 1.6.1 interoperability. Surround mapping-family 1 uses the libopus/Vorbis
 stream layouts, identifies the LFE stream for 5.1/6.1/7.1, applies
 frame-duration-dependent stream bitrate allocation, and keeps coupled streams
-on stereo CELT to preserve the spatial image. Mapping family 2 is reserved for
-the not-yet-implemented projection/ambisonics API.
+on stereo CELT to preserve the spatial image.
+
+Public projection and Ambisonics entry points:
+
+- `NewProjectionEncoder(...) (*ProjectionEncoder, error)`
+- `NewProjectionDecoder(...) (*ProjectionDecoder, error)`
+- `NewAmbisonicsEncoder(...) (*ProjectionEncoder, error)`
+- `NewAmbisonicsDecoder(...) (*AmbisonicsDecoder, error)`
+- `NewMappingMatrix(...) (*MappingMatrix, error)`
+- `NewMappingMatrixFromBytes(...) (*MappingMatrix, error)`
+
+RFC 8486 mapping family 2 supports ACN/SN3D Ambisonics through channel mapping,
+including optional non-diegetic stereo. Mapping family 3 uses projection
+mixing/demixing matrices; predefined libopus 1.6.1 matrices are available for
+first- through fifth-order layouts. Tests cover PCM API variants, round trips,
+matrix validation, and bidirectional family 2/3 libopus interoperability.
+
+The `oggopus` subpackage provides:
+
+- CRC-checked Ogg `Page` parsing, reading, marshaling, and writing
+- lacing and continued-packet reconstruction through `PacketReader`
+- packet-to-page output through `PacketWriter`
+- `OpusHead` and `OpusTags` parsing and marshaling
+- complete single-logical-stream Ogg Opus `Reader` and `Writer` APIs
 
 The decoder exposes `SampleRate`, `Channels`, `FinalRange`, and `Pitch`
 getters. `FinalRange` is the XOR of the constituent frame entropy ranges, as
@@ -136,9 +167,9 @@ and the maximum policy is bounded by the RFC per-frame byte limit.
 complexity 9, and constrained VBR without imposing a behavior change on
 existing callers.
 
-Encoder, decoder, multistream, and surround instances are stateful and are not
-safe for concurrent use. One instance owns the codec history for one logical
-Opus stream set; packets
+Encoder, decoder, multistream, surround, projection, and container reader/writer
+instances are stateful and are not safe for concurrent use. One instance owns
+the codec or framing history for one logical Opus stream set; packets
 must be processed in order, and callers must serialize all methods on a shared
 instance, including getters, controls, and `Reset`. Distinct instances may run
 concurrently. Instances must not be copied after first use. Caller-provided
@@ -842,15 +873,19 @@ Notes:
   bandwidth overriding a lower max-bandwidth cap.
 - The former `cmd_diag` duplicate-`main` build failure is fixed (`toc_check.go`
   moved to `cmd_diag/toccheck`).
+- Nightly fuzzing covers int16/float decoding, packet extensions, multistream
+  self-delimited framing, repacketization/padding, and Ogg page/metadata/stream
+  parsing on amd64 and arm64.
 
 The decoder passes the full official Opus test-vector suite and the libopus
 reference comparison.
 
 ## Known Gaps
 
-- No public projection/ambisonics or Ogg Opus container API. Surround mapping
-  families 0, 1, and 255 are implemented; mapping family 2 remains deferred to
-  projection.
+- Projection family 3 encoder setup uses the predefined libopus 1.6.1 matrices;
+  arbitrary custom encoder-matrix generation is not exposed.
+- The Ogg Opus package handles one logical stream and does not provide seeking,
+  chained-stream orchestration, or multiplexed-stream demux.
 - Multistream/surround provide core encode/decode, mapping, aggregate bitrate,
   and per-stream state access, but do not yet mirror every libopus multistream
   CTL or its full surround psychoacoustic energy-mask analysis.
@@ -874,5 +909,7 @@ official RFC 8251 vectors and the libopus 1.6.1 reference comparison. The
 encoder has a CELT path with the current quality pipeline, standard packet
 output, and libopus decode cross-checks, plus a narrow low-bitrate SILK-only
 speech path, an initial high-bitrate 24/48 kHz hybrid voice path, and public
-multistream/surround packet support cross-checked with libopus. It is not
-bit-exact with libopus and does not yet provide full SILK/hybrid mode selection.
+multistream/surround/projection packet support cross-checked with libopus.
+Packet extensions and single-stream Ogg Opus containers are available through
+public Pure Go APIs. It is not bit-exact with libopus and does not yet provide
+full SILK/hybrid mode selection.

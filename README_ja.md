@@ -11,20 +11,21 @@
 [Opus オーディオコーデック](https://opus-codec.org/)（RFC 6716 / RFC 8251）の
 **ランタイム CGO 依存なし**の Pure Go 実装です。**デコーダー**は公式 RFC 8251
 テストベクター 12 個すべてに合格し（RMSE < 0.001）、libopus 1.6.1 リファレンスと
-フレーム単位で一致します。**エンコーダー**は CELT quality pipeline と、限定的な
-モノラル低ビットレート SILK-only 音声経路を実装し、libopus でデコード可能な
-標準 Opus パケットを出力します（[ステータス](#ステータス)参照）。
+フレーム単位で一致します。**エンコーダー**は CELT quality pipeline、限定的な
+低ビットレート SILK-only 音声経路、初期 hybrid 音声経路を実装し、libopus で
+デコード可能な標準 Opus パケットを出力します（[ステータス](#ステータス)参照）。
 
 > 補足: エンコーダーは libopus のエンコーダーとはビット精度一致しません。
 > CELT 経路は Pure Go での音声・音楽エンコードに利用できます。SILK 経路は
-> モノラル低ビットレート音声に限定され、ハイブリッドエンコードは未実装です。
+> voice向けに限定され、ハイブリッドエンコードは高ビットレートの
+> 24/48 kHz voice packet に限定されています。
 
 ## ステータス
 
 | 領域 | 状態 |
 |------|------|
 | **デコーダー** | ✅ 公式 RFC 8251 ベクター 12/12 合格（RMSE < 0.001）。libopus 1.6.1 と一致。SILK / CELT / ハイブリッド（SILK+CELT）を再構成済み（ハイブリッド SILK→CELT redundancy 含む）。 |
-| **エンコーダー** | ✅ CELT quality pipeline（Phase 1+2）と、native 8/12/16 kHz の低ビットレート音声向け限定モノラル SILK-only エンコード。libopus 1.6.1 がデコードできる標準 Opus パケットを出力。64 kbps の目安 SNR: 440 Hz 約 48 dB、1 kHz 約 47 dB、ステレオ約 43 dB。libopus とはビット精度一致**ではない**。ハイブリッドエンコードは未実装。 |
+| **エンコーダー** | ✅ CELT quality pipeline（Phase 1+2）、低ビットレート voice 向け SILK-only、24/48 kHz 高ビットレート voice 向け初期 hybrid encode。libopus 1.6.1 がデコードできる標準 Opus packet を出力。64 kbps の目安 SNR: 440 Hz 約 48 dB、1 kHz 約 47 dB、stereo 約 43 dB。libopus とはビット精度一致**ではない**。 |
 | **CGO** | ランタイム依存なし。libopus ラッパーは参照テスト専用で `opusref` ビルドタグ下にのみ存在。 |
 | **CI** | `test` / `race` / `bench` / `fuzz` を **amd64・arm64** で実行。 |
 
@@ -259,8 +260,20 @@ func NewSurroundDecoder(sampleRate, channels, mappingFamily int) (*SurroundDecod
 
 マルチストリーム packet は RFC 6716 の self-delimited framing を使用し、
 libopus 1.6.1 との相互運用テストを通過しています。サラウンドは mapping
-family 0、1（Vorbis順、最大7.1）、255に対応します。mapping family 2の
-Projection/Ambisonicsは未実装です。
+family 0、1（Vorbis順、最大7.1）、255に対応します。
+
+### Projection と Ambisonics
+
+```go
+func NewProjectionEncoder(sampleRate, channels, mappingFamily int, application Application) (*ProjectionEncoder, error)
+func NewProjectionDecoder(sampleRate, channels, streams, coupledStreams int, demixingMatrix []byte) (*ProjectionDecoder, error)
+func NewAmbisonicsEncoder(sampleRate, channels, mappingFamily int, application Application) (*ProjectionEncoder, error)
+func NewAmbisonicsDecoder(sampleRate, channels, mappingFamily, streams, coupledStreams int, mapping, demixingMatrix []byte) (*AmbisonicsDecoder, error)
+```
+
+RFC 8486 mapping family 2/3 に対応します。family 2 は ACN/SN3D Ambisonics
+channel mapping、family 3 は libopus 1.6.1 の projection mixing/demixing
+matrix を使用し、両 family とも libopus 相互運用テストがあります。
 
 ### パケット操作
 
@@ -272,13 +285,27 @@ func (r *Repacketizer) Out() ([]byte, error)
 func (r *Repacketizer) OutRange(begin, end int) ([]byte, error)
 func PacketPad(packet []byte, newLen int) ([]byte, error)
 func PacketUnpad(packet []byte) ([]byte, error)
+func PacketExtensionsCount(packet []byte) (int, error)
+func PacketExtensionsParse(packet []byte) ([]PacketExtension, error)
+func PacketExtensionsGenerate(packet []byte, extensions []PacketExtension, paddingBytes int) ([]byte, error)
 ```
+
+packet extension は code-3 padding 内で搬送します。DRED/QEXT payload は
+opaque data として扱い、neural/DSP codec 自体は実装していません。
+
+### Ogg Opus コンテナ
+
+`github.com/darui3018823/opus/oggopus` package は、CRC 検証付き Ogg page
+parse/write、packet continuation と lacing、`OpusHead`/`OpusTags` metadata、
+単一 logical stream の Ogg Opus reader/writer を提供します。
 
 ## アーキテクチャ
 
 ```
 github.com/darui3018823/opus/
-├── opus.go / multistream.go / surround.go  # codec 公開 API
+├── opus.go / multistream.go / surround.go / projection.go
+├── extensions.go / repacketizer.go         # packet 操作
+├── oggopus/                                # Ogg page / Ogg Opus API
 ├── internal/
 │   ├── opus_framing.go                  # TOC バイトの解析/生成（RFC 6716 §3）
 │   ├── dsp/                             # FFT、MDCT/IMDCT、窓関数、数学
@@ -334,10 +361,12 @@ Windows では、動作する MinGW/MSYS2 ツールチェーンを用意し Powe
 
 ```bash
 go test -run='^$' -fuzz='^FuzzDecode$' -fuzztime=60s .
+go test -run='^$' -fuzz='^FuzzOggParsers$' -fuzztime=60s ./oggopus
 ```
 
-`FuzzDecode` / `FuzzDecodeFloat` は、デコーダーが任意入力で panic しないことを検証
-します。`fuzz` CI ワークフローが毎晩および手動で実行します。
+fuzz suite は single-stream decode、packet extensions、multistream
+self-delimited framing、repacketizer/padding、Ogg Opus parser を対象にします。
+`fuzz` CI workflow が全 target を毎晩および手動で実行します。
 
 ## 継続的インテグレーション
 
@@ -368,7 +397,10 @@ GitHub Actions ワークフロー 4 本。いずれも **amd64（`ubuntu-latest`
 - `DecodeFEC` は次のパケットの LBRR から SILK-only/hybrid を回復します。
   hybrid の回復内容は冗長 SILK low band です。`DecodePLC` は現状 CELT-only
   に対応します。
-- Projection/Ambisonics と Ogg Opus コンテナ API は未実装です。
+- Projection family 3 は libopus 1.6.1 の定義済み matrix を使用し、任意の
+  custom encoder matrix 生成は未対応です。
+- Ogg Opus package は単一 logical stream を対象とし、seek、chained stream
+  orchestration、multiplexed stream demux は提供しません。
 - マルチストリーム/サラウンドは、libopus の全 multistream CTL と完全な
   surround energy-mask analysis には未対応です。
 - VBR/CVBR と application/signal hint は CELT エンコーダーの判断を調整しますが、

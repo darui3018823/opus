@@ -262,7 +262,21 @@ func NewSurroundDecoder(sampleRate, channels, mappingFamily int) (*SurroundDecod
 
 Multistream packets use RFC 6716 self-delimited framing and interoperate with
 libopus 1.6.1. Surround supports mapping families 0, 1 (Vorbis order, up to
-7.1), and 255. Mapping family 2 projection/ambisonics is not yet implemented.
+7.1), and 255.
+
+### Projection and Ambisonics
+
+```go
+func NewProjectionEncoder(sampleRate, channels, mappingFamily int, application Application) (*ProjectionEncoder, error)
+func NewProjectionDecoder(sampleRate, channels, streams, coupledStreams int, demixingMatrix []byte) (*ProjectionDecoder, error)
+func NewAmbisonicsEncoder(sampleRate, channels, mappingFamily int, application Application) (*ProjectionEncoder, error)
+func NewAmbisonicsDecoder(sampleRate, channels, mappingFamily, streams, coupledStreams int, mapping, demixingMatrix []byte) (*AmbisonicsDecoder, error)
+```
+
+RFC 8486 mapping families 2 and 3 are supported. Family 2 uses ACN/SN3D
+Ambisonics channel mapping; family 3 uses the projection mixing/demixing
+matrices provided by libopus 1.6.1. Both families have bidirectional libopus
+interoperability tests.
 
 ### Packet operations
 
@@ -274,13 +288,28 @@ func (r *Repacketizer) Out() ([]byte, error)
 func (r *Repacketizer) OutRange(begin, end int) ([]byte, error)
 func PacketPad(packet []byte, newLen int) ([]byte, error)
 func PacketUnpad(packet []byte) ([]byte, error)
+func PacketExtensionsCount(packet []byte) (int, error)
+func PacketExtensionsParse(packet []byte) ([]PacketExtension, error)
+func PacketExtensionsGenerate(packet []byte, extensions []PacketExtension, paddingBytes int) ([]byte, error)
 ```
+
+Packet extensions are transported through code-3 padding. DRED and QEXT
+payloads are exposed as opaque data; their neural/DSP codecs are not
+implemented here.
+
+### Ogg Opus containers
+
+The `github.com/darui3018823/opus/oggopus` package provides CRC-checked Ogg
+page parsing/writing, packet continuation and lacing, `OpusHead`/`OpusTags`
+metadata, and complete single-logical-stream Ogg Opus readers and writers.
 
 ## Architecture
 
 ```
 github.com/darui3018823/opus/
-├── opus.go / multistream.go / surround.go  # Codec public APIs
+├── opus.go / multistream.go / surround.go / projection.go
+├── extensions.go / repacketizer.go         # Packet operations
+├── oggopus/                                # Ogg page and Ogg Opus APIs
 ├── internal/
 │   ├── opus_framing.go                  # TOC byte parsing/generation (RFC 6716 §3)
 │   ├── dsp/                             # FFT, MDCT/IMDCT, windows, math
@@ -337,10 +366,12 @@ On Windows, run CGO builds from PowerShell with a working MinGW/MSYS2 toolchain.
 
 ```bash
 go test -run='^$' -fuzz='^FuzzDecode$' -fuzztime=60s .
+go test -run='^$' -fuzz='^FuzzOggParsers$' -fuzztime=60s ./oggopus
 ```
 
-`FuzzDecode` and `FuzzDecodeFloat` assert that the decoder never panics on
-arbitrary input. The `fuzz` CI workflow runs them nightly and on demand.
+The fuzz suite covers single-stream decoding, packet extensions, multistream
+self-delimited framing, repacketization/padding, and Ogg Opus parsing. The
+`fuzz` CI workflow runs every target nightly and on demand.
 
 ## Continuous Integration
 
@@ -373,7 +404,10 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
 - `DecodeFEC` recovers SILK-only and hybrid packets from LBRR in the following
   packet. Hybrid recovery contains the redundant SILK low band. `DecodePLC`
   currently supports CELT-only streams.
-- Projection/ambisonics and Ogg Opus container APIs are not implemented.
+- Projection family 3 uses the predefined libopus 1.6.1 matrices; the package
+  does not currently generate arbitrary custom encoder matrices.
+- The Ogg Opus package handles one logical stream and does not provide seeking,
+  chained-stream orchestration, or multiplexed-stream demux.
 - Multistream/surround do not yet expose every libopus multistream CTL or the
   complete libopus surround energy-mask analysis.
 

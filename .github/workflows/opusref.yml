@@ -1,8 +1,10 @@
-name: Encoder Quality (opusref)
+name: Libopus Interoperability (opusref)
 
 on:
   push:
-    branches: [main, dev/silk-encoder-phase4]
+    branches:
+      - main
+      - "dev/**"
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -16,7 +18,7 @@ concurrency:
 
 jobs:
   opusref:
-    name: encoder quality vs libopus
+    name: reference tests vs libopus
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -37,6 +39,21 @@ jobs:
 
       - name: SILK encoder conformance (SILKOnly)
         run: go test -tags opusref -count=1 -run TestCGOEncodeRefSILKOnly .
+
+      - name: Short-frame interoperability
+        run: go test -tags opusref -count=1 -run '^TestCGOEncodeRefShortFrames$' .
+
+      - name: SILK and hybrid FEC interoperability
+        run: go test -tags opusref -count=1 -run '^TestCGOEncodeRefSILKFEC$|^TestCGOEncodeRefSILKFECMultiFrame$|^TestCGODecodeFECMatchesLibopus$|^TestCGODecodeFECStereoAndHybrid$' .
+
+      - name: Multistream interoperability
+        run: go test -tags opusref -count=1 -run '^TestCGOMultistreamInteroperability$' .
+
+      - name: Projection interoperability
+        run: go test -tags opusref -count=1 -run '^TestCGOProjectionMatricesMatchLibopus$|^TestCGOProjectionFamily[23]Interoperability$' .
+
+      - name: Packet extensions libopus oracle
+        run: go test -tags opusref -count=1 -run '^TestPacketExtensionsLibopusOracle$' .
 
       - name: Decoder reference (12/12 vectors)
         run: go test -tags opusref -count=1 -run TestCGORef .

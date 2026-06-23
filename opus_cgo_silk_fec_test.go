@@ -374,15 +374,7 @@ func TestCGODecodeFECMatchesLibopus(t *testing.T) {
 					}
 				}
 			}
-			minSNR := 6.0
-			if packetMs == 60 {
-				// The deterministic 60 ms fixture carries only a subset of its
-				// LBRR slots. The remaining slot uses this decoder's simpler
-				// SILK PLC, so the complete packet differs more from libopus
-				// even though the present LBRR frames and subsequent state align.
-				minSNR = 1.0
-			}
-			if snr < minSNR {
+			if snr < 6.0 {
 				t.Fatalf("Go/libopus FEC reconstruction diverged: %.2f dB", snr)
 			}
 
@@ -504,7 +496,7 @@ func TestCGODecodeFECStereoAndHybrid(t *testing.T) {
 			}
 			nextSNR, _, _, _ := silkRefAlignedSNR(toFloat64(refNext), goNextF, frameSize*tc.channels/2)
 			t.Logf("normal decode after FEC aligned SNR: %.2f dB", nextSNR)
-			if nextSNR < -2 {
+			if nextSNR < 0 {
 				t.Fatalf("normal decode after FEC diverged: %.2f dB", nextSNR)
 			}
 		})

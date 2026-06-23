@@ -1184,6 +1184,9 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 
 	// ── 9. Update state ───────────────────────────────────────────────────────
 	copy(d.prevNLSFQ15, nlsfQ15)
+	if len(lpcCoeffsQ12) > 0 {
+		copy(d.prevLPCQ12, lpcCoeffsQ12[len(lpcCoeffsQ12)-1])
+	}
 	d.prevSignalType = signalType
 	d.firstFrame = false
 	d.plcCount = 0
@@ -2220,43 +2223,61 @@ func (d *Decoder) decodeSilence() ([]float64, error) {
 	return make([]float64, d.frameSize*d.channels), nil
 }
 
-// concealPacketLoss performs simple packet loss concealment.
+// concealPacketLoss performs pitch-history based packet loss concealment.
 func (d *Decoder) concealPacketLoss() ([]float64, error) {
 	d.plcCount++
-	fadeGain := 1.0 / float64(d.plcCount+1)
 
 	output := make([]int32, d.frameSize)
-	for i := range output {
-		d.randSeed = 196314165*d.randSeed + 907633515
-		noise := d.randSeed >> 10
-
-		var lpcPred64 int64
-		for j := 0; j < d.lpcOrder; j++ {
-			pastIdx := i - j - 1
-			var past int32
-			if pastIdx >= 0 {
-				past = output[pastIdx]
-			} else {
-				histIdx := len(d.lpcState) + pastIdx
-				if histIdx >= 0 && histIdx < len(d.lpcState) {
-					past = d.lpcState[histIdx]
-				}
-			}
-			lpcPred64 += int64(d.prevLPCQ12[j]) * int64(past)
-		}
-		lpcPred := int32(lpcPred64 >> 12)
-		output[i] = noise + lpcPred
-		if output[i] > (1 << 23) {
-			output[i] = 1 << 23
-		} else if output[i] < -(1 << 23) {
-			output[i] = -(1 << 23)
-		}
+	lag := d.lagPrev
+	if lag <= 0 || lag > len(d.ltpState) {
+		lag = d.fsKHz * 10
+	}
+	if lag <= 0 {
+		lag = 1
 	}
 
+	histStart := len(d.ltpState) - lag
+	for i := range output {
+		var pred int32
+		src := histStart + i
+		switch {
+		case src >= 0 && src < len(d.ltpState):
+			pred = d.ltpState[src]
+		case i >= lag:
+			pred = output[i-lag]
+		case len(d.ltpState) > 0:
+			pred = d.ltpState[len(d.ltpState)-1]
+		}
+
+		if d.prevSignalType != SignalTypeVoiced {
+			d.randSeed = 196314165*d.randSeed + 907633515
+			noise := d.randSeed >> 20
+			var lpcPred64 int64
+			for j := 0; j < d.lpcOrder; j++ {
+				pastIdx := i - j - 1
+				var past int32
+				if pastIdx >= 0 {
+					past = output[pastIdx] << 14
+				} else {
+					histIdx := len(d.lpcState) + pastIdx
+					if histIdx >= 0 && histIdx < len(d.lpcState) {
+						past = d.lpcState[histIdx]
+					}
+				}
+				lpcPred64 += int64(d.prevLPCQ12[j]) * int64(past)
+			}
+			pred = int32(lpcPred64>>26) + noise
+		}
+
+		frameFade := 1.0 - 0.25*float64(i)/float64(max(1, d.frameSize-1))
+		lossFade := math.Pow(0.85, float64(d.plcCount-1))
+		output[i] = clampPCM32(int64(math.Round(float64(pred) * frameFade * lossFade)))
+	}
+
+	d.updatePLCState(output)
 	result := make([]float64, d.frameSize)
-	scale := fadeGain / float64(1<<14)
 	for i, s := range output {
-		result[i] = float64(s) * scale
+		result[i] = float64(s) / 32768.0
 	}
 
 	if d.channels == 2 {
@@ -2268,6 +2289,43 @@ func (d *Decoder) concealPacketLoss() ([]float64, error) {
 		return stereo, nil
 	}
 	return result, nil
+}
+
+func (d *Decoder) updatePLCState(output []int32) {
+	if len(output) == 0 {
+		return
+	}
+	if len(d.prevOutput) != d.frameSize {
+		d.prevOutput = make([]int32, d.frameSize)
+	}
+	for i, sample := range output {
+		d.prevOutput[i] = sample << 14
+	}
+	for i := range d.lpcState {
+		src := len(output) - len(d.lpcState) + i
+		if src >= 0 {
+			d.lpcState[i] = output[src] << 14
+		} else {
+			d.lpcState[i] = 0
+		}
+	}
+	if len(output) <= len(d.ltpState) {
+		mvLen := len(d.ltpState) - len(output)
+		copy(d.ltpState[:mvLen], d.ltpState[len(output):])
+		for i, sample := range output {
+			d.ltpState[mvLen+i] = sample
+		}
+	}
+}
+
+func clampPCM32(v int64) int32 {
+	if v > math.MaxInt16 {
+		return math.MaxInt16
+	}
+	if v < math.MinInt16 {
+		return math.MinInt16
+	}
+	return int32(v)
 }
 
 // Reset resets the decoder state.

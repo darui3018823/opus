@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-06-23
+Last reviewed: 2026-06-24
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -755,11 +755,12 @@ libopus frame-major order: stereo predictor and optional mid-only flag, then
 mid and side redundant bodies for each frame. The opusref quality guard now
 requires at least 6 dB aligned SNR for stereo SILK and stereo hybrid FEC
 recovery (previously -2 dB), with per-channel measurements and a subsequent
-normal-decode continuity check. On the deterministic fixture this improved
-stereo SILK from 0.05 to 6.85 dB and stereo hybrid from 0.00 to 7.63 dB.
-The remaining weak mono 60 ms result is isolated to a missing first LBRR slot
-that falls back to the current simplified SILK PLC; the two present LBRR slots
-measure 8.26 and 21.92 dB against libopus.
+normal-decode continuity check. The mono 20/40/60 ms Go-vs-libopus FEC floor is
+also at least 6 dB; the 60 ms case improved from 1.72 to 8.43 dB after the SILK
+PLC fallback began preserving LPC history and using the previous pitch/LTP
+history for missing LBRR slots. On the deterministic fixture, stereo SILK
+measures 6.85 dB and stereo hybrid measures 7.63 dB. FEC after-state continuity
+is guarded at non-negative aligned SNR for the tested stereo/hybrid cases.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single
@@ -797,11 +798,11 @@ Mono SILK LBRR/FEC encoding verification on 2026-06-20: passing
 `go test -count=1 -tags opusref ./...`). The libopus sequence tests cover
 normal decoding plus `decode_fec=1` recovery for 20/40/60 ms packets.
 
-Stereo/hybrid LBRR ordering verification on 2026-06-23: targeted normal and
-opusref tests pass. The stereo/hybrid Go-vs-libopus FEC floor is 6 dB, channel
-metrics are logged, and normal decoding is continued after FEC in every tested
-mode. Mono 60 ms remains limited by the simplified SILK PLC used for an absent
-LBRR slot.
+FEC quality verification on 2026-06-24: targeted normal and opusref tests pass.
+The mono, stereo SILK, and mono/stereo hybrid Go-vs-libopus FEC floor is 6 dB,
+channel metrics are logged for stereo, and normal decoding is continued after
+FEC in every tested mode. The mono 60 ms case now clears the same full-packet
+floor even when one LBRR slot falls back to SILK PLC.
 
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.

@@ -52,8 +52,14 @@ jobs:
       - name: Projection interoperability
         run: go test -tags opusref -count=1 -run '^TestCGOProjectionMatricesMatchLibopus$|^TestCGOProjectionFamily[23]Interoperability$' .
 
+      - name: Vendor libopus source (packet-extension oracle)
+        run: |
+          curl -sL -o opus-src.tar.gz https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz
+          tar -xzf opus-src.tar.gz
+          mv opus-1.6.1 libopus
+
       - name: Packet extensions libopus oracle
-        run: go test -tags opusref -count=1 -run '^TestPacketExtensionsLibopusOracle$' .
+        run: go test -tags "opusref opusextsrc" -count=1 -run '^TestPacketExtensionsLibopusOracle$' .
 
       - name: Decoder reference (12/12 vectors)
         run: go test -tags opusref -count=1 -run TestCGORef .

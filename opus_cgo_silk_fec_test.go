@@ -3,11 +3,13 @@
 package opus_test
 
 import (
+	"fmt"
 	"math"
 	"testing"
 
 	opus "github.com/darui3018823/opus"
 	"github.com/darui3018823/opus/internal/cgoref"
+	"github.com/darui3018823/opus/internal/entcode"
 )
 
 // TestCGOEncodeRefSILKFEC validates the SILK inband-FEC (LBRR) encoder against
@@ -359,6 +361,10 @@ func TestCGODecodeFECMatchesLibopus(t *testing.T) {
 			snr, _, _, _ := silkRefAlignedSNR(toFloat64(refFEC), goFEC, frameSize/2)
 			t.Logf("FEC Go/libopus aligned SNR: %.2f dB", snr)
 			if packetMs > 20 {
+				lbrrPresent, err := silkMonoLBRRPresent(packets[lost+1], packetMs/20)
+				if err != nil {
+					t.Fatalf("parse LBRR mask: %v", err)
+				}
 				subframeSize := rate / 50
 				for f := 0; f < packetMs/20; f++ {
 					start := f * subframeSize
@@ -369,7 +375,11 @@ func TestCGODecodeFECMatchesLibopus(t *testing.T) {
 						subframeSize/2,
 					)
 					t.Logf("FEC subframe %d aligned SNR: %.2f dB", f, frameSNR)
-					if !(packetMs == 60 && f == 0) && frameSNR < 6 {
+					if !lbrrPresent[f] {
+						t.Logf("FEC subframe %d LBRR absent (PLC) - skipped", f)
+						continue
+					}
+					if frameSNR < 6 {
 						t.Fatalf("present LBRR subframe %d diverged: %.2f dB", f, frameSNR)
 					}
 				}
@@ -397,6 +407,47 @@ func TestCGODecodeFECMatchesLibopus(t *testing.T) {
 		})
 	}
 }
+
+func silkMonoLBRRPresent(packet []byte, nFrames int) ([]bool, error) {
+	if nFrames < 1 {
+		nFrames = 1
+	}
+	present := make([]bool, nFrames)
+	if len(packet) < 2 {
+		return present, nil
+	}
+
+	countCode := int(packet[0] & 0x03)
+	if countCode != 0 {
+		return nil, fmt.Errorf("expected single Opus frame packet, got count code %d", countCode)
+	}
+	dec := entcode.NewDecoder(packet[1:])
+	if err := dec.Error(); err != nil {
+		return nil, err
+	}
+
+	for i := 0; i < nFrames; i++ {
+		_ = dec.DecodeBitLogp(1)
+	}
+	lbrrFlag := dec.DecodeBitLogp(1)
+	if !lbrrFlag {
+		return present, dec.Error()
+	}
+
+	mask := 1
+	if nFrames == 2 {
+		mask = dec.DecodeIcdf(silkLBRRFlags2ICDF[:], 8) + 1
+	} else if nFrames >= 3 {
+		mask = dec.DecodeIcdf(silkLBRRFlags3ICDF[:], 8) + 1
+	}
+	for i := range present {
+		present[i] = mask&(1<<uint(i)) != 0
+	}
+	return present, dec.Error()
+}
+
+var silkLBRRFlags2ICDF = [3]uint8{203, 150, 0}
+var silkLBRRFlags3ICDF = [7]uint8{215, 195, 166, 125, 110, 82, 0}
 
 func TestCGODecodeFECStereoAndHybrid(t *testing.T) {
 	tests := []struct {

@@ -3478,7 +3478,7 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 		peer.dec.CopyPrimaryStateFrom(infoDec.dec)
 	}
 	d.lastPacketDuration = info.totalSamples
-	d.prevMode = framing.ModeSILKOnly
+	d.prevMode = info.mode
 	return info.totalSamples, nil
 }
 

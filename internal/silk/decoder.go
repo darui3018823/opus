@@ -559,9 +559,8 @@ func (d *Decoder) decodeFECStereo(dec *entcode.Decoder, nFrames int) ([]float64,
 			return nil, err
 		}
 
-		hasSide := !d.prevDecodeOnlyMiddle || sidePresent
 		side := make([]float64, d.frameSize)
-		if hasSide {
+		if !decodeOnlyMiddle {
 			if sidePresent {
 				if d.prevDecodeOnlyMiddle {
 					d.side.Reset()
@@ -738,13 +737,8 @@ func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]floa
 			lbrrMasks[ch] = dec.DecodeIcdf(silkLBRRFlags3ICDF[:], 8) + 1
 		}
 	}
-	if lbrrMasks[0] != 0 {
-		if err := d.consumeLBRRFrames(dec, nFrames, lbrrMasks[0]); err != nil {
-			return nil, err
-		}
-	}
-	if lbrrMasks[1] != 0 {
-		if err := d.side.consumeLBRRFrames(dec, nFrames, lbrrMasks[1]); err != nil {
+	if lbrrMasks[0] != 0 || lbrrMasks[1] != 0 {
+		if err := d.consumeStereoLBRRFrames(dec, nFrames, lbrrMasks); err != nil {
 			return nil, err
 		}
 	}
@@ -785,6 +779,40 @@ func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]floa
 		d.prevDecodeOnlyMiddle = decodeOnlyMiddle
 	}
 	return allPCM, nil
+}
+
+func (d *Decoder) consumeStereoLBRRFrames(dec *entcode.Decoder, nFrames int, masks [2]int) error {
+	frameMs := d.frameSize * 1000 / d.sampleRate
+	mid, err := NewDecoderWithFrameMs(d.sampleRate, 1, frameMs)
+	if err != nil {
+		return err
+	}
+	side, err := NewDecoderWithFrameMs(d.sampleRate, 1, frameMs)
+	if err != nil {
+		return err
+	}
+	prevPresent := [2]bool{}
+	for frame := 0; frame < nFrames; frame++ {
+		midPresent := masks[0]&(1<<uint(frame)) != 0
+		sidePresent := masks[1]&(1<<uint(frame)) != 0
+		if midPresent {
+			_ = decodeStereoPredQ13(dec)
+			if !sidePresent {
+				_ = dec.DecodeIcdf(silkStereoOnlyCodeMidICDF[:], 8)
+			}
+			if _, err := mid.decodeFrame(dec, 1, prevPresent[0]); err != nil {
+				return err
+			}
+		}
+		if sidePresent {
+			if _, err := side.decodeFrame(dec, 1, prevPresent[1]); err != nil {
+				return err
+			}
+		}
+		prevPresent[0] = midPresent
+		prevPresent[1] = sidePresent
+	}
+	return nil
 }
 
 func (d *Decoder) decodeFrameMono(dec *entcode.Decoder, vadFlag uint32, conditionalGain bool) ([]float64, error) {

@@ -445,11 +445,21 @@ func TestCGODecodeFECStereoAndHybrid(t *testing.T) {
 			defer refDec.Close()
 			const lost = 4
 			for p := 0; p < lost; p++ {
-				if _, err := goDec.Decode(packets[p], make([]int16, frameSize*tc.channels)); err != nil {
+				goPrime := make([]int16, frameSize*tc.channels)
+				if _, err := goDec.Decode(packets[p], goPrime); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := refDec.DecodeFloat(packets[p], frameSize); err != nil {
+				refPrime, err := refDec.DecodeFloat(packets[p], frameSize)
+				if err != nil {
 					t.Fatal(err)
+				}
+				goPrimeF := make([]float64, len(goPrime))
+				for i, sample := range goPrime {
+					goPrimeF[i] = float64(sample) / 32768
+				}
+				primeSNR, _, _, _ := silkRefAlignedSNR(toFloat64(refPrime), goPrimeF, frameSize*tc.channels/2)
+				if primeSNR < 10 {
+					t.Fatalf("normal FEC-stream decode before loss diverged at packet %d: %.2f dB", p, primeSNR)
 				}
 			}
 			goPCM := make([]int16, frameSize*tc.channels)
@@ -478,7 +488,7 @@ func TestCGODecodeFECStereoAndHybrid(t *testing.T) {
 					t.Logf("channel %d FEC aligned SNR: %.2f dB", ch, channelSNR)
 				}
 			}
-			if snr < 6 {
+			if snr < 20 {
 				t.Fatalf("FEC reconstruction diverged: %.2f dB", snr)
 			}
 
@@ -496,7 +506,7 @@ func TestCGODecodeFECStereoAndHybrid(t *testing.T) {
 			}
 			nextSNR, _, _, _ := silkRefAlignedSNR(toFloat64(refNext), goNextF, frameSize*tc.channels/2)
 			t.Logf("normal decode after FEC aligned SNR: %.2f dB", nextSNR)
-			if nextSNR < 0 {
+			if nextSNR < 10 {
 				t.Fatalf("normal decode after FEC diverged: %.2f dB", nextSNR)
 			}
 		})

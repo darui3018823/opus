@@ -65,6 +65,57 @@ func TestPitchCoreRejectsNoise(t *testing.T) {
 	}
 }
 
+func TestFirstFrameLongLagDisablesPitchPrediction(t *testing.T) {
+	enc, err := NewEncoderWithFrameMs(16000, 1, 20)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	if err := enc.SetBitrate(24000); err != nil {
+		t.Fatalf("SetBitrate: %v", err)
+	}
+	if err := enc.SetComplexity(5); err != nil {
+		t.Fatalf("SetComplexity: %v", err)
+	}
+	enc.SetRateMode(RateModeCVBR)
+
+	dec, err := NewDecoderWithFrameMs(16000, 1, 20)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	dec.trace = &decodeTrace{}
+
+	frameSize := enc.frameSize
+	pcm := make([]float64, frameSize)
+	for i := range pcm {
+		tm := float64(i) / 16000.0
+		f0 := 145 + 24*math.Sin(2*math.Pi*1.7*tm)
+		env := 0.18 + 0.10*math.Sin(2*math.Pi*3.1*tm+0.2)
+		pcm[i] = env * (0.58*math.Sin(2*math.Pi*f0*tm) +
+			0.24*math.Sin(2*math.Pi*2*f0*tm+0.35) +
+			0.11*math.Sin(2*math.Pi*3*f0*tm+0.85))
+	}
+
+	pkt, err := enc.Encode(pcm)
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+	if _, err := dec.DecodeMulti(pkt, 1); err != nil {
+		t.Fatalf("DecodeMulti: %v", err)
+	}
+	if len(dec.trace.Frames) != 1 {
+		t.Fatalf("decoded trace frames=%d, want 1", len(dec.trace.Frames))
+	}
+	tf := dec.trace.Frames[0]
+	if tf.SignalType == SignalTypeVoiced {
+		t.Fatalf("first frame after reset was coded voiced with pitch=%v ltp=%v", tf.PitchLags, tf.LTPCoefQ14)
+	}
+	for _, coef := range tf.LTPCoefQ14 {
+		if coef != 0 {
+			t.Fatalf("first frame LTP coefficient=%d, want all zero ltp=%v", coef, tf.LTPCoefQ14)
+		}
+	}
+}
+
 // TestResamplerDown2HalvesLength checks the int16 2:1 decimator output length
 // and that a DC input is preserved.
 func TestResamplerDown2HalvesLength(t *testing.T) {

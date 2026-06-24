@@ -110,6 +110,7 @@ _ = packet
 
 // Float64 input is also supported:
 //   packet, err := enc.EncodeFloat(make([]float64, 960*2), 960)
+// Float32 input is supported with EncodeFloat32.
 
 // Bandwidth is detected automatically from signal content; override if needed:
 //   enc.SetBandwidth(opus.BandwidthWideband) // force wideband
@@ -118,7 +119,8 @@ _ = packet
 // Optional content hint independent of Application:
 //   enc.SetSignalType(opus.SignalVoice)
 
-// Multi-frame packets use exact 20 ms multiples up to 120 ms:
+// Short CELT packets and multi-frame packets are supported:
+//   packet, err := enc.Encode(pcm480, 480)   // 10 ms at 48 kHz
 //   packet, err := enc.Encode(pcm1920, 1920) // 40 ms
 ```
 
@@ -130,17 +132,15 @@ _ = packet
 - **Channels**: mono and stereo.
 - **Decoder frame sizes**: all Opus durations (2.5/5/10/20/40/60 ms), selected
   per packet by the TOC byte.
-- **Encoder frame sizes**: exact 20 ms multiples from 20 ms through 120 ms
-  (multi-frame, RFC 6716 §3.2). Other sizes are rejected.
+- **Encoder frame sizes**: 2.5/5/10 ms CELT packets and exact 20 ms multiples
+  from 20 ms through 120 ms (multi-frame, RFC 6716 §3.2).
 - **Encoder bandwidth**: automatic (signal-content-driven FFT detection) or
   manual (`SetBandwidth`/`SetMaxBandwidth`). Ranges: NB/WB/SWB/FB.
-- **Encoder mode selection**: CELT is the default for general audio, music,
-  restricted-low-delay, and bitrates above 40 kbps. The limited SILK-only path
-  is selected for mono or stereo speech when `ApplicationVOIP` or `SignalVoice`
-  is active, bitrate is at most 40 kbps, and `SetBandwidth`/`SetMaxBandwidth`
-  allow the selected SILK bandwidth. Native 8/12/16 kHz input maps to NB/MB/WB;
-  24/48 kHz voice input is downsampled to WB SILK. `SignalMusic` keeps the
-  encoder on CELT.
+- **Encoder mode selection**: CELT is used for general audio, music,
+  restricted-low-delay, and voice above the useful hybrid range. Voice
+  boundaries account for channel count and active LBRR: SILK-only extends to
+  40 kbps mono or 48 kbps stereo, with extra headroom when FEC is active;
+  24/48 kHz voice can use hybrid at intermediate rates, then returns to CELT.
 - **Application types** (drive bandwidth and transient-detection behaviour):
   - `opus.ApplicationVOIP` — narrower bandwidth tiers, eager short-block switching
   - `opus.ApplicationAudio` — music/general defaults
@@ -151,33 +151,81 @@ _ = packet
 
 ## Public API
 
+The public version constants are generated from the repository's
+[`VERSION`](VERSION) file.
+
+`MaxFrameSize` is 5760 samples per channel at 48 kHz (120 ms).
+`MaxFrameBytes` is the 1275-byte compressed-frame limit. `MaxPacketSize` is a
+conservative unpadded single-stream packet storage bound; explicit packet
+padding can exceed it.
+
 ### Encoder
 
 ```go
 func NewEncoder(sampleRate, channels int, application Application) (*Encoder, error)
+func NewEncoderWithProfile(sampleRate, channels int, application Application, profile EncoderProfile) (*Encoder, error)
 
 func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error)
+func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error)
 func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error)
+func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error)
 
 func (e *Encoder) Bitrate() int
+func (e *Encoder) EffectiveBitrate() int
 func (e *Encoder) Complexity() int
 func (e *Encoder) VBR() bool
+func (e *Encoder) VBRConstraint() bool
 func (e *Encoder) Application() Application
+func (e *Encoder) SampleRate() int
+func (e *Encoder) Channels() int
+func (e *Encoder) Lookahead() int
+func (e *Encoder) FinalRange() uint32
+func (e *Encoder) InDTX() bool
 
 func (e *Encoder) SetBitrate(bitrate int) error       // 6000–510000 bps
 func (e *Encoder) SetComplexity(complexity int) error  // 0–10
 func (e *Encoder) SetVBR(vbr bool)
 func (e *Encoder) SetVBRConstraint(constrained bool)   // true = CVBR
-func (e *Encoder) SetApplication(application Application)
+func (e *Encoder) SetApplication(application Application) error
 func (e *Encoder) SetSignalType(signal SignalType)
 func (e *Encoder) SignalType() SignalType
 func (e *Encoder) SetBandwidth(bw int) error           // Auto/NB/WB/SWB/FB
 func (e *Encoder) SetMaxBandwidth(bw int) error
+func (e *Encoder) MaxBandwidth() int
 func (e *Encoder) Bandwidth() int
 func (e *Encoder) SetDTX(dtx bool)
+func (e *Encoder) DTX() bool
+func (e *Encoder) SetInbandFEC(enabled bool)             // SILK-only/hybrid
+func (e *Encoder) InbandFEC() bool
+func (e *Encoder) SetPacketLossPerc(perc int)            // clamped to 0–100
+func (e *Encoder) PacketLossPerc() int
 func (e *Encoder) SetPacketPadding(n int)
+func (e *Encoder) SetForceChannels(channels int) error
+func (e *Encoder) ForceChannels() int
+func (e *Encoder) SetLSBDepth(depth int) error
+func (e *Encoder) LSBDepth() int
+func (e *Encoder) SetPredictionDisabled(disabled bool)
+func (e *Encoder) PredictionDisabled() bool
+func (e *Encoder) SetPhaseInversionDisabled(disabled bool)
+func (e *Encoder) PhaseInversionDisabled() bool
 func (e *Encoder) Reset() error
 ```
+
+`NewEncoder` preserves the historical 64 kbit/s, complexity 5, CBR defaults.
+Use `EncoderProfileLibopus` for automatic bitrate, complexity 9, and constrained
+VBR defaults.
+
+### Concurrency and ownership
+
+`Encoder` and `Decoder` are stateful and are not safe for concurrent use.
+Create one instance per logical Opus stream and preserve packet order. All
+methods on the same instance, including getters, configuration methods, and
+`Reset`, must be serialized by the caller, for example with a mutex. Separate
+instances may be used concurrently.
+
+Do not copy an `Encoder` or `Decoder` after first use. Encode and decode methods
+borrow caller-provided PCM, packet, and destination slices only until the method
+returns. Returned encoded packets and PCM slices are owned by the caller.
 
 ### Decoder
 
@@ -185,20 +233,83 @@ func (e *Encoder) Reset() error
 func NewDecoder(sampleRate, channels int) (*Decoder, error)
 
 func (d *Decoder) Decode(data []byte, pcm []int16) (int, error)
+func (d *Decoder) Decode24(data []byte, pcm []int32) (int, error)
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error)
-func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) // currently a CELT PLC fallback
+func (d *Decoder) DecodeFloat32(data []byte) ([]float32, error)
+func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) // CELT-only after a successful CELT decode
+func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error)   // SILK LBRR
 func (d *Decoder) Reset() error
 func (d *Decoder) GetLastPacketDuration() int
+func (d *Decoder) SampleRate() int
+func (d *Decoder) Channels() int
+func (d *Decoder) FinalRange() uint32
+func (d *Decoder) Pitch() int
+func (d *Decoder) SetGain(gainQ8 int) error
+func (d *Decoder) Gain() int
+func (d *Decoder) SetPhaseInversionDisabled(disabled bool)
+func (d *Decoder) PhaseInversionDisabled() bool
 ```
 
-There is intentionally **no** `EncodeFloat32`, `DecodeFloat32`, or
-`DecodePLC(pcm, frameSize)` API. Use the float64 variants above.
+### Multistream and surround
+
+```go
+func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, mapping []byte, application Application) (*MultistreamEncoder, error)
+func NewMultistreamDecoder(sampleRate, channels, streams, coupledStreams int, mapping []byte) (*MultistreamDecoder, error)
+
+func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application Application) (*SurroundEncoder, error)
+func NewSurroundDecoder(sampleRate, channels, mappingFamily int) (*SurroundDecoder, error)
+```
+
+Multistream packets use RFC 6716 self-delimited framing and interoperate with
+libopus 1.6.1. Surround supports mapping families 0, 1 (Vorbis order, up to
+7.1), and 255.
+
+### Projection and Ambisonics
+
+```go
+func NewProjectionEncoder(sampleRate, channels, mappingFamily int, application Application) (*ProjectionEncoder, error)
+func NewProjectionDecoder(sampleRate, channels, streams, coupledStreams int, demixingMatrix []byte) (*ProjectionDecoder, error)
+func NewAmbisonicsEncoder(sampleRate, channels, mappingFamily int, application Application) (*ProjectionEncoder, error)
+func NewAmbisonicsDecoder(sampleRate, channels, mappingFamily, streams, coupledStreams int, mapping, demixingMatrix []byte) (*AmbisonicsDecoder, error)
+```
+
+RFC 8486 mapping families 2 and 3 are supported. Family 2 uses ACN/SN3D
+Ambisonics channel mapping; family 3 uses the projection mixing/demixing
+matrices provided by libopus 1.6.1. Both families have bidirectional libopus
+interoperability tests.
+
+### Packet operations
+
+```go
+func NewRepacketizer() *Repacketizer
+func (r *Repacketizer) Cat(packet []byte) error
+func (r *Repacketizer) NumFrames() int
+func (r *Repacketizer) Out() ([]byte, error)
+func (r *Repacketizer) OutRange(begin, end int) ([]byte, error)
+func PacketPad(packet []byte, newLen int) ([]byte, error)
+func PacketUnpad(packet []byte) ([]byte, error)
+func PacketExtensionsCount(packet []byte) (int, error)
+func PacketExtensionsParse(packet []byte) ([]PacketExtension, error)
+func PacketExtensionsGenerate(packet []byte, extensions []PacketExtension, paddingBytes int) ([]byte, error)
+```
+
+Packet extensions are transported through code-3 padding. DRED and QEXT
+payloads are exposed as opaque data; their neural/DSP codecs are not
+implemented here.
+
+### Ogg Opus containers
+
+The `github.com/darui3018823/opus/oggopus` package provides CRC-checked Ogg
+page parsing/writing, packet continuation and lacing, `OpusHead`/`OpusTags`
+metadata, and complete single-logical-stream Ogg Opus readers and writers.
 
 ## Architecture
 
 ```
 github.com/darui3018823/opus/
-├── opus.go / constants.go / errors.go  # Public API (Encoder/Decoder)
+├── opus.go / multistream.go / surround.go / projection.go
+├── extensions.go / repacketizer.go         # Packet operations
+├── oggopus/                                # Ogg page and Ogg Opus APIs
 ├── internal/
 │   ├── opus_framing.go                  # TOC byte parsing/generation (RFC 6716 §3)
 │   ├── dsp/                             # FFT, MDCT/IMDCT, windows, math
@@ -255,10 +366,12 @@ On Windows, run CGO builds from PowerShell with a working MinGW/MSYS2 toolchain.
 
 ```bash
 go test -run='^$' -fuzz='^FuzzDecode$' -fuzztime=60s .
+go test -run='^$' -fuzz='^FuzzOggParsers$' -fuzztime=60s ./oggopus
 ```
 
-`FuzzDecode` and `FuzzDecodeFloat` assert that the decoder never panics on
-arbitrary input. The `fuzz` CI workflow runs them nightly and on demand.
+The fuzz suite covers single-stream decoding, packet extensions, multistream
+self-delimited framing, repacketization/padding, and Ogg Opus parsing. The
+`fuzz` CI workflow runs every target nightly and on demand.
 
 ## Continuous Integration
 
@@ -280,15 +393,23 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
 
 ## Limitations
 
-- SILK-only encode is limited to low-bitrate speech; 24/48 kHz input is
-  downsampled to WB SILK, so high-band preservation requires future hybrid
-  encode work.
+- SILK/hybrid encode remains voice-oriented and does not yet reproduce every
+  libopus mode boundary or quality decision.
 - The encoder is not bit-exact with libopus, but produces standards-conformant
   packets that any compliant decoder (including libopus) can decode.
 - VBR/CVBR and application/signal hints shape the CELT encoder heuristics, but
   do not provide full libopus-equivalent mode/rate-control behavior.
-- `DecodeFEC` is currently a PLC fallback, not packet FEC extraction.
-- No multistream, surround, or Ogg Opus container API.
+- SILK-only and hybrid encoding can emit LBRR/in-band FEC for mono and stereo
+  via `SetInbandFEC(true)` and a non-zero `SetPacketLossPerc`.
+- `DecodeFEC` recovers SILK-only and hybrid packets from LBRR in the following
+  packet. Hybrid recovery contains the redundant SILK low band. `DecodePLC`
+  currently supports CELT-only streams.
+- Projection family 3 uses the predefined libopus 1.6.1 matrices; the package
+  does not currently generate arbitrary custom encoder matrices.
+- The Ogg Opus package handles one logical stream and does not provide seeking,
+  chained-stream orchestration, or multiplexed-stream demux.
+- Multistream/surround do not yet expose every libopus multistream CTL or the
+  complete libopus surround energy-mask analysis.
 
 ## Contributing
 

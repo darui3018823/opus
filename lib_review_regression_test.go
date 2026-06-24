@@ -65,11 +65,43 @@ func TestEncoderRejectsInvalidPacketDurations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := enc48.EncodeFloat(make([]float64, 480), 480); !errors.Is(err, ErrUnsupportedFrameSize) {
-		t.Fatalf("48 kHz 10 ms encode error = %v, want ErrUnsupportedFrameSize", err)
+	if _, err := enc48.EncodeFloat(make([]float64, 720), 720); !errors.Is(err, ErrUnsupportedFrameSize) {
+		t.Fatalf("48 kHz 15 ms encode error = %v, want ErrUnsupportedFrameSize", err)
 	}
 	if _, err := enc48.EncodeFloat(make([]float64, 7*960), 7*960); !errors.Is(err, ErrUnsupportedFrameSize) {
 		t.Fatalf("140 ms encode error = %v, want ErrUnsupportedFrameSize", err)
+	}
+}
+
+// TestEncoderResetPreservesSignalHintAfterShortFrame guards against the content
+// hint reverting on Reset when a short-frame CELT encoder was active: encoding a
+// 2.5 ms frame makes a short-frame instance active, SetSignalType updates only
+// that instance, and Reset switches back to the 20 ms encoder.
+func TestEncoderResetPreservesSignalHintAfterShortFrame(t *testing.T) {
+	const sampleRate = 48000
+	enc, err := NewEncoder(sampleRate, 1, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	short := make([]float64, 120) // 2.5 ms at 48 kHz
+	for i := range short {
+		short[i] = 0.2 * math.Sin(2*math.Pi*440*float64(i)/sampleRate)
+	}
+	if _, err := enc.EncodeFloat(short, 120); err != nil {
+		t.Fatal(err)
+	}
+
+	enc.SetSignalType(SignalVoice)
+	if got := enc.SignalType(); got != SignalVoice {
+		t.Fatalf("SignalType before reset = %v, want SignalVoice", got)
+	}
+
+	if err := enc.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if got := enc.SignalType(); got != SignalVoice {
+		t.Fatalf("SignalType after reset = %v, want SignalVoice (hint reverted to stale 20 ms encoder)", got)
 	}
 }
 
@@ -103,6 +135,63 @@ func TestDecodeReturnsBufferTooSmall(t *testing.T) {
 	}
 	if _, err := dec.Decode(pkt, make([]int16, frameSize-1)); !errors.Is(err, ErrBufferTooSmall) {
 		t.Fatalf("Decode small buffer error = %v, want ErrBufferTooSmall", err)
+	}
+}
+
+func TestDecodeBufferTooSmallDoesNotAdvanceState(t *testing.T) {
+	const sampleRate = 48000
+	const frameSize = 960
+
+	enc, err := NewEncoder(sampleRate, 1, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeFrame := func(freq, phase float64) []float64 {
+		pcm := make([]float64, frameSize)
+		for i := range pcm {
+			pcm[i] = 0.3 * math.Sin(2*math.Pi*freq*float64(i)/sampleRate+phase)
+		}
+		return pcm
+	}
+	firstPacket, err := enc.EncodeFloat(makeFrame(440, 0), frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPacket, err := enc.EncodeFloat(makeFrame(733, 0.7), frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	retryDecoder, err := NewDecoder(sampleRate, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlDecoder, err := NewDecoder(sampleRate, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dec := range []*Decoder{retryDecoder, controlDecoder} {
+		if _, err := dec.Decode(firstPacket, make([]int16, frameSize)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := retryDecoder.Decode(secondPacket, make([]int16, frameSize-1)); !errors.Is(err, ErrBufferTooSmall) {
+		t.Fatalf("Decode small buffer error = %v, want ErrBufferTooSmall", err)
+	}
+
+	retried := make([]int16, frameSize)
+	if _, err := retryDecoder.Decode(secondPacket, retried); err != nil {
+		t.Fatal(err)
+	}
+	control := make([]int16, frameSize)
+	if _, err := controlDecoder.Decode(secondPacket, control); err != nil {
+		t.Fatal(err)
+	}
+	for i := range retried {
+		if retried[i] != control[i] {
+			t.Fatalf("retry output differs at sample %d: got %d, want %d", i, retried[i], control[i])
+		}
 	}
 }
 

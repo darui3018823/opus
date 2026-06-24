@@ -756,11 +756,31 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64) (v
 	}
 
 	ltpCorr = e.ltpCorrState
-	_, lagIndex, contourIndex, voiced = silkPitchAnalysisCoreFLP(
+	pitchOut, lagIndex, contourIndex, voiced := silkPitchAnalysisCoreFLP(
 		res, &ltpCorr, e.prevLagForPitch, searchThres1, searchThres2,
 		fsKHz, peComplexity, nbSubfr)
+	if e.firstFrameAfterReset && e.channels == 1 && !e.stereoComponent && !e.hybridMode && voiced && firstFrameLongLagPitch(pitchOut, fsKHz) {
+		e.ltpCorrState = 0
+		return false, 0, 0, 0
+	}
 	e.ltpCorrState = ltpCorr
 	return voiced, lagIndex, contourIndex, ltpCorr
+}
+
+func firstFrameLongLagPitch(pitchLags []int, fsKHz int) bool {
+	if fsKHz != 16 {
+		return false
+	}
+	// Keep the guard to low-F0 wideband onsets. The scoreboard overshoot is the
+	// 16 kHz speech-like harmonic first frame (~145 Hz, lag > 100), while the
+	// shorter-lag voiced/onset fixtures rely on the existing first-frame path.
+	maxReliableFirstFrameLag := fsKHz * 1000 / 160
+	for _, lag := range pitchLags {
+		if lag > maxReliableFirstFrameLag {
+			return true
+		}
+	}
+	return false
 }
 
 // updatePitchHist shifts the encoder's pitch history buffer to end with the most

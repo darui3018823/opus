@@ -3,13 +3,7 @@
 // and aims for complete compatibility without using CGO.
 package opus
 
-// Opus version constants
-const (
-	Version      = "0.1.0"
-	VersionMajor = 0
-	VersionMinor = 1
-	VersionPatch = 0
-)
+//go:generate go run ./internal/cmd/genversion -version VERSION -out version_gen.go
 
 // Sample rates supported by Opus
 const (
@@ -28,6 +22,9 @@ const (
 	FrameSize20ms  = 960  // 20ms at 48kHz (most common)
 	FrameSize40ms  = 1920 // 40ms at 48kHz
 	FrameSize60ms  = 2880 // 60ms at 48kHz
+	FrameSize80ms  = 3840 // 80ms at 48kHz
+	FrameSize100ms = 4800 // 100ms at 48kHz
+	FrameSize120ms = 5760 // 120ms at 48kHz (maximum packet duration)
 )
 
 // Application types
@@ -49,8 +46,22 @@ const (
 
 // Channel modes
 const (
+	ChannelsAuto   = -1000
 	ChannelsMono   = 1
 	ChannelsStereo = 2
+)
+
+// Decoder gain is expressed in Q8 dB, matching OPUS_SET_GAIN.
+const (
+	GainQ8Min = -32768
+	GainQ8Max = 32767
+)
+
+// Encoder input precision hints accepted by SetLSBDepth.
+const (
+	LSBDepthMin     = 8
+	LSBDepthMax     = 24
+	LSBDepthDefault = 24
 )
 
 // Opus modes (internal)
@@ -70,36 +81,38 @@ const (
 
 // Encoder/Decoder control codes (CTL)
 const (
-	SetBitrateRequest             = 4002
-	GetBitrateRequest             = 4003
-	SetForceChannelsRequest       = 4022
-	GetForceChannelsRequest       = 4023
-	SetMaxBandwidthRequest        = 4004
-	GetMaxBandwidthRequest        = 4005
-	SetBandwidthRequest           = 4008
-	GetBandwidthRequest           = 4009
-	SetComplexityRequest          = 4010
-	GetComplexityRequest          = 4011
-	SetInbandFECRequest           = 4012
-	GetInbandFECRequest           = 4013
-	SetPacketLossPercRequest      = 4014
-	GetPacketLossPercRequest      = 4015
-	SetDTXRequest                 = 4016
-	GetDTXRequest                 = 4017
-	SetVBRRequest                 = 4006
-	GetVBRRequest                 = 4007
-	SetVBRConstraintRequest       = 4020
-	GetVBRConstraintRequest       = 4021
-	SetSignalRequest              = 4024
-	GetSignalRequest              = 4025
-	SetApplicationRequest         = 4000
-	GetApplicationRequest         = 4001
-	GetLookaheadRequest           = 4027
-	SetExpertFrameDurationRequest = 4040
-	GetExpertFrameDurationRequest = 4041
-	SetPredictionDisabledRequest  = 4042
-	GetPredictionDisabledRequest  = 4043
-	ResetStateRequest             = 4028
+	SetBitrateRequest                = 4002
+	GetBitrateRequest                = 4003
+	SetForceChannelsRequest          = 4022
+	GetForceChannelsRequest          = 4023
+	SetMaxBandwidthRequest           = 4004
+	GetMaxBandwidthRequest           = 4005
+	SetBandwidthRequest              = 4008
+	GetBandwidthRequest              = 4009
+	SetComplexityRequest             = 4010
+	GetComplexityRequest             = 4011
+	SetInbandFECRequest              = 4012
+	GetInbandFECRequest              = 4013
+	SetPacketLossPercRequest         = 4014
+	GetPacketLossPercRequest         = 4015
+	SetDTXRequest                    = 4016
+	GetDTXRequest                    = 4017
+	SetVBRRequest                    = 4006
+	GetVBRRequest                    = 4007
+	SetVBRConstraintRequest          = 4020
+	GetVBRConstraintRequest          = 4021
+	SetSignalRequest                 = 4024
+	GetSignalRequest                 = 4025
+	SetApplicationRequest            = 4000
+	GetApplicationRequest            = 4001
+	GetLookaheadRequest              = 4027
+	SetExpertFrameDurationRequest    = 4040
+	GetExpertFrameDurationRequest    = 4041
+	SetPredictionDisabledRequest     = 4042
+	GetPredictionDisabledRequest     = 4043
+	SetPhaseInversionDisabledRequest = 4046
+	GetPhaseInversionDisabledRequest = 4047
+	ResetStateRequest                = 4028
 )
 
 // Complexity (0-10)
@@ -115,8 +128,21 @@ const (
 	PacketLossPercMax = 100
 )
 
-// Maximum packet size
+// Public single-stream size limits.
 const (
-	MaxPacketSize = 1500 // bytes
-	MaxFrameSize  = 2880 // samples at 48kHz for 60ms
+	// MaxFrameSize is the maximum decoded packet duration in samples per
+	// channel at 48 kHz (120 ms).
+	MaxFrameSize = FrameSize120ms
+
+	// MaxFrameBytes is the RFC 6716 maximum compressed payload size of one
+	// Opus frame.
+	MaxFrameBytes = 1275
+
+	// MaxPacketFrames is the maximum number of frames in one Opus packet.
+	MaxPacketFrames = 48
+
+	// MaxPacketSize is a conservative storage bound for an unpadded
+	// single-stream Opus packet: up to two framing bytes plus MaxFrameBytes
+	// for each frame. Explicit SetPacketPadding can produce larger packets.
+	MaxPacketSize = (MaxFrameBytes + 2) * MaxPacketFrames
 )

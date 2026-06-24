@@ -38,6 +38,7 @@ type Encoder struct {
 	prevEnergy     float64   // Previous frame energy for smoothing
 	prevLPC        []float64 // Previous LPC coefficients
 	prevNLSF       []float64 // Previous NLSF
+	prevNLSFQ15    []int16   // Previous quantized NLSF in Q15 (matches decoder prevNLSFQ15; used for interpolation search)
 	prevPitchLag   int       // Previous pitch lag
 	prevLagIndex   int       // Previous entropy-coded pitch lag index
 	prevSignalType int       // Previous SILK signal type
@@ -88,6 +89,38 @@ type Encoder struct {
 	// ltpSumLogGainQ7 is the cumulative log prediction gain across subframes
 	// (silk sum_log_gain_Q7), limiting the total LTP gain for stability.
 	ltpSumLogGainQ7 float64
+
+	// ── Inband Low Bitrate Redundancy (LBRR / in-band FEC) ──────────────────
+	// lbrrEnabled is the SILK LBRR_coded gate (set by the top-level FEC
+	// decision); packetLossPerc feeds the LBRR gain-increase schedule.
+	lbrrEnabled    bool
+	packetLossPerc int
+	// lbrrInPrevPacket records whether the previous packet generated LBRR data,
+	// selecting the LBRR_GainIncreases schedule (silk_setup_LBRR).
+	lbrrInPrevPacket bool
+	// pendingLBRR holds the LBRR frames generated while encoding the previous
+	// packet; they are emitted at the front of the current packet (the cross-
+	// packet one-packet FEC delay). curLBRR accumulates the current packet's
+	// LBRR frames. lbrrPlanned is set when curLBRR has at least one frame.
+	pendingLBRR        []lbrrFrameData
+	curLBRR            []lbrrFrameData
+	pendingLBRRFrames  int // frame count the pending LBRR data was generated for
+	lbrrRunPrevGainIdx int // running gain index within the current LBRR run
+	// pendingLBRRStereoPred carries the M/S predictor indices for the frames in
+	// pendingLBRR. Stereo LBRR syntax writes these controls frame-by-frame
+	// before the corresponding mid/side redundant bodies.
+	pendingLBRRStereoPred [][2][3]int8
+	// lbrrBitsPerFrame is the current packet's emitted LBRR cost divided across
+	// its regular frames. silkFrameTargetBits subtracts it so CBR/CVBR do not
+	// simply add redundancy on top of the configured bitrate.
+	lbrrBitsPerFrame int
+	// Capture of the current voiced frame's coded pitch/LTP indices, populated
+	// by encodePitchAndLTP so the LBRR generator can replay them.
+	capLagHigh    int
+	capLagLow     int
+	capContour    int
+	capLTPPerIdx  int
+	capLTPGainIdx []int
 }
 
 type nlsfAnalysis struct {
@@ -95,6 +128,7 @@ type nlsfAnalysis struct {
 	rawIdx       []int
 	nlsfQ15      []int16
 	lpcQ12       []int16
+	lpcQ12Interp []int16 // LPC from interpolated NLSF for subframes 0,1 (nil when interpFactor==4)
 	interpFactor int
 }
 
@@ -159,8 +193,10 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 	}
 
 	prevNLSF := make([]float64, lpcOrder)
+	prevNLSFQ15 := make([]int16, lpcOrder)
 	for i := range prevNLSF {
 		prevNLSF[i] = math.Pi * float64(i+1) / float64(lpcOrder+1)
+		prevNLSFQ15[i] = int16((float64(i+1) / float64(lpcOrder+1)) * 32768.0)
 	}
 
 	enc := &Encoder{
@@ -315,13 +351,28 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 	for _, active := range vadFlags {
 		enc.EncodeBitLogp(active, 1)
 	}
-	enc.EncodeBitLogp(false, 1) // No LBRR data in this encoder slice.
+	// LBRR flag + redundant frames carried over from the previous packet (the
+	// one-packet FEC delay). When FEC is disabled this writes a single 0 bit,
+	// identical to the previous hardcoded behaviour.
+	lbrrStartBits := enc.ECTell()
+	e.emitPendingLBRR(enc, nFrames)
+	lbrrBits := enc.ECTell() - lbrrStartBits
+	e.lbrrBitsPerFrame = 0
+	if lbrrBits > 1 {
+		e.lbrrBitsPerFrame = (lbrrBits + nFrames - 1) / nFrames
+	}
+	if lbrrDebug {
+		fmt.Fprintf(os.Stderr, "[LBRR budget] bits=%d perFrame=%d base=%d adjusted=%d\n",
+			lbrrBits, e.lbrrBitsPerFrame, e.bitrate*e.frameMs/1000, e.silkFrameTargetBits())
+	}
 
+	e.beginLBRRPacket()
 	e.lastSNRVBRStream = false
 	for i, signal := range frames {
 		e.encodeRangeFrame(enc, signal, vadFlags[i], i > 0)
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 	}
+	e.finishLBRRPacket(nFrames)
 	return nil
 }
 
@@ -368,9 +419,47 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		for _, active := range vadFlags[ch] {
 			enc.EncodeBitLogp(active, 1)
 		}
-		enc.EncodeBitLogp(false, 1) // No LBRR data in this encoder slice.
+		symbol := e.pendingLBRRSymbol(nFrames)
+		if ch == 1 {
+			symbol = e.side.pendingLBRRSymbol(nFrames)
+		}
+		enc.EncodeBitLogp(symbol != 0, 1)
+	}
+	lbrrSymbols := [2]int{
+		e.pendingLBRRSymbol(nFrames),
+		e.side.pendingLBRRSymbol(nFrames),
+	}
+	for ch, symbol := range lbrrSymbols {
+		component := e
+		if ch == 1 {
+			component = e.side
+		}
+		component.writePendingLBRRMask(enc, nFrames, symbol)
+	}
+	// libopus writes stereo LBRR frame-major. A mid-channel redundant frame is
+	// preceded by its stereo predictor and, when side LBRR is absent, the
+	// mid-only flag. The channel bodies then follow mid before side.
+	for frame := 0; frame < nFrames; frame++ {
+		midPresent := lbrrSymbols[0]&(1<<uint(frame)) != 0
+		sidePresent := lbrrSymbols[1]&(1<<uint(frame)) != 0
+		if midPresent {
+			var pred [2][3]int8
+			if frame < len(e.pendingLBRRStereoPred) {
+				pred = e.pendingLBRRStereoPred[frame]
+			}
+			encodeStereoPred(enc, pred)
+			if !sidePresent {
+				enc.EncodeIcdf(1, silkStereoOnlyCodeMidICDF[:], 8)
+			}
+			e.writeLBRRFrame(enc, e.pendingLBRR[frame], previousLBRRSignalType(e.pendingLBRR, lbrrSymbols[0], frame))
+		}
+		if sidePresent {
+			e.side.writeLBRRFrame(enc, e.side.pendingLBRR[frame], previousLBRRSignalType(e.side.pendingLBRR, lbrrSymbols[1], frame))
+		}
 	}
 
+	e.beginLBRRPacket()
+	e.side.beginLBRRPacket()
 	e.lastSNRVBRStream = false
 	for i := 0; i < nFrames; i++ {
 		encodeStereoPred(enc, stereoPredIx[i])
@@ -387,10 +476,24 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 			}
 			e.side.encodeRangeFrame(enc, sideFrames[i], vadFlags[1][i], i > 0 && !e.prevOnlyMiddle)
 			e.lastSNRVBRStream = e.lastSNRVBRStream || e.side.lastSNRVBRFrame
+		} else {
+			e.side.appendMissingLBRRFrame()
 		}
 		e.prevOnlyMiddle = onlyMiddle
 	}
+	e.finishLBRRPacket(nFrames)
+	e.side.finishLBRRPacket(nFrames)
+	e.pendingLBRRStereoPred = append(e.pendingLBRRStereoPred[:0], stereoPredIx...)
 	return nil
+}
+
+func previousLBRRSignalType(frames []lbrrFrameData, symbol, frame int) int {
+	for i := frame - 1; i >= 0; i-- {
+		if symbol&(1<<uint(i)) != 0 {
+			return frames[i].signalType
+		}
+	}
+	return -1
 }
 
 func encodeStereoPred(enc *entcode.Encoder, ix [2][3]int8) {
@@ -463,12 +566,33 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	// the winning state and its initial seed (e.nsqSeed), which libopus writes to
 	// the bitstream so the decoder reproduces the same sign sequence.
 	e.nsqSeed = 0
-	pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, gainIndices,
+	pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, nlsf.lpcQ12Interp, gainIndices,
 		signalType, quantOffset, 0, pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale)
 	enc.EncodeIcdf(int(e.nsqSeed), silkUniform4ICDF[:], 8)
 	e.encodePulses(enc, pulses, signalType, quantOffset)
 
+	// Low-Bitrate Redundancy: generate (but do not yet emit) a coarse redundant
+	// copy of this frame. It is buffered and written at the front of the next
+	// packet (the one-packet FEC delay). Mirrors silk_LBRR_encode_FLP: reuse the
+	// regular side information, bump the gains, and re-run the quantizer.
+	var leakBefore string
+	if lbrrDebug {
+		leakBefore = e.leakFingerprint()
+	}
+	e.generateLBRRFrame(signal, signalType, quantOffset, gainIndices, nlsf,
+		pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale, initialState)
+	if lbrrDebug {
+		if after := e.leakFingerprint(); after != leakBefore {
+			fmt.Fprintf(os.Stderr, "[LBRR LEAK]\n  before=%s\n  after =%s\n", leakBefore, after)
+		}
+	}
+
 	e.prevNLSF = nlsfQ15ToRadians(nlsf.nlsfQ15)
+	if len(e.prevNLSFQ15) == len(nlsf.nlsfQ15) {
+		copy(e.prevNLSFQ15, nlsf.nlsfQ15)
+	} else {
+		e.prevNLSFQ15 = append([]int16(nil), nlsf.nlsfQ15...)
+	}
 	if len(gainIndices) > 0 {
 		e.prevGainIdx = gainIndices[len(gainIndices)-1]
 	}
@@ -547,6 +671,14 @@ func (e *Encoder) selectRateControlPlan(
 		_, _, ltpCoeffsQ14 := e.selectLTPGainsVQ(signal, nlsf.lpcQ12, pitchLags)
 		baseTargets = e.shapeGainIndices(signal, nlsf.lpcQ12, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
 	} else {
+		// Unvoiced keeps the Q5d excitation-normalised gains whether it runs the
+		// homebrew or the trellis NSQ. The trellis is used with *neutral* shaping
+		// for unvoiced (see closedLoopNSQWithRateScale), so its objective is
+		// broadband error like homebrew's; the excitation-RMS gain (RMS ≈ 2
+		// pulse-units) is the operating point tuned for that — it sets the right
+		// pulse density to spend the rate budget on broadband SNR. The
+		// spectral-envelope shape gains would normalise the excitation sparser and
+		// leave the budget search under-spending the noise frame.
 		baseTargets = e.excitationGainIndicesResidual(signal, nlsf.lpcQ12)
 	}
 	baseIndices = e.resolveGainIndices(baseTargets, conditionalGain)
@@ -597,6 +729,12 @@ func (e *Encoder) selectBudgetRateControlPlan(
 		// control permits, so keep searching until a compact fallback is found.
 		gainBoosts = []int{0, 4, 8, 12, 16, 20, 24, 32, 40, 48}
 		rateScales = []float64{1, 4, 16, 64, 256, 1024, 4096}
+	} else if e.lbrrBitsPerFrame > 0 {
+		// LBRR is part of the configured SILK packet budget, not additive
+		// overhead. Search beyond the ordinary quality-control range when the
+		// redundant copy leaves a small regular-frame budget.
+		gainBoosts = []int{0, 2, 4, 6, 8, 10, 12, 16, 20, 24}
+		rateScales = []float64{1, 2, 4, 8, 16, 32, 64, 128, 512, 1024, 4096}
 	}
 
 	best := rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
@@ -616,7 +754,7 @@ func (e *Encoder) selectBudgetRateControlPlan(
 			signal, vadActive, signalType, quantOffset, conditionalGain, targets, nlsf, pitchLag, pitchGain)
 		for _, scale := range rateScales {
 			e.restoreFrameState(initial)
-			pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, gainIndices,
+			pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, nlsf.lpcQ12Interp, gainIndices,
 				signalType, quantOffset, 0, pitchLags, ltpCoeffsQ14, ltpScaleQ14, scale)
 			// Voiced hybrid frames may need to sacrifice SILK-layer activity to
 			// leave room for CELT in the shared packet budget. Unvoiced hybrid
@@ -679,7 +817,7 @@ func (e *Encoder) estimateFrameCandidateBits(
 	}
 
 	e.nsqSeed = 0
-	pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, gainIndices,
+	pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, nlsf.lpcQ12Interp, gainIndices,
 		signalType, quantOffset, 0, pitchLags, ltpCoeffsQ14, ltpScaleQ14, rateScale)
 	enc.EncodeIcdf(int(e.nsqSeed), silkUniform4ICDF[:], 8)
 	e.encodePulses(enc, pulses, signalType, quantOffset)
@@ -730,6 +868,7 @@ func (e *Encoder) silkFrameTargetBits() int {
 	if e.channels == 2 || e.stereoComponent {
 		bits /= 2
 	}
+	bits -= e.lbrrBitsPerFrame
 	if bits < 16 {
 		bits = 16
 	}
@@ -896,6 +1035,15 @@ func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, signal []float64, lpcQ
 
 	e.prevPitchLag = pitchLags[e.nSubframes-1]
 	e.prevLagIndex = recLag
+
+	// Capture the coded pitch/LTP indices so the LBRR generator can replay this
+	// frame's side information into the next packet without recomputation.
+	e.capLagHigh = lagIndex
+	e.capLagLow = lagLowBits
+	e.capContour = contourIndex
+	e.capLTPPerIdx = ltpPerIdx
+	e.capLTPGainIdx = append([]int(nil), ltpGainIndices...)
+
 	return ltpCoeffsQ14, silkLTPScalesTable[0], pitchLags
 }
 
@@ -1582,27 +1730,140 @@ func (e *Encoder) analyzeNLSF(signal []float64, cb *nlsfCBParams, signalType int
 
 	nlsfQ15 := reconstructNLSFQ15(cb, cb1Idx, rawIdx)
 	lpcQ12 := nlsfToLPCLibopus(nlsfQ15, cb.order)
+
+	interpFactor, lpcQ12Interp := e.selectNLSFInterpolation(signal, cb, signalType, nlsfQ15, lpcQ12)
+
 	return nlsfAnalysis{
 		cb1Idx:       cb1Idx,
 		rawIdx:       rawIdx,
 		nlsfQ15:      nlsfQ15,
 		lpcQ12:       lpcQ12,
-		interpFactor: 4,
+		lpcQ12Interp: lpcQ12Interp,
+		interpFactor: interpFactor,
 	}
+}
+
+// selectNLSFInterpolation mirrors the interpolation-index search of libopus
+// silk_find_LPC_FLP. It chooses NLSFInterpCoef_Q2 (0..4) by testing whether
+// interpolating the previous quantized NLSF toward the current quantized NLSF
+// lowers the LPC residual energy over the first half of the frame (subframes
+// 0 and 1). interpFactor==4 means no interpolation.
+//
+// Unlike libopus — which computes the analysis on the LTP-residual / gain-scaled
+// signal and derives the transmitted NLSF from a last-half Burg — this works
+// directly on the time-domain signal and on our codebook-quantized NLSF (the
+// transmitted current frame value), evaluating only the interpolation decision.
+// The returned LPC set (subframes 0,1) is built from the same quantized NLSF
+// interpolation the decoder applies, so encoder analysis-by-synthesis stays
+// aligned with decoder reconstruction.
+//
+// Gating: only 4-subframe frames, not the first frame after reset, never
+// inactive frames, and voiced frames only when the trellis NSQ honours the
+// per-subframe LPC sets (the homebrew voiced path cannot re-whiten mid-frame).
+func (e *Encoder) selectNLSFInterpolation(signal []float64, cb *nlsfCBParams, signalType int, nlsfQ15, lpcQ12 []int16) (int, []int16) {
+	if e.nSubframes != 4 || e.firstFrameAfterReset {
+		return 4, nil
+	}
+	if signalType == SignalTypeInactive {
+		return 4, nil
+	}
+	// First cut: restrict interpolation to mono SILK-only frames, matching the
+	// staging discipline of the earlier SILK quality steps. Stereo and hybrid
+	// share tighter packet budgets / separate conformance constraints and are
+	// expanded only after dedicated libopus-decode validation.
+	if e.stereoComponent || e.hybridMode {
+		return 4, nil
+	}
+	if signalType == SignalTypeVoiced && !e.voicedUsesTrellis() {
+		return 4, nil
+	}
+	if len(e.prevNLSFQ15) != cb.order {
+		return 4, nil
+	}
+
+	half := e.frameSize / 2
+	if half <= cb.order {
+		return 4, nil
+	}
+
+	// Baseline: residual of the first half using the current (non-interpolated) LPC.
+	// libopus picks the interpolation index with strictly lower first-half residual
+	// (silk_find_LPC_FLP: `if res_nrg_interp < res_nrg`). We mirror that comparison.
+	//
+	// Caveat (documented WIP): libopus runs this decision on the gain-scaled /
+	// LTP-residual signal and transmits a last-half Burg NLSF, so subframes 2,3 stay
+	// optimal and only 0,1 interpolate from a consistent basis. We decide on the
+	// time-domain signal against the codebook-quantized full-frame NLSF, so on
+	// synthetic sustained tones (where codebook jitter makes prevNLSF != currNLSF)
+	// the open-loop residual can favour interpolation that the closed-loop NSQ
+	// reconstructs slightly worse. The full benefit needs the find_LPC_FLP-domain
+	// port; the 2-set NSQ + interpolation wiring here is validated against libopus
+	// decode (opusref) and is the foundation for that follow-up.
+	bestNrg := firstHalfLPCResidual(signal, lpcQ12, cb.order, half)
+	bestFactor := 4
+	var bestLPC []int16
+
+	// Search interpolation indices 3..0 (matching libopus iteration order).
+	for k := 3; k >= 0; k-- {
+		interpNLSF := interpolateNLSFQ15(e.prevNLSFQ15, nlsfQ15, k, cb)
+		interpLPC := nlsfToLPCLibopus(interpNLSF, cb.order)
+		nrg := firstHalfLPCResidual(signal, interpLPC, cb.order, half)
+		if nrg < bestNrg {
+			bestNrg = nrg
+			bestFactor = k
+			bestLPC = interpLPC
+		}
+	}
+	return bestFactor, bestLPC
+}
+
+// interpolateNLSFQ15 reproduces the decoder's quantized-NLSF interpolation
+// (decoder.go: prev + ((factor*(curr-prev))>>2)) followed by stabilization, so
+// the encoder's subframe-0/1 LPC matches what the decoder reconstructs for the
+// chosen interpolation factor.
+func interpolateNLSFQ15(prevQ15, currQ15 []int16, factor int, cb *nlsfCBParams) []int16 {
+	out := make([]int16, cb.order)
+	for i := 0; i < cb.order; i++ {
+		prev := int32(prevQ15[i])
+		curr := int32(currQ15[i])
+		out[i] = int16(prev + ((int32(factor) * (curr - prev)) >> 2))
+	}
+	silkNLSFStabilize(out, cb.deltaMinQ15, cb.order)
+	return out
+}
+
+// firstHalfLPCResidual returns the mean LPC residual energy over [order, half)
+// of the signal, skipping the order-sample warm-up so all interpolation
+// candidates are compared on the same fully-predicted window.
+func firstHalfLPCResidual(signal []float64, lpcQ12 []int16, order, half int) float64 {
+	if half > len(signal) {
+		half = len(signal)
+	}
+	if half <= order {
+		return 0
+	}
+	energy := 0.0
+	for i := order; i < half; i++ {
+		pred := 0.0
+		for j := 0; j < order && j < len(lpcQ12); j++ {
+			pred += float64(lpcQ12[j]) / 4096.0 * signal[i-j-1]
+		}
+		err := signal[i] - pred
+		energy += err * err
+	}
+	return energy / float64(half-order)
 }
 
 func (e *Encoder) lpcNLSFTargetQ15(signal []float64, cb *nlsfCBParams) ([]int16, bool) {
 	if len(signal) <= cb.order {
 		return nil, false
 	}
-	lpc := NewLPCAnalysis(cb.order)
-	if lpc == nil {
-		return nil, false
-	}
-	if err := lpc.AnalyzeWindowed(signal); err != nil {
-		return nil, false
-	}
-	target := lpc.NLSFTargetQ15()
+	// Burg-method LPC over the whole frame (single subframe), then accurate
+	// A2NLSF root finding — the libopus silk_find_LPC_FLP path. minInvGain
+	// bounds the prediction gain (1 / MAX_PREDICTION_POWER_GAIN).
+	const minInvGain = 1.0 / 1e4
+	a, _ := silkBurgModifiedFLP(signal, minInvGain, len(signal), 1, cb.order)
+	target := silkA2NLSFFLP(a, cb.order)
 	if len(target) != cb.order {
 		return nil, false
 	}
@@ -2035,13 +2296,29 @@ func (e *Encoder) closedLoopNSQ(
 	ltpCoeffsQ14 [][5]int16,
 	ltpScaleQ14 int16,
 ) []int16 {
-	return e.closedLoopNSQWithRateScale(signal, lpcQ12, gainIndices,
+	return e.closedLoopNSQWithRateScale(signal, lpcQ12, nil, gainIndices,
 		signalType, quantOffset, seed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, 1)
 }
 
 // voicedUsesTrellis reports whether voiced frames take the Step 4 trellis NSQ.
 func (e *Encoder) voicedUsesTrellis() bool {
 	return e.useTrellisNSQ
+}
+
+// unvoicedUsesTrellis reports whether unvoiced frames take the full
+// delayed-decision trellis NSQ instead of the single-state homebrew quantizer.
+// Like voiced, unvoiced is paired with the co-designed noise-shape envelope
+// gains (shapeGainIndices); the trellis perceptual shaping only beats homebrew's
+// broadband SNR when the gains are co-designed with it (Step 3/4 lesson).
+//
+// Gated to mono SILK-only for now: stereo and hybrid carry separate conformance
+// constraints (tighter shared budgets, per-channel PRNG-dither decorrelation),
+// so those frames keep the proven homebrew + excitation-RMS-gain path, exactly
+// as the earlier SILK quality steps were staged. Frame-to-frame handoff between
+// the homebrew and trellis paths is already supported and tested
+// (TestHomebrewToTrellisNSQStateHandoff), so a mixed stream is safe.
+func (e *Encoder) unvoicedUsesTrellis() bool {
+	return e.useTrellisNSQ && !e.stereoComponent && !e.hybridMode
 }
 
 // TrellisNSQ reports whether voiced SILK-only frames may use the trellis NSQ.
@@ -2085,6 +2362,7 @@ func (e *Encoder) SetHybridMode(on bool) {
 func (e *Encoder) closedLoopNSQWithRateScale(
 	signal []float64,
 	lpcQ12 []int16,
+	lpcQ12Interp []int16,
 	gainIndices []int,
 	signalType, quantOffset int,
 	seed int32,
@@ -2094,14 +2372,22 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 	rateScale float64,
 ) []int16 {
 	// The delayed-decision trellis with the co-designed process_gains gains is a
-	// clear win for voiced frames (Step 4), but its perceptual shaping lowers
-	// broadband SNR on noise, so unvoiced/inactive frames stay on the homebrew
-	// quantizer with the excitation-normalized gains (Q5d). Dispatch by type.
-	if signalType != SignalTypeVoiced || !e.voicedUsesTrellis() {
-		return e.closedLoopNSQHomebrew(signal, lpcQ12, gainIndices,
+	// clear win when its perceptual shaping is paired with the co-designed
+	// noise-shape envelope gains (Step 4). Both voiced and unvoiced take it with
+	// those gains; inactive frames produce no excitation (the near-silent path)
+	// and stay on the homebrew zero-pulse branch. Dispatch by type.
+	useTrellis := false
+	switch signalType {
+	case SignalTypeVoiced:
+		useTrellis = e.voicedUsesTrellis()
+	case SignalTypeUnvoiced:
+		useTrellis = e.unvoicedUsesTrellis()
+	}
+	if !useTrellis {
+		return e.closedLoopNSQHomebrew(signal, lpcQ12, lpcQ12Interp, gainIndices,
 			signalType, quantOffset, seed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, rateScale)
 	}
-	if signalType == SignalTypeInactive || len(signal) == 0 {
+	if len(signal) == 0 {
 		e.updateSilentSynthesisState()
 		e.updateSilentNSQState()
 		return make([]int16, e.frameSize)
@@ -2136,12 +2422,22 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 
 	pitchGain := estimatePitchGainFromLTP(ltpCoeffsQ14)
 	shape := e.analyzeNoiseShapeFLP(signal, lpcQ12, signalType, quantOffset, pitchLags, pitchGain, e.speechActivity)
-	if e.stereoComponent {
-		// Mid/side components are later reconstructed and, for 24/48 kHz
-		// inputs, resampled as a coupled stereo signal. Aggressive component-
-		// domain spectral shaping concentrates quantization noise near the SILK
-		// layer edge, where decoder resampler differences dominate. Keep the
-		// delayed-decision trellis and its rate term, but use neutral shaping.
+	if e.stereoComponent || signalType == SignalTypeUnvoiced {
+		// Stereo mid/side components are later reconstructed and resampled as a
+		// coupled signal, where component-domain spectral shaping concentrates
+		// quantization noise near the SILK layer edge.
+		//
+		// Unvoiced/noise: the perceptual AR/tilt/LF shaping is what libopus uses,
+		// but it deliberately spreads quantization noise to perceptually masked
+		// bands, which lowers the broadband SNR this project scores against (the
+		// reason unvoiced previously stayed on homebrew). Running the
+		// delayed-decision trellis with *neutral* shaping keeps the lookahead
+		// rate-distortion win — strictly stronger than the greedy single-state
+		// homebrew quantizer — while optimising broadband error, so the trellis
+		// can match or beat homebrew on noise instead of regressing it.
+		//
+		// In both cases keep the delayed-decision trellis and its rate term but
+		// drop the spectral shaping.
 		shape.AR_Q13 = [silkMaxNBSubframes][silkMaxShapeLPCOrder]int16{}
 		shape.LF_shp_Q14 = [silkMaxNBSubframes]int32{}
 		shape.Tilt_Q14 = [silkMaxNBSubframes]int32{}
@@ -2157,7 +2453,7 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 		lambdaQ10 = 64
 	}
 
-	return e.silkNSQDelDec(x16, lpcQ12, ltpCoeffsQ14, shape, gainsQ16, pitchL,
+	return e.silkNSQDelDec(x16, lpcQ12, lpcQ12Interp, ltpCoeffsQ14, shape, gainsQ16, pitchL,
 		lambdaQ10, ltpScaleQ14, signalType, quantOffset, seed)
 }
 
@@ -2186,6 +2482,7 @@ func (e *Encoder) updateSilentNSQState() {
 func (e *Encoder) closedLoopNSQHomebrew(
 	signal []float64,
 	lpcQ12 []int16,
+	lpcQ12Interp []int16,
 	gainIndices []int,
 	signalType, quantOffset int,
 	seed int32,
@@ -2202,6 +2499,18 @@ func (e *Encoder) closedLoopNSQHomebrew(
 	}
 	if rateScale < 1 {
 		rateScale = 1
+	}
+	// NLSF interpolation: subframes 0,1 use the interpolated LPC set. This path
+	// handles unvoiced frames (no mid-frame re-whitening — the voiced rewhitening
+	// block below is gated on TYPE_VOICED), and voiced frames only reach here when
+	// the trellis is disabled, in which case selectNLSFInterpolation already
+	// forced interpFactor==4 (lpcQ12Interp==nil) so there is no LPC-set switch.
+	interpActive := len(lpcQ12Interp) >= e.lpcOrder
+	lpcForSubframe := func(sf int) []int16 {
+		if interpActive && sf < 2 {
+			return lpcQ12Interp
+		}
+		return lpcQ12
 	}
 
 	uvIdx := 0
@@ -2233,6 +2542,7 @@ func (e *Encoder) closedLoopNSQHomebrew(
 
 	for sf := 0; sf < e.nSubframes; sf++ {
 		start := sf * subframeLen
+		aQ12 := lpcForSubframe(sf)
 		gainIdx := gainIndices[clampInt(sf, 0, len(gainIndices)-1)]
 		gainQ16 := silkGainDequantQ16(gainIdx)
 		gainQ10 := gainQ16 >> 6
@@ -2263,7 +2573,7 @@ func (e *Encoder) closedLoopNSQHomebrew(
 				filterLen := sLTPBufIdx - startIdx
 				if filterLen > 0 {
 					sLTP := make([]int16, filterLen)
-					silkLPCAnalysisFilter(sLTP, outBufQ0[startIdx:startIdx+filterLen], lpcQ12, filterLen, e.lpcOrder)
+					silkLPCAnalysisFilter(sLTP, outBufQ0[startIdx:startIdx+filterLen], aQ12, filterLen, e.lpcOrder)
 					invGainQ31 = silkSMULWB(invGainQ31, ltpScaleQ14) << 2
 					for i := 0; i < lag+2 && i < filterLen; i++ {
 						sLTPQ15[sLTPBufIdx-i-1] = silkSMULWB(invGainQ31, sLTP[filterLen-i-1])
@@ -2280,7 +2590,7 @@ func (e *Encoder) closedLoopNSQHomebrew(
 		for i := 0; i < subframeLen && start+i < e.frameSize && start+i < len(signal); i++ {
 			lpcPredQ10 := int32(e.lpcOrder >> 1)
 			for j := 0; j < e.lpcOrder; j++ {
-				lpcPredQ10 = silkSMLAWB(lpcPredQ10, sLPCQ14[silkMaxLPCOrder+i-j-1], lpcQ12[j])
+				lpcPredQ10 = silkSMLAWB(lpcPredQ10, sLPCQ14[silkMaxLPCOrder+i-j-1], aQ12[j])
 			}
 			predQ14 := silkLShiftSat32(lpcPredQ10, 4)
 
@@ -2676,6 +2986,12 @@ func (e *Encoder) Reset() {
 	for i := range e.prevNLSF {
 		e.prevNLSF[i] = math.Pi * float64(i+1) / float64(e.lpcOrder+1)
 	}
+	if len(e.prevNLSFQ15) != e.lpcOrder {
+		e.prevNLSFQ15 = make([]int16, e.lpcOrder)
+	}
+	for i := range e.prevNLSFQ15 {
+		e.prevNLSFQ15[i] = int16((float64(i+1) / float64(e.lpcOrder+1)) * 32768.0)
+	}
 	e.prevPitchLag = 100
 	e.prevLagIndex = 0
 	e.prevGains = []float64{1.0, 1.0, 1.0, 1.0}
@@ -2704,6 +3020,18 @@ func (e *Encoder) Reset() {
 	e.lastSNRVBRFrame = false
 	e.lastSNRVBRStream = false
 	e.lastFinalRange = 0
+	e.pendingLBRR = nil
+	e.curLBRR = nil
+	e.pendingLBRRFrames = 0
+	e.pendingLBRRStereoPred = nil
+	e.lbrrInPrevPacket = false
+	e.lbrrRunPrevGainIdx = 0
+	e.lbrrBitsPerFrame = 0
+	e.capLagHigh = 0
+	e.capLagLow = 0
+	e.capContour = 0
+	e.capLTPPerIdx = 0
+	e.capLTPGainIdx = nil
 	e.stereoState.reset()
 	e.prevOnlyMiddle = false
 	if e.side != nil {

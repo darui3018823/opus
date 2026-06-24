@@ -1,8 +1,10 @@
-name: Encoder Quality (opusref)
+name: Libopus Interoperability (opusref)
 
 on:
   push:
-    branches: [main, dev/silk-encoder-phase4]
+    branches:
+      - main
+      - "dev/**"
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -16,7 +18,7 @@ concurrency:
 
 jobs:
   opusref:
-    name: encoder quality vs libopus
+    name: reference tests vs libopus
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -37,6 +39,33 @@ jobs:
 
       - name: SILK encoder conformance (SILKOnly)
         run: go test -tags opusref -count=1 -run TestCGOEncodeRefSILKOnly .
+
+      - name: Short-frame interoperability
+        run: go test -tags opusref -count=1 -run '^TestCGOEncodeRefShortFrames$' .
+
+      - name: SILK and hybrid FEC interoperability
+        run: go test -tags opusref -count=1 -run '^TestCGOEncodeRefSILKFEC$|^TestCGOEncodeRefSILKFECMultiFrame$|^TestCGODecodeFECMatchesLibopus$|^TestCGODecodeFECStereoAndHybrid$' .
+
+      - name: Multistream interoperability
+        run: go test -tags opusref -count=1 -run '^TestCGOMultistreamInteroperability$' .
+
+      - name: Projection interoperability
+        run: go test -tags opusref -count=1 -run '^TestCGOProjectionMatricesMatchLibopus$|^TestCGOProjectionFamily[23]Interoperability$' .
+
+      - name: Vendor libopus source (packet-extension oracle)
+        run: |
+          curl -sL -o opus-src.tar.gz https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz
+          tar -xzf opus-src.tar.gz
+          mv opus-1.6.1 libopus
+
+      - name: Packet extensions libopus oracle
+        # Override the distro CGO_CFLAGS (-I/usr/include/opus, libopus 1.4 without
+        # OpusDRED) so the vendored 1.6.1 headers resolve consistently with the
+        # bundled src/extensions.c. The oracle only uses the self-contained
+        # extensions.c, so linking the 1.4 shared lib stays ABI-safe.
+        env:
+          CGO_CFLAGS: -I${{ github.workspace }}/libopus/include -I${{ github.workspace }}/libopus/celt -I${{ github.workspace }}/libopus/src
+        run: go test -tags "opusref opusextsrc" -count=1 -run '^TestPacketExtensionsLibopusOracle$' .
 
       - name: Decoder reference (12/12 vectors)
         run: go test -tags opusref -count=1 -run TestCGORef .

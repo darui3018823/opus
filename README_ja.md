@@ -11,20 +11,21 @@
 [Opus オーディオコーデック](https://opus-codec.org/)（RFC 6716 / RFC 8251）の
 **ランタイム CGO 依存なし**の Pure Go 実装です。**デコーダー**は公式 RFC 8251
 テストベクター 12 個すべてに合格し（RMSE < 0.001）、libopus 1.6.1 リファレンスと
-フレーム単位で一致します。**エンコーダー**は CELT quality pipeline と、限定的な
-モノラル低ビットレート SILK-only 音声経路を実装し、libopus でデコード可能な
-標準 Opus パケットを出力します（[ステータス](#ステータス)参照）。
+フレーム単位で一致します。**エンコーダー**は CELT quality pipeline、限定的な
+低ビットレート SILK-only 音声経路、初期 hybrid 音声経路を実装し、libopus で
+デコード可能な標準 Opus パケットを出力します（[ステータス](#ステータス)参照）。
 
 > 補足: エンコーダーは libopus のエンコーダーとはビット精度一致しません。
 > CELT 経路は Pure Go での音声・音楽エンコードに利用できます。SILK 経路は
-> モノラル低ビットレート音声に限定され、ハイブリッドエンコードは未実装です。
+> voice向けに限定され、ハイブリッドエンコードは高ビットレートの
+> 24/48 kHz voice packet に限定されています。
 
 ## ステータス
 
 | 領域 | 状態 |
 |------|------|
 | **デコーダー** | ✅ 公式 RFC 8251 ベクター 12/12 合格（RMSE < 0.001）。libopus 1.6.1 と一致。SILK / CELT / ハイブリッド（SILK+CELT）を再構成済み（ハイブリッド SILK→CELT redundancy 含む）。 |
-| **エンコーダー** | ✅ CELT quality pipeline（Phase 1+2）と、native 8/12/16 kHz の低ビットレート音声向け限定モノラル SILK-only エンコード。libopus 1.6.1 がデコードできる標準 Opus パケットを出力。64 kbps の目安 SNR: 440 Hz 約 48 dB、1 kHz 約 47 dB、ステレオ約 43 dB。libopus とはビット精度一致**ではない**。ハイブリッドエンコードは未実装。 |
+| **エンコーダー** | ✅ CELT quality pipeline（Phase 1+2）、低ビットレート voice 向け SILK-only、24/48 kHz 高ビットレート voice 向け初期 hybrid encode。libopus 1.6.1 がデコードできる標準 Opus packet を出力。64 kbps の目安 SNR: 440 Hz 約 48 dB、1 kHz 約 47 dB、stereo 約 43 dB。libopus とはビット精度一致**ではない**。 |
 | **CGO** | ランタイム依存なし。libopus ラッパーは参照テスト専用で `opusref` ビルドタグ下にのみ存在。 |
 | **CI** | `test` / `race` / `bench` / `fuzz` を **amd64・arm64** で実行。 |
 
@@ -109,6 +110,7 @@ _ = packet
 
 // float64 入力も可能:
 //   packet, err := enc.EncodeFloat(make([]float64, 960*2), 960)
+// float32 入力には EncodeFloat32 を使用できる。
 
 // 帯域は信号内容から自動検出される。必要なら明示指定できる:
 //   enc.SetBandwidth(opus.BandwidthWideband) // wideband に固定
@@ -117,7 +119,8 @@ _ = packet
 // Application とは独立した信号種別ヒント:
 //   enc.SetSignalType(opus.SignalVoice)
 
-// 20ms の整数倍、最大 120ms まで multi-frame packet として出力可能:
+// 短い CELT packet と multi-frame packet を出力可能:
+//   packet, err := enc.Encode(pcm480, 480)   // 48 kHz で 10ms
 //   packet, err := enc.Encode(pcm1920, 1920) // 40ms
 ```
 
@@ -128,17 +131,15 @@ _ = packet
 - **チャンネル**: モノラル・ステレオ。
 - **デコーダーのフレームサイズ**: 全 Opus 長（2.5/5/10/20/40/60 ms）を TOC バイトに
   従いパケット単位で選択。
-- **エンコーダーのフレームサイズ**: 20ms の整数倍（20ms〜120ms）。それ以外は
-  エラーになります。
+- **エンコーダーのフレームサイズ**: CELT の 2.5/5/10ms、および 20ms の整数倍
+  （20ms〜120ms）。
 - **エンコーダー帯域**: 信号内容に基づく自動検出、または
   `SetBandwidth` / `SetMaxBandwidth` による明示指定。NB/WB/SWB/FB に対応。
-- **エンコーダーモード選択**: 通常の音声・音楽、restricted-low-delay、
-  40 kbps 超のビットレートでは CELT を使います。限定的な SILK-only 経路は、
-  モノラルまたはステレオの音声で、`ApplicationVOIP` または `SignalVoice` が有効、
-  ビットレートが 40 kbps 以下、かつ `SetBandwidth` / `SetMaxBandwidth` が選択
-  された SILK 帯域を許す場合に選択されます。8/12/16 kHz 入力は NB/MB/WB に対応し、
-  24/48 kHz の音声入力は WB SILK へダウンサンプリングされます。`SignalMusic` は
-  CELT を維持します。
+- **エンコーダーモード選択**: 通常音声・音楽・restricted-low-delay、および
+  hybridの有効範囲を超える高レート音声ではCELTを使います。voice境界は
+  チャンネル数とLBRRを考慮し、SILK-onlyはmono 40 kbps、stereo 48 kbps
+  までを基本とし、FEC有効時は範囲を拡張します。24/48 kHz音声は中間レートで
+  hybridを使い、それ以上ではCELTへ戻ります。
 - **アプリケーションタイプ**（帯域しきい値や transient 判定を調整）:
   - `opus.ApplicationVOIP` — voice 向け、狭めの帯域しきい値
   - `opus.ApplicationAudio` — music/general 向け
@@ -148,34 +149,81 @@ _ = packet
 
 ## 公開 API
 
+公開バージョン定数はリポジトリの [`VERSION`](VERSION) から生成されます。
+
+`MaxFrameSize` は48 kHz・1チャンネル当たり5760サンプル（120 ms）です。
+`MaxFrameBytes` は圧縮済み1フレームの1275バイト上限、`MaxPacketSize` は
+paddingなしsingle-streamパケット用の保守的な格納上限です。明示的なpacket
+paddingを追加した場合はこれを超え得ます。
+
 ### エンコーダー
 
 ```go
 func NewEncoder(sampleRate, channels int, application Application) (*Encoder, error)
+func NewEncoderWithProfile(sampleRate, channels int, application Application, profile EncoderProfile) (*Encoder, error)
 
 func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error)
+func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error)
 func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error)
+func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error)
 
 func (e *Encoder) Bitrate() int
+func (e *Encoder) EffectiveBitrate() int
 func (e *Encoder) Complexity() int
 func (e *Encoder) VBR() bool
+func (e *Encoder) VBRConstraint() bool
 func (e *Encoder) Application() Application
+func (e *Encoder) SampleRate() int
+func (e *Encoder) Channels() int
+func (e *Encoder) Lookahead() int
+func (e *Encoder) FinalRange() uint32
+func (e *Encoder) InDTX() bool
 
 func (e *Encoder) SetBitrate(bitrate int) error       // 6000–510000 bps
 func (e *Encoder) SetComplexity(complexity int) error // 0–10
 func (e *Encoder) SetVBR(vbr bool)
 func (e *Encoder) SetVBRConstraint(constrained bool)  // true = CVBR
-func (e *Encoder) SetApplication(application Application)
+func (e *Encoder) SetApplication(application Application) error
 func (e *Encoder) SetSignalType(signal SignalType)
 func (e *Encoder) SignalType() SignalType
 func (e *Encoder) SetBandwidth(bw int) error          // Auto/NB/WB/SWB/FB
 func (e *Encoder) SetMaxBandwidth(bw int) error
+func (e *Encoder) MaxBandwidth() int
 func (e *Encoder) Bandwidth() int
 func (e *Encoder) SetDTX(dtx bool)
 func (e *Encoder) DTX() bool
+func (e *Encoder) SetInbandFEC(enabled bool)             // SILK-only/hybrid
+func (e *Encoder) InbandFEC() bool
+func (e *Encoder) SetPacketLossPerc(perc int)            // 0〜100 にクランプ
+func (e *Encoder) PacketLossPerc() int
 func (e *Encoder) SetPacketPadding(n int)
+func (e *Encoder) SetForceChannels(channels int) error
+func (e *Encoder) ForceChannels() int
+func (e *Encoder) SetLSBDepth(depth int) error
+func (e *Encoder) LSBDepth() int
+func (e *Encoder) SetPredictionDisabled(disabled bool)
+func (e *Encoder) PredictionDisabled() bool
+func (e *Encoder) SetPhaseInversionDisabled(disabled bool)
+func (e *Encoder) PhaseInversionDisabled() bool
 func (e *Encoder) Reset() error
 ```
+
+`NewEncoder` は従来の 64 kbit/s・complexity 5・CBR を維持します。
+自動 bitrate・complexity 9・constrained VBR の既定値には
+`EncoderProfileLibopus` を指定します。
+
+### 並行利用と所有権
+
+`Encoder` と `Decoder` は状態を保持し、同一インスタンスを複数 goroutine
+から同時に利用することはできません。論理 Opus ストリームごとに1つの
+インスタンスを作成し、パケット順序を維持してください。同一インスタンスの
+getter、設定変更、`Reset` を含む全メソッドは、必要に応じて mutex などを使い
+呼び出し側で直列化します。別々のインスタンスは並行して利用できます。
+
+初回利用後の `Encoder` / `Decoder` を値コピーしないでください。エンコード・
+デコードメソッドが呼び出し側の PCM、packet、出力先 slice を借用するのは
+メソッドが戻るまでです。返された圧縮 packet と PCM slice の所有権は
+呼び出し側にあります。
 
 ### デコーダー
 
@@ -183,20 +231,81 @@ func (e *Encoder) Reset() error
 func NewDecoder(sampleRate, channels int) (*Decoder, error)
 
 func (d *Decoder) Decode(data []byte, pcm []int16) (int, error)
+func (d *Decoder) Decode24(data []byte, pcm []int32) (int, error)
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error)
-func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) // 現状は CELT PLC フォールバック
+func (d *Decoder) DecodeFloat32(data []byte) ([]float32, error)
+func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) // CELT-only
+func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error)   // SILK LBRR
 func (d *Decoder) Reset() error
 func (d *Decoder) GetLastPacketDuration() int
+func (d *Decoder) SampleRate() int
+func (d *Decoder) Channels() int
+func (d *Decoder) FinalRange() uint32
+func (d *Decoder) Pitch() int
+func (d *Decoder) SetGain(gainQ8 int) error
+func (d *Decoder) Gain() int
+func (d *Decoder) SetPhaseInversionDisabled(disabled bool)
+func (d *Decoder) PhaseInversionDisabled() bool
 ```
 
-`EncodeFloat32` / `DecodeFloat32` / `DecodePLC(pcm, frameSize)` は**ありません**。
-float64 版を使用してください。
+### マルチストリームとサラウンド
+
+```go
+func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, mapping []byte, application Application) (*MultistreamEncoder, error)
+func NewMultistreamDecoder(sampleRate, channels, streams, coupledStreams int, mapping []byte) (*MultistreamDecoder, error)
+
+func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application Application) (*SurroundEncoder, error)
+func NewSurroundDecoder(sampleRate, channels, mappingFamily int) (*SurroundDecoder, error)
+```
+
+マルチストリーム packet は RFC 6716 の self-delimited framing を使用し、
+libopus 1.6.1 との相互運用テストを通過しています。サラウンドは mapping
+family 0、1（Vorbis順、最大7.1）、255に対応します。
+
+### Projection と Ambisonics
+
+```go
+func NewProjectionEncoder(sampleRate, channels, mappingFamily int, application Application) (*ProjectionEncoder, error)
+func NewProjectionDecoder(sampleRate, channels, streams, coupledStreams int, demixingMatrix []byte) (*ProjectionDecoder, error)
+func NewAmbisonicsEncoder(sampleRate, channels, mappingFamily int, application Application) (*ProjectionEncoder, error)
+func NewAmbisonicsDecoder(sampleRate, channels, mappingFamily, streams, coupledStreams int, mapping, demixingMatrix []byte) (*AmbisonicsDecoder, error)
+```
+
+RFC 8486 mapping family 2/3 に対応します。family 2 は ACN/SN3D Ambisonics
+channel mapping、family 3 は libopus 1.6.1 の projection mixing/demixing
+matrix を使用し、両 family とも libopus 相互運用テストがあります。
+
+### パケット操作
+
+```go
+func NewRepacketizer() *Repacketizer
+func (r *Repacketizer) Cat(packet []byte) error
+func (r *Repacketizer) NumFrames() int
+func (r *Repacketizer) Out() ([]byte, error)
+func (r *Repacketizer) OutRange(begin, end int) ([]byte, error)
+func PacketPad(packet []byte, newLen int) ([]byte, error)
+func PacketUnpad(packet []byte) ([]byte, error)
+func PacketExtensionsCount(packet []byte) (int, error)
+func PacketExtensionsParse(packet []byte) ([]PacketExtension, error)
+func PacketExtensionsGenerate(packet []byte, extensions []PacketExtension, paddingBytes int) ([]byte, error)
+```
+
+packet extension は code-3 padding 内で搬送します。DRED/QEXT payload は
+opaque data として扱い、neural/DSP codec 自体は実装していません。
+
+### Ogg Opus コンテナ
+
+`github.com/darui3018823/opus/oggopus` package は、CRC 検証付き Ogg page
+parse/write、packet continuation と lacing、`OpusHead`/`OpusTags` metadata、
+単一 logical stream の Ogg Opus reader/writer を提供します。
 
 ## アーキテクチャ
 
 ```
 github.com/darui3018823/opus/
-├── opus.go / constants.go / errors.go  # 公開 API（Encoder/Decoder）
+├── opus.go / multistream.go / surround.go / projection.go
+├── extensions.go / repacketizer.go         # packet 操作
+├── oggopus/                                # Ogg page / Ogg Opus API
 ├── internal/
 │   ├── opus_framing.go                  # TOC バイトの解析/生成（RFC 6716 §3）
 │   ├── dsp/                             # FFT、MDCT/IMDCT、窓関数、数学
@@ -252,10 +361,12 @@ Windows では、動作する MinGW/MSYS2 ツールチェーンを用意し Powe
 
 ```bash
 go test -run='^$' -fuzz='^FuzzDecode$' -fuzztime=60s .
+go test -run='^$' -fuzz='^FuzzOggParsers$' -fuzztime=60s ./oggopus
 ```
 
-`FuzzDecode` / `FuzzDecodeFloat` は、デコーダーが任意入力で panic しないことを検証
-します。`fuzz` CI ワークフローが毎晩および手動で実行します。
+fuzz suite は single-stream decode、packet extensions、multistream
+self-delimited framing、repacketizer/padding、Ogg Opus parser を対象にします。
+`fuzz` CI workflow が全 target を毎晩および手動で実行します。
 
 ## 継続的インテグレーション
 
@@ -277,13 +388,21 @@ GitHub Actions ワークフロー 4 本。いずれも **amd64（`ubuntu-latest`
 
 ## 制限事項
 
-- SILK-only エンコードは低ビットレート音声に限定されています。24/48 kHz 入力は
-  WB SILK へダウンサンプリングされるため、高域保持には今後のハイブリッド
-  エンコード対応が必要です。
+- SILK/hybridエンコードはvoice向けであり、libopusの全mode境界・品質判断との
+  完全な一致には未到達です。
 - エンコーダーは libopus とビット精度一致ではありませんが、準拠デコーダー
   （libopus を含む）がデコードできる標準 Opus パケットを出力します。
-- `DecodeFEC` は現状 PLC フォールバックで、パケット FEC 抽出ではありません。
-- マルチストリーム・サラウンド・Ogg Opus コンテナ API はありません。
+- SILK-only と hybrid エンコードは、`SetInbandFEC(true)` と 0 より大きい
+  `SetPacketLossPerc` により、mono/stereo の LBRR/in-band FEC を送出できます。
+- `DecodeFEC` は次のパケットの LBRR から SILK-only/hybrid を回復します。
+  hybrid の回復内容は冗長 SILK low band です。`DecodePLC` は現状 CELT-only
+  に対応します。
+- Projection family 3 は libopus 1.6.1 の定義済み matrix を使用し、任意の
+  custom encoder matrix 生成は未対応です。
+- Ogg Opus package は単一 logical stream を対象とし、seek、chained stream
+  orchestration、multiplexed stream demux は提供しません。
+- マルチストリーム/サラウンドは、libopus の全 multistream CTL と完全な
+  surround energy-mask analysis には未対応です。
 - VBR/CVBR と application/signal hint は CELT エンコーダーの判断を調整しますが、
   libopus と同等の完全なモード選択・レート制御ではありません。
 

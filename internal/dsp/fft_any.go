@@ -1,6 +1,47 @@
 package dsp
 
-import "math"
+import (
+	"math"
+	"sync"
+)
+
+type bluesteinPlan struct {
+	n         int
+	m         int
+	chirp     []Complex
+	kernelFFT []Complex
+	fft       *FFTConfig
+}
+
+var bluesteinPlans sync.Map
+
+func getBluesteinPlan(n int) *bluesteinPlan {
+	if cached, ok := bluesteinPlans.Load(n); ok {
+		return cached.(*bluesteinPlan)
+	}
+	m := nextPow2(2*n - 1)
+	plan := &bluesteinPlan{
+		n:     n,
+		m:     m,
+		chirp: make([]Complex, n),
+	}
+	for i := 0; i < n; i++ {
+		ang := math.Pi * float64(i) * float64(i) / float64(n)
+		plan.chirp[i] = Complex{Real: math.Cos(ang), Imag: math.Sin(ang)}
+	}
+	kernel := make([]Complex, m)
+	for i := 0; i < n; i++ {
+		kernel[i] = plan.chirp[i]
+	}
+	for i := m - n + 1; i < m; i++ {
+		kernel[i] = plan.chirp[m-i]
+	}
+	plan.fft, _ = NewFFTConfig(m)
+	plan.kernelFFT = kernel
+	_ = plan.fft.ExecuteInPlace(plan.kernelFFT)
+	actual, _ := bluesteinPlans.LoadOrStore(n, plan)
+	return actual.(*bluesteinPlan)
+}
 
 // nextPow2 returns the smallest power of 2 >= n.
 func nextPow2(n int) int {
@@ -23,45 +64,22 @@ func AnyFFT(x []Complex) []Complex {
 		return out
 	}
 
-	// Choose M = next power of 2 >= 2N - 1 for zero-padded convolution.
-	M := nextPow2(2*N - 1)
-
-	// Chirp factor: W[n] = exp(+i*pi*n²/N)
-	W := make([]Complex, N)
+	plan := getBluesteinPlan(N)
+	work := make([]Complex, plan.m)
 	for n := 0; n < N; n++ {
-		ang := math.Pi * float64(n) * float64(n) / float64(N)
-		W[n] = Complex{Real: math.Cos(ang), Imag: math.Sin(ang)}
+		work[n] = x[n].Mul(plan.chirp[n].Conj())
 	}
+	_ = plan.fft.ExecuteInPlace(work)
+	for i := 0; i < plan.m; i++ {
+		work[i] = work[i].Mul(plan.kernelFFT[i]).Conj()
+	}
+	_ = plan.fft.ExecuteInPlace(work)
+	scale := 1.0 / float64(plan.m)
 
-	// a[n] = x[n] * conj(W[n])  (= x[n] * exp(-i*pi*n²/N))
-	a := make([]Complex, M)
-	for n := 0; n < N; n++ {
-		a[n] = x[n].Mul(W[n].Conj())
-	}
-
-	// b[m] = chirp convolution kernel: W[m] for m in [0,N), W[N-m] for m in (M-N+1,M), else 0.
-	b := make([]Complex, M)
-	for m := 0; m < N; m++ {
-		b[m] = W[m]
-	}
-	for m := M - N + 1; m < M; m++ {
-		b[m] = W[M-m]
-	}
-
-	// Transform a and b; multiply; inverse transform.
-	cfg, _ := NewFFTConfig(M)
-	A, _ := cfg.Execute(a)
-	B, _ := cfg.Execute(b)
-	AB := make([]Complex, M)
-	for i := 0; i < M; i++ {
-		AB[i] = A[i].Mul(B[i])
-	}
-	c, _ := cfg.ExecuteInverse(AB)
-
-	// DFT[k] = conj(W[k]) * c[k], for k = 0..N-1.
 	out := make([]Complex, N)
 	for k := 0; k < N; k++ {
-		out[k] = W[k].Conj().Mul(c[k])
+		c := work[k].Conj().MulScalar(scale)
+		out[k] = plan.chirp[k].Conj().Mul(c)
 	}
 	return out
 }

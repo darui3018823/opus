@@ -113,6 +113,7 @@ func silkNoiseShapeQuantizerShortPrediction(buf []int32, ptr int, aQ12 []int16, 
 func (e *Encoder) silkNSQDelDec(
 	x16 []int16,
 	lpcQ12 []int16,
+	lpcQ12Interp []int16,
 	ltpCoefQ14 [][5]int16,
 	shape silkNoiseShapeAnalysis,
 	gainsQ16 [silkMaxNBSubframes]int32,
@@ -123,6 +124,16 @@ func (e *Encoder) silkNSQDelDec(
 	seed int32,
 ) []int16 {
 	pulses := make([]int16, e.frameSize)
+	// NLSF interpolation (silk_NSQ_del_dec, LSF_interpolation_flag==1): subframes
+	// 0,1 use the interpolated LPC set, subframes 2,3 the current set. When
+	// inactive (nil interp set) every subframe uses the current LPC.
+	interpActive := len(lpcQ12Interp) >= e.lpcOrder
+	lpcForSubframe := func(sf int) []int16 {
+		if interpActive && sf < 2 {
+			return lpcQ12Interp
+		}
+		return lpcQ12
+	}
 	if e.nsq.prevGainQ16 == 0 {
 		e.nsq.prevGainQ16 = 65536
 	}
@@ -190,7 +201,7 @@ func (e *Encoder) silkNSQDelDec(
 	smplBufIdx := 0
 	subfrCount := 0
 	for sf := 0; sf < e.nSubframes; sf++ {
-		aQ12 := lpcQ12
+		aQ12 := lpcForSubframe(sf)
 		if len(aQ12) < e.lpcOrder {
 			tmp := make([]int16, e.lpcOrder)
 			copy(tmp, aQ12)
@@ -206,14 +217,59 @@ func (e *Encoder) silkNSQDelDec(
 		e.nsq.rewhiteFlag = false
 		if signalType == SignalTypeVoiced {
 			lag = pitchL[sf]
-			if sf == 0 {
+			// Re-whiten at the start of each LPC set: subframe 0 always, and
+			// subframe 2 when NLSF interpolation is active. This mirrors libopus
+			// silk_NSQ_del_dec's condition k & (3 - (LSF_interpolation_flag<<1)) == 0.
+			if sf == 0 || (interpActive && sf == 2) {
+				if sf == 2 {
+					// RESET DELAYED DECISIONS at the LPC-set boundary: pick the
+					// current winner, penalize the losers, and flush the winner's
+					// pending tail (the last decisionDelay samples of subframe 1)
+					// to the output using subframe 1's gain before the LPC set
+					// switches under it.
+					bWinner := 0
+					rdMin := delDec[0].rdQ10
+					for k := 1; k < nStates; k++ {
+						if delDec[k].rdQ10 < rdMin {
+							rdMin = delDec[k].rdQ10
+							bWinner = k
+						}
+					}
+					for k := 0; k < nStates; k++ {
+						if k != bWinner {
+							delDec[k].rdQ10 = silkADD32(delDec[k].rdQ10, math.MaxInt32>>4)
+						}
+					}
+					bd := &delDec[bWinner]
+					bIdx := smplBufIdx + decisionDelay
+					bGainQ10 := silkRSHIFT32(gainsQ16[1], 6)
+					base := sf * subframeLen
+					for i := 0; i < decisionDelay; i++ {
+						bIdx = (bIdx - 1) % silkDecisionDelay
+						if bIdx < 0 {
+							bIdx += silkDecisionDelay
+						}
+						outPos := base - decisionDelay + i
+						xPos := ltpMemLen + base - decisionDelay + i
+						shpPos := e.nsq.sLTPShpBufIdx - decisionDelay + i
+						if outPos >= 0 && outPos < len(pulses) && xPos >= 0 && xPos < len(e.nsq.xq) {
+							pulses[outPos] = int16(silkRShiftRound(int64(bd.qQ10[bIdx]), 10))
+							e.nsq.xq[xPos] = clamp16(silkRShiftRound(int64(silkSMULWW(bd.xqQ14[bIdx], bGainQ10)), 8))
+							if shpPos >= 0 && shpPos < len(e.nsq.sLTPShpQ14) {
+								e.nsq.sLTPShpQ14[shpPos] = bd.shapeQ14[bIdx]
+							}
+						}
+					}
+					subfrCount = 0
+				}
 				startIdx := ltpMemLen - lag - e.lpcOrder - 5/2
 				if startIdx < 0 {
 					startIdx = 0
 				}
 				filterLen := ltpMemLen - startIdx
 				if filterLen > 0 {
-					silkLPCAnalysisFilter(sLTP[startIdx:startIdx+filterLen], int16SliceToInt32(e.nsq.xq[startIdx:startIdx+filterLen]), aQ12, filterLen, e.lpcOrder)
+					xqOff := sf * subframeLen
+					silkLPCAnalysisFilter(sLTP[startIdx:startIdx+filterLen], int16SliceToInt32(e.nsq.xq[startIdx+xqOff:startIdx+xqOff+filterLen]), aQ12, filterLen, e.lpcOrder)
 				}
 				e.nsq.sLTPBufIdx = ltpMemLen
 				e.nsq.rewhiteFlag = true

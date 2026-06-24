@@ -45,6 +45,7 @@ type Decoder struct {
 
 	// lastFinalRange is the range coder rng after the last Decode call.
 	lastFinalRange uint32
+	disableInv     bool
 }
 
 // NewDecoder creates a new CELT decoder.
@@ -340,6 +341,14 @@ func (d *Decoder) LastFinalRange() uint32 {
 	return d.lastFinalRange
 }
 
+// Pitch returns the current CELT post-filter pitch period at 48 kHz.
+func (d *Decoder) Pitch() int {
+	if len(d.postFilter) == 0 || d.postFilter[0] == nil {
+		return 0
+	}
+	return d.postFilter[0].Period()
+}
+
 // CopyStateFrom transfers inter-frame CELT decoder history from another
 // decoder instance. The public Opus decoder uses separate CELT instances for
 // packet bandwidth/frame/channel variants, but the Opus stream has one logical
@@ -479,7 +488,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	totalBitsQ3 := lenBytes*8<<3 - antiCollapseRsv
 	seed := QuantAllBands(dec, start, end, X[:frameLen], Y, collapse, pulses, isTransient,
 		spread, dualStereo, intensity, tfRes, totalBitsQ3, balance, lm, codedBands,
-		d.lastFinalRange, false)
+		d.lastFinalRange, d.disableInv)
 
 	// Anti-collapse bit — RAW bit (ec_dec_bits), read AFTER PVQ. Does not affect rng.
 	antiCollapseOn := false
@@ -625,6 +634,26 @@ func (d *Decoder) decodeLoss() []float64 {
 // DecodePLC performs packet loss concealment (public API)
 func (d *Decoder) DecodePLC() ([]float64, error) {
 	return d.decodeLoss(), nil
+}
+
+// FrameSize returns the decoder's frame size in samples per channel at 48 kHz.
+func (d *Decoder) FrameSize() int {
+	return d.mode.FrameSize
+}
+
+// Channels returns the number of coded channels handled by the decoder.
+func (d *Decoder) Channels() int {
+	return d.mode.Channels
+}
+
+// SetPhaseInversionDisabled controls intensity-stereo phase inversion.
+func (d *Decoder) SetPhaseInversionDisabled(disabled bool) {
+	d.disableInv = disabled
+}
+
+// PhaseInversionDisabled reports the intensity-stereo phase inversion setting.
+func (d *Decoder) PhaseInversionDisabled() bool {
+	return d.disableInv
 }
 
 // Reset resets the decoder state

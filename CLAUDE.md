@@ -70,13 +70,17 @@ internal/resampler/                   <- Opus-rate sample rate conversion
 ### Public API (`opus.go`)
 
 - `NewEncoder(sampleRate, channels, application)` -> `*Encoder`
-- `Encoder.Encode(pcm []int16, frameSize)` / `EncodeFloat(pcm []float64, frameSize)`
+- `Encoder.Encode(pcm []int16, frameSize)` / `Encode24` / `EncodeFloat` /
+  `EncodeFloat32`
 - `NewDecoder(sampleRate, channels)` -> `*Decoder`
-- `Decoder.Decode(data []byte, pcm []int16)` / `DecodeFloat` / `DecodeFEC`
+- `Decoder.Decode(data []byte, pcm []int16)` / `Decode24` / `DecodeFloat` /
+  `DecodeFloat32` / `DecodeFEC` / `DecodePLC`
+- Multistream, surround, projection/Ambisonics, repacketizer, packet extension,
+  and Ogg Opus APIs are available in their package-level files/subpackages.
 
-There is no public `EncodeFloat32`, `DecodeFloat32`, or `DecodePLC(pcm,
-frameSize)` API at the current snapshot. Use `EncodeFloat`/`DecodeFloat` for
-float64 data; `DecodeFEC` currently falls back to CELT PLC behavior.
+`DecodeFEC` extracts SILK LBRR for mono/stereo SILK-only and hybrid packets.
+`DecodePLC` is public but currently supports CELT-only streams after a
+successful CELT decode; SILK-only and hybrid PLC return `ErrUnimplemented`.
 
 ### Current implementation status
 
@@ -98,12 +102,12 @@ all 12 vectors against libopus 1.6.1 (overall RMSE < 0.001). Note:
 official-vector and `.bit`-based diagnostic tests `t.Skip` when `testdata/`
 (git-ignored) is absent.
 
-#### Encoder (Phase 1+2 complete — CELT-only)
+#### Encoder
 
-The encoder implements the full CELT quality pipeline (Phase 1+2, merged to
-`main` 2026-06-15). It emits standard RFC 6716 Opus packets that libopus 1.6.1
-decodes correctly. It is not bit-exact with libopus; SILK and hybrid modes are
-not yet encoded.
+The encoder implements the full CELT quality pipeline and limited public
+SILK-only and hybrid speech paths. It emits standard RFC 6716 Opus packets that
+libopus 1.6.1 decodes correctly. It is not bit-exact with libopus and does not
+yet provide full libopus-equivalent SILK/hybrid mode selection or rate control.
 
 **Implemented features:**
 
@@ -113,8 +117,9 @@ not yet encoded.
   application prefers narrower tiers; `SetBandwidth`/`SetMaxBandwidth` for
   manual override.
 - **Rate control**: CBR / VBR / CVBR (`SetVBR`, `SetVBRConstraint`).
-- **Packetization**: 20/40/60 ms multi-frame packets (RFC 6716 §3.2 codes 0–3)
-  including code-3 padding. `SetPacketPadding` for explicit padding.
+- **Packetization**: 2.5/5/10 ms CELT packets and 20 ms multiples through
+  120 ms (RFC 6716 §3.2 codes 0–3), including code-3 padding.
+  `SetPacketPadding` for explicit padding.
 - **Silence detection + DTX**: near-silent frames emit a minimal 2–3 byte
   packet; `SetDTX` enables discontinuous transmission.
 - **Transient detection**: time-domain HPF masking (`transientAnalysis`) selects
@@ -129,18 +134,25 @@ not yet encoded.
 - **Anti-collapse**: consecutive-transient bit prevents spectral collapse.
 - **Application coupling**: `SignalType` (Voice/Music) wired from `Application`;
   VOIP→voice lowers the patch-transient threshold for speech onsets.
+- **SILK-only speech**: limited mono/stereo low-bitrate voice path for
+  8/12/16 kHz input and downsampled 24/48 kHz WB voice.
+- **Hybrid speech**: initial 24/48 kHz high-bitrate voice path with SILK low
+  band plus CELT high band.
+- **In-band FEC/LBRR**: SILK-only and hybrid encode/decode support for mono and
+  stereo when `SetInbandFEC(true)` and non-zero packet-loss percentage are set.
 
 **SNR (delay-aligned, self-decode, 64 kbps):**
 sine 440 Hz ≈ 48 dB · sine 1 kHz ≈ 47 dB · sine 4 kHz ≈ 39 dB · sine 1 kHz stereo ≈ 43 dB.
 
-**Not yet implemented:** SILK encoder, hybrid (SILK+CELT) encoder, FEC/PLC
-encode. These are Phase 3+.
+**Known gaps:** SILK/hybrid encode is intentionally narrow and quality/rate
+control is still below libopus parity. Public PLC remains CELT-only; SILK-only
+and hybrid PLC are not implemented.
 
 ### Encoding data flow
 
-PCM (int16 or float64) -> optional resampler to 48 kHz -> CELT encoder (MDCT,
-band processing, PVQ quantization) -> range coder -> TOC byte prepended ->
-Opus packet
+PCM (int16, int24-in-int32, float64, or float32) -> mode selection -> CELT,
+SILK-only, or hybrid encoder path -> range coder/framing -> TOC byte prepended
+-> Opus packet
 
 ### Decoding data flow
 

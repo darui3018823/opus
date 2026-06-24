@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-06-20
+Last reviewed: 2026-06-24
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -11,55 +11,191 @@ code-derived status.
 
 Module: `github.com/darui3018823/opus`
 
-The public API is concentrated in `opus.go`, with constants in `constants.go`
-and package-level error values in `errors.go`.
+The single-stream API is concentrated in `opus.go`; multistream, surround, and
+projection APIs are in `multistream.go`, `surround.go`, and `projection.go`.
+Packet transformation APIs are in `repacketizer.go` and `extensions.go`.
+The `oggopus` subpackage implements Ogg page and Ogg Opus container APIs.
+Constants are in `constants.go` and package-level error values in `errors.go`.
+Public version constants are generated into `version_gen.go` from the
+repository-level `VERSION` file; `go generate ./...` refreshes them and CI
+rejects generated-file drift.
+
+Public size constants distinguish separate limits:
+
+- `MaxFrameSize` / `FrameSize120ms`: 5760 samples per channel at 48 kHz,
+  representing the maximum 120 ms packet duration.
+- `MaxFrameBytes`: the RFC 6716 maximum of 1275 compressed bytes for one frame.
+- `MaxPacketFrames`: the RFC 6716 maximum of 48 frames per packet.
+- `MaxPacketSize`: `(MaxFrameBytes + 2) * MaxPacketFrames`, a conservative
+  storage bound for an unpadded single-stream packet. Explicit
+  `SetPacketPadding` can intentionally produce a larger packet.
 
 ### Encoder
 
 Implemented public entry points:
 
 - `NewEncoder(sampleRate, channels int, application Application) (*Encoder, error)`
+- `NewEncoderWithProfile(sampleRate, channels int, application Application, profile EncoderProfile) (*Encoder, error)`
 - `(*Encoder).Encode(pcm []int16, frameSize int) ([]byte, error)`
+- `(*Encoder).Encode24(pcm []int32, frameSize int) ([]byte, error)`
 - `(*Encoder).EncodeFloat(pcm []float64, frameSize int) ([]byte, error)`
+- `(*Encoder).EncodeFloat32(pcm []float32, frameSize int) ([]byte, error)`
 - `(*Encoder).Bitrate() int`
+- `(*Encoder).EffectiveBitrate() int`
 - `(*Encoder).Complexity() int`
 - `(*Encoder).VBR() bool`
+- `(*Encoder).VBRConstraint() bool`
 - `(*Encoder).Application() Application`
+- `(*Encoder).SampleRate() int` / `(*Encoder).Channels() int`
+- `(*Encoder).Lookahead() int`
+- `(*Encoder).FinalRange() uint32`
+- `(*Encoder).InDTX() bool`
 - `(*Encoder).SetBitrate(bitrate int) error`
 - `(*Encoder).SetComplexity(complexity int) error`
 - `(*Encoder).SetVBR(vbr bool)`
 - `(*Encoder).SetVBRConstraint(constrained bool)`
 - `(*Encoder).SetDTX(enabled bool)` / `(*Encoder).DTX() bool`
+- `(*Encoder).SetInbandFEC(enabled bool)` / `(*Encoder).InbandFEC() bool`
+- `(*Encoder).SetPacketLossPerc(perc int)` / `(*Encoder).PacketLossPerc() int`
 - `(*Encoder).SetPacketPadding(n int)`
-- `(*Encoder).SetApplication(application Application)`
+- `(*Encoder).SetForceChannels(channels int) error` / `(*Encoder).ForceChannels() int`
+- `(*Encoder).SetLSBDepth(depth int) error` / `(*Encoder).LSBDepth() int`
+- `(*Encoder).SetPredictionDisabled(bool)` / `(*Encoder).PredictionDisabled() bool`
+- `(*Encoder).SetPhaseInversionDisabled(bool)` / `(*Encoder).PhaseInversionDisabled() bool`
+- `(*Encoder).SetApplication(application Application) error`
 - `(*Encoder).SetSignalType(signal SignalType)`
 - `(*Encoder).SignalType() SignalType`
 - `(*Encoder).SetMaxBandwidth(bw int) error`
+- `(*Encoder).MaxBandwidth() int`
 - `(*Encoder).SetBandwidth(bw int) error` / `(*Encoder).Bandwidth() int`
 - `(*Encoder).Reset() error`
+
+Public packet inspection entry points:
+
+- `PacketGetConfig(packet []byte) (int, error)`
+- `PacketGetMode(packet []byte) (int, error)`
+- `PacketGetBandwidth(packet []byte) (int, error)`
+- `PacketGetNumChannels(packet []byte) (int, error)`
+- `PacketGetNumFrames(packet []byte) (int, error)`
+- `PacketGetSamplesPerFrame(packet []byte, sampleRate int) (int, error)`
+- `PacketGetNumSamples(packet []byte, sampleRate int) (int, error)`
+- `NewRepacketizer() *Repacketizer`
+- `(*Repacketizer).Cat(packet []byte) error`
+- `(*Repacketizer).Out() ([]byte, error)`
+- `(*Repacketizer).OutRange(begin, end int) ([]byte, error)`
+- `PacketPad(packet []byte, newLen int) ([]byte, error)`
+- `PacketUnpad(packet []byte) ([]byte, error)`
+- `PacketExtensionsCount(packet []byte) (int, error)`
+- `PacketExtensionsParse(packet []byte) ([]PacketExtension, error)`
+- `PacketExtensionsGenerate(packet []byte, extensions []PacketExtension, paddingBytes int) ([]byte, error)`
+
+These helpers validate the complete RFC 6716 packet framing and return
+`ErrInvalidPacket` for malformed or over-duration packets.
+The repacketizer combines matching single-stream frames without transcoding,
+enforces the 120 ms limit, and supports canonical padding removal. Packet
+extensions are parsed and generated in code-3 padding with repeat expansion.
+DRED and QEXT payloads are transported opaquely; their codecs are outside this
+package.
+
+Public multistream and surround entry points:
+
+- `NewMultistreamEncoder(...) (*MultistreamEncoder, error)`
+- `NewMultistreamDecoder(...) (*MultistreamDecoder, error)`
+- int16, signed-24-bit-in-int32, float32, and float64 encode/decode methods
+- per-stream encoder/decoder access, aggregate bitrate control, reset, mapping,
+  stream-count, coupled-stream-count, and final-range getters
+- `NewSurroundEncoder(...) (*SurroundEncoder, error)`
+- `NewSurroundDecoder(...) (*SurroundDecoder, error)`
+- mapping families 0 (mono/stereo), 1 (Vorbis order, 1 through 8 channels), and
+  255 (discrete uncoupled channels)
+
+Multistream packets use RFC 6716 Appendix B self-delimited framing for every
+elementary stream except the last. Tests cover Go encode/decode round trips,
+duplicate and silent mappings, duration validation, and bidirectional libopus
+1.6.1 interoperability. Surround mapping-family 1 uses the libopus/Vorbis
+stream layouts, identifies the LFE stream for 5.1/6.1/7.1, applies
+frame-duration-dependent stream bitrate allocation, and keeps coupled streams
+on stereo CELT to preserve the spatial image.
+
+Public projection and Ambisonics entry points:
+
+- `NewProjectionEncoder(...) (*ProjectionEncoder, error)`
+- `NewProjectionDecoder(...) (*ProjectionDecoder, error)`
+- `NewAmbisonicsEncoder(...) (*ProjectionEncoder, error)`
+- `NewAmbisonicsDecoder(...) (*AmbisonicsDecoder, error)`
+- `NewMappingMatrix(...) (*MappingMatrix, error)`
+- `NewMappingMatrixFromBytes(...) (*MappingMatrix, error)`
+
+RFC 8486 mapping family 2 supports ACN/SN3D Ambisonics through channel mapping,
+including optional non-diegetic stereo. Mapping family 3 uses projection
+mixing/demixing matrices; predefined libopus 1.6.1 matrices are available for
+first- through fifth-order layouts. Tests cover PCM API variants, round trips,
+matrix validation, and bidirectional family 2/3 libopus interoperability.
+
+The `oggopus` subpackage provides:
+
+- CRC-checked Ogg `Page` parsing, reading, marshaling, and writing
+- lacing and continued-packet reconstruction through `PacketReader`
+- packet-to-page output through `PacketWriter`
+- `OpusHead` and `OpusTags` parsing and marshaling
+- complete single-logical-stream Ogg Opus `Reader` and `Writer` APIs
+
+The decoder exposes `SampleRate`, `Channels`, `FinalRange`, and `Pitch`
+getters. `FinalRange` is the XOR of the constituent frame entropy ranges, as
+for the libopus single-stream CTL. `Pitch` is reported in output-rate samples.
+Decoder output gain is available through `SetGain` and `Gain`, using Q8 dB.
+Single-stream encode/decode also supports signed 24-bit PCM stored in `int32`
+through `Encode24` and `Decode24`. Encoder and decoder phase-inversion controls
+are wired to CELT intensity-stereo processing.
+
+A stereo encoder can force a mono Opus stream; input is downmixed before a
+stateful mono codec instance. LSB depth is retained as the libopus-style input
+precision hint. Prediction disabling currently prevents predictive SILK and
+hybrid routing, keeping the stream on CELT.
 
 Accepted sample rates are `8000`, `12000`, `16000`, `24000`, and `48000`.
 Accepted channel counts are mono and stereo.
 
-The top-level encoder always creates an internal CELT encoder at 48 kHz and
-uses a 20 ms internal CELT frame (`960` samples per channel) for the general
-audio path. Non-48 kHz CELT input is resampled to 48 kHz before CELT encoding.
-The CELT emitted TOC byte is CELT-only 20 ms, with the **coded bandwidth
+`SetBitrate` accepts numeric rates from 6000 through 510000 bit/s as well as
+`BitrateAuto` and `BitrateMax`. `Bitrate` returns the configured value or
+policy sentinel; `EffectiveBitrate` returns the numeric rate currently applied.
+The automatic policy follows libopus' frame-size/sample-rate/channel formula,
+and the maximum policy is bounded by the RFC per-frame byte limit.
+
+`NewEncoder` preserves the historical defaults (64 kbit/s, complexity 5, CBR).
+`NewEncoderWithProfile(..., EncoderProfileLibopus)` selects automatic bitrate,
+complexity 9, and constrained VBR without imposing a behavior change on
+existing callers.
+
+Encoder, decoder, multistream, surround, projection, and container reader/writer
+instances are stateful and are not safe for concurrent use. One instance owns
+the codec or framing history for one logical Opus stream set; packets
+must be processed in order, and callers must serialize all methods on a shared
+instance, including getters, controls, and `Reset`. Distinct instances may run
+concurrently. Instances must not be copied after first use. Caller-provided
+PCM, packet, and destination slices are borrowed only for the duration of a
+method call; returned packet and PCM slices are caller-owned.
+
+The top-level encoder uses internal CELT encoders at 48 kHz for 2.5, 5, 10,
+and 20 ms transform geometries. Non-48 kHz CELT input is resampled to 48 kHz
+before CELT encoding. The CELT emitted TOC byte uses the requested valid frame
+duration, with the **coded bandwidth
 selected per the input sample rate, target bitrate, explicit bandwidth settings,
 and signal-content detector** (see Slice 2-6 and the post-2-6 notes below); it
 is no longer always fullband.
 
 As of SILK Encoder slices 11 and 12, the top-level encoder can also emit a
-limited SILK-only path for low-bitrate speech: `ApplicationVOIP` or an explicit
-voice signal hint, mono or stereo input, and target bitrates up to and including
-40 kbps. Native 8/12/16 kHz input maps to SILK NB/MB/WB; 24/48 kHz voice input
+SILK-only path for low-bitrate speech: `ApplicationVOIP` or an explicit voice
+signal hint, with channel- and FEC-aware bitrate boundaries. The base upper
+bound is 40 kbps mono or 48 kbps stereo; active LBRR extends it by 8 kbps per
+channel. Native 8/12/16 kHz input maps to SILK NB/MB/WB; 24/48 kHz voice input
 is downsampled to a 16 kHz WB SILK layer and emits a WB SILK-only TOC config.
 That path uses the internal SILK encoder, emits SILK-only duration configs for
 20/40/60 ms Opus frames for mono, and packs longer supported durations as
 standard multiple Opus frame streams. Stereo SILK packets use 20 ms streams for
 60 ms and longer public packet durations to keep individual Opus frame payloads
 inside the 1275-byte framing limit. Explicit `SignalMusic`,
-restricted-low-delay, bitrates above 40 kbps, a forced bandwidth that cannot be
+restricted-low-delay, bitrates outside the predictive-mode policy, a forced bandwidth that cannot be
 represented by the selected SILK layer, or, while bandwidth selection is
 automatic, a max-bandwidth cap below the SILK bandwidth keep the encoder out of
 the SILK-only path. An explicit forced bandwidth takes precedence over the
@@ -82,6 +218,12 @@ take precedence over max-bandwidth caps. Hybrid is currently limited to 20 ms
 Opus frames, optionally packed as standard multi-frame packets for longer public
 frame sizes.
 
+The mode policy has an upper hybrid boundary as well as the SILK-to-hybrid
+boundary. Mono hybrid is selected through 112 kbps and stereo through 192 kbps;
+active LBRR extends those limits by 16 kbps per channel. Above the boundary,
+voice returns to CELT so the transform layer receives the full packet budget.
+Tests cover channel, CVBR, bandwidth, FEC/loss, and transition cases.
+
 The encoder implements both directions of libopus-style SILK/hybrid↔CELT
 transition redundancy. It tracks the previous packet's coding mode with
 `Encoder.prevMode`. For hybrid→CELT, the switch is deferred by one packet: the
@@ -98,10 +240,17 @@ all three transition forms (verified by
 `TestCGOEncodeRefHybridRedundancyTransition` and
 `TestCGOEncodeRefCELTToSILKRedundancyTransition`).
 
-Supported public encode packet durations are exact 20 ms multiples from 20 ms
-through 120 ms (`frameSize == base20ms * 1..6`). Unsupported frame sizes and
+Supported public encode packet durations are 2.5, 5, and 10 ms CELT packets,
+plus exact 20 ms multiples from 20 through 120 ms. Unsupported frame sizes and
 durations over the Opus 120 ms packet limit are rejected with
 `ErrUnsupportedFrameSize`.
+
+The arbitrary-length FFT path caches immutable Bluestein plans and performs the
+convolution FFTs in place. On the Windows amd64 audit machine this reduced the
+20 ms stereo CELT benchmark from approximately 458 KB/48 allocations to
+229 KB/30 allocations for encode, and from approximately 422 KB/51 allocations
+to 192 KB/33 allocations for decode. `TestCoreAllocationRegression` guards the
+allocation counts after plan warm-up.
 
 ### Phase 2: Production CELT Encoder (In Progress)
 
@@ -307,7 +456,7 @@ Current encoder limitations:
 - VBR/CVBR affects CELT target sizing and packet sizes, but the rate controller
   is still a simplified CELT-only implementation rather than libopus-equivalent
   full mode/rate control.
-- `EncodeFloat` uses `float64`; there is no public `EncodeFloat32` method.
+- Both float32 and float64 PCM encoding APIs are available.
 - The public encoder exposes limited SILK-only and hybrid speech paths; it does
   not yet expose full libopus-equivalent SILK/hybrid mode selection.
 - The CELT encoder path is functional but not verified as bit-exact against
@@ -319,10 +468,15 @@ Implemented public entry points:
 
 - `NewDecoder(sampleRate, channels int) (*Decoder, error)`
 - `(*Decoder).Decode(data []byte, pcm []int16) (int, error)`
+- `(*Decoder).Decode24(data []byte, pcm []int32) (int, error)`
 - `(*Decoder).DecodeFloat(data []byte) ([]float64, error)`
+- `(*Decoder).DecodeFloat32(data []byte) ([]float32, error)`
+- `(*Decoder).DecodePLC(pcm []int16, frameSize int) (int, error)`
 - `(*Decoder).DecodeFEC(data []byte, pcm []int16) (int, error)`
 - `(*Decoder).Reset() error`
 - `(*Decoder).GetLastPacketDuration() int`
+- `(*Decoder).SetPhaseInversionDisabled(bool)` /
+  `(*Decoder).PhaseInversionDisabled() bool`
 
 Accepted sample rates are `8000`, `12000`, `16000`, `24000`, and `48000`.
 Accepted channel counts are mono and stereo.
@@ -342,11 +496,14 @@ Packets whose decoded duration exceeds 120 ms are rejected as invalid.
 
 Current decoder limitations:
 
-- `DecodeFEC` currently uses CELT packet-loss concealment from the fullband
-  20 ms decoder and does not decode FEC data from the supplied packet.
-- There is no public `DecodeFloat32` method.
-- There is no public `DecodePLC(pcm, frameSize)` method; CELT PLC exists
-  internally and is reached through `DecodeFEC`.
+- `DecodePLC` supports CELT-only streams after a successful CELT packet decode.
+  The requested duration must be a valid Opus duration, an integer multiple of
+  the active CELT frame duration, and no more than 120 ms. SILK-only and hybrid
+  PLC return `ErrUnimplemented`.
+- `DecodeFEC` extracts SILK LBRR for mono/stereo SILK-only and hybrid packets.
+  Hybrid recovery reconstructs the redundant SILK low band; CELT-only packets
+  do not carry SILK LBRR.
+- Both float32 and float64 PCM decoding APIs are available.
 - `GetLastPacketDuration` reports the duration in output samples per channel of
   the last successfully decoded packet; before any decode it reports the default
   20 ms duration for the decoder sample rate.
@@ -494,7 +651,7 @@ The SILK package contains:
   against silence regressions, dead output, energy runaway, duration errors,
   side-channel collapse, and severe quality drops. Slice 10 hardens the public
   mode/rate boundary with tests for
-  the 40 kbps SILK limit, application and signal hints, pre-Slice-11/12
+  the original 40 kbps mono SILK limit, application and signal hints, pre-Slice-11/12
   channel/input-rate exclusions, forced/max bandwidth interaction, and
   VBR/DTX/padding interaction. The public SILK-only integration now also pads
   undersized CBR streams to the nominal bitrate target while leaving VBR/CVBR
@@ -587,6 +744,25 @@ The SILK package contains:
   explicit RMS loudness difference in dB. On the speech-harmonic fixture the
   matched loudness differences are within 0.75 dB at 8/12/16 kHz; the former
   approximately 0.57 alignment scale is no longer present.
+SILK encoding supports standards-compliant one-packet-delayed LBRR/in-band FEC
+when `SetInbandFEC(true)` is combined with a non-zero `SetPacketLossPerc`.
+Mono, stereo mid/side, and hybrid SILK layers buffer redundant channel bodies,
+write the per-channel 1/2/3-frame flag grammar before regular frames, and keep
+normal decode entropy alignment. `DecodeFEC` reconstructs SILK-only and hybrid
+packets; hybrid recovery uses the redundant SILK low band because LBRR does not
+carry a separate CELT high-band copy. Stereo LBRR is written and decoded in the
+libopus frame-major order: stereo predictor and optional mid-only flag, then
+mid and side redundant bodies for each frame. The normal stereo decode path
+also consumes those pending LBRR bodies in frame-major order, so the regular
+frame state remains aligned before a later `DecodeFEC` call. The opusref quality
+guard now requires at least 20 dB aligned SNR for mono hybrid, stereo SILK, and
+stereo hybrid FEC recovery, with per-channel measurements and a subsequent
+normal-decode continuity check. The mono 20/40/60 ms Go-vs-libopus FEC floor is
+still at least 6 dB; the 60 ms case improved from 1.72 to 8.43 dB after the SILK
+PLC fallback began preserving LPC history and using the previous pitch/LTP
+history for missing LBRR slots. On the deterministic fixture, stereo SILK
+measures 35.95 dB and stereo hybrid measures 28.68 dB. FEC after-state
+continuity is guarded at 10 dB for the tested stereo/hybrid cases.
 
 The public Opus decoder instantiates SILK decoders for 8/12/16 kHz packet
 rates. Hybrid configs (12-15) are fully reconstructed in `opus.go`: a single
@@ -619,6 +795,29 @@ Q5a verification on 2026-06-17: passing (`go vet ./...`,
 Voiced SNR-VBR rate-control verification on 2026-06-18: passing
 (`go test ./...` and
 `go test -tags opusref -run TestOpusSILKABAgainstLibopusEncoder -v .`).
+Mono SILK LBRR/FEC encoding verification on 2026-06-20: passing
+(`go vet ./...`, `go test -count=1 ./...`, and
+`go test -count=1 -tags opusref ./...`). The libopus sequence tests cover
+normal decoding plus `decode_fec=1` recovery for 20/40/60 ms packets.
+
+FEC quality verification on 2026-06-24: targeted normal and opusref tests pass.
+The stereo SILK and mono/stereo hybrid Go-vs-libopus FEC floor is 20 dB, channel
+metrics are logged for stereo, and normal decoding is continued after FEC in
+every tested mode with a 10 dB continuity floor. The mono 20/40/60 ms floor
+remains 6 dB. This is not a 60 ms-specific limitation: LBRR is intentionally not
+coded for VAD-inactive frames (matching libopus' single-VAD semantics), so a lost
+frame that was inactive has no redundant copy and is recovered via SILK PLC
+instead. SILK PLC is not bit-exact with libopus, and measuring aligned SNR on
+such a near-silent frame yields a small value. In the deterministic fixture the
+3 Hz amplitude-envelope trough makes exactly one 60 ms frame inactive, so its
+slot (subframe 0 of the recovered packet) is PLC-concealed by both Go and
+libopus rather than reconstructed from LBRR; the present-LBRR subframes match
+libopus closely (40 ms ~33 dB, present 60 ms subframes ~9-10 dB).
+
+P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
+inversion controls, multistream, and surround tests pass in the normal suite.
+`TestCGOMultistreamInteroperability` verifies both Go-encoded packets decoded
+by libopus 1.6.1 and libopus-encoded packets decoded by Go.
 
 Passing package-level tests:
 
@@ -685,20 +884,29 @@ Notes:
   bandwidth overriding a lower max-bandwidth cap.
 - The former `cmd_diag` duplicate-`main` build failure is fixed (`toc_check.go`
   moved to `cmd_diag/toccheck`).
+- Nightly fuzzing covers int16/float decoding, packet extensions, multistream
+  self-delimited framing, repacketization/padding, and Ogg page/metadata/stream
+  parsing on amd64 and arm64.
 
 The decoder passes the full official Opus test-vector suite and the libopus
 reference comparison.
 
 ## Known Gaps
 
-- No public multistream, surround, or Ogg Opus container API.
-- No public float32 encode/decode API.
-- No public `DecodePLC(pcm, frameSize)` API matching the README examples.
-- Top-level SILK-only encoder selection exists only for low-bitrate VOIP/voice.
-- Top-level hybrid encoder selection exists only for high-bitrate 24/48 kHz
-  VOIP/voice; there is no full libopus-equivalent hybrid mode/rate-control
-  coverage.
-- FEC decode is currently a PLC fallback, not packet FEC extraction.
+- Projection family 3 encoder setup uses the predefined libopus 1.6.1 matrices;
+  arbitrary custom encoder-matrix generation is not exposed.
+- The Ogg Opus package handles one logical stream and does not provide seeking,
+  chained-stream orchestration, or multiplexed-stream demux.
+- Multistream/surround provide core encode/decode, mapping, aggregate bitrate,
+  and per-stream state access, but do not yet mirror every libopus multistream
+  CTL or its full surround psychoacoustic energy-mask analysis.
+- Public PLC currently covers CELT-only streams; SILK-only and hybrid PLC are
+  not implemented.
+- Top-level SILK/hybrid encoder selection is voice-oriented and now accounts
+  for rate, channels, bandwidth, CVBR, and active FEC, but it is not yet a full
+  libopus-equivalent mode/rate/quality policy.
+- SILK-only and hybrid LBRR/FEC encoding and decoding are available for mono
+  and stereo. Hybrid FEC reconstructs the redundant SILK low band.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
   to full libopus-compatible mode/rate-control behavior.
 - Decoder parity is achieved on the official vectors and the libopus reference;
@@ -711,5 +919,8 @@ The codebase is a Pure Go Opus implementation with a decoder that passes all 12
 official RFC 8251 vectors and the libopus 1.6.1 reference comparison. The
 encoder has a CELT path with the current quality pipeline, standard packet
 output, and libopus decode cross-checks, plus a narrow low-bitrate SILK-only
-speech path, and an initial high-bitrate 24/48 kHz hybrid voice path. It is not
-bit-exact with libopus and does not yet provide full SILK/hybrid mode selection.
+speech path, an initial high-bitrate 24/48 kHz hybrid voice path, and public
+multistream/surround/projection packet support cross-checked with libopus.
+Packet extensions and single-stream Ogg Opus containers are available through
+public Pure Go APIs. It is not bit-exact with libopus and does not yet provide
+full SILK/hybrid mode selection.

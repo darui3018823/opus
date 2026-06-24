@@ -11,6 +11,8 @@ import "fmt"
 
 // Encoder is a no-op placeholder for non-opusref builds.
 type Encoder struct{}
+type MultistreamEncoder struct{}
+type MultistreamDecoder struct{}
 
 // NewEncoder reports that the libopus encoder is unavailable without opusref.
 func NewEncoder(sampleRate, channels, application int) (*Encoder, error) {
@@ -54,3 +56,23 @@ func (e *Encoder) Encode(pcm []float32, frameSize int) ([]byte, error) {
 
 // Close is a no-op in non-opusref builds.
 func (e *Encoder) Close() {}
+
+func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, mapping []byte, application int) (*MultistreamEncoder, error) {
+	return nil, fmt.Errorf("cgoref multistream encoder requires -tags opusref")
+}
+
+func (e *MultistreamEncoder) Encode(pcm []float32, frameSize int) ([]byte, error) {
+	return nil, fmt.Errorf("cgoref multistream encoder requires -tags opusref")
+}
+
+func (e *MultistreamEncoder) Close() {}
+
+func NewMultistreamDecoder(sampleRate, channels, streams, coupledStreams int, mapping []byte) (*MultistreamDecoder, error) {
+	return nil, fmt.Errorf("cgoref multistream decoder requires -tags opusref")
+}
+
+func (d *MultistreamDecoder) DecodeFloat(packet []byte, maxSPC int) ([]float32, error) {
+	return nil, fmt.Errorf("cgoref multistream decoder requires -tags opusref")
+}
+
+func (d *MultistreamDecoder) Close() {}

@@ -95,6 +95,39 @@ func TestVoicedUsesTrellisGating(t *testing.T) {
 	}
 }
 
+// TestUnvoicedUsesTrellisGating pins the unvoiced trellis gate to mono SILK-only.
+// Unlike the voiced trellis (enabled in every mode), unvoiced runs the full
+// delayed-decision NSQ only when not a stereo component and not hybrid: those
+// modes carry separate conformance constraints and keep the homebrew path.
+func TestUnvoicedUsesTrellisGating(t *testing.T) {
+	mono, err := NewEncoder(16000, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder mono: %v", err)
+	}
+	if !mono.unvoicedUsesTrellis() {
+		t.Fatalf("mono SILK-only encoder should use the unvoiced trellis")
+	}
+	mono.SetHybridMode(true)
+	if mono.unvoicedUsesTrellis() {
+		t.Fatalf("hybrid-mode encoder should keep unvoiced on homebrew")
+	}
+	mono.SetHybridMode(false)
+	if !mono.unvoicedUsesTrellis() {
+		t.Fatalf("clearing hybrid mode should re-enable the unvoiced trellis")
+	}
+
+	stereo, err := NewEncoder(16000, 2)
+	if err != nil {
+		t.Fatalf("NewEncoder stereo: %v", err)
+	}
+	if stereo.unvoicedUsesTrellis() {
+		t.Fatalf("stereo mid encoder should keep unvoiced on homebrew")
+	}
+	if stereo.side == nil || stereo.side.unvoicedUsesTrellis() {
+		t.Fatalf("stereo side encoder should keep unvoiced on homebrew")
+	}
+}
+
 // TestShapeGainIndicesStable confirms the Step 4 voiced gain pipeline produces
 // gain indices in range and stable (no near-zero gains that would over-drive the
 // excitation) for a steady voiced tone — the failure mode that the prediction-

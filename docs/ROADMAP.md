@@ -7,7 +7,7 @@ Pure Go Opus library. For exact current behavior, prefer
 [`docs/CURRENT_IMPLEMENTATION.md`](CURRENT_IMPLEMENTATION.md); it is generated
 from the code state and takes precedence when this roadmap lags.
 
-## Current Status: v1.1.1 Snapshot
+## Current Status: 2026-06-24 Snapshot
 
 - Decoder: complete for the current public API; passes all 12 official RFC 8251
   vectors and the libopus 1.6.1 reference comparison.
@@ -18,9 +18,11 @@ from the code state and takes precedence when this roadmap lags.
   packets that libopus decodes, but is not bit-exact and does not implement full
   libopus-equivalent SILK/hybrid mode selection.
 - Runtime CGO: none. CGO is used only by optional `opusref` reference tests.
-- Encoder quality has a dedicated Ubuntu `opusref` workflow. It installs
+- Encoder quality and interoperability have a dedicated Ubuntu `opusref`
+  workflow. It installs
   `libopus-dev`, obtains the distro-specific header path from `pkg-config`, and
-  runs the SILK A/B scoreboard plus encoder/decoder reference checks.
+  runs the SILK A/B scoreboard plus short-frame, FEC, multistream, projection,
+  packet-extension, and decoder reference checks.
 
 ## Historical Milestones
 
@@ -84,10 +86,15 @@ from the code state and takes precedence when this roadmap lags.
   fuller libopus mode/rate-control coverage.
 
 **FEC/PLC API parity** 🔄
-- Implement true packet FEC extraction and expose a public PLC API.
+- SILK-only/hybrid LBRR FEC encode/decode is implemented for mono and stereo.
+- Improve the remaining FEC quality edge cases and add SILK/hybrid support to
+  the public `DecodePLC` path, which is currently CELT-only.
 
 **Multistream/container support** 🔄
-- Add multistream/surround mapping and Ogg Opus container APIs.
+- Core multistream/surround, projection/Ambisonics, and single-logical-stream
+  Ogg Opus APIs are implemented.
+- Remaining work is seeking/chained/multiplexed Ogg support and fuller libopus
+  CTL/psychoacoustic parity for multistream/surround.
 
 **Encoder parity and tuning** 🔄
 - Continue quality and bit-exactness-oriented CELT refinements where useful.
@@ -334,8 +341,8 @@ For each major component:
 
 **Immediate priorities after v1.1.1**:
 1. 🔄 Broader SILK/hybrid encoder mode coverage.
-2. 🔄 True FEC decode and public PLC API design.
-3. 🔄 Multistream/surround and Ogg Opus container APIs.
+2. 🔄 SILK/hybrid public PLC and remaining FEC quality edge cases.
+3. 🔄 Remaining multistream/surround/Ogg parity beyond the implemented core APIs.
 4. 🔄 Encoder parity/quality refinements against libopus.
 5. 📝 Keep README and `CURRENT_IMPLEMENTATION.md` aligned with releases.
 
@@ -351,5 +358,5 @@ For each major component:
 
 ---
 
-Last Updated: 2026-06-15
-Status: v1.1.1 shipped; decoder parity complete, CELT-only encoder quality pipeline complete for current scope.
+Last Updated: 2026-06-24
+Status: decoder parity complete; CELT quality pipeline, limited SILK-only/hybrid encode, LBRR FEC, multistream/surround/projection, packet extensions, and single-stream Ogg Opus core APIs are implemented for current scope.

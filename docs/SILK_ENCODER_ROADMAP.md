@@ -1,6 +1,6 @@
 # SILK Encoder Roadmap
 
-Last updated: 2026-06-16
+Last updated: 2026-06-24
 
 This roadmap starts from the implementation snapshot in
 `docs/CURRENT_IMPLEMENTATION.md`. If this document and the current snapshot
@@ -13,18 +13,26 @@ The public encoder has two encode paths:
 
 - General audio still uses the CELT encoder.
 - A narrow SILK-only path is available for low-bitrate speech when the encoder
-  is configured for `ApplicationVOIP` or `SignalVoice` and the target bitrate is
-  at most 40 kbps. Native 8/12/16 kHz input maps to SILK NB/MB/WB, while 24/48
-  kHz input is downsampled to WB SILK. Mono and stereo SILK-only packets are
-  supported.
+  is configured for `ApplicationVOIP` or `SignalVoice`, with channel- and
+  FEC-aware bitrate boundaries. Native 8/12/16 kHz input maps to SILK NB/MB/WB,
+  while 24/48 kHz input is downsampled to WB SILK. Mono and stereo SILK-only
+  packets are supported.
+- A hybrid path is available for high-bitrate 24/48 kHz voice packets, writing a
+  SILK low band and CELT high band into one shared range stream.
+- SILK-only and hybrid paths can emit one-packet-delayed LBRR/in-band FEC for
+  mono and stereo, and `DecodeFEC` recovers SILK-only/hybrid redundant data.
+  Public `DecodePLC` remains CELT-only.
+- Public multistream/surround/projection APIs, packet extensions, repacketizer
+  operations, and single-logical-stream Ogg Opus containers are implemented;
+  this SILK roadmap now focuses on remaining SILK/hybrid quality and parity.
 
 The internal SILK encoder can write decoder-compatible mono and stereo 10 ms /
 20 ms range streams, pack multiple SILK frames into one shared stream, encode
 structured pulses, make simple voiced pitch/LTP decisions, select input-adaptive
-NLSF indices, and run a first closed-loop NSQ-style pulse search with simple
-noise-shaping feedback. Stereo uses conservative mid/side coding with zero
-stereo predictors. It is intentionally not a libopus-equivalent SILK encoder
-yet.
+NLSF indices, run delayed-decision trellis NSQ for voiced mono/stereo/hybrid
+frames, use adaptive stereo predictors, and preserve decoder-compatible state
+across FEC and mode-transition cases. It is intentionally not a
+libopus-equivalent SILK encoder yet.
 
 ## Phase Transition: Foundation Done, Quality Next (2026-06-16)
 
@@ -49,12 +57,13 @@ encoder chain, climbing from the bottom of the chain upward.
 - Every quality slice must move a measured number on the scoreboard below, or
   prove non-regression while improving robustness.
 
-## Non-goals For The Quality Phase
+## Non-goals For The Original Quality Phase
 
 - Bit-exact matching with libopus encoder output.
-- LBRR/FEC encoding (deferred to after Q7).
-- Ogg Opus container support.
-- Multistream or surround.
+- LBRR/FEC encoding, Ogg Opus container support, and multistream/surround were
+  out of scope for the original 2026-06-16 quality phase. They have since
+  received core implementations; remaining work is tracked as quality/parity
+  follow-up in `CURRENT_IMPLEMENTATION.md`.
 
 ## The Scoreboard (Q0) — North Star
 
@@ -570,9 +579,8 @@ Scope:
 
 Out of scope:
 
-- Hybrid stereo.
-- Surround/multistream.
-- LBRR/FEC.
+- Full surround/multistream psychoacoustic parity.
+- Libopus-equivalent stereo mode/rate-control parity.
 
 Exit criteria:
 
@@ -621,7 +629,6 @@ Scope:
 Out of scope:
 
 - Full opus_encoder.c rate control parity.
-- LBRR/FEC.
 - Complex mode transitions and redundancy tuning beyond the minimum required
   for valid packets.
 

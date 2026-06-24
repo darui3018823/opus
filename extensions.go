@@ -159,6 +159,11 @@ func packetExtensionLayout(packet []byte) (frames [][]byte, padding []byte, fram
 		body = body[1:]
 		if p == 255 {
 			padLen += 254
+			// Guard against int overflow on 32-bit platforms with a crafted
+			// oversized padding run before the final bound check below.
+			if padLen > len(packet) {
+				return nil, nil, 0, fmt.Errorf("%w: padding length %d exceeds packet", ErrInvalidPacket, padLen)
+			}
 			continue
 		}
 		padLen += p

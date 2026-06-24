@@ -2343,6 +2343,13 @@ func (d *Decoder) updatePLCState(output []int32) {
 		for i, sample := range output {
 			d.ltpState[mvLen+i] = sample
 		}
+	} else {
+		// output longer than the LTP buffer (e.g. 16 kHz: 320 > 288): keep the
+		// most recent len(d.ltpState) samples so the pitch history stays fresh.
+		offset := len(output) - len(d.ltpState)
+		for i := range d.ltpState {
+			d.ltpState[i] = output[offset+i]
+		}
 	}
 }
 

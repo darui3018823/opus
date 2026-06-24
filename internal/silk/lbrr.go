@@ -19,19 +19,12 @@ func (e *Encoder) leakFingerprint() string {
 		}
 		return s
 	}
-	sumA := func(xs []int32) int64 {
-		var s int64
-		for _, v := range xs {
-			s += int64(v)
-		}
-		return s
-	}
 	return fmt.Sprintf("pPitch=%d pLagIx=%d pGainQ16=%d pGainIdx=%d pSig=%d pLagPitch=%d ffar=%v ltpSum=%.4f harm=%.4f tilt=%.4f lpc=%d ltp=%d xq=%d sLTP=%d nsqGain=%d ltpCorr=%.5f lagPrev=%d ltpBuf=%d shpBuf=%d lfar=%d diff=%d sLPC=%d sAR2=%d rewhite=%v curLag=%d curCont=%d nsqSeed=%d pGains=%.4f",
 		e.prevPitchLag, e.prevLagIndex, e.prevGainQ16, e.prevGainIdx, e.prevSignalType, e.prevLagForPitch,
 		e.firstFrameAfterReset, e.ltpSumLogGainQ7, e.shapeHarmSmooth, e.shapeTiltSmooth,
 		sum(e.lpcState), sum(e.ltpState), sum32to64(e.nsq.xq), sum(e.nsq.sLTPShpQ14), e.nsq.prevGainQ16, e.ltpCorrState,
 		e.nsq.lagPrev, e.nsq.sLTPBufIdx, e.nsq.sLTPShpBufIdx, e.nsq.sLFARShpQ14, e.nsq.sDiffShpQ14,
-		sumA(e.nsq.sLPCQ14[:]), sumA(e.nsq.sAR2Q14[:]), e.nsq.rewhiteFlag,
+		sum(e.nsq.sLPCQ14[:]), sum(e.nsq.sAR2Q14[:]), e.nsq.rewhiteFlag,
 		e.curPitchLagIndex, e.curPitchContourIndex, e.nsqSeed, sumFloats(e.prevGains))
 }
 

@@ -157,7 +157,9 @@ func TestCGOEncodeRefSILKFEC(t *testing.T) {
 
 	// The LBRR reconstruction must be a real match to the lost frame, and clearly
 	// better than the PLC extrapolation libopus falls back to with no redundancy.
-	if snrFEC < 3.0 {
+	// Measured ~25.8 dB on the deterministic fixture; floor well above the old
+	// placeholder so a real regression is caught.
+	if snrFEC < 10.0 {
 		t.Fatalf("FEC reconstruction too poor: alignedSNR=%.2fdB rmse=%.4f", snrFEC, rmseFEC)
 	}
 	if snrFEC < snrPLC+3.0 {
@@ -285,7 +287,9 @@ func TestCGOEncodeRefSILKFECMultiFrame(t *testing.T) {
 			snr, rmse, dl, _ := silkRefAlignedSNR(refFrames[N], toFloat64(rec), frameSize/2)
 			t.Logf("%dms: bytes fec=%d no=%d (+%d) | frame %d FEC recovery alignedSNR=%.2fdB rmse=%.4f delay=%d len(rec)=%d len(ref)=%d",
 				packetMs, bytesFEC, bytesNo, bytesFEC-bytesNo, N, snr, rmse, dl, len(rec), len(refFrames[N]))
-			if snr < 3.0 {
+			// Measured ~17.9 dB (40 ms) / ~13.4 dB (60 ms) on the deterministic
+			// fixture; floor at 10 dB leaves margin while catching regressions.
+			if snr < 10.0 {
 				t.Fatalf("multi-frame FEC reconstruction too poor: alignedSNR=%.2fdB", snr)
 			}
 		})

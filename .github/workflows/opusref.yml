@@ -59,6 +59,12 @@ jobs:
           mv opus-1.6.1 libopus
 
       - name: Packet extensions libopus oracle
+        # Override the distro CGO_CFLAGS (-I/usr/include/opus, libopus 1.4 without
+        # OpusDRED) so the vendored 1.6.1 headers resolve consistently with the
+        # bundled src/extensions.c. The oracle only uses the self-contained
+        # extensions.c, so linking the 1.4 shared lib stays ABI-safe.
+        env:
+          CGO_CFLAGS: -I${{ github.workspace }}/libopus/include -I${{ github.workspace }}/libopus/celt -I${{ github.workspace }}/libopus/src
         run: go test -tags "opusref opusextsrc" -count=1 -run '^TestPacketExtensionsLibopusOracle$' .
 
       - name: Decoder reference (12/12 vectors)

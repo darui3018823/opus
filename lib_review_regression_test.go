@@ -73,6 +73,38 @@ func TestEncoderRejectsInvalidPacketDurations(t *testing.T) {
 	}
 }
 
+// TestEncoderResetPreservesSignalHintAfterShortFrame guards against the content
+// hint reverting on Reset when a short-frame CELT encoder was active: encoding a
+// 2.5 ms frame makes a short-frame instance active, SetSignalType updates only
+// that instance, and Reset switches back to the 20 ms encoder.
+func TestEncoderResetPreservesSignalHintAfterShortFrame(t *testing.T) {
+	const sampleRate = 48000
+	enc, err := NewEncoder(sampleRate, 1, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	short := make([]float64, 120) // 2.5 ms at 48 kHz
+	for i := range short {
+		short[i] = 0.2 * math.Sin(2*math.Pi*440*float64(i)/sampleRate)
+	}
+	if _, err := enc.EncodeFloat(short, 120); err != nil {
+		t.Fatal(err)
+	}
+
+	enc.SetSignalType(SignalVoice)
+	if got := enc.SignalType(); got != SignalVoice {
+		t.Fatalf("SignalType before reset = %v, want SignalVoice", got)
+	}
+
+	if err := enc.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if got := enc.SignalType(); got != SignalVoice {
+		t.Fatalf("SignalType after reset = %v, want SignalVoice (hint reverted to stale 20 ms encoder)", got)
+	}
+}
+
 func TestDecoderRejectsPacketDurationOver120ms(t *testing.T) {
 	dec, err := NewDecoder(48000, 1)
 	if err != nil {

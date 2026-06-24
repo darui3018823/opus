@@ -1877,6 +1877,11 @@ func celtEndBandForFramingBW(bw int) int {
 
 // Reset resets the encoder state
 func (e *Encoder) Reset() error {
+	// Preserve the configured content hint. The active encoder may be a
+	// short-frame instance carrying a SetSignalType/SetApplication update that the
+	// 20 ms encoder never saw; reapply it to every encoder below so switching back
+	// to celtEncoders[3] does not revert SignalType() to a stale hint.
+	signalHint := e.celtEncoder.SignalTypeHint()
 	for _, enc := range e.celtEncoders {
 		if enc != nil {
 			enc.Reset()
@@ -1912,6 +1917,7 @@ func (e *Encoder) Reset() error {
 			enc.SetRateMode(e.rateMode)
 			enc.SetDTX(e.dtx)
 			enc.SetPhaseInversionDisabled(e.phaseInversionDisabled)
+			enc.SetSignalType(signalHint)
 		}
 	}
 	return nil

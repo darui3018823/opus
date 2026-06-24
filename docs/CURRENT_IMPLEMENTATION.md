@@ -804,8 +804,15 @@ FEC quality verification on 2026-06-24: targeted normal and opusref tests pass.
 The stereo SILK and mono/stereo hybrid Go-vs-libopus FEC floor is 20 dB, channel
 metrics are logged for stereo, and normal decoding is continued after FEC in
 every tested mode with a 10 dB continuity floor. The mono 20/40/60 ms floor
-remains 6 dB because the 60 ms case still includes one LBRR slot that falls back
-to SILK PLC.
+remains 6 dB. This is not a 60 ms-specific limitation: LBRR is intentionally not
+coded for VAD-inactive frames (matching libopus' single-VAD semantics), so a lost
+frame that was inactive has no redundant copy and is recovered via SILK PLC
+instead. SILK PLC is not bit-exact with libopus, and measuring aligned SNR on
+such a near-silent frame yields a small value. In the deterministic fixture the
+3 Hz amplitude-envelope trough makes exactly one 60 ms frame inactive, so its
+slot (subframe 0 of the recovered packet) is PLC-concealed by both Go and
+libopus rather than reconstructed from LBRR; the present-LBRR subframes match
+libopus closely (40 ms ~33 dB, present 60 ms subframes ~9-10 dB).
 
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.

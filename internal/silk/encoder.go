@@ -132,6 +132,13 @@ type nlsfAnalysis struct {
 	interpFactor int
 }
 
+type lpcBurgDomain struct {
+	signal      []float64
+	subfrLength int
+	nbSubfr     int
+	minInvGain  float64
+}
+
 type encoderFrameState struct {
 	prevPitchLag    int
 	prevLagIndex    int
@@ -534,10 +541,44 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	quantOffset := 0
 
 	cb := getNLSFCB(e.lpcOrder)
-	nlsf := e.analyzeNLSF(signal, cb, signalType)
-	quantOffset = e.estimateQuantOffsetType(signal, nlsf.lpcQ12, signalType, pitchLag, pitchGain)
+	var domainGainTargets []int
+	var domainConfig []lpcInPreConfig
+	if !e.stereoComponent && !e.hybridMode && signalType != SignalTypeInactive {
+		bootstrap := e.analyzeNLSF(signal, cb, signalType)
+		quantOffset = e.estimateQuantOffsetType(signal, bootstrap.lpcQ12, signalType, pitchLag, pitchGain)
+		pitchLags := make([]int, e.nSubframes)
+		for sf := range pitchLags {
+			pitchLags[sf] = pitchLag
+		}
+		var ltpCoeffsQ14 [][5]int16
+		ltpPredCodGain := 0.0
+		if signalType == SignalTypeVoiced {
+			pitchLags = e.reconstructCurrentPitchLags()
+			ltpSum := e.ltpSumLogGainQ7
+			_, _, ltpCoeffsQ14, ltpPredCodGain = e.selectLTPGainsVQWithGain(signal, bootstrap.lpcQ12, pitchLags)
+			e.ltpSumLogGainQ7 = ltpSum
+		}
+		gainTargets, shape := e.shapeGainAnalysis(signal, bootstrap.lpcQ12, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
+		domainGainTargets = gainTargets
+		gainIndices := e.resolveGainIndices(gainTargets, conditionalGain)
+		invGains := invGainsFromIndices(gainIndices)
+		domainConfig = []lpcInPreConfig{{
+			input:           e.lpcInPreInput(signal),
+			subframeLengths: equalSubframeLengths(e.frameSize, e.nSubframes),
+			invGains:        invGains,
+			ltpCoefs:        ltpQ14ToFloat(ltpCoeffsQ14),
+			pitchLags:       pitchLags,
+			ltpPredCodGain:  ltpPredCodGain,
+			codingQuality:   shape.CodingQuality,
+			voiced:          signalType == SignalTypeVoiced,
+		}}
+	}
+	nlsf := e.analyzeNLSF(signal, cb, signalType, domainConfig...)
+	if len(domainConfig) == 0 {
+		quantOffset = e.estimateQuantOffsetType(signal, nlsf.lpcQ12, signalType, pitchLag, pitchGain)
+	}
 
-	plan := e.selectRateControlPlan(initialState, signal, vadActive, signalType, quantOffset, conditionalGain, nlsf, pitchLag, pitchGain)
+	plan := e.selectRateControlPlan(initialState, signal, vadActive, signalType, quantOffset, conditionalGain, nlsf, pitchLag, pitchGain, domainGainTargets)
 	e.lastSNRVBRFrame = plan.snrVBR
 
 	e.restoreFrameState(initialState)
@@ -646,8 +687,12 @@ func (e *Encoder) selectRateControlPlan(
 	nlsf nlsfAnalysis,
 	pitchLag int,
 	pitchGain float64,
+	domainGainTargets []int,
 ) rateControlPlan {
 	baseTargets := e.analysisGainIndices(signal)
+	if len(domainGainTargets) == e.nSubframes {
+		baseTargets = append([]int(nil), domainGainTargets...)
+	}
 	baseIndices := e.resolveGainIndices(baseTargets, conditionalGain)
 	if signalType == SignalTypeInactive {
 		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
@@ -666,7 +711,11 @@ func (e *Encoder) selectRateControlPlan(
 	// noise-shape + process_gains pipeline so the gain matches the spectral
 	// envelope and bounds the residual, instead of the heuristic that flooded the
 	// shell coder with pulses (Step 4).
-	if signalType == SignalTypeVoiced {
+	if len(domainGainTargets) == e.nSubframes {
+		// Mono SILK-only find_LPC_FLP-domain migration: these gains were already
+		// computed before NLSF analysis so Burg could run in the gain-scaled
+		// domain. Keep the same targets for the coded gain plan.
+	} else if signalType == SignalTypeVoiced {
 		pitchLags := e.reconstructCurrentPitchLags()
 		_, _, ltpCoeffsQ14 := e.selectLTPGainsVQ(signal, nlsf.lpcQ12, pitchLags)
 		baseTargets = e.shapeGainIndices(signal, nlsf.lpcQ12, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
@@ -1386,7 +1435,7 @@ func (e *Encoder) excitationGainIndicesResidual(signal []float64, lpcQ12 []int16
 // Used for voiced frames where the dB heuristic mis-scaled the gain and flooded
 // the shell coder with pulses (Step 4). The shape-smoothing state is saved and
 // restored so this acts as a pure analysis pass.
-func (e *Encoder) shapeGainIndices(signal []float64, lpcQ12 []int16, signalType, quantOffset int, pitchLags []int, ltpCoeffsQ14 [][5]int16, pitchGain float64) []int {
+func (e *Encoder) shapeGainAnalysis(signal []float64, lpcQ12 []int16, signalType, quantOffset int, pitchLags []int, ltpCoeffsQ14 [][5]int16, pitchGain float64) ([]int, silkNoiseShapeAnalysis) {
 	harmSmooth, tiltSmooth := e.shapeHarmSmooth, e.shapeTiltSmooth
 	shape := e.analyzeNoiseShapeFLP(signal, lpcQ12, signalType, quantOffset, pitchLags, pitchGain, e.speechActivity)
 	e.shapeHarmSmooth, e.shapeTiltSmooth = harmSmooth, tiltSmooth
@@ -1426,6 +1475,11 @@ func (e *Encoder) shapeGainIndices(signal []float64, lpcQ12 []int16, signalType,
 			sf, shape.Gains[sf], resNrg[sf], gain, silkQuantizeGainIndex(gain*65536.0))
 		targets[sf] = silkQuantizeGainIndex(gain * 65536.0)
 	}
+	return targets, shape
+}
+
+func (e *Encoder) shapeGainIndices(signal []float64, lpcQ12 []int16, signalType, quantOffset int, pitchLags []int, ltpCoeffsQ14 [][5]int16, pitchGain float64) []int {
+	targets, _ := e.shapeGainAnalysis(signal, lpcQ12, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
 	return targets
 }
 
@@ -1720,11 +1774,38 @@ func (e *Encoder) defaultNLSFIndex(signalType int, cb *nlsfCBParams) int {
 	return 10
 }
 
-func (e *Encoder) analyzeNLSF(signal []float64, cb *nlsfCBParams, signalType int) nlsfAnalysis {
+func (e *Encoder) analyzeNLSF(signal []float64, cb *nlsfCBParams, signalType int, preConfig ...lpcInPreConfig) nlsfAnalysis {
 	rawIdx := make([]int, cb.order)
 	cb1Idx := e.defaultNLSFIndex(signalType, cb)
+	var burgDomain *lpcBurgDomain
+	if len(preConfig) > 0 && signalType != SignalTypeInactive {
+		cfg := preConfig[0]
+		input := signal
+		if len(cfg.input) > 0 {
+			input = cfg.input
+		}
+		lpcInPre := buildLPCInPre(input, cfg.subframeLengths, cfg.invGains, cfg.ltpCoefs, cfg.pitchLags, cb.order, cfg.voiced)
+		if len(cfg.subframeLengths) > 0 && len(lpcInPre) > 0 {
+			subfrLength := cfg.subframeLengths[0] + cb.order
+			uniform := subfrLength > cb.order
+			for _, n := range cfg.subframeLengths {
+				if n+cb.order != subfrLength {
+					uniform = false
+					break
+				}
+			}
+			if uniform && len(lpcInPre) >= subfrLength*len(cfg.subframeLengths) {
+				burgDomain = &lpcBurgDomain{
+					signal:      lpcInPre,
+					subfrLength: subfrLength,
+					nbSubfr:     len(cfg.subframeLengths),
+					minInvGain:  lpcMinInvGain(cfg.ltpPredCodGain, cfg.codingQuality, e.firstFrameAfterReset),
+				}
+			}
+		}
+	}
 	if signalType != SignalTypeInactive {
-		targetQ15, ok := e.lpcNLSFTargetQ15(signal, cb)
+		targetQ15, ok := e.lpcNLSFTargetQ15(signal, cb, burgDomain)
 		cb1Idx, rawIdx = bestNLSFAnalysis(signal, cb, targetQ15, ok)
 	}
 
@@ -1732,6 +1813,9 @@ func (e *Encoder) analyzeNLSF(signal []float64, cb *nlsfCBParams, signalType int
 	lpcQ12 := nlsfToLPCLibopus(nlsfQ15, cb.order)
 
 	interpFactor, lpcQ12Interp := e.selectNLSFInterpolation(signal, cb, signalType, nlsfQ15, lpcQ12)
+	if burgDomain != nil {
+		interpFactor, lpcQ12Interp = 4, nil
+	}
 
 	return nlsfAnalysis{
 		cb1Idx:       cb1Idx,
@@ -1854,15 +1938,24 @@ func firstHalfLPCResidual(signal []float64, lpcQ12 []int16, order, half int) flo
 	return energy / float64(half-order)
 }
 
-func (e *Encoder) lpcNLSFTargetQ15(signal []float64, cb *nlsfCBParams) ([]int16, bool) {
-	if len(signal) <= cb.order {
+func (e *Encoder) lpcNLSFTargetQ15(signal []float64, cb *nlsfCBParams, domain ...*lpcBurgDomain) ([]int16, bool) {
+	burgSignal := signal
+	subfrLength := len(signal)
+	nbSubfr := 1
+	minInvGain := lpcMinInvGain(0, 1, e.firstFrameAfterReset)
+	if len(domain) > 0 && domain[0] != nil {
+		burgSignal = domain[0].signal
+		subfrLength = domain[0].subfrLength
+		nbSubfr = domain[0].nbSubfr
+		minInvGain = domain[0].minInvGain
+	}
+	if len(burgSignal) <= cb.order || subfrLength <= cb.order || nbSubfr <= 0 || len(burgSignal) < subfrLength*nbSubfr {
 		return nil, false
 	}
 	// Burg-method LPC over the whole frame (single subframe), then accurate
 	// A2NLSF root finding — the libopus silk_find_LPC_FLP path. minInvGain
-	// bounds the prediction gain (1 / MAX_PREDICTION_POWER_GAIN).
-	const minInvGain = 1.0 / 1e4
-	a, _ := silkBurgModifiedFLP(signal, minInvGain, len(signal), 1, cb.order)
+	// bounds the prediction gain with the libopus LTP/coding-quality formula.
+	a, _ := silkBurgModifiedFLP(burgSignal, minInvGain, subfrLength, nbSubfr, cb.order)
 	target := silkA2NLSFFLP(a, cb.order)
 	if len(target) != cb.order {
 		return nil, false

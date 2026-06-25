@@ -1806,7 +1806,11 @@ func (e *Encoder) analyzeNLSF(signal []float64, cb *nlsfCBParams, signalType int
 	}
 	if signalType != SignalTypeInactive {
 		targetQ15, ok := e.lpcNLSFTargetQ15(signal, cb, burgDomain)
-		cb1Idx, rawIdx = bestNLSFAnalysis(signal, cb, targetQ15, ok)
+		if ok {
+			cb1Idx, rawIdx = e.guardedFaithfulNLSFAnalysis(signal, cb, targetQ15, signalType)
+		} else {
+			cb1Idx, rawIdx = bestNLSFAnalysis(signal, cb, targetQ15, ok)
+		}
 	}
 
 	nlsfQ15 := reconstructNLSFQ15(cb, cb1Idx, rawIdx)
@@ -1825,6 +1829,25 @@ func (e *Encoder) analyzeNLSF(signal []float64, cb *nlsfCBParams, signalType int
 		lpcQ12Interp: lpcQ12Interp,
 		interpFactor: interpFactor,
 	}
+}
+
+func (e *Encoder) guardedFaithfulNLSFAnalysis(signal []float64, cb *nlsfCBParams, targetQ15 []int16, signalType int) (int, []int) {
+	faithfulCB1, faithfulRaw, faithfulQ15 := e.faithfulNLSFEncode(targetQ15, cb, signalType)
+	faithfulLPC := nlsfToLPCLibopus(faithfulQ15, cb.order)
+	faithfulResidual := lpcResidualEnergy(signal, faithfulLPC)
+	faithfulPeak := lpcSpectralPeakGain(faithfulLPC)
+
+	legacyCB1 := bestNLSFStage1(signal, cb)
+	legacyRaw := refineNLSFResidual(signal, cb, legacyCB1)
+	legacyQ15 := reconstructNLSFQ15(cb, legacyCB1, legacyRaw)
+	legacyLPC := nlsfToLPCLibopus(legacyQ15, cb.order)
+	legacyResidual := lpcResidualEnergy(signal, legacyLPC)
+	legacyPeak := lpcSpectralPeakGain(legacyLPC)
+
+	if faithfulResidual <= legacyResidual*1.05+1e-12 && faithfulPeak <= math.Max(18.0, legacyPeak*1.35) {
+		return faithfulCB1, faithfulRaw
+	}
+	return legacyCB1, legacyRaw
 }
 
 // selectNLSFInterpolation mirrors the interpolation-index search of libopus
@@ -2134,11 +2157,6 @@ func rawNLSFResidualForTarget(cb *nlsfCBParams, cb1Idx int, targetQ15 []int16) [
 	}
 
 	const nlsfQuantLevelAdjQ10 = int32(102)
-	quantStepSizeQ16 := int32(11796)
-	if cb.order == 16 {
-		quantStepSizeQ16 = 9830
-	}
-
 	nextOutQ10 := int32(0)
 	for i := cb.order - 1; i >= 0; i-- {
 		predQ10 := (nextOutQ10 * int32(predQ8[i])) >> 8
@@ -2152,7 +2170,7 @@ func rawNLSFResidualForTarget(cb *nlsfCBParams, cb1Idx int, targetQ15 []int16) [
 			} else if out < 0 {
 				out += nlsfQuantLevelAdjQ10
 			}
-			out = predQ10 + int32((int64(out)*int64(quantStepSizeQ16))>>16)
+			out = predQ10 + int32((int64(out)*int64(cb.quantStepSizeQ16))>>16)
 			err := int64(out - desiredResQ10[i])
 			if err < 0 {
 				err = -err
@@ -2202,11 +2220,6 @@ func reconstructNLSFQ15(cb *nlsfCBParams, cb1Idx int, rawIdx []int) []int16 {
 	}
 
 	const nlsfQuantLevelAdjQ10 = int32(102)
-	quantStepSizeQ16 := int32(11796)
-	if cb.order == 16 {
-		quantStepSizeQ16 = 9830
-	}
-
 	predQ8 := make([]uint8, cb.order)
 	ecSelBase := cb1Idx * (cb.order / 2)
 	for i := 0; i < cb.order; i += 2 {
@@ -2220,7 +2233,7 @@ func reconstructNLSFQ15(cb *nlsfCBParams, cb1Idx int, rawIdx []int) []int16 {
 	for i := cb.order - 1; i >= 0; i-- {
 		idx := 0
 		if i < len(rawIdx) {
-			idx = clampInt(rawIdx[i], -4, 4)
+			idx = clampInt(rawIdx[i], -nlsfQuantMaxAmplitudeExt, nlsfQuantMaxAmplitudeExt)
 		}
 		predQ10 := (outQ10 * int32(predQ8[i])) >> 8
 		outQ10 = int32(idx) << 10
@@ -2229,7 +2242,7 @@ func reconstructNLSFQ15(cb *nlsfCBParams, cb1Idx int, rawIdx []int) []int16 {
 		} else if outQ10 < 0 {
 			outQ10 += nlsfQuantLevelAdjQ10
 		}
-		outQ10 = predQ10 + int32((int64(outQ10)*int64(quantStepSizeQ16))>>16)
+		outQ10 = predQ10 + int32((int64(outQ10)*int64(cb.quantStepSizeQ16))>>16)
 		resQ10[i] = outQ10
 	}
 
@@ -2288,16 +2301,29 @@ func (e *Encoder) encodeNLSF(enc *entcode.Encoder, cb *nlsfCBParams, signalType 
 		entry := cb.cb2Select[ecSelBase+i/2]
 		ecIx0 := ((int(entry) >> 1) & 7) * 9
 		ecIx1 := ((int(entry) >> 5) & 7) * 9
-		enc.EncodeIcdf(nlsfSymbol(analysis.rawIdx, i), cb.cb2ICDF[ecIx0:ecIx0+9], 8)
-		enc.EncodeIcdf(nlsfSymbol(analysis.rawIdx, i+1), cb.cb2ICDF[ecIx1:ecIx1+9], 8)
+		encodeNLSFResidualIndex(enc, nlsfRawIndex(analysis.rawIdx, i), cb.cb2ICDF[ecIx0:ecIx0+9])
+		encodeNLSFResidualIndex(enc, nlsfRawIndex(analysis.rawIdx, i+1), cb.cb2ICDF[ecIx1:ecIx1+9])
 	}
 }
 
-func nlsfSymbol(rawIdx []int, i int) int {
+func nlsfRawIndex(rawIdx []int, i int) int {
 	if i >= len(rawIdx) {
-		return 4
+		return 0
 	}
-	return clampInt(rawIdx[i], -3, 3) + 4
+	return clampInt(rawIdx[i], -nlsfQuantMaxAmplitudeExt, nlsfQuantMaxAmplitudeExt)
+}
+
+func encodeNLSFResidualIndex(enc *entcode.Encoder, idx int, icdf []uint8) {
+	switch {
+	case idx >= nlsfQuantMaxAmplitude:
+		enc.EncodeIcdf(2*nlsfQuantMaxAmplitude, icdf, 8)
+		enc.EncodeIcdf(clampInt(idx-nlsfQuantMaxAmplitude, 0, len(silkNLSFExtICDF)-1), silkNLSFExtICDF[:], 8)
+	case idx <= -nlsfQuantMaxAmplitude:
+		enc.EncodeIcdf(0, icdf, 8)
+		enc.EncodeIcdf(clampInt(-idx-nlsfQuantMaxAmplitude, 0, len(silkNLSFExtICDF)-1), silkNLSFExtICDF[:], 8)
+	default:
+		enc.EncodeIcdf(idx+nlsfQuantMaxAmplitude, icdf, 8)
+	}
 }
 
 type pulseBlock struct {

@@ -495,7 +495,7 @@ func TestEncoderAdaptiveNLSFEncoding(t *testing.T) {
 		t.Fatalf("decoded cb1 index=%d, want %d", gotIndices[0], analysis.cb1Idx)
 	}
 	for i := 0; i < cb.order; i++ {
-		want := clampInt(analysis.rawIdx[i], -3, 3)
+		want := clampInt(analysis.rawIdx[i], -nlsfQuantMaxAmplitudeExt, nlsfQuantMaxAmplitudeExt)
 		if gotIndices[i+1] != want {
 			t.Fatalf("decoded raw NLSF index[%d]=%d, want %d", i, gotIndices[i+1], want)
 		}
@@ -540,26 +540,52 @@ func TestEncoderLPCNLSFTargetQuantization(t *testing.T) {
 	if len(top) != 4 {
 		t.Fatalf("topNLSFCB1ByTarget len=%d, want 4", len(top))
 	}
-	seed := rawNLSFResidualForTarget(cb, top[0], targetQ15)
-	for i, v := range seed {
-		if v < -3 || v > 3 {
-			t.Fatalf("seed raw[%d]=%d outside encodable range", i, v)
-		}
-	}
-
 	legacyCB1 := bestNLSFStage1(signal, cb)
 	legacyRaw := refineNLSFResidual(signal, cb, legacyCB1)
-	legacyLPC := nlsfToLPCLibopus(reconstructNLSFQ15(cb, legacyCB1, legacyRaw), cb.order)
-	chosenCB1, chosenRaw := bestNLSFAnalysis(signal, cb, targetQ15, true)
-	chosenLPC := nlsfToLPCLibopus(reconstructNLSFQ15(cb, chosenCB1, chosenRaw), cb.order)
+	legacyQ15 := reconstructNLSFQ15(cb, legacyCB1, legacyRaw)
+	chosenCB1, chosenRaw, _ := enc.faithfulNLSFEncode(targetQ15, cb, SignalTypeVoiced)
+	chosenQ15 := reconstructNLSFQ15(cb, chosenCB1, chosenRaw)
 
-	legacyResidual := lpcResidualEnergy(signal, legacyLPC)
-	chosenResidual := lpcResidualEnergy(signal, chosenLPC)
-	if chosenResidual > legacyResidual+1e-12 {
-		t.Fatalf("Q1 NLSF residual=%g, legacy=%g", chosenResidual, legacyResidual)
+	legacyDist := nlsfTargetDistortion(cb, legacyCB1, legacyQ15, targetQ15)
+	chosenDist := nlsfTargetDistortion(cb, chosenCB1, chosenQ15, targetQ15)
+	if chosenDist > legacyDist+1e-9 {
+		t.Fatalf("faithful NLSF target distortion=%g, legacy=%g", chosenDist, legacyDist)
 	}
-	if lpcSpectralPeakGain(chosenLPC) > math.Max(18.0, lpcSpectralPeakGain(legacyLPC)*1.35)+1e-9 {
-		t.Fatalf("chosen LPC spectral peak gain escaped Q1 guard")
+}
+
+func TestEncodeNLSFResidualExtensionIndices(t *testing.T) {
+	cb := getNLSFCB(10)
+	analysis := nlsfAnalysis{
+		cb1Idx:  0,
+		rawIdx:  []int{10, -10, 4, -4, 3, -3, 0, 1, -1, 2},
+		nlsfQ15: reconstructNLSFQ15(cb, 0, []int{10, -10, 4, -4, 3, -3, 0, 1, -1, 2}),
+	}
+
+	rangeEnc := entcode.NewEncoder(64)
+	enc, err := NewEncoder(8000, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder() error = %v", err)
+	}
+	enc.encodeNLSF(rangeEnc, cb, SignalTypeUnvoiced, analysis)
+	rangeEnc.Flush()
+
+	dec, err := NewDecoder(8000, 1)
+	if err != nil {
+		t.Fatalf("NewDecoder() error = %v", err)
+	}
+	gotQ15, gotIndices, err := dec.decodeNLSF(entcode.NewDecoder(rangeEnc.Bytes()), cb, SignalTypeUnvoiced)
+	if err != nil {
+		t.Fatalf("decodeNLSF() error = %v", err)
+	}
+	for i, want := range analysis.rawIdx {
+		if got := gotIndices[i+1]; got != want {
+			t.Fatalf("raw index[%d]=%d, want %d", i, got, want)
+		}
+	}
+	for i, want := range analysis.nlsfQ15 {
+		if gotQ15[i] != want {
+			t.Fatalf("NLSF_Q15[%d]=%d, want %d", i, gotQ15[i], want)
+		}
 	}
 }
 

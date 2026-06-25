@@ -68,6 +68,19 @@ var silkNLSFCB2ICDFNBMB = [72]uint8{
 	255, 254, 236, 173, 95, 37, 7, 1, 0,
 }
 
+// silkNLSFCB2BitsNBMBQ5 — stage-2 residual code rates in Q5.
+// From silk_NLSF_CB2_BITS_NB_MB_Q5[72].
+var silkNLSFCB2BitsNBMBQ5 = [72]uint8{
+	255, 255, 255, 131, 6, 145, 255, 255, 255,
+	255, 255, 236, 93, 15, 96, 255, 255, 255,
+	255, 255, 194, 83, 25, 71, 221, 255, 255,
+	255, 162, 73, 34, 66, 162, 255, 255, 255,
+	210, 126, 73, 43, 57, 173, 255, 255, 255,
+	201, 125, 71, 48, 58, 130, 255, 255, 255,
+	166, 110, 73, 57, 62, 104, 210, 255, 255,
+	251, 123, 65, 55, 68, 100, 171, 255,
+}
+
 // silkNLSFCB2SelectNBMB — stage-2 codebook selection indices (160 values).
 // From silk_NLSF_CB2_SELECT_NB_MB[160].
 var silkNLSFCB2SelectNBMB = [160]uint8{
@@ -168,6 +181,19 @@ var silkNLSFCB2ICDFWB = [72]uint8{
 	255, 254, 240, 186, 86, 14, 2, 1, 0,
 	255, 254, 239, 178, 91, 30, 5, 1, 0,
 	255, 248, 227, 177, 100, 19, 2, 1, 0,
+}
+
+// silkNLSFCB2BitsWBQ5 — stage-2 residual code rates in Q5.
+// From silk_NLSF_CB2_BITS_WB_Q5[72].
+var silkNLSFCB2BitsWBQ5 = [72]uint8{
+	255, 255, 255, 156, 4, 154, 255, 255, 255,
+	255, 255, 227, 102, 15, 92, 255, 255, 255,
+	255, 255, 213, 83, 24, 72, 236, 255, 255,
+	255, 150, 76, 33, 63, 214, 255, 255, 255,
+	190, 121, 77, 43, 55, 185, 255, 255, 255,
+	245, 137, 71, 43, 59, 139, 255, 255, 255,
+	255, 131, 66, 50, 66, 107, 194, 255, 255,
+	166, 116, 76, 55, 53, 125, 255, 255,
 }
 
 // silkNLSFCB2SelectWB — stage-2 codebook selection indices for WB (256 values).
@@ -302,41 +328,50 @@ var silkNLSFCB1WghtWBQ9 = [32][16]int16{
 
 // nlsfCBParams holds all parameters for one NLSF codebook (NB/MB or WB).
 type nlsfCBParams struct {
-	nEntries    int     // number of stage-1 entries (32)
-	order       int     // LPC order (10 or 16)
-	cb1Q8       []uint8 // stage-1 codebook, nEntries*order bytes
-	cb1WghtQ9   []int16 // stage-1 weights, nEntries*order int16s
-	cb1ICDF     []uint8 // stage-1 iCDF (64 bytes for 32+32)
-	cb2ICDF     []uint8 // stage-2 iCDF (72 bytes)
-	cb2Select   []uint8 // stage-2 selection table
-	predQ8      []uint8 // NLSF prediction coefficients
-	deltaMinQ15 []int16 // minimum delta constraints
+	nEntries           int     // number of stage-1 entries (32)
+	order              int     // LPC order (10 or 16)
+	quantStepSizeQ16   int32   // residual dequantization step
+	invQuantStepSizeQ6 int32   // inverse residual quantization step
+	cb1Q8              []uint8 // stage-1 codebook, nEntries*order bytes
+	cb1WghtQ9          []int16 // stage-1 weights, nEntries*order int16s
+	cb1ICDF            []uint8 // stage-1 iCDF (64 bytes for 32+32)
+	cb2ICDF            []uint8 // stage-2 iCDF (72 bytes)
+	cb2RatesQ5         []uint8 // stage-2 residual code rates (72 bytes)
+	cb2Select          []uint8 // stage-2 selection table
+	predQ8             []uint8 // NLSF prediction coefficients
+	deltaMinQ15        []int16 // minimum delta constraints
 }
 
 // nlsfCBNBMB is the NB/MB codebook (order=10).
 var nlsfCBNBMB = &nlsfCBParams{
-	nEntries:    32,
-	order:       10,
-	cb1Q8:       silkNLSFCB1NBMBQ8Flat[:],
-	cb1WghtQ9:   silkNLSFCB1WghtNBMBQ9Flat[:],
-	cb1ICDF:     silkNLSFCB1ICDFNBMB[:],
-	cb2ICDF:     silkNLSFCB2ICDFNBMB[:],
-	cb2Select:   silkNLSFCB2SelectNBMB[:],
-	predQ8:      silkNLSFPredNBMBQ8[:],
-	deltaMinQ15: silkNLSFDeltaMinNBMBQ15[:],
+	nEntries:           32,
+	order:              10,
+	quantStepSizeQ16:   11796,
+	invQuantStepSizeQ6: 356,
+	cb1Q8:              silkNLSFCB1NBMBQ8Flat[:],
+	cb1WghtQ9:          silkNLSFCB1WghtNBMBQ9Flat[:],
+	cb1ICDF:            silkNLSFCB1ICDFNBMB[:],
+	cb2ICDF:            silkNLSFCB2ICDFNBMB[:],
+	cb2RatesQ5:         silkNLSFCB2BitsNBMBQ5[:],
+	cb2Select:          silkNLSFCB2SelectNBMB[:],
+	predQ8:             silkNLSFPredNBMBQ8[:],
+	deltaMinQ15:        silkNLSFDeltaMinNBMBQ15[:],
 }
 
 // nlsfCBWB is the WB codebook (order=16).
 var nlsfCBWB = &nlsfCBParams{
-	nEntries:    32,
-	order:       16,
-	cb1Q8:       silkNLSFCB1WBQ8Flat[:],
-	cb1WghtQ9:   silkNLSFCB1WghtWBQ9Flat[:],
-	cb1ICDF:     silkNLSFCB1ICDFWB[:],
-	cb2ICDF:     silkNLSFCB2ICDFWB[:],
-	cb2Select:   silkNLSFCB2SelectWB[:],
-	predQ8:      silkNLSFPredWBQ8[:],
-	deltaMinQ15: silkNLSFDeltaMinWBQ15[:],
+	nEntries:           32,
+	order:              16,
+	quantStepSizeQ16:   9830,
+	invQuantStepSizeQ6: 427,
+	cb1Q8:              silkNLSFCB1WBQ8Flat[:],
+	cb1WghtQ9:          silkNLSFCB1WghtWBQ9Flat[:],
+	cb1ICDF:            silkNLSFCB1ICDFWB[:],
+	cb2ICDF:            silkNLSFCB2ICDFWB[:],
+	cb2RatesQ5:         silkNLSFCB2BitsWBQ5[:],
+	cb2Select:          silkNLSFCB2SelectWB[:],
+	predQ8:             silkNLSFPredWBQ8[:],
+	deltaMinQ15:        silkNLSFDeltaMinWBQ15[:],
 }
 
 // Flat (row-major) versions of the 2D codebook arrays for slice referencing.

@@ -192,10 +192,10 @@ func TestNoiseShapeAnalysisCBRSkipsLowActivitySNRReduction(t *testing.T) {
 	}
 }
 
-// TestUnvoicedUsesTrellisGating pins the unvoiced trellis gate to mono SILK-only.
-// Unlike the voiced trellis (enabled in every mode), unvoiced runs the full
-// delayed-decision NSQ only when not a stereo component and not hybrid: those
-// modes carry separate conformance constraints and keep the homebrew path.
+// TestUnvoicedUsesTrellisGating pins the Phase 6 unvoiced trellis expansion:
+// unvoiced now follows the same gate as voiced. Stereo components and hybrid
+// low-band frames keep neutral shaping in the NSQ path, but still use the
+// delayed-decision search.
 func TestUnvoicedUsesTrellisGating(t *testing.T) {
 	mono, err := NewEncoder(16000, 1)
 	if err != nil {
@@ -205,8 +205,8 @@ func TestUnvoicedUsesTrellisGating(t *testing.T) {
 		t.Fatalf("mono SILK-only encoder should use the unvoiced trellis")
 	}
 	mono.SetHybridMode(true)
-	if mono.unvoicedUsesTrellis() {
-		t.Fatalf("hybrid-mode encoder should keep unvoiced on homebrew")
+	if !mono.unvoicedUsesTrellis() {
+		t.Fatalf("hybrid-mode encoder should use the unvoiced trellis")
 	}
 	mono.SetHybridMode(false)
 	if !mono.unvoicedUsesTrellis() {
@@ -217,11 +217,11 @@ func TestUnvoicedUsesTrellisGating(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewEncoder stereo: %v", err)
 	}
-	if stereo.unvoicedUsesTrellis() {
-		t.Fatalf("stereo mid encoder should keep unvoiced on homebrew")
+	if !stereo.unvoicedUsesTrellis() {
+		t.Fatalf("stereo mid encoder should use the unvoiced trellis")
 	}
-	if stereo.side == nil || stereo.side.unvoicedUsesTrellis() {
-		t.Fatalf("stereo side encoder should keep unvoiced on homebrew")
+	if stereo.side == nil || !stereo.side.unvoicedUsesTrellis() {
+		t.Fatalf("stereo side encoder should use the unvoiced trellis")
 	}
 }
 

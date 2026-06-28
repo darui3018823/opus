@@ -859,6 +859,25 @@ fallback-free path is not yet a net win: the targeted 16 kHz opusref probe fails
 for `go test -count=1 ./internal/silk` and
 `go test -count=1 -tags opusref -run TestOpusSILKABAgainstLibopusEncoder -v .`.
 
+find_LPC FLP Phase 6 has started with the first scope expansion on 2026-06-29:
+unvoiced SILK frames now use the delayed-decision trellis NSQ in stereo
+components and hybrid low-band streams as well as mono SILK-only streams. The
+unvoiced/stereo-component path keeps neutral spectral shaping before NSQ, so the
+change expands the delayed-decision rate/distortion search without adopting the
+perceptual shaping that previously hurt broadband-noise scoring. This does not
+remove the Phase 5 transparent-NLSF experiment gate; voiced transparent NLSF
+still remains guarded by default.
+
+Phase 6 unvoiced-scope verification on 2026-06-29: passing
+(`go test -count=1 ./internal/silk -run
+"TestUnvoicedUsesTrellisGating|TestTrellisNSQVoicedRoundTrip|TestHomebrewToTrellisNSQStateHandoff" -v`,
+`go test -count=1 . -run
+"TestEncoderSILKOnlyUnvoicedNoiseRateControlBound|TestEncoderHybrid24kUnvoicedNoiseDoesNotCollapse|TestEncoderSILKOnlyStereoQualityBaseline" -v`,
+`go test -count=1 -tags opusref -run
+"TestOpusSILKStereoABAgainstLibopusEncoder|TestOpusSILKHybridABAgainstLibopusEncoder" -v .`,
+and `go test -count=1 -tags opusref -run
+"TestCGOEncodeRefSILKFEC|TestCGOEncodeRefSILKOnly|TestCGOEncodeRefHybrid" -v .`).
+
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.
 `TestCGOMultistreamInteroperability` verifies both Go-encoded packets decoded

@@ -52,10 +52,9 @@ type Encoder struct {
 	nsqSeed        int32 // winning del-dec seed (silk_NSQ_del_dec writes this back to the bitstream)
 	lastFinalRange uint32
 	// useTrellisNSQ enables the FLP noise-shape analysis + delayed-decision
-	// trellis NSQ (Q3+Q4) for voiced frames, where the gains co-designed by
-	// silk_process_gains_FLP (Step 4) make it a clear win over the legacy
-	// single-state homebrew quantizer. On by default; unvoiced/inactive frames
-	// always use the homebrew path (the trellis shaping hurts broadband noise).
+	// trellis NSQ (Q3+Q4) for active frames. Voiced frames use the perceptual
+	// shaping path; unvoiced/stereo-component frames keep neutral shaping while
+	// retaining the delayed-decision rate/distortion search.
 	useTrellisNSQ bool
 	// snrTargetEnabled records the OPUS_SILK_RC_SNR A/B selection.
 	// useSNRTargetVBR is its rate-mode-gated effective value.
@@ -2591,14 +2590,13 @@ func (e *Encoder) voicedUsesTrellis() bool {
 // gains (shapeGainIndices); the trellis perceptual shaping only beats homebrew's
 // broadband SNR when the gains are co-designed with it (Step 3/4 lesson).
 //
-// Gated to mono SILK-only for now: stereo and hybrid carry separate conformance
-// constraints (tighter shared budgets, per-channel PRNG-dither decorrelation),
-// so those frames keep the proven homebrew + excitation-RMS-gain path, exactly
-// as the earlier SILK quality steps were staged. Frame-to-frame handoff between
-// the homebrew and trellis paths is already supported and tested
-// (TestHomebrewToTrellisNSQStateHandoff), so a mixed stream is safe.
+// Phase 6 widens this beyond mono SILK-only. The trellis path already neutralises
+// stereo-component and unvoiced spectral shaping before NSQ, preserving the
+// broadband-SNR objective while retaining delayed-decision rate/distortion
+// search. Hybrid still supplies its own CELT high band; this gate only decides
+// the SILK low-band excitation quantizer.
 func (e *Encoder) unvoicedUsesTrellis() bool {
-	return e.useTrellisNSQ && !e.stereoComponent && !e.hybridMode
+	return e.useTrellisNSQ
 }
 
 // TrellisNSQ reports whether voiced SILK-only frames may use the trellis NSQ.

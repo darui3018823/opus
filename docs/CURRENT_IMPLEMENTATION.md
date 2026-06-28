@@ -824,6 +824,14 @@ and `go test -count=1 -tags opusref ./...`). The mono AB scoreboard remains
 15/15 with `gap_SNR_matched <= 0`; the numerical results are unchanged from the
 pre-change baseline for the tested fixtures.
 
+find_LPC FLP Phase 3 gains/residual-energy verification on 2026-06-29:
+passing (`go vet ./...`, `go test -count=1 ./...`,
+`go test -count=1 -tags opusref -run TestOpusSILKABAgainstLibopusEncoder -v .`,
+and `go test -count=1 -tags opusref ./...`). The process-gains residual-energy
+path now mirrors `silk_residual_energy_FLP`'s stacked `LPC_in_pre` layout,
+first-half/last-half LPC coefficient selection, and gain-squared scaling. The
+mono AB scoreboard remains 15/15 with `gap_SNR_matched <= 0`.
+
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.
 `TestCGOMultistreamInteroperability` verifies both Go-encoded packets decoded

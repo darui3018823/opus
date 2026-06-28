@@ -32,6 +32,46 @@ func TestSilkControlSNR(t *testing.T) {
 	}
 }
 
+func TestSilkResidualEnergyFLPUsesStackedHalvesAndGains(t *testing.T) {
+	const (
+		order     = 2
+		subfrLen  = 4
+		nbSubfr   = 4
+		int16Sqr  = 32768.0 * 32768.0
+		shift     = order + subfrLen
+		totalSize = nbSubfr * shift
+	)
+	lpcInPre := make([]float64, totalSize)
+	for i := range lpcInPre {
+		lpcInPre[i] = 0.02*math.Sin(0.37*float64(i)) + 0.01*math.Cos(0.11*float64(i*i))
+	}
+	lpc0 := []int16{512, -256}
+	lpc1 := []int16{-384, 128}
+	gains := [silkMaxNBSubframes]float64{3.0, 4.0, 5.0, 6.0}
+
+	got := silkResidualEnergyFLP(lpcInPre, lpc0, lpc1, gains, subfrLen, nbSubfr, order)
+	want := [silkMaxNBSubframes]float64{}
+	for sf := 0; sf < nbSubfr; sf++ {
+		coef := lpc0
+		if sf >= 2 {
+			coef = lpc1
+		}
+		base := sf * shift
+		for i := order; i < shift; i++ {
+			pred := float64(coef[0])/4096.0*lpcInPre[base+i-1] +
+				float64(coef[1])/4096.0*lpcInPre[base+i-2]
+			err := lpcInPre[base+i] - pred
+			want[sf] += err * err
+		}
+		want[sf] *= gains[sf] * gains[sf] * int16Sqr
+	}
+	for sf := 0; sf < nbSubfr; sf++ {
+		if math.Abs(got[sf]-want[sf]) > 1e-6*math.Max(1, math.Abs(want[sf])) {
+			t.Fatalf("subframe %d residual energy=%g, want %g", sf, got[sf], want[sf])
+		}
+	}
+}
+
 func TestVoicedSNRTargetBackoff(t *testing.T) {
 	for _, tc := range []struct {
 		fsKHz int
@@ -212,7 +252,7 @@ func TestShapeGainIndicesStable(t *testing.T) {
 	ltpPerIdx, ltpGainIdx := selectLTPGain(pitchGain)
 	ltpCoeffs := ltpCoeffsForIndices(ltpPerIdx, ltpGainIdx, enc.nSubframes)
 
-	idx := enc.shapeGainIndices(signal, nlsf.lpcQ12, SignalTypeVoiced, 0, pitchLags, ltpCoeffs, pitchGain)
+	idx := enc.shapeGainIndices(signal, nlsf.lpcQ12, nil, SignalTypeVoiced, 0, pitchLags, ltpCoeffs, pitchGain)
 	if len(idx) != enc.nSubframes {
 		t.Fatalf("shapeGainIndices len=%d, want %d", len(idx), enc.nSubframes)
 	}

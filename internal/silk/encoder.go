@@ -564,7 +564,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 			_, _, ltpCoeffsQ14, ltpPredCodGain = e.selectLTPGainsVQWithGain(signal, bootstrap.lpcQ12, pitchLags)
 			e.ltpSumLogGainQ7 = ltpSum
 		}
-		gainTargets, shape := e.shapeGainAnalysis(signal, bootstrap.lpcQ12, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
+		gainTargets, shape := e.shapeGainAnalysis(signal, bootstrap.lpcQ12, nil, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
 		domainGainTargets = gainTargets
 		gainIndices := e.resolveGainIndices(gainTargets, conditionalGain)
 		invGains := invGainsFromIndices(gainIndices)
@@ -724,7 +724,7 @@ func (e *Encoder) selectRateControlPlan(
 	} else if signalType == SignalTypeVoiced {
 		pitchLags := e.reconstructCurrentPitchLags()
 		_, _, ltpCoeffsQ14 := e.selectLTPGainsVQ(signal, nlsf.lpcQ12, pitchLags)
-		baseTargets = e.shapeGainIndices(signal, nlsf.lpcQ12, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
+		baseTargets = e.shapeGainIndices(signal, nlsf.lpcQ12, nlsf.lpcQ12Interp, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
 	} else {
 		// Unvoiced keeps the Q5d excitation-normalised gains whether it runs the
 		// homebrew or the trellis NSQ. The trellis is used with *neutral* shaping
@@ -1441,12 +1441,12 @@ func (e *Encoder) excitationGainIndicesResidual(signal []float64, lpcQ12 []int16
 // Used for voiced frames where the dB heuristic mis-scaled the gain and flooded
 // the shell coder with pulses (Step 4). The shape-smoothing state is saved and
 // restored so this acts as a pure analysis pass.
-func (e *Encoder) shapeGainAnalysis(signal []float64, lpcQ12 []int16, signalType, quantOffset int, pitchLags []int, ltpCoeffsQ14 [][5]int16, pitchGain float64) ([]int, silkNoiseShapeAnalysis) {
+func (e *Encoder) shapeGainAnalysis(signal []float64, lpcQ12 []int16, lpcInterpQ12 []int16, signalType, quantOffset int, pitchLags []int, ltpCoeffsQ14 [][5]int16, pitchGain float64) ([]int, silkNoiseShapeAnalysis) {
 	harmSmooth, tiltSmooth := e.shapeHarmSmooth, e.shapeTiltSmooth
 	shape := e.analyzeNoiseShapeFLP(signal, lpcQ12, signalType, quantOffset, pitchLags, pitchGain, e.speechActivity)
 	e.shapeHarmSmooth, e.shapeTiltSmooth = harmSmooth, tiltSmooth
 
-	resNrg := e.ltpResidualEnergyPerSubframe(signal, lpcQ12, signalType, pitchLags, ltpCoeffsQ14)
+	resNrg := e.processGainsResidualEnergy(signal, lpcQ12, lpcInterpQ12, signalType, pitchLags, ltpCoeffsQ14, shape.Gains)
 	subLen := e.frameSize / e.nSubframes
 	invMaxSqr := 0.0
 	if subLen > 0 {
@@ -1462,7 +1462,7 @@ func (e *Encoder) shapeGainAnalysis(signal []float64, lpcQ12 []int16, signalType
 	// only takes hold where the prediction is genuinely good (ratio_bytes ~2x→~1x).
 	gainScale := 1.0
 	if signalType == SignalTypeVoiced {
-		ltpCodGainDB := e.ltpPredCodGainDB(signal, lpcQ12, resNrg, pitchLags, ltpCoeffsQ14)
+		ltpCodGainDB := e.ltpPredCodGainDB(signal, lpcQ12, e.ltpResidualEnergyPerSubframe(signal, lpcQ12, signalType, pitchLags, ltpCoeffsQ14), pitchLags, ltpCoeffsQ14)
 		gainScale = 1.0 - 0.5*silkSigmoid(0.25*(ltpCodGainDB-12.0))
 		silkTraceSNR("process_gains voiced ltp_cod_gain=%.3fdB gain_scale=%.6f", ltpCodGainDB, gainScale)
 	}
@@ -1484,8 +1484,8 @@ func (e *Encoder) shapeGainAnalysis(signal []float64, lpcQ12 []int16, signalType
 	return targets, shape
 }
 
-func (e *Encoder) shapeGainIndices(signal []float64, lpcQ12 []int16, signalType, quantOffset int, pitchLags []int, ltpCoeffsQ14 [][5]int16, pitchGain float64) []int {
-	targets, _ := e.shapeGainAnalysis(signal, lpcQ12, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
+func (e *Encoder) shapeGainIndices(signal []float64, lpcQ12 []int16, lpcInterpQ12 []int16, signalType, quantOffset int, pitchLags []int, ltpCoeffsQ14 [][5]int16, pitchGain float64) []int {
+	targets, _ := e.shapeGainAnalysis(signal, lpcQ12, lpcInterpQ12, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
 	return targets
 }
 

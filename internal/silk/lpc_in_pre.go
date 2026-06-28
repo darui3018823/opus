@@ -139,6 +139,53 @@ func ltpQ14ToFloat(ltpCoeffsQ14 [][5]int16) [][]float64 {
 	return out
 }
 
+// lastHalfBurgNLSF runs Burg LPC analysis over the last half of a stacked
+// LPC_in_pre buffer. Each stacked subframe is subfrLength samples long,
+// including the order-sample warm-up prefix used by find_LPC_FLP.
+func lastHalfBurgNLSF(preSignal []float64, subfrLength, order, nbSubfr int, minInvGain float64) ([]int16, []float64) {
+	if order <= 0 || subfrLength <= order || nbSubfr < 2 {
+		return nil, nil
+	}
+	halfSubfr := nbSubfr / 2
+	if halfSubfr <= 0 {
+		return nil, nil
+	}
+	start := (nbSubfr - halfSubfr) * subfrLength
+	need := start + halfSubfr*subfrLength
+	if start < 0 || need > len(preSignal) {
+		return nil, nil
+	}
+	if minInvGain <= 0 {
+		minInvGain = lpcMinInvGain(0, 1, false)
+	}
+	a, _ := silkBurgModifiedFLP(preSignal[start:need], minInvGain, subfrLength, halfSubfr, order)
+	nlsf := silkA2NLSFFLP(a, order)
+	return nlsf, a
+}
+
+func firstHalfStackedLPCResidual(preSignal []float64, lpcQ12 []int16, order, subfrLength, nbSubfr int) float64 {
+	if order <= 0 || subfrLength <= order || nbSubfr < 2 || len(lpcQ12) < order {
+		return 0
+	}
+	halfSubfr := nbSubfr / 2
+	energy := 0.0
+	for sf := 0; sf < halfSubfr; sf++ {
+		base := sf * subfrLength
+		if base+subfrLength > len(preSignal) {
+			break
+		}
+		for i := order; i < subfrLength; i++ {
+			pred := 0.0
+			for j := 0; j < order; j++ {
+				pred += float64(lpcQ12[j]) / 4096.0 * preSignal[base+i-j-1]
+			}
+			err := preSignal[base+i] - pred
+			energy += err * err
+		}
+	}
+	return energy
+}
+
 func (e *Encoder) lpcInPreInput(signal []float64) []float64 {
 	histLen := len(e.pitchHist)
 	if histLen < e.lpcOrder {

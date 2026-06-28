@@ -53,3 +53,76 @@ func TestLPCMinInvGainFormula(t *testing.T) {
 		t.Fatalf("reset minInvGain=%g, want %g", reset, 1.0/maxPredictionPowerGainAfterReset)
 	}
 }
+
+func TestLastHalfBurgNLSFSmoke(t *testing.T) {
+	const (
+		order       = 10
+		nbSubfr     = 4
+		subfrLength = 50
+	)
+	pre := makeStackedLPCInPreFixture(subfrLength, nbSubfr, order)
+	nlsf, lpc := lastHalfBurgNLSF(pre, subfrLength, order, nbSubfr, 1e-4)
+	if len(nlsf) != order {
+		t.Fatalf("NLSF len=%d, want %d", len(nlsf), order)
+	}
+	if len(lpc) != order {
+		t.Fatalf("LPC len=%d, want %d", len(lpc), order)
+	}
+	for i, v := range nlsf {
+		if v < 0 || v > 32767 {
+			t.Fatalf("NLSF[%d]=%d out of Q15 range", i, v)
+		}
+		if i > 0 && v <= nlsf[i-1] {
+			t.Fatalf("NLSF not ordered at %d: %d <= %d", i, v, nlsf[i-1])
+		}
+	}
+}
+
+func TestInterpolatedLPCEndpointUsesTransmittedNLSF(t *testing.T) {
+	enc, err := NewEncoder(16000, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	cb := getNLSFCB(enc.lpcOrder)
+	enc.prevNLSFQ15 = make([]int16, cb.order)
+	for i := range enc.prevNLSFQ15 {
+		enc.prevNLSFQ15[i] = int16((i + 1) * 32768 / (cb.order + 1))
+	}
+	transmitted := make([]int16, cb.order)
+	for i := range transmitted {
+		transmitted[i] = int16((i + 1) * 32768 / (cb.order + 1))
+	}
+	transmitted[0] += 90
+	transmitted[5] -= 160
+	silkNLSFStabilize(transmitted, cb.deltaMinQ15, cb.order)
+
+	const interpFactor = 2
+	got := interpolatedLPCForTransmittedNLSF(enc.prevNLSFQ15, transmitted, interpFactor, cb)
+	wantNLSF := interpolateNLSFQ15(enc.prevNLSFQ15, transmitted, interpFactor, cb)
+	want := nlsfToLPCLibopus(wantNLSF, cb.order)
+	if len(got) != len(want) {
+		t.Fatalf("interp LPC len=%d, want %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("interp LPC[%d]=%d, want %d", i, got[i], want[i])
+		}
+	}
+	if interpolatedLPCForTransmittedNLSF(enc.prevNLSFQ15, transmitted, 4, cb) != nil {
+		t.Fatal("interp LPC non-nil for factor 4")
+	}
+}
+
+func makeStackedLPCInPreFixture(subfrLength, nbSubfr, order int) []float64 {
+	pre := make([]float64, subfrLength*nbSubfr)
+	for sf := 0; sf < nbSubfr; sf++ {
+		for i := 0; i < subfrLength; i++ {
+			n := float64(sf*(subfrLength-order) + i - order)
+			pre[sf*subfrLength+i] =
+				0.35*math.Sin(2*math.Pi*n/37.0) +
+					0.18*math.Sin(2*math.Pi*n/19.0) +
+					0.04*float64(sf)
+		}
+	}
+	return pre
+}

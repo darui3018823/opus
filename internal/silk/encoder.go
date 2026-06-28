@@ -1860,24 +1860,26 @@ func (e *Encoder) guardedFaithfulBurgNLSFAnalysis(signal []float64, cb *nlsfCBPa
 	faithfulLPC := nlsfToLPCLibopus(faithfulQ15, cb.order)
 	faithfulPeak := lpcSpectralPeakGain(faithfulLPC)
 
-	legacyCB1 := bestNLSFStage1(signal, cb)
-	legacyRaw := refineNLSFResidual(signal, cb, legacyCB1)
-	legacyQ15 := reconstructNLSFQ15(cb, legacyCB1, legacyRaw)
-	legacyLPC := nlsfToLPCLibopus(legacyQ15, cb.order)
-	legacyPeak := lpcSpectralPeakGain(legacyLPC)
+	if os.Getenv("OPUS_SILK_TRANSPARENT_NLSF") != "1" {
+		legacyCB1 := bestNLSFStage1(signal, cb)
+		legacyRaw := refineNLSFResidual(signal, cb, legacyCB1)
+		legacyQ15 := reconstructNLSFQ15(cb, legacyCB1, legacyRaw)
+		legacyLPC := nlsfToLPCLibopus(legacyQ15, cb.order)
+		legacyPeak := lpcSpectralPeakGain(legacyLPC)
 
-	targetLPC := nlsfToLPCLibopus(transmitTarget, cb.order)
-	loudnessDiff := lpcEnvelopeLoudnessDB(faithfulLPC) - lpcEnvelopeLoudnessDB(targetLPC)
-	peakOK := faithfulPeak <= math.Max(18.0, legacyPeak*1.35) && faithfulPeak <= 96.0
-	if !peakOK || math.Abs(loudnessDiff) > 1.5 {
-		return nlsfAnalysis{
-			cb1Idx:       legacyCB1,
-			rawIdx:       legacyRaw,
-			nlsfQ15:      legacyQ15,
-			lpcQ12:       legacyLPC,
-			lpcQ12Interp: nil,
-			interpFactor: 4,
-		}, true
+		targetLPC := nlsfToLPCLibopus(transmitTarget, cb.order)
+		loudnessDiff := lpcEnvelopeLoudnessDB(faithfulLPC) - lpcEnvelopeLoudnessDB(targetLPC)
+		peakOK := faithfulPeak <= math.Max(18.0, legacyPeak*1.35) && faithfulPeak <= 96.0
+		if !peakOK || math.Abs(loudnessDiff) > 1.5 {
+			return nlsfAnalysis{
+				cb1Idx:       legacyCB1,
+				rawIdx:       legacyRaw,
+				nlsfQ15:      legacyQ15,
+				lpcQ12:       legacyLPC,
+				lpcQ12Interp: nil,
+				interpFactor: 4,
+			}, true
+		}
 	}
 
 	lpcQ12Interp := interpolatedLPCForTransmittedNLSF(e.prevNLSFQ15, faithfulQ15, interpFactor, cb)

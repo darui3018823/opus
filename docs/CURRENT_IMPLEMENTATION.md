@@ -845,6 +845,20 @@ NLSF-interpolation LPC-set switch now uses libopus' full-Q16 gain scaling
 instead of the normal delayed-output Q10 gain path, and the mono AB scoreboard
 remains 15/15 with `gap_SNR_matched <= 0`.
 
+find_LPC FLP Phase 5 transparent-NLSF adoption has an explicit experiment gate
+as of 2026-06-29. Setting `OPUS_SILK_TRANSPARENT_NLSF=1` removes the
+burg-domain voiced legacy raw-residual fallback and always transmits the
+transparent Burg target path (including last-half targets when interpolation is
+selected). The default encoder keeps the Phase 4 guard because the full
+fallback-free path is not yet a net win: the targeted 16 kHz opusref probe fails
+(`go test -count=1 -tags opusref -run
+'TestOpusSILKABAgainstLibopusEncoder/16k/(steady-voiced|speech-like-harmonic|onset)$'
+-v .`) with 16 kHz steady-voiced `gap_SNR_matched=3.75 dB`, 16 kHz onset
+`gap_SNR_matched=0.59 dB`, and speech-like-harmonic matched loudness
+`-1.59 dB` outside the ±1.5 dB guard. The normal guarded path remains passing
+for `go test -count=1 ./internal/silk` and
+`go test -count=1 -tags opusref -run TestOpusSILKABAgainstLibopusEncoder -v .`.
+
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.
 `TestCGOMultistreamInteroperability` verifies both Go-encoded packets decoded

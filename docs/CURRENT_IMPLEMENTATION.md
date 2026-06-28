@@ -732,8 +732,11 @@ The SILK package contains:
   still used for the bitstream VAD flag decision. Its live-onset decision
   bypasses the five-frame majority-vote attack delay for mono and single-frame
   stereo mid/side components, so initial harmonic stereo frames reach pitch
-  analysis. Multi-frame stereo streams retain smoothed flags to preserve their
-  shared conditional-gain entropy context. The homebrew NSQ used by
+  analysis. The noise-shape FLP path now consumes speech activity and low-band
+  input-quality values through the same Q8/Q15 boundaries used by libopus and
+  applies the low-activity SNR reduction only in VBR/CVBR mode. Multi-frame
+  stereo streams retain smoothed flags to preserve their shared
+  conditional-gain entropy context. The homebrew NSQ used by
   inactive/unvoiced frames now hands its reconstructed LPC, LTP, gain, and lag
   state to the delayed-decision trellis before a voiced frame. This keeps
   encoder and decoder synthesis aligned across unvoiced-to-voiced transitions;
@@ -813,6 +816,13 @@ such a near-silent frame yields a small value. In the deterministic fixture the
 slot (subframe 0 of the recovered packet) is PLC-concealed by both Go and
 libopus rather than reconstructed from LBRR; the present-LBRR subframes match
 libopus closely (40 ms ~33 dB, present 60 ms subframes ~9-10 dB).
+
+find_LPC FLP Phase 2 noise-shape input-boundary verification on 2026-06-29:
+passing (`go vet ./...`, `go test -count=1 ./...`,
+`go test -count=1 -tags opusref -run TestOpusSILKABAgainstLibopusEncoder -v .`,
+and `go test -count=1 -tags opusref ./...`). The mono AB scoreboard remains
+15/15 with `gap_SNR_matched <= 0`; the numerical results are unchanged from the
+pre-change baseline for the tested fixtures.
 
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.

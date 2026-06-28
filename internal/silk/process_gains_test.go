@@ -95,6 +95,63 @@ func TestVoicedUsesTrellisGating(t *testing.T) {
 	}
 }
 
+func TestNoiseShapeAnalysisUsesLibopusQuantizedInputs(t *testing.T) {
+	enc, err := NewEncoder(16000, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	enc.inputQuality = 0.25
+	enc.inputQualityB = [silkVADNBands]float64{1.0, 0.0, 0.75, 0.75}
+
+	signal := make([]float64, enc.frameSize)
+	shape := enc.analyzeNoiseShapeFLP(signal, make([]int16, enc.lpcOrder),
+		SignalTypeUnvoiced, 1, nil, 0, 1.0)
+
+	wantInputQuality := 0.5 * (float64(32767) / 32768.0)
+	if math.Abs(shape.InputQuality-wantInputQuality) > 1e-12 {
+		t.Fatalf("InputQuality=%g, want low-two-band Q15 average %g", shape.InputQuality, wantInputQuality)
+	}
+	wantSpeechActivity := float64(255) / 256.0
+	quantOffset := float64(silkQuantizationOffsetsQ10[SignalTypeUnvoiced>>1][1]) / 1024.0
+	wantLambda := lambdaOffset +
+		lambdaDelayedDecisions*float64(enc.silkComplexityConfig().nStatesDelayedDecision) +
+		lambdaSpeechAct*wantSpeechActivity +
+		lambdaInputQuality*wantInputQuality +
+		lambdaCodingQuality*shape.CodingQuality +
+		lambdaQuantOffset*quantOffset
+	wantLambdaQ10 := silkFloat2Int(wantLambda * 1024.0)
+	if shape.Lambda_Q10 != wantLambdaQ10 {
+		t.Fatalf("Lambda_Q10=%d, want %d from Q8 speech activity", shape.Lambda_Q10, wantLambdaQ10)
+	}
+}
+
+func TestNoiseShapeAnalysisCBRSkipsLowActivitySNRReduction(t *testing.T) {
+	makeEncoder := func(mode RateMode) *Encoder {
+		enc, err := NewEncoder(16000, 1)
+		if err != nil {
+			t.Fatalf("NewEncoder: %v", err)
+		}
+		enc.SetRateMode(mode)
+		for i := range enc.inputQualityB {
+			enc.inputQualityB[i] = 1.0
+		}
+		return enc
+	}
+	signal := make([]float64, 320)
+	for i := range signal {
+		signal[i] = 0.05 * math.Sin(2*math.Pi*float64(i)/40.0)
+	}
+	lpc := make([]int16, 16)
+	cbr := makeEncoder(RateModeCBR).analyzeNoiseShapeFLP(signal, lpc,
+		SignalTypeUnvoiced, 1, nil, 0, 0.25)
+	vbr := makeEncoder(RateModeVBR).analyzeNoiseShapeFLP(signal, lpc,
+		SignalTypeUnvoiced, 1, nil, 0, 0.25)
+
+	if vbr.Gains[0] <= cbr.Gains[0] {
+		t.Fatalf("VBR low-activity gain=%g, want above CBR gain=%g after SNR reduction", vbr.Gains[0], cbr.Gains[0])
+	}
+}
+
 // TestUnvoicedUsesTrellisGating pins the unvoiced trellis gate to mono SILK-only.
 // Unlike the voiced trellis (enabled in every mode), unvoiced runs the full
 // delayed-decision NSQ only when not a stereo component and not hybrid: those

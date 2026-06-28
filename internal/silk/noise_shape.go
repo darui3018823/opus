@@ -138,6 +138,22 @@ func silkSigmoid(x float64) float64 {
 	return 1.0 / (1.0 + math.Exp(-x))
 }
 
+func silkQ8UnitFloat(x float64) float64 {
+	q8 := int(math.Floor(clampFloat(x, 0, 1) * 256.0))
+	if q8 > 255 {
+		q8 = 255
+	}
+	return float64(q8) / 256.0
+}
+
+func silkQ15UnitFloat(x float64) float64 {
+	q15 := int(math.Floor(clampFloat(x, 0, 1) * 32768.0))
+	if q15 > 32767 {
+		q15 = 32767
+	}
+	return float64(q15) / 32768.0
+}
+
 func silkWarpedAutocorrelationFLP(corr, input []float64, warping float64, length, order int) {
 	state := make([]float64, order+1)
 	acc := make([]float64, order+1)
@@ -257,12 +273,10 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 	fsKHz := e.sampleRate / 1000
 	subframeLen := e.frameSize / e.nSubframes
 	shapeWinLength := silkSubframeLengthMS*fsKHz + 2*cfg.laShape
-	speechActivity = clampFloat(speechActivity, 0, 1)
-	inputQuality := clampFloat(e.inputQuality, 0, 1)
-	inputQualityBand0 := inputQuality
-	if len(e.inputQualityB) > 0 {
-		inputQualityBand0 = clampFloat(e.inputQualityB[0], 0, 1)
-	}
+	speechActivity = silkQ8UnitFloat(speechActivity)
+	inputQualityBand0 := silkQ15UnitFloat(e.inputQualityB[0])
+	inputQualityBand1 := silkQ15UnitFloat(e.inputQualityB[1])
+	inputQuality := 0.5 * (inputQualityBand0 + inputQualityBand1)
 	out := silkNoiseShapeAnalysis{
 		QuantOffsetType: quantOffsetType,
 		ShapingLPCOrder: cfg.shapingLPCOrder,
@@ -299,9 +313,11 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 	out.SNRdB = snrDB
 	snrAdjDB := snrDB
 	out.CodingQuality = silkSigmoid(0.25 * (snrAdjDB - 20.0))
-	// VBR path: reduce coding SNR during low speech activity.
-	b := 1.0 - speechActivity
-	snrAdjDB -= bgSNRDecrDB * out.CodingQuality * (0.5 + 0.5*out.InputQuality) * b * b
+	if e.rateMode != RateModeCBR {
+		// VBR path: reduce coding SNR during low speech activity.
+		b := 1.0 - speechActivity
+		snrAdjDB -= bgSNRDecrDB * out.CodingQuality * (0.5 + 0.5*out.InputQuality) * b * b
+	}
 	if signalType == SignalTypeVoiced {
 		snrAdjDB += harmSNRIncrDB * e.ltpCorrState
 	} else {

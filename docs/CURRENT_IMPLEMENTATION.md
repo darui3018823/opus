@@ -709,13 +709,16 @@ The SILK package contains:
   matched libopus: the fixed-point NLSF-to-LPC port omitted libopus's final
   inverse-prediction-gain stability check and iterative bandwidth expansion.
   That stabilization is now ported, including the exact chirp update. Q3a/Q4a
-  starts the shaping/NSQ handoff by computing per-subframe shaping controls
+  started the shaping/NSQ handoff by computing per-subframe shaping controls
   (feedback, spectral tilt, LF/HF shaping, voiced harmonic shaping, and a
-  Lambda-style pulse penalty scale) and feeding them into the current
-  single-state closed-loop NSQ. This replaces the former single scalar
-  output-error feedback term, but it is still not a faithful libopus
-  `silk_noise_shape_analysis_FLP` / `silk_prefilter_FLP` /
-  `silk_NSQ_del_dec_FLP` port. Q2 (`internal/silk/pitch_flp.go`) replaces the
+  Lambda-style pulse penalty scale) and feeding them into the delayed-decision
+  NSQ. The NSQ now mirrors libopus' fixed-point delayed-decision structure,
+  including two candidate levels per state, delayed winner selection, seed
+  propagation, cross-subframe delayed writes, NLSF-interpolation LPC-set
+  switching, re-whitening at the interpolation boundary, and full-Q16 gain
+  scaling for the boundary tail flush. This is still not a complete
+  libopus-equivalent `silk_prefilter_FLP` / encoder mode-control port. Q2
+  (`internal/silk/pitch_flp.go`) replaces the
   former home-brew single-lag full-frame autocorrelation with a faithful float
   port of `silk_find_pitch_lags_FLP` + `silk_pitch_analysis_core_FLP`: an
   LPC-residual whitening front end feeds a three-stage hierarchical search
@@ -831,6 +834,16 @@ and `go test -count=1 -tags opusref ./...`). The process-gains residual-energy
 path now mirrors `silk_residual_energy_FLP`'s stacked `LPC_in_pre` layout,
 first-half/last-half LPC coefficient selection, and gain-squared scaling. The
 mono AB scoreboard remains 15/15 with `gap_SNR_matched <= 0`.
+
+find_LPC FLP Phase 4 NSQ del-dec boundary verification on 2026-06-29:
+passing targeted trellis/state handoff tests and mono opusref AB
+(`go test -count=1 ./internal/silk -run
+"TestNSQScaleBoundaryXQUsesFullGainPrecision|TestTrellisNSQVoicedRoundTrip|TestHomebrewToTrellisNSQStateHandoff" -v`
+and `go test -count=1 -tags opusref -run
+TestOpusSILKABAgainstLibopusEncoder -v .`). The boundary tail flush at the
+NLSF-interpolation LPC-set switch now uses libopus' full-Q16 gain scaling
+instead of the normal delayed-output Q10 gain path, and the mono AB scoreboard
+remains 15/15 with `gap_SNR_matched <= 0`.
 
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.

@@ -244,12 +244,17 @@ func (e *Encoder) quantLTPGains(XX [][ltpOrder * ltpOrder]float64, xX [][ltpOrde
 // LPC residual -> find_LTP correlations -> weighted-VQ codebook search. It
 // returns the chosen periodicity index, the per-subframe gain indices, and the
 // resulting Q14 taps. Replaces the centre-tap-only homebrew selectLTPGain.
-func (e *Encoder) selectLTPGainsVQ(signal []float64, lpcQ12 []int16, pitchLags []int) (perIdx int, gainIndices []int, ltpCoeffsQ14 [][5]int16) {
+func (e *Encoder) selectLTPGainsVQWithGain(signal []float64, lpcQ12 []int16, pitchLags []int) (perIdx int, gainIndices []int, ltpCoeffsQ14 [][5]int16, predGainDB float64) {
 	subfrLen := e.frameSize / e.nSubframes
 	res, frameStart := e.lpcResidualInt16Domain(signal, lpcQ12)
 	XX, xX := e.findLTP(res, frameStart, pitchLags, subfrLen)
-	perIdx, gainIndices, _ = e.quantLTPGains(XX, xX, subfrLen)
+	perIdx, gainIndices, predGainDB = e.quantLTPGains(XX, xX, subfrLen)
 	ltpCoeffsQ14 = ltpCoeffsForPerSubframe(perIdx, gainIndices)
+	return
+}
+
+func (e *Encoder) selectLTPGainsVQ(signal []float64, lpcQ12 []int16, pitchLags []int) (perIdx int, gainIndices []int, ltpCoeffsQ14 [][5]int16) {
+	perIdx, gainIndices, ltpCoeffsQ14, _ = e.selectLTPGainsVQWithGain(signal, lpcQ12, pitchLags)
 	return perIdx, gainIndices, ltpCoeffsQ14
 }
 

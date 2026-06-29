@@ -709,13 +709,16 @@ The SILK package contains:
   matched libopus: the fixed-point NLSF-to-LPC port omitted libopus's final
   inverse-prediction-gain stability check and iterative bandwidth expansion.
   That stabilization is now ported, including the exact chirp update. Q3a/Q4a
-  starts the shaping/NSQ handoff by computing per-subframe shaping controls
+  started the shaping/NSQ handoff by computing per-subframe shaping controls
   (feedback, spectral tilt, LF/HF shaping, voiced harmonic shaping, and a
-  Lambda-style pulse penalty scale) and feeding them into the current
-  single-state closed-loop NSQ. This replaces the former single scalar
-  output-error feedback term, but it is still not a faithful libopus
-  `silk_noise_shape_analysis_FLP` / `silk_prefilter_FLP` /
-  `silk_NSQ_del_dec_FLP` port. Q2 (`internal/silk/pitch_flp.go`) replaces the
+  Lambda-style pulse penalty scale) and feeding them into the delayed-decision
+  NSQ. The NSQ now mirrors libopus' fixed-point delayed-decision structure,
+  including two candidate levels per state, delayed winner selection, seed
+  propagation, cross-subframe delayed writes, NLSF-interpolation LPC-set
+  switching, re-whitening at the interpolation boundary, and full-Q16 gain
+  scaling for the boundary tail flush. This is still not a complete
+  libopus-equivalent `silk_prefilter_FLP` / encoder mode-control port. Q2
+  (`internal/silk/pitch_flp.go`) replaces the
   former home-brew single-lag full-frame autocorrelation with a faithful float
   port of `silk_find_pitch_lags_FLP` + `silk_pitch_analysis_core_FLP`: an
   LPC-residual whitening front end feeds a three-stage hierarchical search
@@ -732,8 +735,11 @@ The SILK package contains:
   still used for the bitstream VAD flag decision. Its live-onset decision
   bypasses the five-frame majority-vote attack delay for mono and single-frame
   stereo mid/side components, so initial harmonic stereo frames reach pitch
-  analysis. Multi-frame stereo streams retain smoothed flags to preserve their
-  shared conditional-gain entropy context. The homebrew NSQ used by
+  analysis. The noise-shape FLP path now consumes speech activity and low-band
+  input-quality values through the same Q8/Q15 boundaries used by libopus and
+  applies the low-activity SNR reduction only in VBR/CVBR mode. Multi-frame
+  stereo streams retain smoothed flags to preserve their shared
+  conditional-gain entropy context. The homebrew NSQ used by
   inactive/unvoiced frames now hands its reconstructed LPC, LTP, gain, and lag
   state to the delayed-decision trellis before a voiced frame. This keeps
   encoder and decoder synthesis aligned across unvoiced-to-voiced transitions;
@@ -813,6 +819,79 @@ such a near-silent frame yields a small value. In the deterministic fixture the
 slot (subframe 0 of the recovered packet) is PLC-concealed by both Go and
 libopus rather than reconstructed from LBRR; the present-LBRR subframes match
 libopus closely (40 ms ~33 dB, present 60 ms subframes ~9-10 dB).
+
+find_LPC FLP Phase 2 noise-shape input-boundary verification on 2026-06-29:
+passing (`go vet ./...`, `go test -count=1 ./...`,
+`go test -count=1 -tags opusref -run TestOpusSILKABAgainstLibopusEncoder -v .`,
+and `go test -count=1 -tags opusref ./...`). The mono AB scoreboard remains
+15/15 with `gap_SNR_matched <= 0`; the numerical results are unchanged from the
+pre-change baseline for the tested fixtures.
+
+find_LPC FLP Phase 3 gains/residual-energy verification on 2026-06-29:
+passing (`go vet ./...`, `go test -count=1 ./...`,
+`go test -count=1 -tags opusref -run TestOpusSILKABAgainstLibopusEncoder -v .`,
+and `go test -count=1 -tags opusref ./...`). The process-gains residual-energy
+path now mirrors `silk_residual_energy_FLP`'s stacked `LPC_in_pre` layout,
+first-half/last-half LPC coefficient selection, and gain-squared scaling. The
+mono AB scoreboard remains 15/15 with `gap_SNR_matched <= 0`.
+
+find_LPC FLP Phase 4 NSQ del-dec boundary verification on 2026-06-29:
+passing targeted trellis/state handoff tests and mono opusref AB
+(`go test -count=1 ./internal/silk -run
+"TestNSQScaleBoundaryXQUsesFullGainPrecision|TestTrellisNSQVoicedRoundTrip|TestHomebrewToTrellisNSQStateHandoff" -v`
+and `go test -count=1 -tags opusref -run
+TestOpusSILKABAgainstLibopusEncoder -v .`). The boundary tail flush at the
+NLSF-interpolation LPC-set switch now uses libopus' full-Q16 gain scaling
+instead of the normal delayed-output Q10 gain path, and the mono AB scoreboard
+remains 15/15 with `gap_SNR_matched <= 0`.
+
+find_LPC FLP Phase 5 transparent-NLSF adoption has an explicit experiment gate
+as of 2026-06-29. Setting `OPUS_SILK_TRANSPARENT_NLSF=1` removes the
+burg-domain voiced legacy raw-residual fallback and always transmits the
+transparent Burg target path (including last-half targets when interpolation is
+selected). The default encoder keeps the Phase 4 guard because the full
+fallback-free path is not yet a net win: the targeted 16 kHz opusref probe fails
+(`go test -count=1 -tags opusref -run
+'TestOpusSILKABAgainstLibopusEncoder/16k/(steady-voiced|speech-like-harmonic|onset)$'
+-v .`) with 16 kHz steady-voiced `gap_SNR_matched=3.75 dB`, 16 kHz onset
+`gap_SNR_matched=0.59 dB`, and speech-like-harmonic matched loudness
+`-1.59 dB` outside the ±1.5 dB guard. The normal guarded path remains passing
+for `go test -count=1 ./internal/silk` and
+`go test -count=1 -tags opusref -run TestOpusSILKABAgainstLibopusEncoder -v .`.
+
+A decisive measurement on 2026-06-29 settled whether the transparent path is a
+real per-bit improvement or just a rate trade-off. Comparing the committed
+baseline (transparent NLSF off) against `OPUS_SILK_TRANSPARENT_NLSF=1
+OPUS_SILK_RC_SNR=0` (the natural-size SNR path disabled, reverting to the budget
+search) across all nine voiced/onset AB cells, the transparent path raises own
+SNR in 8/9 cells but spends 60.8%–147.8% more bytes in every cell; `16k/onset`
+even loses 0.31 dB of own SNR while using 60.8% more bytes. This is a rate
+trade-off, not a per-bit win: transparent NLSF does not improve voiced quality at
+a comparable rate even after the Phase 2–4 back-end faithfulisation. The
+transparent-NLSF experiment is therefore shelved behind its default-off env gate
+rather than adopted; the only remaining theoretical route to a voiced per-bit win
+is a full NSQ/gain co-optimisation rewrite, whose expected value is low given
+that Phase 2–4 did not move the result. The default encoder ships the neutral
+guarded path.
+
+find_LPC FLP Phase 6 has started with the first scope expansion on 2026-06-29:
+unvoiced SILK frames now use the delayed-decision trellis NSQ in stereo
+components and hybrid low-band streams as well as mono SILK-only streams. The
+unvoiced/stereo-component path keeps neutral spectral shaping before NSQ, so the
+change expands the delayed-decision rate/distortion search without adopting the
+perceptual shaping that previously hurt broadband-noise scoring. This does not
+remove the Phase 5 transparent-NLSF experiment gate; voiced transparent NLSF
+still remains guarded by default.
+
+Phase 6 unvoiced-scope verification on 2026-06-29: passing
+(`go test -count=1 ./internal/silk -run
+"TestUnvoicedUsesTrellisGating|TestTrellisNSQVoicedRoundTrip|TestHomebrewToTrellisNSQStateHandoff" -v`,
+`go test -count=1 . -run
+"TestEncoderSILKOnlyUnvoicedNoiseRateControlBound|TestEncoderHybrid24kUnvoicedNoiseDoesNotCollapse|TestEncoderSILKOnlyStereoQualityBaseline" -v`,
+`go test -count=1 -tags opusref -run
+"TestOpusSILKStereoABAgainstLibopusEncoder|TestOpusSILKHybridABAgainstLibopusEncoder" -v .`,
+and `go test -count=1 -tags opusref -run
+"TestCGOEncodeRefSILKFEC|TestCGOEncodeRefSILKOnly|TestCGOEncodeRefHybrid" -v .`).
 
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.

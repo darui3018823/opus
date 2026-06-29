@@ -242,7 +242,6 @@ func (e *Encoder) silkNSQDelDec(
 					}
 					bd := &delDec[bWinner]
 					bIdx := smplBufIdx + decisionDelay
-					bGainQ10 := silkRSHIFT32(gainsQ16[1], 6)
 					base := sf * subframeLen
 					for i := 0; i < decisionDelay; i++ {
 						bIdx = (bIdx - 1) % silkDecisionDelay
@@ -254,7 +253,7 @@ func (e *Encoder) silkNSQDelDec(
 						shpPos := e.nsq.sLTPShpBufIdx - decisionDelay + i
 						if outPos >= 0 && outPos < len(pulses) && xPos >= 0 && xPos < len(e.nsq.xq) {
 							pulses[outPos] = int16(silkRShiftRound(int64(bd.qQ10[bIdx]), 10))
-							e.nsq.xq[xPos] = clamp16(silkRShiftRound(int64(silkSMULWW(bd.xqQ14[bIdx], bGainQ10)), 8))
+							e.nsq.xq[xPos] = nsqScaleBoundaryXQ(bd.xqQ14[bIdx], gainsQ16[1])
 							if shpPos >= 0 && shpPos < len(e.nsq.sLTPShpQ14) {
 								e.nsq.sLTPShpQ14[shpPos] = bd.shapeQ14[bIdx]
 							}
@@ -537,6 +536,10 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 	for k := 0; k < nStatesDelayedDecision; k++ {
 		copy(delDec[k].sLPCQ14[:silkMaxLPCOrder], delDec[k].sLPCQ14[length:length+silkMaxLPCOrder])
 	}
+}
+
+func nsqScaleBoundaryXQ(xqQ14, gainQ16 int32) int16 {
+	return clamp16(silkRShiftRound(int64(silkSMULWW(xqQ14, gainQ16)), 14))
 }
 
 func nsqQuantCandidates(rQ10, offsetQ10, lambdaQ10 int32) (q1Q10, q2Q10, rd1Q10, rd2Q10 int32) {

@@ -859,6 +859,21 @@ fallback-free path is not yet a net win: the targeted 16 kHz opusref probe fails
 for `go test -count=1 ./internal/silk` and
 `go test -count=1 -tags opusref -run TestOpusSILKABAgainstLibopusEncoder -v .`.
 
+A decisive measurement on 2026-06-29 settled whether the transparent path is a
+real per-bit improvement or just a rate trade-off. Comparing the committed
+baseline (transparent NLSF off) against `OPUS_SILK_TRANSPARENT_NLSF=1
+OPUS_SILK_RC_SNR=0` (the natural-size SNR path disabled, reverting to the budget
+search) across all nine voiced/onset AB cells, the transparent path raises own
+SNR in 8/9 cells but spends 60.8%–147.8% more bytes in every cell; `16k/onset`
+even loses 0.31 dB of own SNR while using 60.8% more bytes. This is a rate
+trade-off, not a per-bit win: transparent NLSF does not improve voiced quality at
+a comparable rate even after the Phase 2–4 back-end faithfulisation. The
+transparent-NLSF experiment is therefore shelved behind its default-off env gate
+rather than adopted; the only remaining theoretical route to a voiced per-bit win
+is a full NSQ/gain co-optimisation rewrite, whose expected value is low given
+that Phase 2–4 did not move the result. The default encoder ships the neutral
+guarded path.
+
 find_LPC FLP Phase 6 has started with the first scope expansion on 2026-06-29:
 unvoiced SILK frames now use the delayed-decision trellis NSQ in stereo
 components and hybrid low-band streams as well as mono SILK-only streams. The

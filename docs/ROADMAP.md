@@ -85,10 +85,11 @@ from the code state and takes precedence when this roadmap lags.
 - Broaden the current limited SILK-only and initial hybrid encode paths toward
   fuller libopus mode/rate-control coverage.
 
-**FEC/PLC API parity** 🔄
+**FEC/PLC API parity** ✅
 - SILK-only/hybrid LBRR FEC encode/decode is implemented for mono and stereo.
-- Improve the remaining FEC quality edge cases and add SILK/hybrid support to
-  the public `DecodePLC` path, which is currently CELT-only.
+- Public `DecodePLC` supports CELT-only, SILK-only, and hybrid streams for mono
+  and stereo, including stateful recovery into the next normal packet.
+- Remaining work is limited to quality refinements rather than API coverage.
 
 **Multistream/container support** 🔄
 - Core multistream/surround, projection/Ambisonics, and single-logical-stream
@@ -341,7 +342,7 @@ For each major component:
 
 **Immediate priorities after v1.1.1**:
 1. 🔄 Broader SILK/hybrid encoder mode coverage.
-2. 🔄 SILK/hybrid public PLC and remaining FEC quality edge cases.
+2. ✅ SILK/hybrid public PLC; continue only targeted FEC/PLC quality refinements.
 3. 🔄 Remaining multistream/surround/Ogg parity beyond the implemented core APIs.
 4. 🔄 Encoder parity/quality refinements against libopus.
 5. 📝 Keep README and `CURRENT_IMPLEMENTATION.md` aligned with releases.

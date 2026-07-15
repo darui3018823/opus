@@ -61,6 +61,22 @@ func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, ma
 	return nil, fmt.Errorf("cgoref multistream encoder requires -tags opusref")
 }
 
+func (e *MultistreamEncoder) SetBitrate(bps int) error {
+	return fmt.Errorf("cgoref multistream encoder requires -tags opusref")
+}
+
+func (e *MultistreamEncoder) SetVoiceMode() error {
+	return fmt.Errorf("cgoref multistream encoder requires -tags opusref")
+}
+
+func (e *MultistreamEncoder) SetInbandFEC(enabled bool) error {
+	return fmt.Errorf("cgoref multistream encoder requires -tags opusref")
+}
+
+func (e *MultistreamEncoder) SetPacketLossPerc(perc int) error {
+	return fmt.Errorf("cgoref multistream encoder requires -tags opusref")
+}
+
 func (e *MultistreamEncoder) Encode(pcm []float32, frameSize int) ([]byte, error) {
 	return nil, fmt.Errorf("cgoref multistream encoder requires -tags opusref")
 }
@@ -72,6 +88,10 @@ func NewMultistreamDecoder(sampleRate, channels, streams, coupledStreams int, ma
 }
 
 func (d *MultistreamDecoder) DecodeFloat(packet []byte, maxSPC int) ([]float32, error) {
+	return nil, fmt.Errorf("cgoref multistream decoder requires -tags opusref")
+}
+
+func (d *MultistreamDecoder) DecodeFloatFEC(packet []byte, frameSize int) ([]float32, error) {
 	return nil, fmt.Errorf("cgoref multistream decoder requires -tags opusref")
 }
 

@@ -304,7 +304,7 @@ func readCorpusWAV(path string) (corpusClip, error) {
 		id := string(data[pos : pos+4])
 		size := int(binary.LittleEndian.Uint32(data[pos+4 : pos+8]))
 		pos += 8
-		if size < 0 || pos+size > len(data) {
+		if size < 0 || size > len(data)-pos {
 			return corpusClip{}, fmt.Errorf("truncated %q chunk", id)
 		}
 		chunk := data[pos : pos+size]

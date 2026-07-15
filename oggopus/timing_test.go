@@ -138,8 +138,10 @@ func TestReaderPacketTimingRejectsInvalidGranules(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := r.NextPacket(); !errors.Is(err, ErrInvalidOpusStream) {
-				t.Fatalf("error = %v, want ErrInvalidOpusStream", err)
+			for attempt := 0; attempt < 2; attempt++ {
+				if _, err := r.NextPacket(); !errors.Is(err, ErrInvalidOpusStream) {
+					t.Fatalf("attempt %d error = %v, want ErrInvalidOpusStream", attempt, err)
+				}
 			}
 		})
 	}

@@ -29,6 +29,7 @@ type Reader struct {
 	linkIndex           int
 	physicalEOF         bool
 	terminalErr         error
+	seenSerials         map[uint32]struct{}
 	Head                Head
 	Tags                Tags
 }
@@ -61,6 +62,7 @@ func NewReader(r io.Reader) (*Reader, error) {
 		preSkipRemaining: int(head.PreSkip),
 		Head:             head,
 		Tags:             tags,
+		seenSerials:      map[uint32]struct{}{headPacket.Serial: {}},
 	}, nil
 }
 
@@ -115,18 +117,21 @@ func (r *Reader) NextPacket() (Packet, error) {
 		}
 	}
 	for len(r.pending) == 0 {
-		if r.packets.EOS() {
-			if err := r.advanceLink(); err != nil {
-				return Packet{}, err
-			}
-			continue
-		}
 		if err := r.readAudioPage(); err != nil {
 			if errors.Is(err, io.EOF) && r.packets.EOS() {
+				if err := r.validateLogicalEOS(); err != nil {
+					r.terminalErr = err
+					return Packet{}, err
+				}
 				if err := r.advanceLink(); err != nil {
 					return Packet{}, err
 				}
 				continue
+			}
+			if errors.Is(err, io.EOF) {
+				r.physicalEOF = true
+			} else {
+				r.terminalErr = err
 			}
 			return Packet{}, err
 		}
@@ -134,6 +139,28 @@ func (r *Reader) NextPacket() (Packet, error) {
 	packet := r.pending[0]
 	r.pending = r.pending[1:]
 	return packet, nil
+}
+
+func (r *Reader) validateLogicalEOS() error {
+	if !r.packets.haveEOS {
+		return fmt.Errorf("%w: missing EOS page metadata", ErrInvalidOpusStream)
+	}
+	if r.haveLinkEnd {
+		return nil
+	}
+	if !r.haveAudioGranule || r.packets.eosGranule != r.previousPageGranule {
+		return fmt.Errorf("%w: empty EOS granule %d, want %d", ErrInvalidOpusStream, r.packets.eosGranule, r.previousPageGranule)
+	}
+	if r.seeker != nil {
+		offset, err := r.seeker.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return err
+		}
+		r.linkEndOffset = offset
+		r.linkFinalGranule = r.packets.eosGranule
+		r.haveLinkEnd = true
+	}
+	return nil
 }
 
 func (r *Reader) advanceLink() error {
@@ -147,6 +174,12 @@ func (r *Reader) advanceLink() error {
 		r.terminalErr = err
 		return err
 	}
+	if _, duplicate := r.seenSerials[headPacket.Serial]; duplicate {
+		err := fmt.Errorf("%w: chained stream reuses serial %d", ErrSerial, headPacket.Serial)
+		r.terminalErr = err
+		return err
+	}
+	r.seenSerials[headPacket.Serial] = struct{}{}
 	packets.allowOrphan = true
 	r.packets = packets
 	r.pending = nil

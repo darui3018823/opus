@@ -125,3 +125,80 @@ func TestReaderSeekPCMWithinChainedStreams(t *testing.T) {
 		t.Fatalf("decode after physical EOF seek: %v", err)
 	}
 }
+
+func TestReaderRejectsReusedChainedSerial(t *testing.T) {
+	data := append(makeChainLink(t, 60, 1, "first", 1, false), makeChainLink(t, 60, 1, "second", 2, false)...)
+	r, err := NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.NextPacket(); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := r.NextPacket(); !errors.Is(err, ErrSerial) {
+			t.Fatalf("attempt %d error = %v, want ErrSerial", attempt, err)
+		}
+	}
+}
+
+func TestReaderRejectsTruncatedPacketOnEOSPage(t *testing.T) {
+	base := makeChainLink(t, 61, 1, "base", 1, false)
+	reader := bytes.NewReader(base)
+	var stream bytes.Buffer
+	for reader.Len() > 0 {
+		page, err := ReadPage(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if page.EOS() {
+			page.Segments = append(page.Segments, 255)
+			page.Data = append(page.Data, bytes.Repeat([]byte{0}, 255)...)
+		}
+		if err := WritePage(&stream, page); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := NewReader(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.NextPacket(); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := r.NextPacket(); !errors.Is(err, ErrTruncatedPacket) {
+			t.Fatalf("attempt %d error = %v, want ErrTruncatedPacket", attempt, err)
+		}
+	}
+}
+
+func TestReaderRejectsMismatchedEmptyEOSGranule(t *testing.T) {
+	data := makeChainLink(t, 62, 1, "empty", 1, true)
+	reader := bytes.NewReader(data)
+	var stream bytes.Buffer
+	for reader.Len() > 0 {
+		page, err := ReadPage(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if page.EOS() && len(page.Segments) == 0 {
+			page.GranulePosition--
+		}
+		if err := WritePage(&stream, page); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := NewReader(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.NextPacket(); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := r.NextPacket(); !errors.Is(err, ErrInvalidOpusStream) {
+			t.Fatalf("attempt %d error = %v, want ErrInvalidOpusStream", attempt, err)
+		}
+	}
+}

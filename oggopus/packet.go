@@ -40,6 +40,8 @@ type PacketReader struct {
 	eos         bool
 	terminalErr error
 	allowOrphan bool
+	eosGranule  int64
+	haveEOS     bool
 }
 
 func NewPacketReader(r io.Reader) *PacketReader {
@@ -169,6 +171,8 @@ func (r *PacketReader) readPage() error {
 	r.queue = append(r.queue, completed...)
 	if page.EOS() {
 		r.eos = true
+		r.eosGranule = page.GranulePosition
+		r.haveEOS = true
 		if len(r.partial) != 0 {
 			r.partial = nil
 			r.terminalErr = ErrTruncatedPacket

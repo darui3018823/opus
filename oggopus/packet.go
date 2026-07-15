@@ -15,8 +15,11 @@ type Packet struct {
 	Duration48k int
 	// DiscardStart and DiscardEnd are decoded samples per channel to remove
 	// for Opus pre-skip, seeking, or end trimming. Reader populates them.
-	DiscardStart      int
-	DiscardEnd        int
+	DiscardStart int
+	DiscardEnd   int
+	// LinkIndex is the zero-based chained logical-stream index. PacketReader
+	// leaves it zero; Reader populates it for audio packets.
+	LinkIndex         int
 	Serial            uint32
 	PageSequence      uint32
 	BOS               bool

@@ -31,16 +31,19 @@ func (r *Reader) SeekPCM(sample int64) (err error) {
 	if err != nil {
 		return fmt.Errorf("%w: determine stream size: %v", ErrNotSeekable, err)
 	}
-	finalGranule, err := lastStreamGranule(r.seeker, r.audioOffset, end, r.Serial())
-	if err != nil {
-		return err
+	if !r.haveLinkEnd {
+		r.linkFinalGranule, r.linkEndOffset, err = findLogicalStreamEnd(r.seeker, r.audioOffset, end, r.Serial())
+		if err != nil {
+			return err
+		}
+		r.haveLinkEnd = true
 	}
-	playable := finalGranule - int64(r.Head.PreSkip)
+	playable := r.linkFinalGranule - int64(r.Head.PreSkip)
 	if sample < 0 || sample > playable {
 		return fmt.Errorf("%w: sample %d outside [0,%d]", ErrSeekOutOfRange, sample, playable)
 	}
 	if sample == playable {
-		if _, err := r.seeker.Seek(end, io.SeekStart); err != nil {
+		if _, err := r.seeker.Seek(r.linkEndOffset, io.SeekStart); err != nil {
 			return err
 		}
 		r.packets = NewPacketReader(r.seeker)
@@ -49,6 +52,8 @@ func (r *Reader) SeekPCM(sample int64) (err error) {
 		r.haveAudioGranule = false
 		r.seekDiscardActive = false
 		r.atEnd = true
+		r.physicalEOF = false
+		r.terminalErr = nil
 		restore = false
 		return nil
 	}
@@ -59,7 +64,7 @@ func (r *Reader) SeekPCM(sample int64) (err error) {
 	startSequence := uint32(0)
 	allowOrphan := false
 	if searchGranule > int64(r.Head.PreSkip) {
-		page, offset, found, err := bisectPageAtOrBefore(r.seeker, r.audioOffset, end, r.Serial(), searchGranule)
+		page, offset, found, err := bisectPageAtOrBefore(r.seeker, r.audioOffset, r.linkEndOffset, r.Serial(), searchGranule)
 		if err != nil {
 			return err
 		}
@@ -85,34 +90,56 @@ func (r *Reader) SeekPCM(sample int64) (err error) {
 	r.seekDiscardActive = true
 	r.seekTargetGranule = targetGranule
 	r.atEnd = false
+	r.physicalEOF = false
+	r.terminalErr = nil
 	restore = false
 	return nil
 }
 
-func lastStreamGranule(rs io.ReadSeeker, audioOffset, end int64, serial uint32) (int64, error) {
-	const maxPageWireSize = int64(27 + MaxSegments + MaxPageData)
-	from := max(audioOffset, end-2*maxPageWireSize)
-	var last int64 = -1
-	for from < end {
-		page, offset, next, err := scanNextPage(rs, from, end)
-		if errors.Is(err, io.EOF) {
+func findLogicalStreamEnd(rs io.ReadSeeker, start, end int64, serial uint32) (int64, int64, error) {
+	low, high := start, end
+	bestOffset := int64(-1)
+	for range 64 {
+		if high-low <= 1 {
 			break
 		}
+		mid := low + (high-low)/2
+		page, offset, next, err := scanNextPage(rs, mid, end)
+		if errors.Is(err, io.EOF) {
+			high = mid
+			continue
+		}
 		if err != nil {
-			return 0, err
+			return 0, 0, err
+		}
+		if page.Serial == serial {
+			bestOffset = offset
+			low = max(next, mid+1)
+		} else {
+			high = offset
+		}
+	}
+	from := start
+	if bestOffset >= 0 {
+		from = bestOffset
+	}
+	for from < end {
+		page, offset, next, err := scanNextPage(rs, from, end)
+		if err != nil {
+			return 0, 0, err
 		}
 		if page.Serial != serial {
-			return 0, fmt.Errorf("%w: got %d, want %d", ErrSerial, page.Serial, serial)
+			break
 		}
-		if page.GranulePosition >= 0 {
-			last = page.GranulePosition
+		if page.EOS() {
+			if page.GranulePosition < 0 {
+				return 0, 0, fmt.Errorf("%w: EOS page has no granule position", ErrInvalidOpusStream)
+			}
+			return page.GranulePosition, next, nil
 		}
 		from = max(next, offset+1)
 	}
-	if last < int64(0) {
-		return 0, fmt.Errorf("%w: no final granule position", ErrInvalidOpusStream)
-	}
-	return last, nil
+	return 0, 0, fmt.Errorf("%w: logical stream has no EOS page", ErrInvalidOpusStream)
 }
 
 func bisectPageAtOrBefore(rs io.ReadSeeker, start, end int64, serial uint32, target int64) (Page, int64, bool, error) {

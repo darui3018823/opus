@@ -1,14 +1,16 @@
 package oggopus
 
 import (
+	"errors"
 	"fmt"
 	"io"
 
 	opus "github.com/darui3018823/opus"
 )
 
-// Reader parses one complete Ogg Opus logical bitstream.
+// Reader parses an Ogg Opus physical stream, including chained logical streams.
 type Reader struct {
+	source              io.Reader
 	packets             *PacketReader
 	seeker              io.ReadSeeker
 	audioOffset         int64
@@ -21,6 +23,12 @@ type Reader struct {
 	seekDiscardActive   bool
 	seekTargetGranule   int64
 	atEnd               bool
+	linkEndOffset       int64
+	linkFinalGranule    int64
+	haveLinkEnd         bool
+	linkIndex           int
+	physicalEOF         bool
+	terminalErr         error
 	Head                Head
 	Tags                Tags
 }
@@ -29,26 +37,7 @@ type Reader struct {
 func NewReader(r io.Reader) (*Reader, error) {
 	seeker, _ := r.(io.ReadSeeker)
 	packets := NewPacketReader(r)
-	headPacket, err := packets.Next()
-	if err != nil {
-		return nil, fmt.Errorf("%w: read OpusHead: %v", ErrInvalidOpusStream, err)
-	}
-	if !headPacket.BOS || headPacket.PageSequence != 0 || headPacket.GranulePosition != 0 ||
-		!headPacket.FirstPacketOnPage || !headPacket.LastPacketOnPage {
-		return nil, fmt.Errorf("%w: OpusHead must be the only packet on BOS page 0 with granule 0", ErrInvalidOpusStream)
-	}
-	head, err := ParseHead(headPacket.Data)
-	if err != nil {
-		return nil, err
-	}
-	tagsPacket, err := packets.Next()
-	if err != nil {
-		return nil, fmt.Errorf("%w: read OpusTags: %v", ErrInvalidOpusStream, err)
-	}
-	if tagsPacket.BOS || tagsPacket.GranulePosition != 0 || !tagsPacket.LastPacketOnPage {
-		return nil, fmt.Errorf("%w: OpusTags must finish its page with granule 0", ErrInvalidOpusStream)
-	}
-	tags, err := ParseTags(tagsPacket.Data)
+	headPacket, head, tags, err := readLinkHeaders(packets)
 	if err != nil {
 		return nil, err
 	}
@@ -63,6 +52,7 @@ func NewReader(r io.Reader) (*Reader, error) {
 	// continued packet whose missing prefix must be discarded.
 	packets.allowOrphan = true
 	return &Reader{
+		source:           r,
 		packets:          packets,
 		seeker:           seeker,
 		audioOffset:      audioOffset,
@@ -74,25 +64,111 @@ func NewReader(r io.Reader) (*Reader, error) {
 	}, nil
 }
 
+func readLinkHeaders(packets *PacketReader) (Packet, Head, Tags, error) {
+	headPacket, err := packets.Next()
+	if err != nil {
+		return Packet{}, Head{}, Tags{}, fmt.Errorf("%w: read OpusHead: %w", ErrInvalidOpusStream, err)
+	}
+	if !headPacket.BOS || headPacket.PageSequence != 0 || headPacket.GranulePosition != 0 ||
+		!headPacket.FirstPacketOnPage || !headPacket.LastPacketOnPage {
+		return Packet{}, Head{}, Tags{}, fmt.Errorf("%w: OpusHead must be the only packet on BOS page 0 with granule 0", ErrInvalidOpusStream)
+	}
+	head, err := ParseHead(headPacket.Data)
+	if err != nil {
+		return Packet{}, Head{}, Tags{}, err
+	}
+	tagsPacket, err := packets.Next()
+	if err != nil {
+		return Packet{}, Head{}, Tags{}, fmt.Errorf("%w: read OpusTags: %w", ErrInvalidOpusStream, err)
+	}
+	if tagsPacket.BOS || tagsPacket.GranulePosition != 0 || !tagsPacket.LastPacketOnPage {
+		return Packet{}, Head{}, Tags{}, fmt.Errorf("%w: OpusTags must finish its page with granule 0", ErrInvalidOpusStream)
+	}
+	tags, err := ParseTags(tagsPacket.Data)
+	if err != nil {
+		return Packet{}, Head{}, Tags{}, err
+	}
+	return headPacket, head, tags, nil
+}
+
 func (r *Reader) Serial() uint32 {
 	return r.serial
 }
+
+// Link returns the zero-based index of the current chained logical stream.
+func (r *Reader) Link() int { return r.linkIndex }
 
 func (r *Reader) EOS() bool { return r.atEnd || r.packets.EOS() }
 
 // NextPacket returns the next Opus audio packet and its Ogg metadata.
 func (r *Reader) NextPacket() (Packet, error) {
-	if r.atEnd {
+	if r.terminalErr != nil {
+		return Packet{}, r.terminalErr
+	}
+	if r.physicalEOF {
 		return Packet{}, io.EOF
 	}
-	if len(r.pending) == 0 {
+	if r.atEnd {
+		r.atEnd = false
+		if err := r.advanceLink(); err != nil {
+			return Packet{}, err
+		}
+	}
+	for len(r.pending) == 0 {
+		if r.packets.EOS() {
+			if err := r.advanceLink(); err != nil {
+				return Packet{}, err
+			}
+			continue
+		}
 		if err := r.readAudioPage(); err != nil {
+			if errors.Is(err, io.EOF) && r.packets.EOS() {
+				if err := r.advanceLink(); err != nil {
+					return Packet{}, err
+				}
+				continue
+			}
 			return Packet{}, err
 		}
 	}
 	packet := r.pending[0]
 	r.pending = r.pending[1:]
 	return packet, nil
+}
+
+func (r *Reader) advanceLink() error {
+	packets := NewPacketReader(r.source)
+	headPacket, head, tags, err := readLinkHeaders(packets)
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			r.physicalEOF = true
+			return io.EOF
+		}
+		r.terminalErr = err
+		return err
+	}
+	packets.allowOrphan = true
+	r.packets = packets
+	r.pending = nil
+	r.serial = headPacket.Serial
+	r.linkIndex++
+	r.Head = head
+	r.Tags = tags
+	r.preSkipRemaining = int(head.PreSkip)
+	r.previousPageGranule = 0
+	r.haveAudioGranule = false
+	r.seekDiscardActive = false
+	r.atEnd = false
+	r.haveLinkEnd = false
+	if r.seeker != nil {
+		r.audioOffset, err = r.seeker.Seek(0, io.SeekCurrent)
+		if err != nil {
+			r.terminalErr = err
+			return err
+		}
+		r.audioSequence = packets.nextSeq
+	}
+	return nil
 }
 
 func (r *Reader) readAudioPage() error {
@@ -110,6 +186,7 @@ func (r *Reader) readAudioPage() error {
 			return fmt.Errorf("%w: packet duration: %v", ErrInvalidOpusStream, err)
 		}
 		packet.Duration48k = duration
+		packet.LinkIndex = r.linkIndex
 		pagePackets = append(pagePackets, packet)
 		if packet.LastPacketOnPage {
 			break
@@ -184,6 +261,13 @@ func (r *Reader) readAudioPage() error {
 		}
 		if trim != 0 {
 			return fmt.Errorf("%w: end trim exceeds decoded audio", ErrInvalidOpusStream)
+		}
+	}
+	if last.EOS && r.seeker != nil {
+		if offset, err := r.seeker.Seek(0, io.SeekCurrent); err == nil {
+			r.linkEndOffset = offset
+			r.linkFinalGranule = granule
+			r.haveLinkEnd = true
 		}
 	}
 	r.previousPageGranule = granule

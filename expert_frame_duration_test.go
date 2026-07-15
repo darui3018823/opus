@@ -215,3 +215,112 @@ func TestExpertFrameDurationForcedMono(t *testing.T) {
 		t.Fatalf("forced mono channels = %d, %v", channels, err)
 	}
 }
+
+func TestMultistreamExpertFrameDuration(t *testing.T) {
+	const (
+		rate      = 48000
+		channels  = 3
+		streams   = 2
+		available = 960
+	)
+	enc, err := NewMultistreamEncoder(rate, channels, streams, 1, []byte{0, 1, 2}, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetExpertFrameDuration(ExpertFrameDuration10ms); err != nil {
+		t.Fatal(err)
+	}
+	if got := enc.ExpertFrameDuration(); got != ExpertFrameDuration10ms {
+		t.Fatalf("duration = %d", got)
+	}
+	for stream := 0; stream < streams; stream++ {
+		child, err := enc.StreamEncoder(stream)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := child.ExpertFrameDuration(); got != ExpertFrameDuration10ms {
+			t.Fatalf("stream %d duration = %d", stream, got)
+		}
+	}
+	packet, err := enc.Encode(make([]int16, available*channels), available)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := MultistreamPacketGetNumSamples(packet, streams, rate); err != nil || got != 480 {
+		t.Fatalf("packet samples = %d, %v; want 480", got, err)
+	}
+	if err := enc.SetExpertFrameDuration(ExpertFrameDuration(6000)); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("invalid setter error = %v", err)
+	}
+	for stream := 0; stream < streams; stream++ {
+		child, _ := enc.StreamEncoder(stream)
+		if got := child.ExpertFrameDuration(); got != ExpertFrameDuration10ms {
+			t.Fatalf("invalid setter changed stream %d duration to %d", stream, got)
+		}
+	}
+	if err := enc.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if got := enc.ExpertFrameDuration(); got != ExpertFrameDuration10ms {
+		t.Fatalf("Reset changed duration to %d", got)
+	}
+}
+
+func TestSurroundExpertFrameDurationUsesSelectedRateAllocation(t *testing.T) {
+	const (
+		rate      = 48000
+		channels  = 6
+		available = 960
+	)
+	enc, err := NewSurroundEncoder(rate, channels, MappingFamilyVorbis, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetExpertFrameDuration(ExpertFrameDuration10ms); err != nil {
+		t.Fatal(err)
+	}
+	packet, err := enc.Encode(make([]int16, available*channels), available)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := MultistreamPacketGetNumSamples(packet, enc.Streams(), rate); err != nil || got != 480 {
+		t.Fatalf("packet samples = %d, %v; want 480", got, err)
+	}
+	wantRates := enc.allocateRates(480)
+	for stream, want := range wantRates {
+		child, _ := enc.StreamEncoder(stream)
+		if got := child.Bitrate(); got != want {
+			t.Fatalf("stream %d bitrate = %d, want selected-duration rate %d", stream, got, want)
+		}
+	}
+}
+
+func TestProjectionExpertFrameDurationUsesSelectedRateAllocation(t *testing.T) {
+	const (
+		rate      = 48000
+		channels  = 4
+		available = 960
+	)
+	enc, err := NewProjectionEncoder(rate, channels, MappingFamilyAmbisonics, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetExpertFrameDuration(ExpertFrameDuration10ms); err != nil {
+		t.Fatal(err)
+	}
+	packet, err := enc.EncodeFloat(make([]float64, available*channels), available)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := MultistreamPacketGetNumSamples(packet, enc.Streams(), rate); err != nil || got != 480 {
+		t.Fatalf("packet samples = %d, %v; want 480", got, err)
+	}
+	wantTotal := (enc.streams+enc.coupledStreams)*(rate+60*rate/480) + enc.streams*15000
+	wantPerStream := max(6000, min(510000, wantTotal/enc.streams))
+	for stream := 0; stream < enc.Streams(); stream++ {
+		child, _ := enc.StreamEncoder(stream)
+		if got := child.Bitrate(); got != wantPerStream {
+			t.Fatalf("stream %d bitrate = %d, want selected-duration rate %d", stream, got, wantPerStream)
+		}
+	}
+}

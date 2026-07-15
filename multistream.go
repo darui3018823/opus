@@ -141,6 +141,29 @@ func (e *MultistreamEncoder) SetComplexity(complexity int) error {
 	return nil
 }
 
+// SetExpertFrameDuration applies a fixed packet duration to every elementary
+// stream. Argument restores frameSize-selected durations.
+func (e *MultistreamEncoder) SetExpertFrameDuration(duration ExpertFrameDuration) error {
+	if _, ok := frameSizeForExpertDuration(duration, e.sampleRate, 0); !ok {
+		return fmt.Errorf("%w: invalid expert frame duration %d", ErrBadArg, duration)
+	}
+	for _, enc := range e.encoders {
+		if err := enc.SetExpertFrameDuration(duration); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ExpertFrameDuration returns the packet-duration selection shared by all
+// elementary streams.
+func (e *MultistreamEncoder) ExpertFrameDuration() ExpertFrameDuration {
+	if len(e.encoders) == 0 {
+		return ExpertFrameDurationArgument
+	}
+	return e.encoders[0].ExpertFrameDuration()
+}
+
 // Encode encodes interleaved int16 PCM.
 func (e *MultistreamEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	required := frameSize * e.channels

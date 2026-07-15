@@ -49,6 +49,101 @@ func TestHybridMultiFrameStrictBudget(t *testing.T) {
 	}
 }
 
+// A hard onset can make the VBR SILK low band overshoot the nominal hybrid
+// frame budget before CELT runs. CELT must raise its final VBR size to the
+// post-header minimum before allocation, so the packet can exceed nominal
+// without changing the decoder's allocation basis.
+func TestHybridCVBROnsetBudgetOvershoot(t *testing.T) {
+	const (
+		rate      = 48000
+		channels  = 1
+		bitrate   = 44000
+		frameSize = rate / 50
+	)
+	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+	if err := enc.SetBitrate(bitrate); err != nil {
+		t.Fatalf("SetBitrate: %v", err)
+	}
+	enc.SetVBR(true)
+	enc.SetVBRConstraint(true)
+	enc.SetSignalType(SignalVoice)
+
+	dec, err := NewDecoder(rate, channels)
+	if err != nil {
+		t.Fatalf("NewDecoder: %v", err)
+	}
+	nominalPacketBytes := 1 + bitrate*20/1000/8
+	var grewPastNominal bool
+	pcmOut := make([]int16, frameSize*channels)
+	for frame := 0; frame < 4; frame++ {
+		input := hybridCVBROnsetFixture(frame*frameSize, frameSize)
+		packet, err := enc.EncodeFloat(input, frameSize)
+		if err != nil {
+			t.Fatalf("frame %d EncodeFloat: %v", frame, err)
+		}
+		mode, err := PacketGetMode(packet)
+		if err != nil {
+			t.Fatalf("frame %d PacketGetMode: %v", frame, err)
+		}
+		if mode != ModeHybrid {
+			t.Fatalf("frame %d mode=%d, want hybrid", frame, mode)
+		}
+		if len(packet) > nominalPacketBytes {
+			grewPastNominal = true
+		}
+		if _, err := dec.Decode(packet, pcmOut); err != nil {
+			t.Fatalf("frame %d Decode: %v", frame, err)
+		}
+	}
+	if !grewPastNominal {
+		t.Fatalf("CVBR hybrid packet never exceeded nominal target %d bytes", nominalPacketBytes)
+	}
+}
+
+func TestHybridCVBROnsetFinalRange(t *testing.T) {
+	const (
+		rate      = 48000
+		channels  = 1
+		bitrate   = 44000
+		frameSize = rate / 50
+		frames    = 6
+	)
+	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetBitrate(bitrate); err != nil {
+		t.Fatal(err)
+	}
+	enc.SetVBR(true)
+	enc.SetVBRConstraint(true)
+	enc.SetSignalType(SignalVoice)
+
+	dec, err := NewDecoder(rate, channels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]int16, frameSize*channels)
+	for frame := 0; frame < frames; frame++ {
+		input := hybridCVBROnsetFixture(frame*frameSize, frameSize)
+		packet, err := enc.EncodeFloat(input, frameSize)
+		if err != nil {
+			t.Fatalf("frame %d encode: %v", frame, err)
+		}
+		want := enc.FinalRange()
+		if _, err := dec.Decode(packet, out); err != nil {
+			t.Fatalf("frame %d decode: %v", frame, err)
+		}
+		if got := dec.FinalRange(); got != want {
+			t.Fatalf("frame %d final range=%08x, want encoder %08x (packet bytes=%d)",
+				frame, got, want, len(packet))
+		}
+	}
+}
+
 func hybridBudgetFixture(rate, n, channels int) []float64 {
 	out := make([]float64, n*channels)
 	highFreq := 10000.0
@@ -71,6 +166,27 @@ func hybridBudgetFixture(rate, n, channels int) []float64 {
 			right += 0.032 * math.Sin(2*math.Pi*highFreq*x+0.8)
 			out[i*channels+1] = right
 		}
+	}
+	return out
+}
+
+func hybridCVBROnsetFixture(start, n int) []float64 {
+	out := make([]float64, n)
+	for i := 0; i < n; i++ {
+		sample := start + i
+		t := float64(sample) / 48000.0
+		env := 0.38 + 0.22*math.Sin(2*math.Pi*3.1*t+0.2)
+		v := env * (0.34*math.Sin(2*math.Pi*155*t) +
+			0.17*math.Sin(2*math.Pi*310*t+0.5) +
+			0.09*math.Sin(2*math.Pi*620*t+1.0))
+		if sample >= 960 && sample < 1920 {
+			burst := math.Exp(-float64(sample-960) / 210.0)
+			v += burst * (0.08*math.Sin(2*math.Pi*3600*t+0.1) +
+				0.07*math.Sin(2*math.Pi*7600*t+0.4) +
+				0.05*math.Sin(2*math.Pi*13200*t+0.8) +
+				0.04*math.Sin(2*math.Pi*18100*t+1.2))
+		}
+		out[i] = v
 	}
 	return out
 }

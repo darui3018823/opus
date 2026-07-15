@@ -205,7 +205,7 @@ func (e *Encoder) targetBytes() int {
 
 // Encode encodes one CELT frame (interleaved float64 PCM, FrameSize*Channels).
 func (e *Encoder) Encode(samples []float64) ([]byte, error) {
-	_, out, err := e.encodeRange(samples, nil, e.targetBytes(), 0, -1)
+	_, out, err := e.encodeRange(samples, nil, e.targetBytes(), 0, -1, false)
 	return out, err
 }
 
@@ -220,26 +220,27 @@ func (e *Encoder) EncodeRedundant(samples []float64, nbytes int) ([]byte, error)
 	}
 	saved := e.rateMode
 	e.rateMode = RateModeCBR
-	_, out, err := e.encodeRange(samples, nil, nbytes, 0, -1)
+	_, out, err := e.encodeRange(samples, nil, nbytes, 0, -1, false)
 	e.rateMode = saved
 	return out, err
 }
 
 // EncodeHybrid writes the CELT high-band layer of a hybrid frame into an
 // already-started range encoder. The SILK layer must already have written its
-// symbols. totalBytes is the full shared Opus frame payload size.
-func (e *Encoder) EncodeHybrid(samples []float64, enc *entcode.Encoder, totalBytes, start, end int) error {
+// symbols. maxBytes is the maximum shared Opus frame payload size. In VBR mode,
+// the returned size is the final payload size selected before CELT allocation.
+func (e *Encoder) EncodeHybrid(samples []float64, enc *entcode.Encoder, maxBytes, start, end int, sourceSilence bool) (int, error) {
 	if enc == nil {
-		return errors.New("celt: nil range encoder")
+		return 0, errors.New("celt: nil range encoder")
 	}
-	if totalBytes < 2 {
-		return errors.New("celt: invalid hybrid payload size")
+	if maxBytes < 2 {
+		return 0, errors.New("celt: invalid hybrid payload size")
 	}
-	_, _, err := e.encodeRange(samples, enc, totalBytes, start, end)
-	return err
+	targetBytes, _, err := e.encodeRange(samples, enc, maxBytes, start, end, sourceSilence)
+	return targetBytes, err
 }
 
-func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, maxTargetBytes, startBand, endBand int) (int, []byte, error) {
+func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, maxTargetBytes, startBand, endBand int, sourceSilence bool) (int, []byte, error) {
 	if len(samples) != e.mode.FrameSize*e.mode.Channels {
 		return 0, nil, errors.New("celt: invalid input size")
 	}
@@ -251,6 +252,10 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	frameSize := e.mode.FrameSize
 	ov := e.mode.Overlap
 	shared := sharedEnc != nil
+	tell0Frac := 1
+	if shared {
+		tell0Frac = sharedEnc.TellFrac()
+	}
 	start, end := startBand, numBands
 	if start < 0 {
 		start = 0
@@ -273,6 +278,16 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	frameLen := M * int(EBands48000[numBands])
 	if maxTargetBytes < 2 {
 		maxTargetBytes = 2
+	}
+	inputSilence := sourceSilence
+	if !inputSilence {
+		inputSilence = true
+		for _, sample := range samples {
+			if sample != 0 {
+				inputSilence = false
+				break
+			}
+		}
 	}
 
 	// --- Analysis: pre-emphasis, forward MDCT, band energy, normalisation ---
@@ -418,7 +433,8 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			frameEnergy += amp * amp
 		}
 	}
-	if frameEnergy < silenceEnergyThreshold && !shared {
+	isSilence := frameEnergy < silenceEnergyThreshold
+	if isSilence && !shared {
 		out, err := e.encodeSilenceFrame(maxTargetBytes)
 		return maxTargetBytes, out, err
 	}
@@ -631,6 +647,59 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 	etr(enc, "alloc_trim")
 
+	// libopus selects the hybrid VBR size only after coarse energy, TF,
+	// spreading, dynamic allocation, and allocation trim have been coded. The
+	// shrink must precede computeAllocationEncode so the encoder and decoder use
+	// the same final packet length as their allocation budget.
+	if shared && e.rateMode != RateModeCBR {
+		tell := enc.TellFrac()
+		totalBoost := 0
+		for i := start; i < end; i++ {
+			totalBoost += offsets[i]
+		}
+
+		// e.bitrate is the CELT share of the hybrid bitrate. vbrRate and target
+		// use the libopus Q3-bit domain.
+		vbrRate := e.bitrate * frameSize / e.mode.SampleRate << 3
+		baseTarget := vbrRate - ((9*ch + 4) << 3)
+		if baseTarget < 0 {
+			baseTarget = 0
+		}
+		target := baseTarget + int(math.Round((tfEstimate-0.25)*float64(50<<3)))
+		if tfEstimate > 0.7 && target < 50<<3 {
+			target = 50 << 3
+		}
+		target += tell
+
+		minAllowed := (tell+totalBoost+(1<<6)-1)/(1<<6) + 2
+		hybridMin := (tell0Frac + (37 << 3) + totalBoost + (1 << 6) - 1) / (1 << 6)
+		if minAllowed < hybridMin {
+			minAllowed = hybridMin
+		}
+		targetBytes = (target + (1 << 5)) >> 6
+		// Preserve the existing hybrid high-band activity calibration while
+		// moving it to the libopus VBR decision point. The SILK prefix plus a
+		// small mandatory CELT floor is the low-activity target; active high-band
+		// content interpolates toward base_target.
+		silkBytes := (tell0Frac + (1 << 6) - 1) >> 6
+		activityFloor := silkBytes + 10
+		if activityFloor < targetBytes {
+			activity := hybridHighBandActivity(samples, ch)
+			targetBytes = activityFloor + int(activity*float64(targetBytes-activityFloor)+0.5)
+		}
+		if targetBytes < minAllowed {
+			targetBytes = minAllowed
+		}
+		if inputSilence {
+			targetBytes = minAllowed
+		}
+		if targetBytes > maxTargetBytes {
+			targetBytes = maxTargetBytes
+		}
+		enc.Shrink(targetBytes)
+		totalBits = targetBytes * 8
+	}
+
 	// === Bit allocation, fine energy, PVQ, anti-collapse, final fine ===
 	bitsQ3 := totalBits<<3 - enc.TellFrac() - 1
 	antiCollapseRsv := 0
@@ -838,6 +907,39 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		out = padded
 	}
 	return targetBytes, out, nil
+}
+
+func hybridHighBandActivity(pcm []float64, channels int) float64 {
+	if channels <= 0 {
+		return 0
+	}
+	n := len(pcm) / channels
+	if n < 2 {
+		return 0
+	}
+	sample := func(i int) float64 {
+		if channels == 1 {
+			return pcm[i]
+		}
+		return 0.5 * (pcm[i*channels] + pcm[i*channels+1])
+	}
+	var energy, hpEnergy float64
+	prev := sample(0)
+	for i := 1; i < n; i++ {
+		s := sample(i)
+		d := s - prev
+		prev = s
+		hpEnergy += d * d
+		energy += s * s
+	}
+	if energy < 1e-9 {
+		return 0
+	}
+	activity := math.Sqrt(hpEnergy / energy / 2.0)
+	if activity > 1 {
+		activity = 1
+	}
+	return activity
 }
 
 // encodeSilenceFrame emits a CELT frame whose only bitstream content is the

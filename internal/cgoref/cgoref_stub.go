@@ -49,6 +49,16 @@ func (e *Encoder) SetVoiceMode() error {
 	return fmt.Errorf("cgoref encoder requires -tags opusref")
 }
 
+// SetExpertFrameDuration is unavailable in non-opusref builds.
+func (e *Encoder) SetExpertFrameDuration(duration int) error {
+	return fmt.Errorf("cgoref encoder requires -tags opusref")
+}
+
+// ExpertFrameDuration is unavailable in non-opusref builds.
+func (e *Encoder) ExpertFrameDuration() (int, error) {
+	return 0, fmt.Errorf("cgoref encoder requires -tags opusref")
+}
+
 // Encode is unavailable in non-opusref builds.
 func (e *Encoder) Encode(pcm []float32, frameSize int) ([]byte, error) {
 	return nil, fmt.Errorf("cgoref encoder requires -tags opusref")

@@ -42,6 +42,14 @@ static int go_opus_encoder_set_packet_loss(OpusEncoder *enc, int perc) {
 	return opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(perc));
 }
 
+static int go_opus_encoder_set_expert_frame_duration(OpusEncoder *enc, int duration) {
+	return opus_encoder_ctl(enc, OPUS_SET_EXPERT_FRAME_DURATION(duration));
+}
+
+static int go_opus_encoder_get_expert_frame_duration(OpusEncoder *enc, int *duration) {
+	return opus_encoder_ctl(enc, OPUS_GET_EXPERT_FRAME_DURATION(duration));
+}
+
 static int go_opus_multistream_encoder_set_bitrate(OpusMSEncoder *enc, int bps) {
 	return opus_multistream_encoder_ctl(enc, OPUS_SET_BITRATE(bps));
 }
@@ -263,6 +271,25 @@ func (e *Encoder) SetPacketLossPerc(perc int) error {
 		return fmt.Errorf("OPUS_SET_PACKET_LOSS_PERC: %s", C.GoString(C.opus_strerror(code)))
 	}
 	return nil
+}
+
+// SetExpertFrameDuration sets libopus' OPUS_SET_EXPERT_FRAME_DURATION value.
+func (e *Encoder) SetExpertFrameDuration(duration int) error {
+	code := C.go_opus_encoder_set_expert_frame_duration(e.enc, C.int(duration))
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_EXPERT_FRAME_DURATION: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
+// ExpertFrameDuration returns libopus' configured expert frame duration.
+func (e *Encoder) ExpertFrameDuration() (int, error) {
+	var duration C.int
+	code := C.go_opus_encoder_get_expert_frame_duration(e.enc, &duration)
+	if code != 0 {
+		return 0, fmt.Errorf("OPUS_GET_EXPERT_FRAME_DURATION: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return int(duration), nil
 }
 
 // Encode encodes one interleaved float32 PCM frame with libopus.

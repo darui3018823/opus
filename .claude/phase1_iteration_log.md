@@ -75,6 +75,8 @@
 - Branch: `codex/feature-gaps`
 - Production/test commit: `b7f3f94`
   (`feat(oggopus): read chained logical streams`)
+- Review fix: `d1d6375`
+  (`fix(oggopus): validate chained EOS boundaries`)
 - Change: after a logical EOS, `Reader` creates a fresh `PacketReader`, validates
   the next link's OpusHead/OpusTags, resets granule and pre-skip state, and
   continues automatically. `Reader.Link()` and `Packet.LinkIndex` expose link
@@ -85,7 +87,10 @@
 - Tests: three-link concatenation with changing metadata/channels/serials,
   inline and empty EOS pages, sticky physical EOF, sticky malformed next
   headers, current-link start/end seeking, automatic advancement after end
-  seek, restart within a later link, and seek after physical EOF.
+  seek, restart within a later link, seek after physical EOF, truncated EOS
+  packets, mismatched empty-EOS granules, sticky audio validation errors, and
+  reused chained serials. Independent review identified the four latter
+  corruption/identity cases before closeout.
 - Validation: `go vet ./...`, `go test -count=1 ./...`, and
   `go test -count=1 -tags opusref ./...` all passed on 2026-07-16.
 - Decision: adopted. `PacketReader` remains a strict single-logical-stream

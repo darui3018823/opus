@@ -60,3 +60,39 @@ using it to justify encoder policy changes.
 This harness is diagnostic only. It should be used before Phase D policy
 changes, but it should not become a mandatory unit test while its corpus lives
 under ignored `testdata/`.
+
+## Baseline (2026-07-15)
+
+First full run on the default fetched corpus (134 cells, bitrates
+16/24/32/48/64 kbps, loss 0-20%). The CSV itself is git-ignored, so the
+aggregate is recorded here as the Phase D-2 starting point.
+
+Cell status: 132 ok, 2 `own_encode_error` — both
+`hybrid frame 0 exceeds target: 121-123 > 120 bytes` on 48 kHz mono hybrid
+cells. The hybrid target-size clamp rejects the frame instead of shrinking
+it; fix before or as the first item of Phase D-2.
+
+`gap_snr_matched_db` by class (positive = Go behind libopus at matched bytes):
+
+| class | n | avg | min | max |
+|---|---:|---:|---:|---:|
+| clean_speech | 20 | +0.08 | 0.00 | +1.50 |
+| noisy_speech | 20 | -0.21 | -1.41 | +0.28 |
+| stereo_speech | 20 | +0.02 | -0.00 | +0.42 |
+| onset_plosive | 16 | +0.13 | -1.99 | +3.50 |
+| source | 16 | -0.07 | -1.19 | +1.30 |
+| mixed | 20 | -1.72 | -11.72 | +5.64 |
+| music | 20 | -1.67 | -9.26 | +9.69 |
+
+Reading: speech classes are effectively at parity. The large losses are
+concentrated in one synthetic stereo-chords music clip (+7.7 to +9.7 dB at
+24-64 kbps with fair byte ratios 0.89-0.99, CELT music path) and one
+mixed speech+tone mono clip at low bitrate (+5.6 dB at 16 kbps). These are
+CELT/music cells, not SILK voice cells, so they are out of scope for the
+Phase D-2 SILK/hybrid gates and belong to the deprioritized CELT parity track.
+
+Caveat: `ratio_bytes_matched` averages 1.40 (max 2.54) across all cells even
+though the worst cells sit near 1.0. Cells with a ratio far from 1.0 mean the
+matched-bitrate search could not bring libopus close to our byte count
+(mostly loss>0 cells with different FEC overhead); ignore their gap values
+when judging policy changes.

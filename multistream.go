@@ -412,6 +412,11 @@ func (d *MultistreamDecoder) DecodePLC(pcm []int16, frameSize int) (int, error) 
 	}
 
 	// Keep caller-owned PCM untouched unless every elementary stream succeeds.
+	for stream, dec := range d.decoders {
+		if err := dec.validatePLCState(frameSize); err != nil {
+			return 0, fmt.Errorf("stream %d: %w", stream, err)
+		}
+	}
 	out := make([]int16, required)
 	for stream, dec := range d.decoders {
 		streamChannels := dec.Channels()
@@ -455,18 +460,32 @@ func (d *MultistreamDecoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
 	}
 
+	// Preflight every child before any decoder state advances.
+	usePLC := make([]bool, len(packets))
+	for stream, packet := range packets {
+		info, err := inspectPacket(packet, d.sampleRate)
+		if err != nil {
+			return 0, fmt.Errorf("stream %d: %w", stream, err)
+		}
+		usePLC[stream] = info.mode == ModeCELTOnly || d.decoders[stream].prevMode == framing.ModeCELTOnly
+		if usePLC[stream] {
+			err = d.decoders[stream].validatePLCState(duration)
+		} else {
+			err = d.decoders[stream].validateFECState(packet)
+		}
+		if err != nil {
+			return 0, fmt.Errorf("stream %d: %w", stream, err)
+		}
+	}
+
 	// Keep caller-owned PCM untouched unless every elementary stream succeeds.
 	out := make([]int16, required)
 	for stream, packet := range packets {
 		streamChannels := d.decoders[stream].Channels()
 		streamPCM := make([]int16, duration*streamChannels)
-		info, err := inspectPacket(packet, d.sampleRate)
-		if err != nil {
-			return 0, fmt.Errorf("stream %d: %w", stream, err)
-		}
 
 		var decoded int
-		if info.mode == ModeCELTOnly || d.decoders[stream].prevMode == framing.ModeCELTOnly {
+		if usePLC[stream] {
 			decoded, err = d.decoders[stream].DecodePLC(streamPCM, duration)
 		} else {
 			decoded, err = d.decoders[stream].DecodeFEC(packet, streamPCM)

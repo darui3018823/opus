@@ -367,6 +367,10 @@ func TestMultistreamDecodeFECUsesPLCForCELT(t *testing.T) {
 			t.Fatalf("DecodeFEC modified output[%d] on error: %d", i, sample)
 		}
 	}
+	firstFresh, _ := fresh.StreamDecoder(0)
+	if _, err := firstFresh.DecodePLC(make([]int16, frameSize), frameSize); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("later CELT failure advanced earlier SILK stream: %v", err)
+	}
 }
 
 func TestMultistreamDecodeFECUsesPLCAfterCELT(t *testing.T) {
@@ -685,6 +689,28 @@ func TestMultistreamDecodePLCValidationPreservesOutputAndState(t *testing.T) {
 	for i, sample := range untouched {
 		if sample != 3456 {
 			t.Fatalf("child failure modified output[%d]: %d", i, sample)
+		}
+	}
+
+	partialControl, err := NewMultistreamDecoder(rate, 2, 2, 0, []byte{0, 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlFirst, _ := partialControl.StreamDecoder(0)
+	if _, err := controlFirst.Decode(packet, make([]int16, frameSize)); err != nil {
+		t.Fatal(err)
+	}
+	gotAfterFailure := make([]int16, frameSize)
+	wantAfterFailure := make([]int16, frameSize)
+	if _, err := first.DecodePLC(gotAfterFailure, frameSize); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controlFirst.DecodePLC(wantAfterFailure, frameSize); err != nil {
+		t.Fatal(err)
+	}
+	for i := range gotAfterFailure {
+		if gotAfterFailure[i] != wantAfterFailure[i] {
+			t.Fatalf("child failure advanced stream 0 at sample %d: got %d want %d", i, gotAfterFailure[i], wantAfterFailure[i])
 		}
 	}
 }

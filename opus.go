@@ -3420,8 +3420,8 @@ func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
 	if len(pcm) < required {
 		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
 	}
-	if d.prevMode == -1 {
-		return 0, fmt.Errorf("%w: PLC requires a previously decoded packet", ErrInvalidState)
+	if err := d.validatePLCState(frameSize); err != nil {
+		return 0, err
 	}
 
 	floatPCM, err := d.decodePLCFloat(frameSize)
@@ -3441,6 +3441,55 @@ func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
 	}
 	d.lastPacketDuration = frameSize
 	return frameSize, nil
+}
+
+// validatePLCState checks every deterministic PLC failure condition without
+// advancing entropy, synthesis, or resampler state.
+func (d *Decoder) validatePLCState(frameSize int) error {
+	if !isValidPacketFrameSize(frameSize, d.sampleRate) {
+		return fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+	}
+	if d.prevMode == -1 {
+		return fmt.Errorf("%w: PLC requires a previously decoded packet", ErrInvalidState)
+	}
+	if d.prevMode == framing.ModeCELTOnly {
+		if d.lastCeltDec == nil {
+			return fmt.Errorf("%w: missing CELT decoder history", ErrInvalidState)
+		}
+		activeFrameSize := d.lastCeltDec.FrameSize() * d.sampleRate / 48000
+		if activeFrameSize <= 0 || frameSize%activeFrameSize != 0 {
+			return fmt.Errorf("%w: frameSize %d is not a multiple of active CELT frame size %d", ErrUnsupportedFrameSize, frameSize, activeFrameSize)
+		}
+		return nil
+	}
+	if d.prevMode != framing.ModeSILKOnly && d.prevMode != framing.ModeHybrid {
+		return fmt.Errorf("%w: unsupported previous decoder mode %d", ErrInvalidState, d.prevMode)
+	}
+	if d.lastPacketConfig < 0 || d.lastPacketChannels < 1 {
+		return fmt.Errorf("%w: missing SILK decoder history", ErrInvalidState)
+	}
+	rateKHz := silkConfigRateKHz(d.lastPacketConfig)
+	info := d.silkDecoders[silkRateIdx(rateKHz)][d.lastPacketChannels-1]
+	if info == nil || info.dec == nil {
+		return fmt.Errorf("%w: SILK decoder for %d kHz and %d channels", ErrInvalidState, rateKHz, d.lastPacketChannels)
+	}
+	silkFrameMs := 20
+	if is10msConfig(d.lastPacketConfig) {
+		silkFrameMs = 10
+	}
+	activeFrameSize := d.sampleRate * silkFrameMs / 1000
+	if activeFrameSize <= 0 || frameSize%activeFrameSize != 0 {
+		return fmt.Errorf("%w: frameSize %d is not a multiple of active SILK frame size %d", ErrUnsupportedFrameSize, frameSize, activeFrameSize)
+	}
+	if d.prevMode == framing.ModeHybrid {
+		if d.lastCeltDec == nil {
+			return fmt.Errorf("%w: missing CELT history for hybrid PLC", ErrInvalidState)
+		}
+		if celtFrameSize := d.lastCeltDec.FrameSize() * d.sampleRate / 48000; celtFrameSize != activeFrameSize {
+			return fmt.Errorf("%w: hybrid SILK/CELT frame sizes differ (%d != %d)", ErrInvalidState, activeFrameSize, celtFrameSize)
+		}
+	}
+	return nil
 }
 
 func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
@@ -3629,6 +3678,30 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 		d.prevMode = framing.ModeSILKOnly
 	}
 	return info.totalSamples, nil
+}
+
+func (d *Decoder) validateFECState(data []byte) error {
+	info, err := inspectPacket(data, d.sampleRate)
+	if err != nil {
+		return err
+	}
+	if info.mode != ModeSILKOnly && info.mode != ModeHybrid {
+		return fmt.Errorf("%w: CELT-only packets do not carry SILK LBRR", ErrUnimplemented)
+	}
+	config, _, countCode := framing.ParseTOC(data[0])
+	streams, err := splitOpusFrames(data[1:], countCode)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidPacket, err)
+	}
+	if len(streams) != 1 {
+		return fmt.Errorf("%w: FEC for multi-stream Opus packets", ErrUnimplemented)
+	}
+	rateKHz := silkConfigRateKHz(config)
+	infoDec := d.silkDecoders[silkRateIdx(rateKHz)][info.channels-1]
+	if infoDec == nil || infoDec.dec == nil {
+		return fmt.Errorf("%w: SILK decoder for %d kHz", ErrInvalidState, rateKHz)
+	}
+	return nil
 }
 
 // Reset resets the decoder state

@@ -2,6 +2,7 @@ package opus
 
 import (
 	"errors"
+	"math"
 	"testing"
 )
 
@@ -90,5 +91,77 @@ func TestPublicArgumentSentinelErrors(t *testing.T) {
 	}
 	if _, err := enc.Encode(nil, 960); !errors.Is(err, ErrBadArg) {
 		t.Fatalf("Encode PCM error = %v, want ErrBadArg", err)
+	}
+}
+
+func TestPacketHasLBRR(t *testing.T) {
+	celtPacket := []byte{byte(31 << 3), 0}
+	if got, err := PacketHasLBRR(celtPacket); err != nil || got {
+		t.Fatalf("CELT PacketHasLBRR = %v, %v; want false, nil", got, err)
+	}
+
+	enc, err := NewEncoder(16000, 1, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetBitrate(24000); err != nil {
+		t.Fatal(err)
+	}
+	enc.SetInbandFEC(true)
+	enc.SetPacketLossPerc(15)
+	pcm := make([]int16, 320)
+	for i := range pcm {
+		pcm[i] = int16(12000 * math.Sin(2*math.Pi*220*float64(i)/16000))
+	}
+	first, err := enc.Encode(pcm, 320)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := PacketHasLBRR(first); err != nil || got {
+		t.Fatalf("first PacketHasLBRR = %v, %v; want false, nil", got, err)
+	}
+	second, err := enc.Encode(pcm, 320)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := PacketHasLBRR(second); err != nil || !got {
+		t.Fatalf("second PacketHasLBRR = %v, %v; want true, nil", got, err)
+	}
+}
+
+func TestBandwidthGetters(t *testing.T) {
+	enc, err := NewEncoder(48000, 1, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetBandwidth(BandwidthWideband); err != nil {
+		t.Fatal(err)
+	}
+	if got := enc.GetBandwidth(); got != BandwidthWideband {
+		t.Fatalf("encoder GetBandwidth = %d, want %d", got, BandwidthWideband)
+	}
+	packet, err := enc.Encode(make([]int16, 960), 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := NewDecoder(48000, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dec.GetBandwidth(); got != BandwidthAuto {
+		t.Fatalf("fresh decoder GetBandwidth = %d, want BandwidthAuto", got)
+	}
+	pcm := make([]int16, 960)
+	if _, err := dec.Decode(packet, pcm); err != nil {
+		t.Fatal(err)
+	}
+	if got := dec.Bandwidth(); got != BandwidthWideband {
+		t.Fatalf("decoder Bandwidth = %d, want %d", got, BandwidthWideband)
+	}
+	if err := dec.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if got := dec.GetBandwidth(); got != BandwidthAuto {
+		t.Fatalf("reset decoder GetBandwidth = %d, want BandwidthAuto", got)
 	}
 }

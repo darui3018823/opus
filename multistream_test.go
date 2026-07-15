@@ -146,3 +146,42 @@ func TestSelfDelimitedPacketRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestMultistreamPacketPadUnpad(t *testing.T) {
+	const (
+		rate      = 48000
+		channels  = 2
+		frameSize = 960
+		streams   = 2
+	)
+	enc, err := NewMultistreamEncoder(rate, channels, streams, 0, []byte{0, 1}, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := enc.Encode(make([]int16, frameSize*channels), frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := len(packet) + 37
+	padded, err := MultistreamPacketPad(packet, streams, target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(padded) != target {
+		t.Fatalf("padded len = %d, want %d", len(padded), target)
+	}
+	if _, _, err := splitMultistreamPackets(padded, streams, rate); err != nil {
+		t.Fatalf("padded packet no longer parses: %v", err)
+	}
+	unpadded, err := MultistreamPacketUnpad(padded, streams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := MultistreamPacketUnpad(packet, streams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(unpadded) != string(canonical) {
+		t.Fatalf("unpad mismatch: got %x want %x", unpadded, canonical)
+	}
+}

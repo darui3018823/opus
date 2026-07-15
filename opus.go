@@ -1731,6 +1731,9 @@ func (e *Encoder) Bandwidth() int {
 	return celtFramingBWToPublic(e.selectCeltBandwidth())
 }
 
+// GetBandwidth is a CTL-style alias for Bandwidth.
+func (e *Encoder) GetBandwidth() int { return e.Bandwidth() }
+
 // isValidBandwidth reports whether bw is one of the public Bandwidth* constants.
 func isValidBandwidth(bw int) bool {
 	switch bw {
@@ -3646,6 +3649,20 @@ func (d *Decoder) GetLastPacketDuration() int {
 	}
 	return d.frameSize
 }
+
+// Bandwidth returns the bandwidth of the most recently decoded packet as a
+// public Bandwidth* constant. It returns BandwidthAuto before the first
+// successful decode or after Reset.
+func (d *Decoder) Bandwidth() int {
+	if d.lastPacketConfig < 0 {
+		return BandwidthAuto
+	}
+	_, bandwidth, _ := framing.ParseTOCConfig(d.lastPacketConfig)
+	return publicPacketBandwidth(bandwidth)
+}
+
+// GetBandwidth is a CTL-style alias for Bandwidth.
+func (d *Decoder) GetBandwidth() int { return d.Bandwidth() }
 
 // SampleRate returns the decoder output sample rate in Hz.
 func (d *Decoder) SampleRate() int { return d.sampleRate }

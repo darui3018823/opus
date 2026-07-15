@@ -9,10 +9,10 @@ import (
 
 const seekPreRoll48k = 3840
 
-// Seek positions the reader for playback sample at 48 kHz in the current
+// SeekPCM positions the reader for playback sample at 48 kHz in the current
 // logical stream. NextPacket returns decoder pre-roll packets first and marks
 // all samples before the target in DiscardStart.
-func (r *Reader) Seek(sample int64) (err error) {
+func (r *Reader) SeekPCM(sample int64) (err error) {
 	if r.seeker == nil {
 		return ErrNotSeekable
 	}

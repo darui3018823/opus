@@ -38,7 +38,7 @@ func TestReaderSeekStartAndInterior(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Seek(0); err != nil {
+	if err := r.SeekPCM(0); err != nil {
 		t.Fatal(err)
 	}
 	first, err := r.NextPacket()
@@ -50,7 +50,7 @@ func TestReaderSeekStartAndInterior(t *testing.T) {
 	}
 
 	const target = int64(7000)
-	if err := r.Seek(target); err != nil {
+	if err := r.SeekPCM(target); err != nil {
 		t.Fatal(err)
 	}
 	var playable Packet
@@ -89,7 +89,7 @@ func TestReaderSeekPageBoundaryAndEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	boundary := int64(5*seekTestPacketDuration - preSkip)
-	if err := r.Seek(boundary); err != nil {
+	if err := r.SeekPCM(boundary); err != nil {
 		t.Fatal(err)
 	}
 	for {
@@ -106,7 +106,7 @@ func TestReaderSeekPageBoundaryAndEnd(t *testing.T) {
 	}
 
 	end := int64(packets*seekTestPacketDuration - endTrim - preSkip)
-	if err := r.Seek(end); err != nil {
+	if err := r.SeekPCM(end); err != nil {
 		t.Fatal(err)
 	}
 	if !r.EOS() {
@@ -115,8 +115,8 @@ func TestReaderSeekPageBoundaryAndEnd(t *testing.T) {
 	if _, err := r.NextPacket(); !errors.Is(err, io.EOF) {
 		t.Fatalf("NextPacket after Seek(end) = %v, want EOF", err)
 	}
-	if err := r.Seek(0); err != nil {
-		t.Fatalf("Seek(0) after Seek(end): %v", err)
+	if err := r.SeekPCM(0); err != nil {
+		t.Fatalf("SeekPCM(0) after SeekPCM(end): %v", err)
 	}
 	first, err := r.NextPacket()
 	if err != nil {
@@ -141,8 +141,8 @@ func TestReaderSeekRangeErrorsPreserveState(t *testing.T) {
 		t.Fatal("unexpected first packet")
 	}
 	for _, sample := range []int64{-1, 6*seekTestPacketDuration + 1} {
-		if err := r.Seek(sample); !errors.Is(err, ErrSeekOutOfRange) {
-			t.Fatalf("Seek(%d) error = %v", sample, err)
+		if err := r.SeekPCM(sample); !errors.Is(err, ErrSeekOutOfRange) {
+			t.Fatalf("SeekPCM(%d) error = %v", sample, err)
 		}
 	}
 	next, err := r.NextPacket()
@@ -160,8 +160,8 @@ func TestReaderSeekRejectsNonSeekableSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := r.Seek(0); !errors.Is(err, ErrNotSeekable) {
-		t.Fatalf("Seek error = %v, want ErrNotSeekable", err)
+	if err := r.SeekPCM(0); !errors.Is(err, ErrNotSeekable) {
+		t.Fatalf("SeekPCM error = %v, want ErrNotSeekable", err)
 	}
 }
 

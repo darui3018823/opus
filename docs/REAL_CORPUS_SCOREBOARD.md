@@ -104,6 +104,13 @@ encode-size failure. Non-redundant VBR/CVBR hybrid frames now emit the actual
 range-coder size when final flush exceeds the adaptive target by a few bytes,
 instead of returning `hybrid frame ... exceeds target`.
 
+Review note: an alternative fix (raising the target to a floor before CELT
+encodes) was implemented and rejected — it produced non-conformant streams on
+the overshoot frames (libopus cross-decode SNR collapsed to ~0.1 dB). The
+spill approach was validated against libopus:
+`TestHybridCVBROnsetLibopusConsistency` cross-decodes the overshoot fixture
+with libopus and guards against encoder/decoder allocation divergence.
+
 Full local run:
 
 ```powershell

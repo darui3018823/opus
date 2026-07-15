@@ -305,6 +305,8 @@ payloads are exposed as opaque data; their neural/DSP codecs are not
 implemented here.
 See [docs/CTL_PARITY.md](docs/CTL_PARITY.md) for CTL/helper parity against
 libopus 1.6.1.
+See [docs/MODE_RATE_POLICY_DIFF.md](docs/MODE_RATE_POLICY_DIFF.md) for the
+SILK/hybrid mode-rate-quality policy diff that gates future policy work.
 
 ### Ogg Opus containers
 
@@ -397,6 +399,7 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
 - **[docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md)** — code-derived snapshot of the API, internals, tests, and known gaps (authoritative).
 - **[docs/CTL_PARITY.md](docs/CTL_PARITY.md)** — libopus 1.6.1 CTL/helper parity matrix.
 - **[docs/REAL_CORPUS_SCOREBOARD.md](docs/REAL_CORPUS_SCOREBOARD.md)** — opt-in real-corpus matched-bitrate A/B scoreboard.
+- **[docs/MODE_RATE_POLICY_DIFF.md](docs/MODE_RATE_POLICY_DIFF.md)** — SILK/hybrid mode-rate-quality policy diff and D-2 measurement guardrails.
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — design decisions and libopus analysis.
 - **[docs/ROADMAP.md](docs/ROADMAP.md)** — development phases and milestones.
 - **[docs/DEVELOPER.md](docs/DEVELOPER.md)** — code style, porting guidance, profiling tips.

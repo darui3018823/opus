@@ -105,6 +105,9 @@ See `docs/CTL_PARITY.md` for the libopus 1.6.1 CTL/helper parity matrix.
 The opt-in real-corpus matched-bitrate scoreboard is documented in
 `docs/REAL_CORPUS_SCOREBOARD.md` and implemented as an `opusref` diagnostic test
 guarded by `OPUS_REAL_CORPUS=1`.
+The SILK/hybrid mode-rate-quality policy diff is tracked in
+`docs/MODE_RATE_POLICY_DIFF.md`; future policy-gate changes are expected to use
+the real-corpus scoreboard first.
 
 Public multistream and surround entry points:
 
@@ -997,7 +1000,8 @@ reference comparison.
   stereo output.
 - Top-level SILK/hybrid encoder selection is voice-oriented and now accounts
   for rate, channels, bandwidth, CVBR, and active FEC, but it is not yet a full
-  libopus-equivalent mode/rate/quality policy.
+  libopus-equivalent mode/rate/quality policy. See
+  `docs/MODE_RATE_POLICY_DIFF.md` for the current gap map.
 - SILK-only and hybrid LBRR/FEC encoding and decoding are available for mono
   and stereo. Hybrid FEC reconstructs the redundant SILK low band.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired

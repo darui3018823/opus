@@ -3,6 +3,8 @@ package opus
 import (
 	"fmt"
 	"math"
+
+	framing "github.com/darui3018823/opus/internal"
 )
 
 // MultistreamEncoder encodes several elementary Opus streams into one RFC 7845
@@ -348,6 +350,60 @@ func (d *MultistreamDecoder) Decode(data []byte, pcm []int16) (int, error) {
 		}
 		pcm[i] = int16(math.Round(scaled))
 	}
+	return duration, nil
+}
+
+// DecodeFEC decodes in-band forward-error-correction data from the multistream
+// packet following a loss. Elementary CELT streams, which carry no FEC data,
+// are recovered with packet-loss concealment for the shared packet duration.
+func (d *MultistreamDecoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
+	packets, duration, err := splitMultistreamPackets(data, d.streams, d.sampleRate)
+	if err != nil {
+		return 0, err
+	}
+	required := duration * d.channels
+	if len(pcm) < required {
+		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
+	}
+
+	// Keep caller-owned PCM untouched unless every elementary stream succeeds.
+	out := make([]int16, required)
+	for stream, packet := range packets {
+		streamChannels := d.decoders[stream].Channels()
+		streamPCM := make([]int16, duration*streamChannels)
+		info, err := inspectPacket(packet, d.sampleRate)
+		if err != nil {
+			return 0, fmt.Errorf("stream %d: %w", stream, err)
+		}
+
+		var decoded int
+		if info.mode == ModeCELTOnly || d.decoders[stream].prevMode == framing.ModeCELTOnly {
+			decoded, err = d.decoders[stream].DecodePLC(streamPCM, duration)
+		} else {
+			decoded, err = d.decoders[stream].DecodeFEC(packet, streamPCM)
+		}
+		if err != nil {
+			return 0, fmt.Errorf("stream %d: %w", stream, err)
+		}
+		if decoded != duration {
+			return 0, fmt.Errorf("%w: stream %d decoded %d samples, want %d", ErrInvalidState, stream, decoded, duration)
+		}
+
+		for outputChannel, mapped := range d.mapping {
+			if mapped == 255 {
+				continue
+			}
+			sourceStream, sourceChannel := codedChannelLocation(int(mapped), d.coupledStreams)
+			if sourceStream != stream || sourceChannel >= streamChannels {
+				continue
+			}
+			for i := 0; i < duration; i++ {
+				out[i*d.channels+outputChannel] = streamPCM[i*streamChannels+sourceChannel]
+			}
+		}
+	}
+
+	copy(pcm[:required], out)
 	return duration, nil
 }
 

@@ -128,3 +128,55 @@ func TestSurroundMappingFamilies(t *testing.T) {
 		t.Fatalf("family 2 error=%v", err)
 	}
 }
+
+func TestSurroundDecoderPromotesDecodeFEC(t *testing.T) {
+	const (
+		rate      = 16000
+		frameSize = 320
+		lost      = 4
+	)
+	enc, err := NewSurroundEncoder(rate, 1, MappingFamilyVorbis, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := enc.StreamEncoder(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := child.SetBitrate(18000); err != nil {
+		t.Fatal(err)
+	}
+	child.SetSignalType(SignalVoice)
+	child.SetPacketLossPerc(20)
+	child.SetInbandFEC(true)
+
+	packets := make([][]byte, lost+2)
+	for packet := range packets {
+		input := strictSpeechLikeFrame(rate, 1, packet*frameSize, frameSize)
+		packets[packet], err = enc.EncodeFloat(input, frameSize)
+		if err != nil {
+			t.Fatalf("encode packet %d: %v", packet, err)
+		}
+	}
+
+	dec, err := NewSurroundDecoder(rate, 1, MappingFamilyVorbis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for packet := 0; packet < lost; packet++ {
+		if _, err := dec.Decode(packets[packet], make([]int16, frameSize)); err != nil {
+			t.Fatalf("prime packet %d: %v", packet, err)
+		}
+	}
+	recovered := make([]int16, frameSize)
+	if n, err := dec.DecodeFEC(packets[lost+1], recovered); err != nil || n != frameSize {
+		t.Fatalf("DecodeFEC = (%d, %v), want (%d, nil)", n, err, frameSize)
+	}
+	var energy int64
+	for _, sample := range recovered {
+		energy += int64(sample) * int64(sample)
+	}
+	if energy == 0 {
+		t.Fatal("surround FEC recovery decoded to silence")
+	}
+}

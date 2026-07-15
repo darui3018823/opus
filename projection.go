@@ -212,7 +212,7 @@ func (e *ProjectionEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, e
 	if len(e.multistream.encoders) == 0 {
 		return nil, fmt.Errorf("%w: no projection streams", ErrInvalidState)
 	}
-	selectedFrameSize, err := e.multistream.encoders[0].selectEncodeFrameSize(frameSize)
+	selectedFrameSize, err := e.multistream.selectEncodeFrameSize(frameSize)
 	if err != nil {
 		return nil, err
 	}

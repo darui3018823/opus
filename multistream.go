@@ -164,6 +164,26 @@ func (e *MultistreamEncoder) ExpertFrameDuration() ExpertFrameDuration {
 	return e.encoders[0].ExpertFrameDuration()
 }
 
+func (e *MultistreamEncoder) selectEncodeFrameSize(frameSize int) (int, error) {
+	if len(e.encoders) == 0 {
+		return 0, fmt.Errorf("%w: no multistream encoders", ErrInvalidState)
+	}
+	selected, err := e.encoders[0].selectEncodeFrameSize(frameSize)
+	if err != nil {
+		return 0, fmt.Errorf("stream 0: %w", err)
+	}
+	for stream := 1; stream < len(e.encoders); stream++ {
+		streamSelected, err := e.encoders[stream].selectEncodeFrameSize(frameSize)
+		if err != nil {
+			return 0, fmt.Errorf("stream %d: %w", stream, err)
+		}
+		if streamSelected != selected {
+			return 0, fmt.Errorf("%w: stream %d selects %d samples, stream 0 selects %d", ErrInvalidState, stream, streamSelected, selected)
+		}
+	}
+	return selected, nil
+}
+
 // Encode encodes interleaved int16 PCM.
 func (e *MultistreamEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	required := frameSize * e.channels
@@ -209,10 +229,14 @@ func (e *MultistreamEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, 
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
+		return nil, err
+	}
 	packets := make([][]byte, e.streams)
 	for stream, enc := range e.encoders {
 		streamChannels := enc.Channels()
-		streamPCM := make([]float64, frameSize*streamChannels)
+		streamPCM := make([]float64, selectedFrameSize*streamChannels)
 		for codedChannel := 0; codedChannel < streamChannels; codedChannel++ {
 			mapped := stream*2 + codedChannel
 			if stream >= e.coupledStreams {
@@ -222,11 +246,11 @@ func (e *MultistreamEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, 
 			if inputChannel < 0 {
 				return nil, fmt.Errorf("%w: coded channel %d is unmapped", ErrInvalidState, mapped)
 			}
-			for i := 0; i < frameSize; i++ {
+			for i := 0; i < selectedFrameSize; i++ {
 				streamPCM[i*streamChannels+codedChannel] = pcm[i*e.channels+inputChannel]
 			}
 		}
-		packet, err := enc.EncodeFloat(streamPCM, frameSize)
+		packet, err := enc.EncodeFloat(streamPCM, selectedFrameSize)
 		if err != nil {
 			return nil, fmt.Errorf("stream %d: %w", stream, err)
 		}

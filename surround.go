@@ -122,7 +122,7 @@ func (e *SurroundEncoder) prepareFrame(frameSize int) error {
 	if len(e.encoders) == 0 {
 		return fmt.Errorf("%w: no surround streams", ErrInvalidState)
 	}
-	selectedFrameSize, err := e.encoders[0].selectEncodeFrameSize(frameSize)
+	selectedFrameSize, err := e.MultistreamEncoder.selectEncodeFrameSize(frameSize)
 	if err != nil {
 		return err
 	}

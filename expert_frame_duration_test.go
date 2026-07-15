@@ -266,6 +266,56 @@ func TestMultistreamExpertFrameDuration(t *testing.T) {
 	}
 }
 
+func TestMultistreamExpertFrameDurationRejectsDivergentChildren(t *testing.T) {
+	enc, err := NewMultistreamEncoder(48000, 2, 2, 0, []byte{0, 1}, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := enc.StreamEncoder(0)
+	second, _ := enc.StreamEncoder(1)
+	if err := first.SetExpertFrameDuration(ExpertFrameDuration10ms); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.SetExpertFrameDuration(ExpertFrameDuration20ms); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enc.Encode(make([]int16, 960*2), 960); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("divergent duration error = %v, want ErrInvalidState", err)
+	}
+
+	control, err := NewMultistreamEncoder(48000, 2, 2, 0, []byte{0, 1}, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := control.SetExpertFrameDuration(ExpertFrameDuration10ms); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.SetExpertFrameDuration(ExpertFrameDuration10ms); err != nil {
+		t.Fatal(err)
+	}
+	got, err := enc.Encode(make([]int16, 960*2), 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := control.Encode(make([]int16, 960*2), 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) || enc.FinalRange() != control.FinalRange() {
+		t.Fatal("rejected divergent duration advanced encoder state")
+	}
+
+	if err := first.SetExpertFrameDuration(ExpertFrameDuration5ms); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.SetExpertFrameDuration(ExpertFrameDuration20ms); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enc.Encode(make([]int16, 480*2), 480); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("later short child error = %v, want ErrBadArg", err)
+	}
+}
+
 func TestSurroundExpertFrameDurationUsesSelectedRateAllocation(t *testing.T) {
 	const (
 		rate      = 48000

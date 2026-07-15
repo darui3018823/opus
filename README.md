@@ -395,6 +395,8 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
 ## Documentation
 
 - **[docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md)** — code-derived snapshot of the API, internals, tests, and known gaps (authoritative).
+- **[docs/CTL_PARITY.md](docs/CTL_PARITY.md)** — libopus 1.6.1 CTL/helper parity matrix.
+- **[docs/REAL_CORPUS_SCOREBOARD.md](docs/REAL_CORPUS_SCOREBOARD.md)** — opt-in real-corpus matched-bitrate A/B scoreboard.
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — design decisions and libopus analysis.
 - **[docs/ROADMAP.md](docs/ROADMAP.md)** — development phases and milestones.
 - **[docs/DEVELOPER.md](docs/DEVELOPER.md)** — code style, porting guidance, profiling tips.

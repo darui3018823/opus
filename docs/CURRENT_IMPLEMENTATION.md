@@ -102,6 +102,9 @@ extensions are parsed and generated in code-3 padding with repeat expansion.
 DRED and QEXT payloads are transported opaquely; their codecs are outside this
 package.
 See `docs/CTL_PARITY.md` for the libopus 1.6.1 CTL/helper parity matrix.
+The opt-in real-corpus matched-bitrate scoreboard is documented in
+`docs/REAL_CORPUS_SCOREBOARD.md` and implemented as an `opusref` diagnostic test
+guarded by `OPUS_REAL_CORPUS=1`.
 
 Public multistream and surround entry points:
 

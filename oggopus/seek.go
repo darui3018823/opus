@@ -203,7 +203,8 @@ func scanNextPage(rs io.ReadSeeker, from, end int64) (Page, int64, int64, error)
 		if _, err := rs.Seek(from, io.SeekStart); err != nil {
 			return Page{}, 0, 0, err
 		}
-		n, err := rs.Read(buffer)
+		readSize := min(int64(len(buffer)), end-from)
+		n, err := rs.Read(buffer[:readSize])
 		if err != nil && !errors.Is(err, io.EOF) {
 			return Page{}, 0, 0, err
 		}
@@ -223,7 +224,12 @@ func scanNextPage(rs io.ReadSeeker, from, end int64) (Page, int64, int64, error)
 			page, err := ReadPage(rs)
 			if err == nil {
 				next, err := rs.Seek(0, io.SeekCurrent)
-				return page, candidate, next, err
+				if err != nil {
+					return Page{}, 0, 0, err
+				}
+				if next <= end {
+					return page, candidate, next, nil
+				}
 			}
 			search = search[index+1:]
 		}

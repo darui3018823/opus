@@ -267,3 +267,39 @@ func TestReaderSeekStartPreservesExpectedSequence(t *testing.T) {
 		t.Fatalf("NextPacket error = %v, want ErrSequence", err)
 	}
 }
+
+func TestScanNextPageHonorsEndBoundary(t *testing.T) {
+	first, err := (Page{
+		Version:         StreamVersion,
+		GranulePosition: 960,
+		Serial:          1,
+		Segments:        []byte{3},
+		Data:            []byte{0xf8, 0xff, 0xfe},
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := (Page{
+		Version:         StreamVersion,
+		HeaderType:      HeaderBOS,
+		GranulePosition: 0,
+		Serial:          2,
+		Segments:        []byte{3},
+		Data:            []byte{1, 2, 3},
+	}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := append(first, second...)
+	from := int64(len(first) - 2)
+	end := int64(len(first))
+	if _, _, _, err := scanNextPage(bytes.NewReader(data), from, end); !errors.Is(err, io.EOF) {
+		t.Fatalf("scanNextPage crossed end boundary: %v", err)
+	}
+
+	// A capture pattern inside the range is also rejected when its page body
+	// extends beyond the current logical-stream boundary.
+	if _, _, _, err := scanNextPage(bytes.NewReader(data), 0, int64(len(first)-1)); !errors.Is(err, io.EOF) {
+		t.Fatalf("scanNextPage accepted page extending beyond end: %v", err)
+	}
+}

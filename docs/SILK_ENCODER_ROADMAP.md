@@ -21,7 +21,7 @@ The public encoder has two encode paths:
   SILK low band and CELT high band into one shared range stream.
 - SILK-only and hybrid paths can emit one-packet-delayed LBRR/in-band FEC for
   mono and stereo, and `DecodeFEC` recovers SILK-only/hybrid redundant data.
-  Public `DecodePLC` remains CELT-only.
+  Public `DecodePLC` supports SILK-only and hybrid streams as well as CELT.
 - Public multistream/surround/projection APIs, packet extensions, repacketizer
   operations, and single-logical-stream Ogg Opus containers are implemented;
   this SILK roadmap now focuses on remaining SILK/hybrid quality and parity.

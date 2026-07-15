@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-06-24
+Last reviewed: 2026-07-15
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -494,12 +494,14 @@ hybrid path; configs `>= 16` go through the CELT-only path. CELT count codes
 configs decode multiple 20 ms SILK subframes from each Opus frame stream.
 Packets whose decoded duration exceeds 120 ms are rejected as invalid.
 
-Current decoder limitations:
+Current decoder behavior and limitations:
 
-- `DecodePLC` supports CELT-only streams after a successful CELT packet decode.
+- `DecodePLC` supports CELT-only, SILK-only, and hybrid streams after a
+  successful packet decode. Hybrid concealment sums the independently concealed
+  SILK low band and CELT high band through the normal resampler/channel paths.
   The requested duration must be a valid Opus duration, an integer multiple of
-  the active CELT frame duration, and no more than 120 ms. SILK-only and hybrid
-  PLC return `ErrUnimplemented`.
+  the active CELT or SILK frame duration, and no more than 120 ms. SILK PLC is
+  stateful and interoperable but is not bit-exact with libopus PLC.
 - `DecodeFEC` extracts SILK LBRR for mono/stereo SILK-only and hybrid packets.
   Hybrid recovery reconstructs the redundant SILK low band; CELT-only packets
   do not carry SILK LBRR.
@@ -979,8 +981,8 @@ reference comparison.
 - Multistream/surround provide core encode/decode, mapping, aggregate bitrate,
   and per-stream state access, but do not yet mirror every libopus multistream
   CTL or its full surround psychoacoustic energy-mask analysis.
-- Public PLC currently covers CELT-only streams; SILK-only and hybrid PLC are
-  not implemented.
+- Public PLC covers CELT-only, SILK-only, and hybrid streams for mono and
+  stereo output.
 - Top-level SILK/hybrid encoder selection is voice-oriented and now accounts
   for rate, channels, bandwidth, CVBR, and active FEC, but it is not yet a full
   libopus-equivalent mode/rate/quality policy.

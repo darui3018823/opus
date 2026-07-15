@@ -43,8 +43,8 @@ jobs:
       - name: Short-frame interoperability
         run: go test -tags opusref -count=1 -run '^TestCGOEncodeRefShortFrames$' .
 
-      - name: SILK and hybrid FEC interoperability
-        run: go test -tags opusref -count=1 -run '^TestCGOEncodeRefSILKFEC$|^TestCGOEncodeRefSILKFECMultiFrame$|^TestCGODecodeFECMatchesLibopus$|^TestCGODecodeFECStereoAndHybrid$' .
+      - name: SILK and hybrid FEC/PLC interoperability
+        run: go test -tags opusref -count=1 -run '^TestCGOEncodeRefSILKFEC$|^TestCGOEncodeRefSILKFECMultiFrame$|^TestCGODecodeFECMatchesLibopus$|^TestCGODecodeFECStereoAndHybrid$|^TestCGORefSILKAndHybridPLC$' .
 
       - name: Multistream interoperability
         run: go test -tags opusref -count=1 -run '^TestCGOMultistreamInteroperability$' .

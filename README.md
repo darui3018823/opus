@@ -236,7 +236,7 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error)
 func (d *Decoder) Decode24(data []byte, pcm []int32) (int, error)
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error)
 func (d *Decoder) DecodeFloat32(data []byte) ([]float32, error)
-func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) // CELT-only after a successful CELT decode
+func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) // CELT, SILK-only, or hybrid PLC
 func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error)   // SILK LBRR
 func (d *Decoder) Reset() error
 func (d *Decoder) GetLastPacketDuration() int
@@ -403,7 +403,7 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
   via `SetInbandFEC(true)` and a non-zero `SetPacketLossPerc`.
 - `DecodeFEC` recovers SILK-only and hybrid packets from LBRR in the following
   packet. Hybrid recovery contains the redundant SILK low band. `DecodePLC`
-  currently supports CELT-only streams.
+  conceals CELT-only, SILK-only, and hybrid losses after a successful decode.
 - Projection family 3 uses the predefined libopus 1.6.1 matrices; the package
   does not currently generate arbitrary custom encoder matrices.
 - The Ogg Opus package handles one logical stream and does not provide seeking,

@@ -593,6 +593,153 @@ func TestDecoderPLC(t *testing.T) {
 	}
 }
 
+func TestDecoderPLCSILKAndHybrid(t *testing.T) {
+	tests := []struct {
+		name     string
+		rate     int
+		channels int
+		bitrate  int
+		wantMode int
+	}{
+		{"silk-mono", 16000, 1, 24000, ModeSILKOnly},
+		{"silk-stereo", 16000, 2, 32000, ModeSILKOnly},
+		{"hybrid-mono", 48000, 1, 64000, ModeHybrid},
+		{"hybrid-stereo", 48000, 2, 160000, ModeHybrid},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			frameSize := tc.rate / 50
+			enc, err := NewEncoder(tc.rate, tc.channels, ApplicationVOIP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := enc.SetBitrate(tc.bitrate); err != nil {
+				t.Fatal(err)
+			}
+
+			packets := make([][]byte, 8)
+			for p := range packets {
+				input := strictSpeechLikeFrame(tc.rate, tc.channels, p*frameSize, frameSize)
+				if tc.wantMode == ModeHybrid {
+					input = strictHybridWidebandFrame(tc.rate, tc.channels, p*frameSize, frameSize)
+				}
+				packets[p], err = enc.EncodeFloat(input, frameSize)
+				if err != nil {
+					t.Fatalf("encode packet %d: %v", p, err)
+				}
+			}
+			if mode, err := PacketGetMode(packets[3]); err != nil || mode != tc.wantMode {
+				t.Fatalf("packet mode = %d, err=%v, want %d", mode, err, tc.wantMode)
+			}
+
+			dec, err := NewDecoder(tc.rate, tc.channels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for p := 0; p < 4; p++ {
+				if _, err := dec.Decode(packets[p], make([]int16, frameSize*tc.channels)); err != nil {
+					t.Fatalf("prime packet %d: %v", p, err)
+				}
+			}
+
+			plc := make([]int16, 2*frameSize*tc.channels)
+			n, err := dec.DecodePLC(plc, 2*frameSize)
+			if err != nil {
+				t.Fatalf("DecodePLC: %v", err)
+			}
+			if n != 2*frameSize {
+				t.Fatalf("DecodePLC samples = %d, want %d", n, 2*frameSize)
+			}
+			firstEnergy := signalEnergyI16(plc[:frameSize*tc.channels])
+			secondEnergy := signalEnergyI16(plc[frameSize*tc.channels:])
+			if firstEnergy == 0 || secondEnergy == 0 {
+				t.Fatalf("PLC returned silence: first=%g second=%g", firstEnergy, secondEnergy)
+			}
+			if secondEnergy >= firstEnergy {
+				t.Fatalf("PLC energy did not decay: first=%g second=%g", firstEnergy, secondEnergy)
+			}
+
+			recovered := make([]int16, frameSize*tc.channels)
+			if _, err := dec.Decode(packets[6], recovered); err != nil {
+				t.Fatalf("normal decode after PLC: %v", err)
+			}
+			for ch := 0; ch < tc.channels; ch++ {
+				last := plc[(2*frameSize-1)*tc.channels+ch]
+				jump := math.Abs(float64(recovered[ch]) - float64(last))
+				if jump > 6000 {
+					t.Fatalf("recovery boundary jump on channel %d is too large: %.0f", ch, jump)
+				}
+			}
+		})
+	}
+}
+
+func TestDecoderPLCSILKFrameAlignment(t *testing.T) {
+	const (
+		rate      = 16000
+		frameSize = rate / 50
+	)
+	enc, err := NewEncoder(rate, 1, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetBitrate(24000); err != nil {
+		t.Fatal(err)
+	}
+	packet, err := enc.EncodeFloat(strictSpeechLikeFrame(rate, 1, 0, frameSize), frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := NewDecoder(rate, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dec.Decode(packet, make([]int16, frameSize)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dec.DecodePLC(make([]int16, frameSize/2), frameSize/2); !errors.Is(err, ErrUnsupportedFrameSize) {
+		t.Fatalf("10 ms PLC after 20 ms SILK error = %v, want ErrUnsupportedFrameSize", err)
+	}
+}
+
+func TestDecoderPLCSILKLongPacketDurations(t *testing.T) {
+	const rate = 16000
+	for _, packetMs := range []int{40, 60} {
+		t.Run(fmt.Sprintf("%dms", packetMs), func(t *testing.T) {
+			frameSize := rate * packetMs / 1000
+			enc, err := NewEncoder(rate, 1, ApplicationVOIP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := enc.SetBitrate(24000); err != nil {
+				t.Fatal(err)
+			}
+			packet, err := enc.EncodeFloat(strictSpeechLikeFrame(rate, 1, 0, frameSize), frameSize)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode, err := PacketGetMode(packet); err != nil || mode != ModeSILKOnly {
+				t.Fatalf("packet mode = %d, err=%v, want SILK-only", mode, err)
+			}
+			dec, err := NewDecoder(rate, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := dec.Decode(packet, make([]int16, frameSize)); err != nil {
+				t.Fatal(err)
+			}
+			plc := make([]int16, frameSize)
+			if n, err := dec.DecodePLC(plc, frameSize); err != nil || n != frameSize {
+				t.Fatalf("DecodePLC = (%d, %v), want (%d, nil)", n, err, frameSize)
+			}
+			if signalEnergyI16(plc) == 0 {
+				t.Fatal("DecodePLC returned silence")
+			}
+		})
+	}
+}
+
 func TestDecoderPLCValidation(t *testing.T) {
 	dec, err := NewDecoder(48000, 1)
 	if err != nil {

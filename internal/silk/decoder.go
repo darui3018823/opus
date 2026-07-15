@@ -487,6 +487,36 @@ func (d *Decoder) DecodeFEC(packet []byte, nFrames int) ([]float64, error) {
 	return d.decodeFECChannel(dec, nFrames, mask)
 }
 
+// DecodePLC conceals nFrames consecutive lost SILK frames using the current
+// synthesis history. Stereo decoding conceals the mid and side states
+// independently before applying the retained M/S predictor.
+func (d *Decoder) DecodePLC(nFrames int) ([]float64, error) {
+	if nFrames < 1 {
+		nFrames = 1
+	}
+	if d.channels == 1 {
+		return d.concealFECFrames(nFrames)
+	}
+	if d.side == nil {
+		return nil, fmt.Errorf("missing SILK side-channel decoder")
+	}
+
+	out := make([]float64, 0, d.frameSize*nFrames*2)
+	for frame := 0; frame < nFrames; frame++ {
+		mid, err := d.concealPacketLossMono()
+		if err != nil {
+			return nil, err
+		}
+		side, err := d.side.concealPacketLoss()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, d.stereoMSToLR(mid, side, d.stereoPredPrevQ13)...)
+		d.prevDecodeOnlyMiddle = false
+	}
+	return out, nil
+}
+
 func (d *Decoder) decodeFECChannel(dec *entcode.Decoder, nFrames, mask int) ([]float64, error) {
 	allPCM := make([]float64, 0, d.frameSize*nFrames)
 	prevPresent := false

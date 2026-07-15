@@ -3578,7 +3578,13 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 	d.lastPacketDuration = info.totalSamples
 	d.lastPacketConfig = config
 	d.lastPacketChannels = info.channels
-	d.prevMode = info.mode
+	// inspectPacket reports the public Mode* constants; prevMode is compared
+	// against the internal framing.Mode* constants (e.g. by DecodePLC).
+	if info.mode == ModeHybrid {
+		d.prevMode = framing.ModeHybrid
+	} else {
+		d.prevMode = framing.ModeSILKOnly
+	}
 	return info.totalSamples, nil
 }
 

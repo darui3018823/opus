@@ -220,9 +220,10 @@ type Decoder struct {
 	randSeed int32
 
 	// PLC state
-	plcCount   int
-	prevLPCQ12 []int16
-	prevOutput []int32 // Q14
+	plcCount        int
+	prevLPCQ12      []int16
+	prevOutput      []int32 // Q14
+	lastFrameSilent bool    // last decoded frame was a digital-silence packet
 
 	// Stereo packets code mid and side as separate SILK channel states.
 	side                 *Decoder
@@ -405,6 +406,7 @@ func (d *Decoder) DecodeMulti(packet []byte, nFrames int) ([]float64, error) {
 	// Single-byte silence packet
 	if len(packet) == 1 && packet[0] == 0x00 {
 		d.lastFinalRange = 0
+		d.noteDigitalSilence()
 		result := make([]float64, d.frameSize*d.channels*nFrames)
 		return result, nil
 	}
@@ -712,6 +714,8 @@ func (d *Decoder) decodeMultiStereo(packet []byte, nFrames int) ([]float64, erro
 	}
 
 	if len(packet) == 1 && packet[0] == 0x00 {
+		d.noteDigitalSilence()
+		d.side.noteDigitalSilence()
 		return make([]float64, d.frameSize*d.channels*nFrames), nil
 	}
 	if len(packet) < 2 {
@@ -1248,6 +1252,7 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 	d.prevSignalType = signalType
 	d.firstFrame = false
 	d.plcCount = 0
+	d.lastFrameSilent = false
 
 	// Convert int16 PCM → float64 normalized to [-1, 1]
 	result := make([]float64, d.frameSize)
@@ -2281,8 +2286,36 @@ func (d *Decoder) decodeSilence() ([]float64, error) {
 	return make([]float64, d.frameSize*d.channels), nil
 }
 
+// noteDigitalSilence records a decoded digital-silence packet. The synthesis
+// history is cleared so that a following packet loss is concealed as continued
+// silence instead of replaying stale pre-silence speech.
+func (d *Decoder) noteDigitalSilence() {
+	d.lastFrameSilent = true
+	d.plcCount = 0
+	d.prevSignalType = SignalTypeUnvoiced
+	for i := range d.lpcState {
+		d.lpcState[i] = 0
+	}
+	for i := range d.ltpState {
+		d.ltpState[i] = 0
+	}
+	for i := range d.prevOutput {
+		d.prevOutput[i] = 0
+	}
+	// The true delayed samples after a silence frame are zeros; without this
+	// the stereo unmix replays the pre-silence tail into the next frame.
+	d.stereoMid = [2]int16{}
+	d.stereoSide = [2]int16{}
+}
+
 // concealPacketLoss performs pitch-history based packet loss concealment.
 func (d *Decoder) concealPacketLoss() ([]float64, error) {
+	if d.lastFrameSilent {
+		// Digital silence continues as silence; the cleared history would
+		// otherwise only feed the concealment noise generator.
+		d.plcCount++
+		return make([]float64, d.frameSize*d.channels), nil
+	}
 	d.plcCount++
 
 	output := make([]int32, d.frameSize)
@@ -2413,6 +2446,7 @@ func (d *Decoder) Reset() {
 	}
 	d.randSeed = 7818
 	d.plcCount = 0
+	d.lastFrameSilent = false
 	d.stereoPredPrevQ13 = [2]int32{}
 	d.stereoMid = [2]int16{}
 	d.stereoSide = [2]int16{}
@@ -2439,6 +2473,7 @@ func (d *Decoder) CopyPrimaryStateFrom(src *Decoder) {
 	copy(d.ltpState, src.ltpState)
 	d.randSeed = src.randSeed
 	d.plcCount = src.plcCount
+	d.lastFrameSilent = src.lastFrameSilent
 	copy(d.prevLPCQ12, src.prevLPCQ12)
 	copy(d.prevOutput, src.prevOutput)
 }

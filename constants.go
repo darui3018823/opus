@@ -27,6 +27,23 @@ const (
 	FrameSize120ms = 5760 // 120ms at 48kHz (maximum packet duration)
 )
 
+// ExpertFrameDuration selects a fixed encoder packet duration. Argument keeps
+// the default behavior of deriving the duration from Encode's frameSize.
+type ExpertFrameDuration int
+
+const (
+	ExpertFrameDurationArgument ExpertFrameDuration = 5000
+	ExpertFrameDuration2_5ms    ExpertFrameDuration = 5001
+	ExpertFrameDuration5ms      ExpertFrameDuration = 5002
+	ExpertFrameDuration10ms     ExpertFrameDuration = 5003
+	ExpertFrameDuration20ms     ExpertFrameDuration = 5004
+	ExpertFrameDuration40ms     ExpertFrameDuration = 5005
+	ExpertFrameDuration60ms     ExpertFrameDuration = 5006
+	ExpertFrameDuration80ms     ExpertFrameDuration = 5007
+	ExpertFrameDuration100ms    ExpertFrameDuration = 5008
+	ExpertFrameDuration120ms    ExpertFrameDuration = 5009
+)
+
 // Application types
 const (
 	ApplicationVOIP               = 2048 // Voice over IP

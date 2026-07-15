@@ -74,13 +74,14 @@ type Encoder struct {
 	silkResampler  *resampler.Resampler // input sampleRate -> silkSampleRate
 
 	// Configuration
-	bitrateSetting int // requested bitrate or BitrateAuto/BitrateMax
-	bitrate        int // effective numeric bitrate for the current frame size
-	complexity     int
-	rateMode       celt.RateMode // CBR/VBR/CVBR
-	frameSize      int           // frame size in samples at sampleRate
-	padBytes       int           // code-3 padding-data bytes to append (0 = none)
-	dtx            bool          // discontinuous transmission: minimal silence packets
+	bitrateSetting      int // requested bitrate or BitrateAuto/BitrateMax
+	bitrate             int // effective numeric bitrate for the current frame size
+	complexity          int
+	rateMode            celt.RateMode // CBR/VBR/CVBR
+	frameSize           int           // frame size in samples at sampleRate
+	expertFrameDuration ExpertFrameDuration
+	padBytes            int  // code-3 padding-data bytes to append (0 = none)
+	dtx                 bool // discontinuous transmission: minimal silence packets
 
 	// Inband FEC (SILK LBRR). useInbandFEC requests redundant coding; the SILK
 	// encoder only emits LBRR when this is on and packetLossPerc > 0.
@@ -172,22 +173,23 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 	}
 
 	enc := &Encoder{
-		sampleRate:        sampleRate,
-		channels:          channels,
-		application:       application,
-		celtEncoder:       celtEnc,
-		bitrateSetting:    64000,
-		bitrate:           64000,            // Default bitrate
-		complexity:        5,                // Default complexity
-		rateMode:          celt.RateModeCBR, // Default CBR (backward compatible)
-		frameSize:         frameSize,
-		maxBandwidth:      BandwidthFullband,
-		forcedBandwidth:   BandwidthAuto,
-		lastDetectedBW:    -1, // no detection history yet
-		internalFrameSize: internalFrameSize,
-		prevMode:          -1, // no previous packet yet
-		forceChannels:     ChannelsAuto,
-		lsbDepth:          LSBDepthDefault,
+		sampleRate:          sampleRate,
+		channels:            channels,
+		application:         application,
+		celtEncoder:         celtEnc,
+		bitrateSetting:      64000,
+		bitrate:             64000,            // Default bitrate
+		complexity:          5,                // Default complexity
+		rateMode:            celt.RateModeCBR, // Default CBR (backward compatible)
+		frameSize:           frameSize,
+		expertFrameDuration: ExpertFrameDurationArgument,
+		maxBandwidth:        BandwidthFullband,
+		forcedBandwidth:     BandwidthAuto,
+		lastDetectedBW:      -1, // no detection history yet
+		internalFrameSize:   internalFrameSize,
+		prevMode:            -1, // no previous packet yet
+		forceChannels:       ChannelsAuto,
+		lsbDepth:            LSBDepthDefault,
 	}
 	enc.celtEncoders[3] = celtEnc
 
@@ -265,10 +267,12 @@ func signalTypeForApplication(application Application) celt.SignalType {
 // Encode encodes PCM audio samples
 //
 // pcm contains interleaved 16-bit PCM samples (left, right, left, right, ...)
-// frameSize is the number of samples per channel (at the encoder's sample rate)
+// frameSize is the number of samples per channel (at the encoder's sample rate).
+// With a fixed expert frame duration, frameSize is the available sample count.
 // Returns compressed Opus packet
 func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
-	if _, err := e.validateFrameSize(frameSize); err != nil {
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
 		return nil, err
 	}
 	expectedSize := frameSize * e.channels
@@ -277,37 +281,42 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	}
 
 	// Convert int16 to float64
-	floatPCM := make([]float64, expectedSize)
-	for i := 0; i < expectedSize; i++ {
+	selectedSize := selectedFrameSize * e.channels
+	floatPCM := make([]float64, selectedSize)
+	for i := 0; i < selectedSize; i++ {
 		floatPCM[i] = float64(pcm[i]) / 32768.0
 	}
 
-	return e.encodeFloat(floatPCM, frameSize)
+	return e.encodeFloat(floatPCM, selectedFrameSize)
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
 // The nominal input range is [-8388608, 8388607].
 func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
-	if _, err := e.validateFrameSize(frameSize); err != nil {
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
 		return nil, err
 	}
 	expectedSize := frameSize * e.channels
 	if len(pcm) < expectedSize {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
-	floatPCM := make([]float64, expectedSize)
+	selectedSize := selectedFrameSize * e.channels
+	floatPCM := make([]float64, selectedSize)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608.0
 	}
-	return e.encodeFloat(floatPCM, frameSize)
+	return e.encodeFloat(floatPCM, selectedFrameSize)
 }
 
 // EncodeFloat encodes floating-point PCM samples
 //
 // pcm contains interleaved float64 samples in range [-1.0, 1.0]
-// frameSize is the number of samples per channel (at the encoder's sample rate)
+// frameSize is the number of samples per channel (at the encoder's sample rate).
+// With a fixed expert frame duration, frameSize is the available sample count.
 func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
-	if _, err := e.validateFrameSize(frameSize); err != nil {
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
 		return nil, err
 	}
 	expectedSize := frameSize * e.channels
@@ -315,24 +324,28 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
 
-	return e.encodeFloat(pcm[:expectedSize], frameSize)
+	selectedSize := selectedFrameSize * e.channels
+	return e.encodeFloat(pcm[:selectedSize], selectedFrameSize)
 }
 
 // EncodeFloat32 encodes interleaved float32 PCM samples in range [-1.0, 1.0].
 // frameSize is the number of samples per channel at the encoder sample rate.
+// With a fixed expert frame duration, frameSize is the available sample count.
 func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
-	if _, err := e.validateFrameSize(frameSize); err != nil {
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
 		return nil, err
 	}
 	expectedSize := frameSize * e.channels
 	if len(pcm) < expectedSize {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
-	floatPCM := make([]float64, expectedSize)
+	selectedSize := selectedFrameSize * e.channels
+	floatPCM := make([]float64, selectedSize)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i])
 	}
-	return e.encodeFloat(floatPCM, frameSize)
+	return e.encodeFloat(floatPCM, selectedFrameSize)
 }
 
 // encodeFloat is the internal encoding path shared by Encode and EncodeFloat.
@@ -1216,6 +1229,50 @@ func bandwidthRank(bw int) int {
 	}
 }
 
+func frameSizeForExpertDuration(duration ExpertFrameDuration, sampleRate, argumentFrameSize int) (int, bool) {
+	switch duration {
+	case ExpertFrameDurationArgument:
+		return argumentFrameSize, true
+	case ExpertFrameDuration2_5ms:
+		return sampleRate / 400, true
+	case ExpertFrameDuration5ms:
+		return sampleRate / 200, true
+	case ExpertFrameDuration10ms:
+		return sampleRate / 100, true
+	case ExpertFrameDuration20ms:
+		return sampleRate / 50, true
+	case ExpertFrameDuration40ms:
+		return sampleRate / 25, true
+	case ExpertFrameDuration60ms:
+		return sampleRate * 3 / 50, true
+	case ExpertFrameDuration80ms:
+		return sampleRate * 2 / 25, true
+	case ExpertFrameDuration100ms:
+		return sampleRate / 10, true
+	case ExpertFrameDuration120ms:
+		return sampleRate * 3 / 25, true
+	default:
+		return 0, false
+	}
+}
+
+// selectEncodeFrameSize resolves the duration without changing encoder state.
+// In fixed-duration mode, frameSize describes available input rather than the
+// duration to encode.
+func (e *Encoder) selectEncodeFrameSize(frameSize int) (int, error) {
+	selected, ok := frameSizeForExpertDuration(e.expertFrameDuration, e.sampleRate, frameSize)
+	if !ok {
+		return 0, fmt.Errorf("%w: invalid expert frame duration %d", ErrInvalidState, e.expertFrameDuration)
+	}
+	if e.expertFrameDuration != ExpertFrameDurationArgument && frameSize < selected {
+		return 0, fmt.Errorf("%w: available frameSize %d is shorter than selected frame size %d at %d Hz", ErrBadArg, frameSize, selected, e.sampleRate)
+	}
+	if _, err := e.validateFrameSize(selected); err != nil {
+		return 0, err
+	}
+	return selected, nil
+}
+
 func (e *Encoder) validateFrameSize(frameSize int) (int, error) {
 	base := e.frameSize
 	if base <= 0 || frameSize <= 0 {
@@ -1361,6 +1418,24 @@ func (e *Encoder) InDTX() bool { return e.inDTX }
 // Application returns the current application mode.
 func (e *Encoder) Application() Application { return e.application }
 
+// SetExpertFrameDuration selects a fixed packet duration. Argument restores
+// the default behavior where each Encode call's frameSize selects the duration.
+func (e *Encoder) SetExpertFrameDuration(duration ExpertFrameDuration) error {
+	if _, ok := frameSizeForExpertDuration(duration, e.sampleRate, e.frameSize); !ok {
+		return fmt.Errorf("%w: invalid expert frame duration %d", ErrBadArg, duration)
+	}
+	e.expertFrameDuration = duration
+	if e.forcedMono != nil {
+		e.forcedMono.expertFrameDuration = duration
+	}
+	return nil
+}
+
+// ExpertFrameDuration returns the configured packet-duration selection.
+func (e *Encoder) ExpertFrameDuration() ExpertFrameDuration {
+	return e.expertFrameDuration
+}
+
 // SetForceChannels controls the channel count written to the Opus stream.
 // ChannelsAuto uses the constructor channel count. A stereo encoder may be
 // forced to mono; forcing stereo from a mono input is invalid.
@@ -1446,6 +1521,9 @@ func (e *Encoder) monoEncoder() (*Encoder, error) {
 		return nil, err
 	}
 	if err := m.SetBandwidth(e.forcedBandwidth); err != nil {
+		return nil, err
+	}
+	if err := m.SetExpertFrameDuration(e.expertFrameDuration); err != nil {
 		return nil, err
 	}
 	m.SetDTX(e.dtx)

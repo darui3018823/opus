@@ -186,6 +186,29 @@ func TestMultistreamPacketPadUnpad(t *testing.T) {
 	}
 }
 
+func TestMultistreamPacketGetNumSamples(t *testing.T) {
+	const (
+		rate      = 48000
+		channels  = 2
+		streams   = 2
+		frameSize = 960
+	)
+	enc, err := NewMultistreamEncoder(rate, channels, streams, 0, []byte{0, 1}, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := enc.Encode(make([]int16, frameSize*channels), frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := MultistreamPacketGetNumSamples(packet, streams, rate); err != nil || got != frameSize {
+		t.Fatalf("MultistreamPacketGetNumSamples = (%d, %v), want (%d, nil)", got, err, frameSize)
+	}
+	if _, err := MultistreamPacketGetNumSamples(packet, streams+1, rate); !errors.Is(err, ErrInvalidPacket) {
+		t.Fatalf("wrong stream count error = %v, want ErrInvalidPacket", err)
+	}
+}
+
 func TestMultistreamDecodeFECRoundTripMapping(t *testing.T) {
 	const (
 		rate      = 16000

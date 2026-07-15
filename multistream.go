@@ -634,6 +634,12 @@ func multistreamPacketDuration(data []byte, streams, sampleRate int) (int, error
 	return duration, err
 }
 
+// MultistreamPacketGetNumSamples returns a multistream packet's duration in
+// samples per channel. Every elementary stream must have the same duration.
+func MultistreamPacketGetNumSamples(data []byte, streams, sampleRate int) (int, error) {
+	return multistreamPacketDuration(data, streams, sampleRate)
+}
+
 func parseSelfDelimitedPacket(data []byte) ([]byte, int, error) {
 	if len(data) < 2 {
 		return nil, 0, fmt.Errorf("%w: truncated self-delimited packet", ErrInvalidPacket)

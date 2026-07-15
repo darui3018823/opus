@@ -134,3 +134,56 @@ func PacketUnpad(packet []byte) ([]byte, error) {
 	out = append(out, payload...)
 	return out, nil
 }
+
+// MultistreamPacketPad returns an RFC 7845 multistream packet padded to exactly
+// newLen bytes. Padding is applied to the final elementary Opus packet; earlier
+// self-delimited stream lengths are regenerated canonically.
+func MultistreamPacketPad(packet []byte, streams, newLen int) ([]byte, error) {
+	if newLen < len(packet) {
+		return nil, fmt.Errorf("%w: padded length %d is smaller than packet length %d", ErrBadArg, newLen, len(packet))
+	}
+	packets, _, err := splitMultistreamPackets(packet, streams, SampleRate48kHz)
+	if err != nil {
+		return nil, err
+	}
+	if newLen == len(packet) {
+		return append([]byte(nil), packet...), nil
+	}
+	canonical, err := joinMultistreamPackets(packets)
+	if err != nil {
+		return nil, err
+	}
+	if newLen < len(canonical) {
+		return nil, fmt.Errorf("%w: padded length %d is smaller than canonical packet length %d", ErrBadArg, newLen, len(canonical))
+	}
+	last := len(packets) - 1
+	paddedLastLen := len(packets[last]) + (newLen - len(canonical))
+	packets[last], err = PacketPad(packets[last], paddedLastLen)
+	if err != nil {
+		return nil, err
+	}
+	out, err := joinMultistreamPackets(packets)
+	if err != nil {
+		return nil, err
+	}
+	if len(out) != newLen {
+		return nil, fmt.Errorf("%w: cannot represent multistream padded length %d", ErrBadArg, newLen)
+	}
+	return out, nil
+}
+
+// MultistreamPacketUnpad removes RFC 6716 padding from every elementary stream
+// and returns canonical RFC 7845 multistream framing.
+func MultistreamPacketUnpad(packet []byte, streams int) ([]byte, error) {
+	packets, _, err := splitMultistreamPackets(packet, streams, SampleRate48kHz)
+	if err != nil {
+		return nil, err
+	}
+	for i := range packets {
+		packets[i], err = PacketUnpad(packets[i])
+		if err != nil {
+			return nil, fmt.Errorf("stream %d: %w", i, err)
+		}
+	}
+	return joinMultistreamPackets(packets)
+}

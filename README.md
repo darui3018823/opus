@@ -193,6 +193,7 @@ func (e *Encoder) SetBandwidth(bw int) error           // Auto/NB/WB/SWB/FB
 func (e *Encoder) SetMaxBandwidth(bw int) error
 func (e *Encoder) MaxBandwidth() int
 func (e *Encoder) Bandwidth() int
+func (e *Encoder) GetBandwidth() int
 func (e *Encoder) SetDTX(dtx bool)
 func (e *Encoder) DTX() bool
 func (e *Encoder) SetInbandFEC(enabled bool)             // SILK-only/hybrid
@@ -240,6 +241,8 @@ func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) // CELT, SI
 func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error)   // SILK LBRR
 func (d *Decoder) Reset() error
 func (d *Decoder) GetLastPacketDuration() int
+func (d *Decoder) Bandwidth() int
+func (d *Decoder) GetBandwidth() int
 func (d *Decoder) SampleRate() int
 func (d *Decoder) Channels() int
 func (d *Decoder) FinalRange() uint32
@@ -288,6 +291,10 @@ func (r *Repacketizer) Out() ([]byte, error)
 func (r *Repacketizer) OutRange(begin, end int) ([]byte, error)
 func PacketPad(packet []byte, newLen int) ([]byte, error)
 func PacketUnpad(packet []byte) ([]byte, error)
+func MultistreamPacketPad(packet []byte, streams, newLen int) ([]byte, error)
+func MultistreamPacketUnpad(packet []byte, streams int) ([]byte, error)
+func PacketHasLBRR(packet []byte) (bool, error)
+func SoftClipFloat32(pcm []float32, channels int, mem []float32) error
 func PacketExtensionsCount(packet []byte) (int, error)
 func PacketExtensionsParse(packet []byte) ([]PacketExtension, error)
 func PacketExtensionsGenerate(packet []byte, extensions []PacketExtension, paddingBytes int) ([]byte, error)
@@ -296,6 +303,10 @@ func PacketExtensionsGenerate(packet []byte, extensions []PacketExtension, paddi
 Packet extensions are transported through code-3 padding. DRED and QEXT
 payloads are exposed as opaque data; their neural/DSP codecs are not
 implemented here.
+See [docs/CTL_PARITY.md](docs/CTL_PARITY.md) for CTL/helper parity against
+libopus 1.6.1.
+See [docs/MODE_RATE_POLICY_DIFF.md](docs/MODE_RATE_POLICY_DIFF.md) for the
+SILK/hybrid mode-rate-quality policy diff that gates future policy work.
 
 ### Ogg Opus containers
 
@@ -386,6 +397,9 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
 ## Documentation
 
 - **[docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md)** — code-derived snapshot of the API, internals, tests, and known gaps (authoritative).
+- **[docs/CTL_PARITY.md](docs/CTL_PARITY.md)** — libopus 1.6.1 CTL/helper parity matrix.
+- **[docs/REAL_CORPUS_SCOREBOARD.md](docs/REAL_CORPUS_SCOREBOARD.md)** — opt-in real-corpus matched-bitrate A/B scoreboard.
+- **[docs/MODE_RATE_POLICY_DIFF.md](docs/MODE_RATE_POLICY_DIFF.md)** — SILK/hybrid mode-rate-quality policy diff and D-2 measurement guardrails.
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — design decisions and libopus analysis.
 - **[docs/ROADMAP.md](docs/ROADMAP.md)** — development phases and milestones.
 - **[docs/DEVELOPER.md](docs/DEVELOPER.md)** — code style, porting guidance, profiling tips.

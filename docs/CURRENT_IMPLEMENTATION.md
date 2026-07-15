@@ -67,7 +67,8 @@ Implemented public entry points:
 - `(*Encoder).SignalType() SignalType`
 - `(*Encoder).SetMaxBandwidth(bw int) error`
 - `(*Encoder).MaxBandwidth() int`
-- `(*Encoder).SetBandwidth(bw int) error` / `(*Encoder).Bandwidth() int`
+- `(*Encoder).SetBandwidth(bw int) error` / `(*Encoder).Bandwidth() int` /
+  `(*Encoder).GetBandwidth() int`
 - `(*Encoder).Reset() error`
 
 Public packet inspection entry points:
@@ -79,12 +80,16 @@ Public packet inspection entry points:
 - `PacketGetNumFrames(packet []byte) (int, error)`
 - `PacketGetSamplesPerFrame(packet []byte, sampleRate int) (int, error)`
 - `PacketGetNumSamples(packet []byte, sampleRate int) (int, error)`
+- `PacketHasLBRR(packet []byte) (bool, error)`
+- `SoftClipFloat32(pcm []float32, channels int, mem []float32) error`
 - `NewRepacketizer() *Repacketizer`
 - `(*Repacketizer).Cat(packet []byte) error`
 - `(*Repacketizer).Out() ([]byte, error)`
 - `(*Repacketizer).OutRange(begin, end int) ([]byte, error)`
 - `PacketPad(packet []byte, newLen int) ([]byte, error)`
 - `PacketUnpad(packet []byte) ([]byte, error)`
+- `MultistreamPacketPad(packet []byte, streams, newLen int) ([]byte, error)`
+- `MultistreamPacketUnpad(packet []byte, streams int) ([]byte, error)`
 - `PacketExtensionsCount(packet []byte) (int, error)`
 - `PacketExtensionsParse(packet []byte) ([]PacketExtension, error)`
 - `PacketExtensionsGenerate(packet []byte, extensions []PacketExtension, paddingBytes int) ([]byte, error)`
@@ -96,6 +101,13 @@ enforces the 120 ms limit, and supports canonical padding removal. Packet
 extensions are parsed and generated in code-3 padding with repeat expansion.
 DRED and QEXT payloads are transported opaquely; their codecs are outside this
 package.
+See `docs/CTL_PARITY.md` for the libopus 1.6.1 CTL/helper parity matrix.
+The opt-in real-corpus matched-bitrate scoreboard is documented in
+`docs/REAL_CORPUS_SCOREBOARD.md` and implemented as an `opusref` diagnostic test
+guarded by `OPUS_REAL_CORPUS=1`.
+The SILK/hybrid mode-rate-quality policy diff is tracked in
+`docs/MODE_RATE_POLICY_DIFF.md`; future policy-gate changes are expected to use
+the real-corpus scoreboard first.
 
 Public multistream and surround entry points:
 
@@ -475,6 +487,7 @@ Implemented public entry points:
 - `(*Decoder).DecodeFEC(data []byte, pcm []int16) (int, error)`
 - `(*Decoder).Reset() error`
 - `(*Decoder).GetLastPacketDuration() int`
+- `(*Decoder).Bandwidth() int` / `(*Decoder).GetBandwidth() int`
 - `(*Decoder).SetPhaseInversionDisabled(bool)` /
   `(*Decoder).PhaseInversionDisabled() bool`
 
@@ -509,6 +522,8 @@ Current decoder behavior and limitations:
 - `GetLastPacketDuration` reports the duration in output samples per channel of
   the last successfully decoded packet; before any decode it reports the default
   20 ms duration for the decoder sample rate.
+- `Bandwidth`/`GetBandwidth` reports the bandwidth of the last successfully
+  decoded packet and returns `BandwidthAuto` before decode or after reset.
 - The decoder passes all 12 official RFC 8251 vectors (RMSE < 0.001). The
   separate cgo/libopus reference comparison (`TestCGORef`, `go test -tags opusref`)
   also passes all 12 vectors against libopus 1.6.1 (overall RMSE < 0.001).
@@ -985,7 +1000,8 @@ reference comparison.
   stereo output.
 - Top-level SILK/hybrid encoder selection is voice-oriented and now accounts
   for rate, channels, bandwidth, CVBR, and active FEC, but it is not yet a full
-  libopus-equivalent mode/rate/quality policy.
+  libopus-equivalent mode/rate/quality policy. See
+  `docs/MODE_RATE_POLICY_DIFF.md` for the current gap map.
 - SILK-only and hybrid LBRR/FEC encoding and decoding are available for mono
   and stereo. Hybrid FEC reconstructs the redundant SILK low band.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired

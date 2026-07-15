@@ -3,13 +3,19 @@ package oggopus
 import (
 	"fmt"
 	"io"
+
+	opus "github.com/darui3018823/opus"
 )
 
 // Reader parses one complete Ogg Opus logical bitstream.
 type Reader struct {
-	packets *PacketReader
-	Head    Head
-	Tags    Tags
+	packets             *PacketReader
+	pending             []Packet
+	preSkipRemaining    int
+	previousPageGranule int64
+	haveAudioGranule    bool
+	Head                Head
+	Tags                Tags
 }
 
 // NewReader reads and validates the mandatory OpusHead and OpusTags packets.
@@ -38,7 +44,12 @@ func NewReader(r io.Reader) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Reader{packets: packets, Head: head, Tags: tags}, nil
+	return &Reader{
+		packets:          packets,
+		preSkipRemaining: int(head.PreSkip),
+		Head:             head,
+		Tags:             tags,
+	}, nil
 }
 
 func (r *Reader) Serial() uint32 {
@@ -50,14 +61,96 @@ func (r *Reader) EOS() bool { return r.packets.EOS() }
 
 // NextPacket returns the next Opus audio packet and its Ogg metadata.
 func (r *Reader) NextPacket() (Packet, error) {
-	packet, err := r.packets.Next()
-	if err != nil {
-		return Packet{}, err
+	if len(r.pending) == 0 {
+		if err := r.readAudioPage(); err != nil {
+			return Packet{}, err
+		}
 	}
-	if len(packet.Data) == 0 {
-		return Packet{}, fmt.Errorf("%w: zero-length audio packet", ErrInvalidOpusStream)
-	}
+	packet := r.pending[0]
+	r.pending = r.pending[1:]
 	return packet, nil
+}
+
+func (r *Reader) readAudioPage() error {
+	var pagePackets []Packet
+	for {
+		packet, err := r.packets.Next()
+		if err != nil {
+			return err
+		}
+		if len(packet.Data) == 0 {
+			return fmt.Errorf("%w: zero-length audio packet", ErrInvalidOpusStream)
+		}
+		duration, err := r.packetDuration(packet.Data)
+		if err != nil {
+			return fmt.Errorf("%w: packet duration: %v", ErrInvalidOpusStream, err)
+		}
+		packet.Duration48k = duration
+		pagePackets = append(pagePackets, packet)
+		if packet.LastPacketOnPage {
+			break
+		}
+	}
+
+	last := &pagePackets[len(pagePackets)-1]
+	granule := last.GranulePosition
+	if granule < 0 {
+		return fmt.Errorf("%w: completed audio page has no granule position", ErrInvalidOpusStream)
+	}
+	var pageDuration int64
+	for i := range pagePackets {
+		pageDuration += int64(pagePackets[i].Duration48k)
+	}
+
+	naturalEnd := pageDuration
+	if r.haveAudioGranule {
+		naturalEnd += r.previousPageGranule
+		if last.EOS {
+			if granule < r.previousPageGranule || granule > naturalEnd {
+				return fmt.Errorf("%w: EOS granule %d outside [%d,%d]", ErrInvalidOpusStream, granule, r.previousPageGranule, naturalEnd)
+			}
+		} else if granule != naturalEnd {
+			return fmt.Errorf("%w: audio granule %d, want %d", ErrInvalidOpusStream, granule, naturalEnd)
+		}
+	} else if last.EOS {
+		if granule < int64(r.Head.PreSkip) {
+			return fmt.Errorf("%w: EOS granule %d is smaller than pre-skip %d", ErrInvalidOpusStream, granule, r.Head.PreSkip)
+		}
+		if granule > naturalEnd {
+			naturalEnd = granule
+		}
+	} else if granule < naturalEnd {
+		return fmt.Errorf("%w: initial audio granule %d is smaller than page duration %d", ErrInvalidOpusStream, granule, naturalEnd)
+	}
+
+	for i := range pagePackets {
+		discard := min(r.preSkipRemaining, pagePackets[i].Duration48k)
+		pagePackets[i].DiscardStart = discard
+		r.preSkipRemaining -= discard
+	}
+	if last.EOS {
+		trim := naturalEnd - granule
+		for i := len(pagePackets) - 1; i >= 0 && trim > 0; i-- {
+			available := pagePackets[i].Duration48k - pagePackets[i].DiscardStart
+			discard := min(int64(available), trim)
+			pagePackets[i].DiscardEnd = int(discard)
+			trim -= discard
+		}
+		if trim != 0 {
+			return fmt.Errorf("%w: end trim exceeds decoded audio", ErrInvalidOpusStream)
+		}
+	}
+	r.previousPageGranule = granule
+	r.haveAudioGranule = true
+	r.pending = pagePackets
+	return nil
+}
+
+func (r *Reader) packetDuration(data []byte) (int, error) {
+	if r.Head.MappingFamily == 0 {
+		return opus.PacketGetNumSamples(data, opus.SampleRate48kHz)
+	}
+	return opus.MultistreamPacketGetNumSamples(data, int(r.Head.StreamCount), opus.SampleRate48kHz)
 }
 
 // Writer writes one complete Ogg Opus logical bitstream.

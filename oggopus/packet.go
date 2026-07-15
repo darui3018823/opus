@@ -8,8 +8,15 @@ import (
 // Packet is a reconstructed Ogg packet. GranulePosition is meaningful only
 // for the last packet completed on a page; it is -1 for earlier packets.
 type Packet struct {
-	Data              []byte
-	GranulePosition   int64
+	Data            []byte
+	GranulePosition int64
+	// Duration48k is the decoded packet duration per channel at 48 kHz.
+	// PacketReader leaves it zero; Reader populates it for audio packets.
+	Duration48k int
+	// DiscardStart and DiscardEnd are decoded samples per channel to remove
+	// for Opus pre-skip, seeking, or end trimming. Reader populates them.
+	DiscardStart      int
+	DiscardEnd        int
 	Serial            uint32
 	PageSequence      uint32
 	BOS               bool

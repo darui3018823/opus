@@ -129,10 +129,9 @@ func (r *Reader) NextPacket() (Packet, error) {
 				continue
 			}
 			if errors.Is(err, io.EOF) {
-				r.physicalEOF = true
-			} else {
-				r.terminalErr = err
+				err = fmt.Errorf("%w: physical EOF before EOS", ErrInvalidOpusStream)
 			}
+			r.terminalErr = err
 			return Packet{}, err
 		}
 	}

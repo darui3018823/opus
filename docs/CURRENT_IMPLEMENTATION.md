@@ -114,8 +114,8 @@ Public multistream and surround entry points:
 - `NewMultistreamEncoder(...) (*MultistreamEncoder, error)`
 - `NewMultistreamDecoder(...) (*MultistreamDecoder, error)`
 - int16, signed-24-bit-in-int32, float32, and float64 encode/decode methods
-- multistream/surround int16 in-band FEC decode with per-stream CELT PLC
-  fallback
+- multistream/surround int16 PLC and in-band FEC decode, including per-stream
+  CELT PLC fallback during FEC recovery
 - per-stream encoder/decoder access, aggregate bitrate control, reset, mapping,
   stream-count, coupled-stream-count, and final-range getters
 - `NewSurroundEncoder(...) (*SurroundEncoder, error)`
@@ -125,9 +125,10 @@ Public multistream and surround entry points:
 
 Multistream packets use RFC 6716 Appendix B self-delimited framing for every
 elementary stream except the last. Tests cover Go encode/decode round trips,
-duplicate and silent mappings, duration validation, multistream FEC recovery,
-and bidirectional libopus 1.6.1 interoperability. The FEC path is additionally
-cross-checked with libopus-generated two-stream LBRR packets. Surround
+duplicate and silent mappings, duration validation, mixed CELT/SILK PLC bursts,
+multistream FEC recovery, and bidirectional libopus 1.6.1 interoperability. The
+FEC path is additionally cross-checked with libopus-generated two-stream LBRR
+packets. Surround
 mapping-family 1 uses the libopus/Vorbis
 stream layouts, identifies the LFE stream for 5.1/6.1/7.1, applies
 frame-duration-dependent stream bitrate allocation, and keeps coupled streams
@@ -1009,8 +1010,8 @@ reference comparison.
 - Multistream/surround provide core encode/decode, mapping, aggregate bitrate,
   and per-stream state access, but do not yet mirror every libopus multistream
   CTL or its full surround psychoacoustic energy-mask analysis.
-- Public PLC covers CELT-only, SILK-only, and hybrid streams for mono and
-  stereo output.
+- Public PLC covers CELT-only, SILK-only, and hybrid streams for mono, stereo,
+  multistream, and surround output.
 - Top-level SILK/hybrid encoder selection is voice-oriented and now accounts
   for rate, channels, bandwidth, CVBR, and active FEC, but it is not yet a full
   libopus-equivalent mode/rate/quality policy. See

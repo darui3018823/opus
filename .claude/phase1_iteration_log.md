@@ -21,3 +21,21 @@
 - Decision: adopted. The feature adds only a new public method and test-only
   libopus wrappers; existing normal decode and packet framing paths are
   unchanged.
+
+## Iteration 2: multistream and surround DecodePLC
+
+- Branch: `codex/feature-gaps`
+- Production/test commit: `e7e8e84` (`feat(multistream): add PLC decoding`)
+- Change: add `(*MultistreamDecoder).DecodePLC`; `SurroundDecoder` exposes it
+  through embedding. The method validates frame size and output capacity before
+  touching child state, conceals every elementary stream through its existing
+  decoder, applies duplicate/silent mappings, and copies caller PCM only after
+  all children succeed.
+- Tests: mono SILK and coupled CELT concealment, mixed coupled-CELT/mono-SILK
+  repeated loss with non-zero monotonic energy decay, mapping 255 and duplicate
+  channels, normal-decode recovery continuity, validation state preservation,
+  child failure output preservation, and promoted surround API.
+- Validation: `go vet ./...`, `go test -count=1 ./...`, and
+  `go test -count=1 -tags opusref ./...` all passed on 2026-07-16.
+- Decision: adopted. The method adds a public aggregation path over existing
+  PLC implementations without changing normal packet decode behavior.

@@ -73,7 +73,7 @@ func (r *Reader) SeekPCM(sample int64) (err error) {
 		return err
 	}
 	if startOffset == r.audioOffset {
-		r.packets = NewPacketReader(r.seeker)
+		r.packets = newPacketReaderAt(r.seeker, r.Serial(), r.audioSequence, true)
 		r.preSkipRemaining = int(r.Head.PreSkip)
 	} else {
 		r.packets = newPacketReaderAt(r.seeker, r.Serial(), startSequence, allowOrphan)

@@ -188,3 +188,82 @@ func TestPacketReaderSeekResyncDropsOrphanContinuation(t *testing.T) {
 		t.Fatalf("resynchronized packet = %+v", packet)
 	}
 }
+
+func TestReaderAcceptsInitialContinuedAudioPage(t *testing.T) {
+	const serial = 101
+	head, err := (Head{Version: 1, Channels: 1}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags, err := (Tags{Vendor: "continued"}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stream bytes.Buffer
+	for _, page := range []Page{
+		{Version: 0, HeaderType: HeaderBOS, GranulePosition: 0, Serial: serial, Sequence: 0, Segments: []byte{byte(len(head))}, Data: head},
+		{Version: 0, GranulePosition: 0, Serial: serial, Sequence: 1, Segments: []byte{byte(len(tags))}, Data: tags},
+		{
+			Version:         0,
+			HeaderType:      HeaderContinued | HeaderEOS,
+			GranulePosition: seekTestPacketDuration,
+			Serial:          serial,
+			Sequence:        2,
+			Segments:        []byte{3, 3},
+			Data:            []byte{1, 2, 3, 0xf8, 0xff, 0xfe},
+		},
+	} {
+		if err := WritePage(&stream, page); err != nil {
+			t.Fatal(err)
+		}
+	}
+	data := stream.Bytes()
+	for _, seekFirst := range []bool{false, true} {
+		r, err := NewReader(bytes.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seekFirst {
+			if err := r.SeekPCM(0); err != nil {
+				t.Fatal(err)
+			}
+		}
+		packet, err := r.NextPacket()
+		if err != nil {
+			t.Fatalf("seek=%v: %v", seekFirst, err)
+		}
+		if !bytes.Equal(packet.Data, []byte{0xf8, 0xff, 0xfe}) {
+			t.Fatalf("seek=%v packet = %x", seekFirst, packet.Data)
+		}
+	}
+}
+
+func TestReaderSeekStartPreservesExpectedSequence(t *testing.T) {
+	data := makeSeekTestStream(t, 2, 0, 0)
+	reader := bytes.NewReader(data)
+	var rebuilt bytes.Buffer
+	pageIndex := 0
+	for reader.Len() > 0 {
+		page, err := ReadPage(reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pageIndex == 2 {
+			page.Sequence += 7
+		}
+		if err := WritePage(&rebuilt, page); err != nil {
+			t.Fatal(err)
+		}
+		pageIndex++
+	}
+	r, err := NewReader(bytes.NewReader(rebuilt.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SeekPCM(0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.NextPacket(); !errors.Is(err, ErrSequence) {
+		t.Fatalf("NextPacket error = %v, want ErrSequence", err)
+	}
+}

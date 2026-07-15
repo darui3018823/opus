@@ -12,6 +12,7 @@ type Reader struct {
 	packets             *PacketReader
 	seeker              io.ReadSeeker
 	audioOffset         int64
+	audioSequence       uint32
 	serial              uint32
 	pending             []Packet
 	preSkipRemaining    int
@@ -58,10 +59,14 @@ func NewReader(r io.Reader) (*Reader, error) {
 			return nil, fmt.Errorf("%w: determine audio offset: %v", ErrNotSeekable, err)
 		}
 	}
+	// RFC 7845 permits a pasted live stream to begin its audio data with a
+	// continued packet whose missing prefix must be discarded.
+	packets.allowOrphan = true
 	return &Reader{
 		packets:          packets,
 		seeker:           seeker,
 		audioOffset:      audioOffset,
+		audioSequence:    packets.nextSeq,
 		serial:           headPacket.Serial,
 		preSkipRemaining: int(head.PreSkip),
 		Head:             head,

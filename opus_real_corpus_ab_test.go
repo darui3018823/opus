@@ -5,7 +5,9 @@ package opus
 import (
 	"encoding/binary"
 	"encoding/csv"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
 	"os"
 	"path/filepath"
@@ -20,8 +22,19 @@ func TestOpusRealCorpusMatchedBitrateScoreboard(t *testing.T) {
 	if os.Getenv("OPUS_REAL_CORPUS") != "1" {
 		t.Skip("set OPUS_REAL_CORPUS=1 to run the real-corpus matched-bitrate scoreboard")
 	}
-	files, err := filepath.Glob(filepath.Join("testdata", "real_corpus", "**", "*.wav"))
-	if err != nil {
+	// filepath.Glob does not support recursive **, so walk the corpus tree;
+	// user-provided WAVs may be nested at any depth.
+	var files []string
+	err := filepath.WalkDir(filepath.Join("testdata", "real_corpus"), func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() && strings.EqualFold(filepath.Ext(d.Name()), ".wav") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		t.Fatal(err)
 	}
 	if len(files) == 0 {

@@ -39,3 +39,30 @@
   `go test -count=1 -tags opusref ./...` all passed on 2026-07-16.
 - Decision: adopted. The method adds a public aggregation path over existing
   PLC implementations without changing normal packet decode behavior.
+
+## Iteration 3: Ogg Opus granule-position seeking
+
+- Branch: `codex/feature-gaps`
+- Duration prerequisite: `b8fba6b`
+  (`feat(multistream): expose packet duration`)
+- Sequential timing commit: `d4a076d`
+  (`feat(oggopus): expose packet timing trims`)
+- Seek commit: `4a581b6` (`feat(oggopus): add granule-based seeking`)
+- API correction: `75c8875` (`fix(oggopus): use vet-safe seek API name`)
+- Change: `Reader.NextPacket` now supplies 48 kHz duration and discard metadata
+  for pre-skip and EOS granule trimming. `Reader.SeekPCM` uses CRC-validated Ogg
+  page bisection on `io.ReadSeeker`, starts at least 3840 samples before the
+  target, discards orphaned continued-packet prefixes when resynchronizing, and
+  marks decoder pre-roll through `DiscardStart`. Non-seekable and out-of-range
+  requests return stable sentinel errors without changing reader state.
+- API note: the roadmap's provisional `Seek(sample)` name was changed to
+  `SeekPCM(sample)` because `go vet` requires methods named `Seek` to implement
+  the standard `io.Seeker` signature.
+- Tests: pre-skip spanning packets, final-page trim spanning packets,
+  multistream packet duration, invalid granules, seek start/interior/page
+  boundary/end/restart, failed-seek state preservation, non-seekable input,
+  and continued-page orphan resynchronization.
+- Validation: `go vet ./...`, `go test -count=1 ./...`, and
+  `go test -count=1 -tags opusref ./...` all passed on 2026-07-16.
+- Decision: adopted. Existing sequential packet data and page metadata remain
+  unchanged; the new timing fields are additive.

@@ -155,7 +155,10 @@ The `oggopus` subpackage provides:
 - lacing and continued-packet reconstruction through `PacketReader`
 - packet-to-page output through `PacketWriter`
 - `OpusHead` and `OpusTags` parsing and marshaling
-- complete single-logical-stream Ogg Opus `Reader` and `Writer` APIs
+- single-logical-stream Ogg Opus `Reader` and `Writer` APIs
+- validated 48 kHz packet timing with pre-skip/end-trim discard metadata
+- `(*Reader).SeekPCM(sample int64)` for granule-position bisection seeking on
+  `io.ReadSeeker` sources with RFC 7845 80 ms decoder pre-roll
 
 The decoder exposes `SampleRate`, `Channels`, `FinalRange`, and `Pitch`
 getters. `FinalRange` is the XOR of the constituent frame entropy ranges, as
@@ -1005,8 +1008,9 @@ reference comparison.
 
 - Projection family 3 encoder setup uses the predefined libopus 1.6.1 matrices;
   arbitrary custom encoder-matrix generation is not exposed.
-- The Ogg Opus package handles one logical stream and does not provide seeking,
-  chained-stream orchestration, or multiplexed-stream demux.
+- The Ogg Opus package handles one logical stream and provides sample-accurate
+  seek metadata, but does not yet provide chained-stream orchestration or
+  multiplexed-stream demux.
 - Multistream/surround provide core encode/decode, mapping, aggregate bitrate,
   and per-stream state access, but do not yet mirror every libopus multistream
   CTL or its full surround psychoacoustic energy-mask analysis.

@@ -10,16 +10,23 @@ import (
 // Reader parses one complete Ogg Opus logical bitstream.
 type Reader struct {
 	packets             *PacketReader
+	seeker              io.ReadSeeker
+	audioOffset         int64
+	serial              uint32
 	pending             []Packet
 	preSkipRemaining    int
 	previousPageGranule int64
 	haveAudioGranule    bool
+	seekDiscardActive   bool
+	seekTargetGranule   int64
+	atEnd               bool
 	Head                Head
 	Tags                Tags
 }
 
 // NewReader reads and validates the mandatory OpusHead and OpusTags packets.
 func NewReader(r io.Reader) (*Reader, error) {
+	seeker, _ := r.(io.ReadSeeker)
 	packets := NewPacketReader(r)
 	headPacket, err := packets.Next()
 	if err != nil {
@@ -44,8 +51,18 @@ func NewReader(r io.Reader) (*Reader, error) {
 	if err != nil {
 		return nil, err
 	}
+	var audioOffset int64
+	if seeker != nil {
+		audioOffset, err = seeker.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, fmt.Errorf("%w: determine audio offset: %v", ErrNotSeekable, err)
+		}
+	}
 	return &Reader{
 		packets:          packets,
+		seeker:           seeker,
+		audioOffset:      audioOffset,
+		serial:           headPacket.Serial,
 		preSkipRemaining: int(head.PreSkip),
 		Head:             head,
 		Tags:             tags,
@@ -53,14 +70,16 @@ func NewReader(r io.Reader) (*Reader, error) {
 }
 
 func (r *Reader) Serial() uint32 {
-	serial, _ := r.packets.Serial()
-	return serial
+	return r.serial
 }
 
-func (r *Reader) EOS() bool { return r.packets.EOS() }
+func (r *Reader) EOS() bool { return r.atEnd || r.packets.EOS() }
 
 // NextPacket returns the next Opus audio packet and its Ogg metadata.
 func (r *Reader) NextPacket() (Packet, error) {
+	if r.atEnd {
+		return Packet{}, io.EOF
+	}
 	if len(r.pending) == 0 {
 		if err := r.readAudioPage(); err != nil {
 			return Packet{}, err
@@ -122,11 +141,33 @@ func (r *Reader) readAudioPage() error {
 	} else if granule < naturalEnd {
 		return fmt.Errorf("%w: initial audio granule %d is smaller than page duration %d", ErrInvalidOpusStream, granule, naturalEnd)
 	}
+	pageStart := int64(0)
+	if r.haveAudioGranule {
+		pageStart = r.previousPageGranule
+	} else if granule >= pageDuration {
+		pageStart = granule - pageDuration
+	}
 
 	for i := range pagePackets {
 		discard := min(r.preSkipRemaining, pagePackets[i].Duration48k)
 		pagePackets[i].DiscardStart = discard
 		r.preSkipRemaining -= discard
+	}
+	if r.seekDiscardActive {
+		packetStart := pageStart
+		for i := range pagePackets {
+			duration := int64(pagePackets[i].Duration48k)
+			if r.seekTargetGranule > packetStart {
+				discard := min(duration, r.seekTargetGranule-packetStart)
+				if int(discard) > pagePackets[i].DiscardStart {
+					pagePackets[i].DiscardStart = int(discard)
+				}
+			}
+			packetStart += duration
+		}
+		if pageStart+pageDuration >= r.seekTargetGranule {
+			r.seekDiscardActive = false
+		}
 	}
 	if last.EOS {
 		trim := naturalEnd - granule

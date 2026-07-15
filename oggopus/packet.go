@@ -36,10 +36,21 @@ type PacketReader struct {
 	queue       []Packet
 	eos         bool
 	terminalErr error
+	allowOrphan bool
 }
 
 func NewPacketReader(r io.Reader) *PacketReader {
 	return &PacketReader{r: r}
+}
+
+func newPacketReaderAt(r io.Reader, serial, sequence uint32, allowOrphan bool) *PacketReader {
+	return &PacketReader{
+		r:           r,
+		serial:      serial,
+		haveSerial:  true,
+		nextSeq:     sequence,
+		allowOrphan: allowOrphan,
+	}
 }
 
 func (r *PacketReader) Serial() (uint32, bool) { return r.serial, r.haveSerial }
@@ -89,8 +100,27 @@ func (r *PacketReader) readPage() error {
 	}
 	r.nextSeq++
 
+	segments := page.Segments
+	pageData := page.Data
 	if page.Continued() && len(r.partial) == 0 {
-		return ErrUnexpectedContinue
+		if !r.allowOrphan {
+			return ErrUnexpectedContinue
+		}
+		discardBytes := 0
+		discardSegments := 0
+		for discardSegments < len(segments) {
+			lace := segments[discardSegments]
+			discardBytes += int(lace)
+			discardSegments++
+			if lace < 255 {
+				r.allowOrphan = false
+				break
+			}
+		}
+		segments = segments[discardSegments:]
+		pageData = pageData[discardBytes:]
+	} else {
+		r.allowOrphan = false
 	}
 	if !page.Continued() && len(r.partial) != 0 {
 		r.partial = nil
@@ -98,19 +128,19 @@ func (r *PacketReader) readPage() error {
 	}
 
 	completions := 0
-	for _, lace := range page.Segments {
+	for _, lace := range segments {
 		if lace < 255 {
 			completions++
 		}
 	}
 	completed := make([]Packet, 0, completions)
 	offset := 0
-	for i, lace := range page.Segments {
+	for i, lace := range segments {
 		if i == 0 && len(r.partial) == 0 && page.BOS() {
 			r.partialBOS = true
 		}
 		size := int(lace)
-		r.partial = append(r.partial, page.Data[offset:offset+size]...)
+		r.partial = append(r.partial, pageData[offset:offset+size]...)
 		offset += size
 		if lace < 255 {
 			completed = append(completed, Packet{

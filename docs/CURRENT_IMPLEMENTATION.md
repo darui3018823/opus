@@ -114,6 +114,8 @@ Public multistream and surround entry points:
 - `NewMultistreamEncoder(...) (*MultistreamEncoder, error)`
 - `NewMultistreamDecoder(...) (*MultistreamDecoder, error)`
 - int16, signed-24-bit-in-int32, float32, and float64 encode/decode methods
+- multistream/surround int16 in-band FEC decode with per-stream CELT PLC
+  fallback
 - per-stream encoder/decoder access, aggregate bitrate control, reset, mapping,
   stream-count, coupled-stream-count, and final-range getters
 - `NewSurroundEncoder(...) (*SurroundEncoder, error)`
@@ -123,8 +125,10 @@ Public multistream and surround entry points:
 
 Multistream packets use RFC 6716 Appendix B self-delimited framing for every
 elementary stream except the last. Tests cover Go encode/decode round trips,
-duplicate and silent mappings, duration validation, and bidirectional libopus
-1.6.1 interoperability. Surround mapping-family 1 uses the libopus/Vorbis
+duplicate and silent mappings, duration validation, multistream FEC recovery,
+and bidirectional libopus 1.6.1 interoperability. The FEC path is additionally
+cross-checked with libopus-generated two-stream LBRR packets. Surround
+mapping-family 1 uses the libopus/Vorbis
 stream layouts, identifies the LFE stream for 5.1/6.1/7.1, applies
 frame-duration-dependent stream bitrate allocation, and keeps coupled streams
 on stereo CELT to preserve the spatial image.
@@ -1011,8 +1015,10 @@ reference comparison.
   for rate, channels, bandwidth, CVBR, and active FEC, but it is not yet a full
   libopus-equivalent mode/rate/quality policy. See
   `docs/MODE_RATE_POLICY_DIFF.md` for the current gap map.
-- SILK-only and hybrid LBRR/FEC encoding and decoding are available for mono
-  and stereo. Hybrid FEC reconstructs the redundant SILK low band.
+- SILK-only and hybrid LBRR/FEC encoding and decoding are available for mono,
+  stereo, multistream, and surround output. Hybrid FEC reconstructs the
+  redundant SILK low band; CELT elementary streams use PLC during multistream
+  FEC recovery.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
   to full libopus-compatible mode/rate-control behavior.
 - Decoder parity is achieved on the official vectors and the libopus reference;

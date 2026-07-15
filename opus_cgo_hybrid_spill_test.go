@@ -8,13 +8,11 @@ import (
 	"github.com/darui3018823/opus/internal/cgoref"
 )
 
-// TestHybridCVBROnsetLibopusConsistency guards the hybrid CVBR target-spill
-// path: when the VBR SILK low band overshoots the adaptive frame target and
-// the encoder emits the actual range-coder size, the stream must stay
-// decodable by libopus with the same result as the Go decoder. A divergence
-// here means the CELT allocation basis the encoder used no longer matches the
-// packet length the decoders derive it from (this exact failure mode was
-// observed with a rejected variant of the spill fix).
+// TestHybridCVBROnsetLibopusConsistency guards the hybrid CVBR VBR-size path.
+// When the SILK prefix pushes CELT's minimum above the nominal target, CELT
+// must shrink to the raised size before allocation. A divergence here means
+// the encoder's allocation basis no longer matches the packet length decoded
+// by Go and libopus.
 func TestHybridCVBROnsetLibopusConsistency(t *testing.T) {
 	const (
 		rate      = 48000

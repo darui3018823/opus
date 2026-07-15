@@ -50,9 +50,9 @@ func TestHybridMultiFrameStrictBudget(t *testing.T) {
 }
 
 // A hard onset can make the VBR SILK low band overshoot the nominal hybrid
-// frame budget before CELT runs. The encoder must emit the actual range-coder
-// size instead of failing the encode; libopus cross-decode consistency for
-// this path is guarded by TestHybridCVBROnsetLibopusConsistency (opusref).
+// frame budget before CELT runs. CELT must raise its final VBR size to the
+// post-header minimum before allocation, so the packet can exceed nominal
+// without changing the decoder's allocation basis.
 func TestHybridCVBROnsetBudgetOvershoot(t *testing.T) {
 	const (
 		rate      = 48000
@@ -100,6 +100,47 @@ func TestHybridCVBROnsetBudgetOvershoot(t *testing.T) {
 	}
 	if !grewPastNominal {
 		t.Fatalf("CVBR hybrid packet never exceeded nominal target %d bytes", nominalPacketBytes)
+	}
+}
+
+func TestHybridCVBROnsetFinalRange(t *testing.T) {
+	const (
+		rate      = 48000
+		channels  = 1
+		bitrate   = 44000
+		frameSize = rate / 50
+		frames    = 6
+	)
+	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetBitrate(bitrate); err != nil {
+		t.Fatal(err)
+	}
+	enc.SetVBR(true)
+	enc.SetVBRConstraint(true)
+	enc.SetSignalType(SignalVoice)
+
+	dec, err := NewDecoder(rate, channels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]int16, frameSize*channels)
+	for frame := 0; frame < frames; frame++ {
+		input := hybridCVBROnsetFixture(frame*frameSize, frameSize)
+		packet, err := enc.EncodeFloat(input, frameSize)
+		if err != nil {
+			t.Fatalf("frame %d encode: %v", frame, err)
+		}
+		want := enc.FinalRange()
+		if _, err := dec.Decode(packet, out); err != nil {
+			t.Fatalf("frame %d decode: %v", frame, err)
+		}
+		if got := dec.FinalRange(); got != want {
+			t.Fatalf("frame %d final range=%08x, want encoder %08x (packet bytes=%d)",
+				frame, got, want, len(packet))
+		}
 	}
 }
 

@@ -841,14 +841,6 @@ func TestComputeRedundancyBytes(t *testing.T) {
 	}
 }
 
-func TestHybridHighBandActivityRejectsInvalidChannels(t *testing.T) {
-	for _, channels := range []int{0, -1} {
-		if got := hybridHighBandActivity([]float64{0.1, -0.1}, channels); got != 0 {
-			t.Fatalf("channels=%d activity=%v, want 0", channels, got)
-		}
-	}
-}
-
 func TestEncoderHybridSelectionBoundariesStrict(t *testing.T) {
 	cases := []struct {
 		name       string

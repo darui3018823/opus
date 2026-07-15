@@ -228,11 +228,16 @@ selection; if the analysed signal narrows below SWB, the encoder falls back to a
 CELT-only packet using that narrower bandwidth. Explicit forced bandwidths still
 take precedence over max-bandwidth caps. Hybrid is currently limited to 20 ms
 Opus frames, optionally packed as standard multi-frame packets for longer public
-frame sizes. For non-redundant VBR/CVBR hybrid frames, the adaptive target is a
-rate-control hint: if final range-coder flush needs a few extra bytes, the
-encoder emits the actual frame size rather than failing the encode, and the
-decoder derives the matching CELT budget from the packet length (validated by
-a libopus cross-decode regression test).
+frame sizes. For non-redundant VBR/CVBR hybrid frames, CELT now selects the
+final shared payload size internally after coarse energy, TF, spreading,
+dynamic allocation, and allocation trim, then shrinks the shared entropy coder
+before pulse allocation. The target uses the actual SILK prefix rate plus the
+existing high-band activity calibration and is clamped to libopus-style
+`min_allowed`; hard onsets may therefore exceed the nominal rate target without
+changing the decoder's allocation basis. A six-frame final-range regression
+requires every encoder range to match the Go decoder, and an `opusref` test
+cross-decodes the same onset sequence with libopus 1.6.1. CBR and transition
+redundancy retain their fixed-size paths.
 
 The mode policy has an upper hybrid boundary as well as the SILK-to-hybrid
 boundary. Mono hybrid is selected through 112 kbps and stereo through 192 kbps;

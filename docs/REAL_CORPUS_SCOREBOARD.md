@@ -97,25 +97,29 @@ matched-bitrate search could not bring libopus close to our byte count
 (mostly loss>0 cells with different FEC overhead); ignore their gap values
 when judging policy changes.
 
-## D-2 Iteration 0 (2026-07-15)
+## D-2 Iteration 0 REDO (2026-07-15)
 
-Branch `codex/d2-hybrid-target-clamp` fixes the baseline hybrid CVBR
-encode-size failure. Non-redundant VBR/CVBR hybrid frames now emit the actual
-range-coder size when final flush exceeds the adaptive target by a few bytes,
-instead of returning `hybrid frame ... exceeds target`.
+Branch `codex/d2-hybrid-target-clamp` now fixes the baseline hybrid CVBR
+encode-size failure at the CELT allocation boundary. Non-redundant hybrid VBR
+starts with the RFC frame ceiling; after CELT writes its pre-allocation symbols,
+it computes the target and `min_allowed`, applies the existing high-band
+activity calibration, shrinks the shared entropy coder, and then performs
+allocation. The top-level encoder no longer pre-shrinks to
+`hybridAdaptiveTargetBytes()` and no longer accepts a post-allocation spill.
 
-Review note: an alternative fix (raising the target to a floor before CELT
-encodes) was implemented and rejected — it produced non-conformant streams on
-the overshoot frames (libopus cross-decode SNR collapsed to ~0.1 dB). The
-spill approach was validated against libopus:
-`TestHybridCVBROnsetLibopusConsistency` cross-decodes the overshoot fixture
-with libopus and guards against encoder/decoder allocation divergence.
+Two earlier variants were rejected. Raising the target before CELT encoding
+collapsed libopus cross-decode SNR to about 0.1 dB. Accepting the flushed size
+after allocation decoded similarly in Go and libopus, but encoder and decoder
+final ranges diverged on the overshoot frame because they used different
+allocation budgets. `TestHybridCVBROnsetFinalRange` now checks six consecutive
+frames under normal tags, while `TestHybridCVBROnsetLibopusConsistency` retains
+the libopus 1.6.1 cross-decode guard.
 
 Full local run:
 
 ```powershell
 $env:OPUS_REAL_CORPUS = "1"
-$env:OPUS_REAL_CORPUS_OUT = "testdata/real_corpus_scoreboard_d2_iter0.csv"
+$env:OPUS_REAL_CORPUS_OUT = "testdata/real_corpus_scoreboard_d2_iter0_redo.csv"
 go test -count=1 -tags opusref -run TestOpusRealCorpusMatchedBitrateScoreboard -v .
 ```
 
@@ -123,14 +127,19 @@ Result: 140/140 cells `status=ok`. The two baseline failed bitrate cells now
 expand to their four packet-loss rows each, so the total row count increases
 from 134 to 140.
 
-`gap_snr_matched_db` by class:
+`gap_snr_matched_db` and own-byte totals relative to the prior Iteration 0 run:
 
-| class | n | avg | min | max |
-|---|---:|---:|---:|---:|
-| clean_speech | 20 | +0.08 | 0.00 | +1.50 |
-| noisy_speech | 20 | -0.21 | -1.41 | +0.28 |
-| stereo_speech | 20 | +0.02 | -0.00 | +0.42 |
-| onset_plosive | 20 | -0.05 | -2.11 | +3.50 |
-| source | 20 | -0.13 | -1.43 | +1.30 |
-| mixed | 20 | -1.72 | -11.72 | +5.64 |
-| music | 20 | -1.67 | -9.26 | +9.69 |
+| class | n | avg gap | min | max | bytes ratio |
+|---|---:|---:|---:|---:|---:|
+| clean_speech | 20 | +0.08 | 0.00 | +1.50 | 1.01 |
+| noisy_speech | 20 | -0.21 | -1.46 | +0.25 | 0.99 |
+| stereo_speech | 20 | +0.02 | -0.00 | +0.38 | 1.02 |
+| onset_plosive | 20 | -0.02 | -2.00 | +3.50 | 1.00 |
+| source | 20 | -0.10 | -1.28 | +1.30 | 1.00 |
+| mixed | 20 | -1.72 | -11.72 | +5.64 | 1.00 |
+| music | 20 | -1.67 | -9.26 | +9.69 | 1.00 |
+
+Across the five speech-oriented classes, own bytes are 692,384 versus 689,344
+in the prior run (ratio 1.004), and average matched gap moves from -0.058 dB to
+-0.046 dB. This is the same rate/quality level; the change removes the entropy
+allocation mismatch rather than trading materially more bytes for quality.

@@ -95,3 +95,30 @@
   `go test -count=1 -tags opusref ./...` all passed on 2026-07-16.
 - Decision: adopted. `PacketReader` remains a strict single-logical-stream
   primitive; chaining is isolated in the higher-level Ogg Opus `Reader`.
+
+## Iteration 5: expert frame duration
+
+- Branch: `codex/feature-gaps`
+- Reference-wrapper commit: `60824f0`
+  (`test(opusref): wrap expert frame duration`)
+- Single-stream production/test commit: `4faf143`
+  (`feat(encoder): add expert frame duration`)
+- Aggregate integration commit: `d5f78ea`
+  (`feat(multistream): propagate expert frame duration`)
+- Interoperability commit: `66216a6`
+  (`test(opusref): cross-check expert frame duration`)
+- Change: add `ExpertFrameDuration` choices for argument-selected and fixed
+  2.5/5/10/20/40/60/80/100/120 ms packets. In fixed mode, Encode's
+  `frameSize` describes available samples per channel and only the selected
+  prefix is consumed. The setting survives reset and propagates to forced-mono,
+  multistream, surround, and projection encoders. Surround and projection rate
+  allocation use the selected duration rather than the available input length.
+- Tests: all supported rates and durations, every PCM API, arbitrary and short
+  availability, full-buffer validation, default/invalid/reset behavior,
+  argument-mode byte/final-range identity, unconsumed-tail continuity,
+  forced-mono propagation, aggregate encoder propagation/rate allocation, and
+  libopus 1.6.1 SET/GET plus packet-duration parity for all fixed choices.
+- Validation: focused pure-Go and `opusref` suites passed on 2026-07-16; final
+  full-suite gates are recorded in the Phase 1 closeout commit.
+- Decision: adopted. Argument mode preserves existing packet bytes and final
+  range; fixed mode is reachable only through the new public control.

@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-07-15
+Last reviewed: 2026-07-16
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -60,6 +60,8 @@ Implemented public entry points:
 - `(*Encoder).SetPacketPadding(n int)`
 - `(*Encoder).SetForceChannels(channels int) error` / `(*Encoder).ForceChannels() int`
 - `(*Encoder).SetLSBDepth(depth int) error` / `(*Encoder).LSBDepth() int`
+- `(*Encoder).SetExpertFrameDuration(duration ExpertFrameDuration) error` /
+  `(*Encoder).ExpertFrameDuration() ExpertFrameDuration`
 - `(*Encoder).SetPredictionDisabled(bool)` / `(*Encoder).PredictionDisabled() bool`
 - `(*Encoder).SetPhaseInversionDisabled(bool)` / `(*Encoder).PhaseInversionDisabled() bool`
 - `(*Encoder).SetApplication(application Application) error`
@@ -116,8 +118,9 @@ Public multistream and surround entry points:
 - int16, signed-24-bit-in-int32, float32, and float64 encode/decode methods
 - multistream/surround int16 PLC and in-band FEC decode, including per-stream
   CELT PLC fallback during FEC recovery
-- per-stream encoder/decoder access, aggregate bitrate control, reset, mapping,
-  stream-count, coupled-stream-count, and final-range getters
+- per-stream encoder/decoder access, aggregate bitrate and expert frame-duration
+  control, reset, mapping, stream-count, coupled-stream-count, and final-range
+  getters
 - `NewSurroundEncoder(...) (*SurroundEncoder, error)`
 - `NewSurroundDecoder(...) (*SurroundDecoder, error)`
 - mapping families 0 (mono/stereo), 1 (Vorbis order, 1 through 8 channels), and
@@ -147,7 +150,8 @@ RFC 8486 mapping family 2 supports ACN/SN3D Ambisonics through channel mapping,
 including optional non-diegetic stereo. Mapping family 3 uses projection
 mixing/demixing matrices; predefined libopus 1.6.1 matrices are available for
 first- through fifth-order layouts. Tests cover PCM API variants, round trips,
-matrix validation, and bidirectional family 2/3 libopus interoperability.
+matrix validation, expert frame-duration propagation, and bidirectional family
+2/3 libopus interoperability.
 
 The `oggopus` subpackage provides:
 
@@ -273,7 +277,13 @@ all three transition forms (verified by
 Supported public encode packet durations are 2.5, 5, and 10 ms CELT packets,
 plus exact 20 ms multiples from 20 through 120 ms. Unsupported frame sizes and
 durations over the Opus 120 ms packet limit are rejected with
-`ErrUnsupportedFrameSize`.
+`ErrUnsupportedFrameSize`. `SetExpertFrameDuration` selects any of those fixed
+durations, or `ExpertFrameDurationArgument` to retain the default behavior. In
+fixed mode, an Encode call's `frameSize` is the number of available samples per
+channel; it must be at least the selected duration, the matching full input
+buffer must be present, and only the selected prefix is consumed. The control
+is propagated by multistream, surround, and projection encoders, survives
+`Reset`, and is cross-checked against libopus 1.6.1 for every fixed duration.
 
 The arbitrary-length FFT path caches immutable Bluestein plans and performs the
 convolution FFTs in place. On the Windows amd64 audit machine this reduced the

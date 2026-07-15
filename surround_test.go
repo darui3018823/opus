@@ -180,3 +180,47 @@ func TestSurroundDecoderPromotesDecodeFEC(t *testing.T) {
 		t.Fatal("surround FEC recovery decoded to silence")
 	}
 }
+
+func TestSurroundDecoderPromotesDecodePLC(t *testing.T) {
+	const (
+		rate      = 16000
+		channels  = 3
+		frameSize = 320
+	)
+	enc, err := NewSurroundEncoder(rate, channels, MappingFamilyVorbis, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetBitrate(64000); err != nil {
+		t.Fatal(err)
+	}
+	mono, err := enc.StreamEncoder(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mono.SetSignalType(SignalVoice)
+
+	var packet []byte
+	for p := 0; p < 4; p++ {
+		packet, err = enc.EncodeFloat(multistreamPLCFrame(rate, channels, p*frameSize, frameSize), frameSize)
+		if err != nil {
+			t.Fatalf("encode packet %d: %v", p, err)
+		}
+	}
+	dec, err := NewSurroundDecoder(rate, channels, MappingFamilyVorbis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dec.Decode(packet, make([]int16, frameSize*channels)); err != nil {
+		t.Fatal(err)
+	}
+	concealed := make([]int16, frameSize*channels)
+	if n, err := dec.DecodePLC(concealed, frameSize); err != nil || n != frameSize {
+		t.Fatalf("DecodePLC = (%d, %v), want (%d, nil)", n, err, frameSize)
+	}
+	for channel := 0; channel < channels; channel++ {
+		if energy := multistreamChannelEnergy(concealed, channels, channel); energy == 0 {
+			t.Fatalf("surround channel %d concealed to silence", channel)
+		}
+	}
+}

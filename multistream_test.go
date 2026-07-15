@@ -415,3 +415,275 @@ func TestMultistreamDecodeFECUsesPLCAfterCELT(t *testing.T) {
 		}
 	}
 }
+
+func TestMultistreamDecodePLCMonoAndCoupled(t *testing.T) {
+	tests := []struct {
+		name           string
+		channels       int
+		coupledStreams int
+		mapping        []byte
+		bitrate        int
+		voice          bool
+		wantMode       int
+	}{
+		{name: "mono", channels: 1, mapping: []byte{0}, bitrate: 18000, voice: true, wantMode: ModeSILKOnly},
+		{name: "coupled", channels: 2, coupledStreams: 1, mapping: []byte{0, 1}, bitrate: 48000, wantMode: ModeCELTOnly},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			const (
+				rate      = 16000
+				frameSize = 320
+			)
+			enc, err := NewMultistreamEncoder(rate, tc.channels, 1, tc.coupledStreams, tc.mapping, ApplicationVOIP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			child, err := enc.StreamEncoder(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := child.SetBitrate(tc.bitrate); err != nil {
+				t.Fatal(err)
+			}
+			if tc.voice {
+				child.SetSignalType(SignalVoice)
+			} else {
+				child.SetSignalType(SignalMusic)
+				child.SetPredictionDisabled(true)
+			}
+
+			var packet []byte
+			for p := 0; p < 4; p++ {
+				packet, err = enc.EncodeFloat(multistreamPLCFrame(rate, tc.channels, p*frameSize, frameSize), frameSize)
+				if err != nil {
+					t.Fatalf("encode packet %d: %v", p, err)
+				}
+			}
+			if mode, err := PacketGetMode(packet); err != nil || mode != tc.wantMode {
+				t.Fatalf("packet mode = %d, err=%v, want %d", mode, err, tc.wantMode)
+			}
+
+			dec, err := NewMultistreamDecoder(rate, tc.channels, 1, tc.coupledStreams, tc.mapping)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := dec.Decode(packet, make([]int16, frameSize*tc.channels)); err != nil {
+				t.Fatal(err)
+			}
+			concealed := make([]int16, frameSize*tc.channels)
+			if n, err := dec.DecodePLC(concealed, frameSize); err != nil || n != frameSize {
+				t.Fatalf("DecodePLC = (%d, %v), want (%d, nil)", n, err, frameSize)
+			}
+			for channel := 0; channel < tc.channels; channel++ {
+				if energy := multistreamChannelEnergy(concealed, tc.channels, channel); energy == 0 {
+					t.Fatalf("channel %d concealed to silence", channel)
+				}
+			}
+		})
+	}
+}
+
+func TestMultistreamDecodePLCMixedLayoutBurstAndRecovery(t *testing.T) {
+	const (
+		rate            = 16000
+		inputChannels   = 3
+		outputChannels  = 5
+		frameSize       = 320
+		primePackets    = 4
+		concealedFrames = 2
+	)
+	enc, err := NewMultistreamEncoder(rate, inputChannels, 2, 1, []byte{0, 2, 1}, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coupled, _ := enc.StreamEncoder(0)
+	if err := coupled.SetBitrate(48000); err != nil {
+		t.Fatal(err)
+	}
+	coupled.SetSignalType(SignalMusic)
+	coupled.SetPredictionDisabled(true)
+	mono, _ := enc.StreamEncoder(1)
+	if err := mono.SetBitrate(18000); err != nil {
+		t.Fatal(err)
+	}
+	mono.SetSignalType(SignalVoice)
+
+	packets := make([][]byte, primePackets+concealedFrames+1)
+	for p := range packets {
+		packets[p], err = enc.EncodeFloat(multistreamPLCFrame(rate, inputChannels, p*frameSize, frameSize), frameSize)
+		if err != nil {
+			t.Fatalf("encode packet %d: %v", p, err)
+		}
+	}
+	children, _, err := splitMultistreamPackets(packets[primePackets], 2, rate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for stream, want := range []int{ModeCELTOnly, ModeSILKOnly} {
+		mode, err := PacketGetMode(children[stream])
+		if err != nil || mode != want {
+			t.Fatalf("stream %d mode = %d, err=%v, want %d", stream, mode, err, want)
+		}
+	}
+
+	mapping := []byte{0, 2, 1, 2, 255}
+	dec, err := NewMultistreamDecoder(rate, outputChannels, 2, 1, mapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for p := 0; p < primePackets; p++ {
+		if _, err := dec.Decode(packets[p], make([]int16, frameSize*outputChannels)); err != nil {
+			t.Fatalf("prime packet %d: %v", p, err)
+		}
+	}
+
+	concealed := make([][]int16, concealedFrames)
+	for loss := range concealed {
+		concealed[loss] = make([]int16, frameSize*outputChannels)
+		if n, err := dec.DecodePLC(concealed[loss], frameSize); err != nil || n != frameSize {
+			t.Fatalf("DecodePLC loss %d = (%d, %v), want (%d, nil)", loss, n, err, frameSize)
+		}
+		for i := 0; i < frameSize; i++ {
+			if concealed[loss][i*outputChannels+1] != concealed[loss][i*outputChannels+3] {
+				t.Fatalf("loss %d duplicate mapping differs at sample %d", loss, i)
+			}
+			if concealed[loss][i*outputChannels+4] != 0 {
+				t.Fatalf("loss %d mapping 255 is non-zero at sample %d", loss, i)
+			}
+		}
+	}
+	for _, channel := range []int{0, 1, 2} {
+		first := multistreamChannelEnergy(concealed[0], outputChannels, channel)
+		second := multistreamChannelEnergy(concealed[1], outputChannels, channel)
+		if first == 0 || second == 0 {
+			t.Fatalf("channel %d PLC returned silence: first=%g second=%g", channel, first, second)
+		}
+		if second >= first {
+			t.Fatalf("channel %d PLC energy did not decay: first=%g second=%g", channel, first, second)
+		}
+	}
+
+	recovered := make([]int16, frameSize*outputChannels)
+	if _, err := dec.Decode(packets[primePackets+concealedFrames], recovered); err != nil {
+		t.Fatalf("normal decode after PLC: %v", err)
+	}
+	for _, channel := range []int{0, 1, 2, 3} {
+		last := concealed[concealedFrames-1][(frameSize-1)*outputChannels+channel]
+		jump := math.Abs(float64(recovered[channel]) - float64(last))
+		if jump > 10000 {
+			t.Fatalf("recovery boundary jump on channel %d is too large: %.0f", channel, jump)
+		}
+	}
+}
+
+func TestMultistreamDecodePLCValidationPreservesOutputAndState(t *testing.T) {
+	const (
+		rate      = 16000
+		frameSize = 320
+	)
+	enc, err := NewEncoder(rate, 1, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc.SetPredictionDisabled(true)
+	packet, err := enc.EncodeFloat(multistreamPLCFrame(rate, 1, 0, frameSize), frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newPrimed := func() *MultistreamDecoder {
+		dec, err := NewMultistreamDecoder(rate, 1, 1, 0, []byte{0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := dec.Decode(packet, make([]int16, frameSize)); err != nil {
+			t.Fatal(err)
+		}
+		return dec
+	}
+	dec := newPrimed()
+	control := newPrimed()
+
+	invalid := make([]int16, frameSize+1)
+	for i := range invalid {
+		invalid[i] = 1234
+	}
+	if _, err := dec.DecodePLC(invalid, frameSize+1); !errors.Is(err, ErrUnsupportedFrameSize) {
+		t.Fatalf("invalid frame size error = %v, want ErrUnsupportedFrameSize", err)
+	}
+	for i, sample := range invalid {
+		if sample != 1234 {
+			t.Fatalf("invalid frame size modified output[%d]: %d", i, sample)
+		}
+	}
+
+	short := make([]int16, frameSize-1)
+	for i := range short {
+		short[i] = 2345
+	}
+	if _, err := dec.DecodePLC(short, frameSize); !errors.Is(err, ErrBufferTooSmall) {
+		t.Fatalf("small buffer error = %v, want ErrBufferTooSmall", err)
+	}
+	for i, sample := range short {
+		if sample != 2345 {
+			t.Fatalf("small buffer modified output[%d]: %d", i, sample)
+		}
+	}
+
+	got := make([]int16, frameSize)
+	want := make([]int16, frameSize)
+	if _, err := dec.DecodePLC(got, frameSize); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.DecodePLC(want, frameSize); err != nil {
+		t.Fatal(err)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("validation changed decoder state at sample %d: got %d want %d", i, got[i], want[i])
+		}
+	}
+
+	partial, err := NewMultistreamDecoder(rate, 2, 2, 0, []byte{0, 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _ := partial.StreamDecoder(0)
+	if _, err := first.Decode(packet, make([]int16, frameSize)); err != nil {
+		t.Fatal(err)
+	}
+	untouched := make([]int16, frameSize*2)
+	for i := range untouched {
+		untouched[i] = 3456
+	}
+	if _, err := partial.DecodePLC(untouched, frameSize); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("partially primed error = %v, want ErrInvalidState", err)
+	}
+	for i, sample := range untouched {
+		if sample != 3456 {
+			t.Fatalf("child failure modified output[%d]: %d", i, sample)
+		}
+	}
+}
+
+func multistreamPLCFrame(rate, channels, start, frameSize int) []float64 {
+	pcm := make([]float64, frameSize*channels)
+	for i := 0; i < frameSize; i++ {
+		time := float64(start+i) / float64(rate)
+		for channel := 0; channel < channels; channel++ {
+			frequency := float64(170 + 43*channel)
+			pcm[i*channels+channel] = 0.32*math.Sin(2*math.Pi*frequency*time+0.2*float64(channel)) +
+				0.09*math.Sin(2*math.Pi*2*frequency*time+0.35)
+		}
+	}
+	return pcm
+}
+
+func multistreamChannelEnergy(pcm []int16, channels, channel int) float64 {
+	var energy float64
+	for i := channel; i < len(pcm); i += channels {
+		sample := float64(pcm[i])
+		energy += sample * sample
+	}
+	return energy
+}

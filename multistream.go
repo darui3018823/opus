@@ -353,6 +353,48 @@ func (d *MultistreamDecoder) Decode(data []byte, pcm []int16) (int, error) {
 	return duration, nil
 }
 
+// DecodePLC performs packet-loss concealment for frameSize samples per channel
+// on every elementary stream.
+func (d *MultistreamDecoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
+	if !isValidPacketFrameSize(frameSize, d.sampleRate) {
+		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+	}
+	required := frameSize * d.channels
+	if len(pcm) < required {
+		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
+	}
+
+	// Keep caller-owned PCM untouched unless every elementary stream succeeds.
+	out := make([]int16, required)
+	for stream, dec := range d.decoders {
+		streamChannels := dec.Channels()
+		streamPCM := make([]int16, frameSize*streamChannels)
+		decoded, err := dec.DecodePLC(streamPCM, frameSize)
+		if err != nil {
+			return 0, fmt.Errorf("stream %d: %w", stream, err)
+		}
+		if decoded != frameSize {
+			return 0, fmt.Errorf("%w: stream %d decoded %d samples, want %d", ErrInvalidState, stream, decoded, frameSize)
+		}
+
+		for outputChannel, mapped := range d.mapping {
+			if mapped == 255 {
+				continue
+			}
+			sourceStream, sourceChannel := codedChannelLocation(int(mapped), d.coupledStreams)
+			if sourceStream != stream || sourceChannel >= streamChannels {
+				continue
+			}
+			for i := 0; i < frameSize; i++ {
+				out[i*d.channels+outputChannel] = streamPCM[i*streamChannels+sourceChannel]
+			}
+		}
+	}
+
+	copy(pcm[:required], out)
+	return frameSize, nil
+}
+
 // DecodeFEC decodes in-band forward-error-correction data from the multistream
 // packet following a loss. Elementary CELT streams, which carry no FEC data,
 // are recovered with packet-loss concealment for the shared packet duration.

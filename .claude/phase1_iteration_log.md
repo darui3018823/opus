@@ -49,6 +49,7 @@
   (`feat(oggopus): expose packet timing trims`)
 - Seek commit: `4a581b6` (`feat(oggopus): add granule-based seeking`)
 - API correction: `75c8875` (`fix(oggopus): use vet-safe seek API name`)
+- Review fix: `9fdcbb7` (`fix(oggopus): preserve seek stream identity`)
 - Change: `Reader.NextPacket` now supplies 48 kHz duration and discard metadata
   for pre-skip and EOS granule trimming. `Reader.SeekPCM` uses CRC-validated Ogg
   page bisection on `io.ReadSeeker`, starts at least 3840 samples before the
@@ -61,8 +62,31 @@
 - Tests: pre-skip spanning packets, final-page trim spanning packets,
   multistream packet duration, invalid granules, seek start/interior/page
   boundary/end/restart, failed-seek state preservation, non-seekable input,
-  and continued-page orphan resynchronization.
+  continued-page orphan resynchronization, and seek-time serial/sequence
+  validation. An independent review found and the fix covers RFC-valid initial
+  continued audio pages and stream identity loss on `SeekPCM(0)`.
 - Validation: `go vet ./...`, `go test -count=1 ./...`, and
   `go test -count=1 -tags opusref ./...` all passed on 2026-07-16.
 - Decision: adopted. Existing sequential packet data and page metadata remain
   unchanged; the new timing fields are additive.
+
+## Iteration 4: Ogg Opus chained logical streams
+
+- Branch: `codex/feature-gaps`
+- Production/test commit: `b7f3f94`
+  (`feat(oggopus): read chained logical streams`)
+- Change: after a logical EOS, `Reader` creates a fresh `PacketReader`, validates
+  the next link's OpusHead/OpusTags, resets granule and pre-skip state, and
+  continues automatically. `Reader.Link()` and `Packet.LinkIndex` expose link
+  transitions so callers can rebuild decoders when channels or mapping change.
+  `SeekPCM` remains relative to the current link and locates that serial's EOS
+  boundary by bisection instead of treating the physical file end as the link
+  end.
+- Tests: three-link concatenation with changing metadata/channels/serials,
+  inline and empty EOS pages, sticky physical EOF, sticky malformed next
+  headers, current-link start/end seeking, automatic advancement after end
+  seek, restart within a later link, and seek after physical EOF.
+- Validation: `go vet ./...`, `go test -count=1 ./...`, and
+  `go test -count=1 -tags opusref ./...` all passed on 2026-07-16.
+- Decision: adopted. `PacketReader` remains a strict single-logical-stream
+  primitive; chaining is isolated in the higher-level Ogg Opus `Reader`.

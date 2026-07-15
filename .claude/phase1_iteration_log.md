@@ -128,3 +128,18 @@
 Required iterations 1-1 through 1-5 are complete and all three repository
 gates pass. Optional iteration 1-6 (multiplexed Ogg demux and custom projection
 encoder matrices) remains out of scope by default pending explicit approval.
+
+An independent final review found four uncovered boundary cases, fixed before
+closeout:
+
+- `acd4c2b` rejects per-stream expert-duration divergence before any elementary
+  encoder advances, including surround/projection rate preparation.
+- `85191df` prevents seek page scans from reading or accepting pages beyond the
+  current chained-link boundary.
+- `7d8ebb0` treats physical EOF before a logical EOS page as a sticky invalid
+  Ogg Opus stream instead of clean EOF.
+- `85eb9bb` preflights every multistream PLC/FEC child's deterministic state
+  requirements before any child decoder advances.
+
+After these fixes, `go vet ./...`, `go test -count=1 ./...`, and
+`go test -count=1 -tags opusref ./...` all passed again on 2026-07-16.

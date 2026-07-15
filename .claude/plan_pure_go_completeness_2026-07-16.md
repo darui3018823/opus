@@ -172,7 +172,7 @@ v1.0 タグ発行は**ユーザーの明示承認必須**。
 ## ステータス
 
 - [x] Phase 0: D-2 クローズアウト — iter2 採用・D-2 終結 (`0f17758`, 2026-07-16)
-- [x] Phase 1: 機能ギャップ (1-1〜1-5 完了、`66216a6`, 2026-07-16。optional 1-6 は承認待ちのため未着手)
+- [x] Phase 1: 機能ギャップ (1-1〜1-5 完了、最終レビュー修正 `85eb9bb`, 2026-07-16。optional 1-6 は承認待ちのため未着手)
 - [ ] Phase 2: 堅牢性 (2-1 sequence fuzz / 2-2 ogg e2e / 2-3 encoder fuzz / 2-4 differential / 2-5 fix 集積)
 - [ ] Phase 3: 性能 (3-1 harness → hotspot iterations)
 - [ ] Phase 4: リリース品質 (godoc / README / CI matrix / v1.0)

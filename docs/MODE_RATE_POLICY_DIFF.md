@@ -56,7 +56,7 @@ simpler rate allocation once inside those gates.
 |---|---|---|---|
 | User bitrate conversion | `user_bitrate_to_bitrate()` accounts for frame size, overhead, and max packet limits. | `SetBitrate` supports auto/max and numeric rates; auto follows a simpler frame-size/sample-rate/channel formula. | Partial |
 | SILK target rate | `silk_control_encoder()` sets SILK target rate, LBRR state, packet loss, DTX, complexity, internal sample rate, and SNR. | Top-level pushes bitrate/rate mode/FEC/loss to the internal SILK encoder; several SILK analysis components are ported, but not the full control loop. | Partial |
-| Hybrid split | libopus subtracts SILK rate from total rate for CELT high band and adjusts CELT VBR/CVBR behavior in hybrid. | Hybrid writes SILK first into one range stream, then gives CELT the remaining packet budget. VBR uses `hybridAdaptiveTargetBytes()` based on high-band activity. Smoke scoreboard found some current cells still report encode-size errors instead of valid packets. | Partial |
+| Hybrid split | libopus subtracts SILK rate from total rate for CELT high band and adjusts CELT VBR/CVBR behavior in hybrid. | Hybrid writes SILK first into one range stream, then gives CELT the remaining packet budget. VBR uses `hybridAdaptiveTargetBytes()` based on high-band activity. D-2 Iteration 0 fixed the former CVBR encode-size failure by allowing non-redundant VBR/CVBR hybrid frames to emit the actual range-coder size when final flush exceeds the adaptive target. | Partial |
 | CVBR/VBR | libopus defaults to constrained VBR and uses reservoir/constraint behavior across modes. | CELT has VBR/CVBR; SILK/hybrid use simplified target sizing and natural-size paths in selected cases. | Partial |
 | DTX | libopus DTX decision is integrated with SILK and top-level mode state. | Public DTX exists; digital silence emits minimal packets and is handled specially, but broader libopus DTX mode decision is not fully equivalent. | Partial |
 | LBRR/FEC | libopus LBRR setup adjusts gain increases based on previous LBRR and packet loss. | LBRR/FEC encode/decode is implemented for mono/stereo SILK-only and hybrid; gain-increase scheduling is ported in the internal SILK layer. | Mostly supported |
@@ -86,7 +86,7 @@ per-bit improvement or an interoperability necessity.
 |---|---|---|
 | Music/auto predictive entry | `SignalMusic` blocks SILK/hybrid. | Compare music and mixed corpus at 16/24/32/48/64 kbps; require `gap_snr_matched_db` and `ratio_bytes_matched` to improve. |
 | SILK-only upper bound | 40 kbps mono / 48 kbps stereo, plus FEC extension. | Speech/noisy/onset corpus at 32/48/64 kbps, with and without loss. |
-| Hybrid lower/upper bounds | Above SILK-only, up to 112 kbps mono / 192 kbps stereo. | 24/48 kHz speech and mixed corpus; reject cells with encode-size errors until rate allocation is fixed. |
+| Hybrid lower/upper bounds | Above SILK-only, up to 112 kbps mono / 192 kbps stereo. | 24/48 kHz speech and mixed corpus; D-2 Iteration 0 removed the baseline encode-size errors, so future bound changes can be judged on gap and byte deltas. |
 | Automatic bandwidth narrowing | Coarse Go thresholds plus FFT narrowing. | Compare forced bandwidth vs auto cells; track first TOC config and matched SNR. |
 | Stereo width policy | No libopus-equivalent top-level width reduction. | Stereo speech and mixed corpus; track L/R SNR, correlation, clipping, and bytes. |
 

@@ -96,3 +96,34 @@ though the worst cells sit near 1.0. Cells with a ratio far from 1.0 mean the
 matched-bitrate search could not bring libopus close to our byte count
 (mostly loss>0 cells with different FEC overhead); ignore their gap values
 when judging policy changes.
+
+## D-2 Iteration 0 (2026-07-15)
+
+Branch `codex/d2-hybrid-target-clamp` fixes the baseline hybrid CVBR
+encode-size failure. Non-redundant VBR/CVBR hybrid frames now emit the actual
+range-coder size when final flush exceeds the adaptive target by a few bytes,
+instead of returning `hybrid frame ... exceeds target`.
+
+Full local run:
+
+```powershell
+$env:OPUS_REAL_CORPUS = "1"
+$env:OPUS_REAL_CORPUS_OUT = "testdata/real_corpus_scoreboard_d2_iter0.csv"
+go test -count=1 -tags opusref -run TestOpusRealCorpusMatchedBitrateScoreboard -v .
+```
+
+Result: 140/140 cells `status=ok`. The two baseline failed bitrate cells now
+expand to their four packet-loss rows each, so the total row count increases
+from 134 to 140.
+
+`gap_snr_matched_db` by class:
+
+| class | n | avg | min | max |
+|---|---:|---:|---:|---:|
+| clean_speech | 20 | +0.08 | 0.00 | +1.50 |
+| noisy_speech | 20 | -0.21 | -1.41 | +0.28 |
+| stereo_speech | 20 | +0.02 | -0.00 | +0.42 |
+| onset_plosive | 20 | -0.05 | -2.11 | +3.50 |
+| source | 20 | -0.13 | -1.43 | +1.30 |
+| mixed | 20 | -1.72 | -11.72 | +5.64 |
+| music | 20 | -1.67 | -9.26 | +9.69 |

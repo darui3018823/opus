@@ -228,7 +228,10 @@ selection; if the analysed signal narrows below SWB, the encoder falls back to a
 CELT-only packet using that narrower bandwidth. Explicit forced bandwidths still
 take precedence over max-bandwidth caps. Hybrid is currently limited to 20 ms
 Opus frames, optionally packed as standard multi-frame packets for longer public
-frame sizes.
+frame sizes. For non-redundant VBR/CVBR hybrid frames, the adaptive target is a
+rate-control hint: if final range-coder flush needs a few extra bytes, the
+encoder emits the actual frame size rather than failing the encode, and the
+decoder derives the matching CELT budget from the packet length.
 
 The mode policy has an upper hybrid boundary as well as the SILK-to-hybrid
 boundary. Mono hybrid is selected through 112 kbps and stereo through 192 kbps;

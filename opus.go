@@ -861,7 +861,16 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy,
 		enc.Flush()
 		frame := enc.Bytes()
 		if len(frame) > targetBytes {
-			return nil, false, fmt.Errorf("hybrid frame %d exceeds target: %d > %d bytes", k, len(frame), targetBytes)
+			if cbr || frameRedundancy {
+				return nil, false, fmt.Errorf("hybrid frame %d exceeds target: %d > %d bytes", k, len(frame), targetBytes)
+			}
+			// In CVBR/VBR the adaptive target is a rate-control hint, not a hard
+			// packet validity limit. The range coder can need a few extra flush
+			// bytes after the CELT high band; emit the real frame size so the
+			// decoder derives the same CELT budget from the packet length instead
+			// of failing the encode.
+			targetBytes = len(frame)
+			frameBytes = targetBytes
 		}
 		if len(frame) < targetBytes {
 			padded := make([]byte, targetBytes)

@@ -118,7 +118,13 @@
   argument-mode byte/final-range identity, unconsumed-tail continuity,
   forced-mono propagation, aggregate encoder propagation/rate allocation, and
   libopus 1.6.1 SET/GET plus packet-duration parity for all fixed choices.
-- Validation: focused pure-Go and `opusref` suites passed on 2026-07-16; final
-  full-suite gates are recorded in the Phase 1 closeout commit.
+- Validation: `go vet ./...`, `go test -count=1 ./...`, and
+  `go test -count=1 -tags opusref ./...` all passed on 2026-07-16.
 - Decision: adopted. Argument mode preserves existing packet bytes and final
   range; fixed mode is reachable only through the new public control.
+
+## Phase 1 closeout
+
+Required iterations 1-1 through 1-5 are complete and all three repository
+gates pass. Optional iteration 1-6 (multiplexed Ogg demux and custom projection
+encoder matrices) remains out of scope by default pending explicit approval.

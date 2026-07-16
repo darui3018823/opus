@@ -161,3 +161,23 @@ Median comparison:
 
 The change is confined to SILK encoder speculative state rollback, so CELT-only
 and decode workloads are outside the expected effect surface.
+
+## Phase 3-3 Comparison: Noise-Shape Scratch Reuse
+
+Change: `analyzeNoiseShapeFLP` now reuses per-subframe scratch slices within
+one analysis call for windowing, autocorrelation, Schur reflection
+coefficients, and AR coefficients.
+
+The parent commit `aef1481` was measured in a detached temporary worktree with
+the same command used for the new result:
+
+```text
+go test -run '^$' -bench '^BenchmarkPerf/encode/(silk|hybrid)/stereo/48k/20ms$' -benchtime=1s -count=5 -benchmem .
+```
+
+Median comparison against parent `aef1481`:
+
+| Benchmark | Parent ns/op | New ns/op | Time | Parent B/op | New B/op | Allocation |
+|---|---:|---:|---:|---:|---:|---:|
+| `BenchmarkPerf/encode/silk/stereo/48k/20ms-16` | 21135259 | 20171730 | -4.6% | 4766144 | 3156567 | -33.8% |
+| `BenchmarkPerf/encode/hybrid/stereo/48k/20ms-16` | 13511848 | 13134365 | -2.8% | 2978435 | 2262515 | -24.1% |

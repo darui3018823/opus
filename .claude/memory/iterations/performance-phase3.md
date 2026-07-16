@@ -103,3 +103,58 @@ the targeted final-range, quality, and opusref interoperability guards.
 Follow-up candidate: a separate iteration can hoist `analyzeNoiseShapeFLP`
 per-subframe scratch buffers. Profiles still show that function as a major
 allocation hotspot after this change.
+
+## Iteration 3: reuse noise-shape per-subframe scratch buffers (Qualified)
+
+### Implemented locally
+
+- Moved `analyzeNoiseShapeFLP` scratch slices for `windowed`, `windowIn`,
+  `autoCorr`, `rc`, and `ar` outside the subframe loop.
+- Kept the arithmetic path and operation order unchanged; the loop still fully
+  rewrites the scratch regions used by the autocorrelation, Schur, and K2A
+  steps before each use.
+- Left deeper `silkWarpedAutocorrelationFLP` scratch reuse as a separate
+  possible iteration.
+
+### Measurement
+
+To avoid comparing different machine-load windows, the parent commit
+`aef1481` was benchmarked in a detached temporary worktree with the same command
+used on this iteration:
+
+```text
+go test -run '^$' -bench '^BenchmarkPerf/encode/(silk|hybrid)/stereo/48k/20ms$' -benchtime=1s -count=5 -benchmem .
+```
+
+Median comparison against parent `aef1481`:
+
+| Benchmark | Parent ns/op | New ns/op | Time | Parent B/op | New B/op | Allocation |
+|---|---:|---:|---:|---:|---:|---:|
+| `encode/silk/stereo/48k/20ms` | 21135259 | 20171730 | -4.6% | 4766144 | 3156567 | -33.8% |
+| `encode/hybrid/stereo/48k/20ms` | 13511848 | 13134365 | -2.8% | 2978435 | 2262515 | -24.1% |
+
+The shorter all-workload Phase 3 benchmark also showed large allocation
+reductions on the same encode workloads, but the 1s parent-worktree comparison
+above is the qualification comparison for this iteration.
+
+### Qualification observations
+
+Targeted tests passed:
+
+```text
+go test -count=1 ./internal/silk -run "TestTrellisNSQVoicedRoundTrip|TestHomebrewToTrellisNSQStateHandoff|TestNSQScaleBoundaryXQUsesFullGainPrecision|TestSILKInternalQualityBaseline" -v
+```
+
+Standard gates passed:
+
+```text
+go vet ./...
+go test -count=1 ./...
+go test -count=1 -tags opusref ./...
+```
+
+### Decision
+
+Adopted. The iteration meets the Phase 3 threshold through a clear allocation
+reduction in SILK and hybrid stereo encode workloads without measured time
+regression in the same-condition parent comparison.

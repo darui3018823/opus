@@ -303,6 +303,11 @@ speculative rate-control state restoration while keeping snapshots immutable,
 reducing the measured SILK stereo encode baseline from 20.14 ms to 18.47 ms
 and hybrid stereo encode allocation from 3.23 MB to 2.96 MB on the local
 Windows amd64 machine.
+The next allocation pass hoists per-subframe noise-shape scratch buffers inside
+`analyzeNoiseShapeFLP`; measured against the previous optimization under the
+same 1s benchmark command, it reduces SILK stereo encode allocation from
+4.77 MB to 3.16 MB and hybrid stereo encode allocation from 2.98 MB to
+2.26 MB.
 
 ### Phase 2: Production CELT Encoder (In Progress)
 
@@ -962,6 +967,13 @@ targeted SILK/hybrid state, quality, final-range, and opusref tests plus
 `go test -count=1 -tags opusref ./...`. The measured 48 kHz / 20 ms public
 benchmarks improved the SILK mono/stereo encode medians by approximately 8%
 and reduced hybrid stereo encode allocation by approximately 8%.
+
+Phase 3-3 noise-shape scratch reuse verification on 2026-07-17: passing
+targeted SILK trellis/quality tests plus `go vet ./...`,
+`go test -count=1 ./...`, and `go test -count=1 -tags opusref ./...`.
+The same-condition parent-worktree benchmark reduced SILK stereo encode
+allocation by approximately 34% and hybrid stereo encode allocation by
+approximately 24%.
 
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.

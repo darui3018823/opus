@@ -1,13 +1,10 @@
 package opus
 
 import (
-	"encoding/hex"
 	"fmt"
 	"math"
-	"os"
 	"slices"
 	"testing"
-	"time"
 )
 
 const (
@@ -30,16 +27,21 @@ func FuzzDecoderSequence(f *testing.F) {
 	f.Add([]byte{4, 1, 0, 0xff, 0x07, 0xfc, 0, 1, 2, 3, 4})
 
 	// Seed realistic SILK/FEC state transitions from the Pure Go encoder.
-	if seed, err := makeDecoderFECSequenceSeed(); err == nil {
-		f.Add(seed)
+	seed, err := makeDecoderFECSequenceSeed()
+	if err != nil {
+		f.Fatal(err)
 	}
+	f.Add(seed)
+	seed, err = makeDecoderHybridSequenceSeed()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(seed)
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if len(data) < 2 || len(data) > maxDecoderSequenceInput {
 			return
 		}
-		stopSlowTrace := decoderSequenceTraceSlowInput(data)
-		defer stopSlowTrace()
 		rates := [...]int{8000, 12000, 16000, 24000, 48000}
 		rate := rates[int(data[0])%len(rates)]
 		channels := 1 + int(data[1]&1)
@@ -53,25 +55,6 @@ func FuzzDecoderSequence(f *testing.F) {
 		}
 		decoderSequenceReplay(t, data[2:], rate, channels, a, b)
 	})
-}
-
-func decoderSequenceTraceSlowInput(data []byte) func() {
-	path := os.Getenv("OPUS_FUZZ_TRACE_SLOW")
-	if path == "" {
-		return func() {}
-	}
-	done := make(chan struct{})
-	data = slices.Clone(data)
-	go func() {
-		timer := time.NewTimer(250 * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case <-done:
-		case <-timer.C:
-			_ = os.WriteFile(path, []byte(hex.EncodeToString(data)), 0o600)
-		}
-	}()
-	return func() { close(done) }
 }
 
 func decoderSequenceReplay(t *testing.T, data []byte, rate, channels int, a, b *Decoder) {
@@ -259,6 +242,13 @@ func makeDecoderFECSequenceSeed() ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
+		mode, modeErr := PacketGetMode(packets[packet])
+		if modeErr != nil || mode != ModeSILKOnly {
+			return nil, fmt.Errorf("SILK seed packet %d mode=%d: %w", packet, mode, modeErr)
+		}
+	}
+	if hasLBRR, lbrrErr := PacketHasLBRR(packets[5]); lbrrErr != nil || !hasLBRR {
+		return nil, fmt.Errorf("SILK seed packet hasLBRR=%v: %w", hasLBRR, lbrrErr)
 	}
 	operations := make([][]byte, 0, 9)
 	for i := 0; i < 4; i++ {
@@ -266,4 +256,45 @@ func makeDecoderFECSequenceSeed() ([]byte, error) {
 	}
 	operations = append(operations, decoderSequencePacketOp(1, packets[5]), decoderSequencePacketOp(0, packets[5]), []byte{2, 3}, []byte{3}, []byte{2, 3})
 	return decoderSequenceSeed(2, 0, operations...), nil
+}
+
+func makeDecoderHybridSequenceSeed() ([]byte, error) {
+	const (
+		rate      = 48000
+		frameSize = 960
+	)
+	enc, err := NewEncoder(rate, 1, ApplicationVOIP)
+	if err != nil {
+		return nil, err
+	}
+	if err := enc.SetBitrate(64000); err != nil {
+		return nil, err
+	}
+	packets := make([][]byte, 2)
+	for packet := range packets {
+		pcm := make([]float64, frameSize)
+		for i := range pcm {
+			t := float64(packet*frameSize+i) / rate
+			env := 0.42 + 0.18*math.Sin(2*math.Pi*2.7*t+0.3)
+			pcm[i] = env*(0.34*math.Sin(2*math.Pi*175*t)+
+				0.13*math.Sin(2*math.Pi*350*t+0.4)+
+				0.07*math.Sin(2*math.Pi*700*t+0.8)) +
+				0.045*math.Sin(2*math.Pi*16000*t+0.11)
+		}
+		packets[packet], err = enc.EncodeFloat(pcm, frameSize)
+		if err != nil {
+			return nil, err
+		}
+		mode, modeErr := PacketGetMode(packets[packet])
+		if modeErr != nil || mode != ModeHybrid {
+			return nil, fmt.Errorf("hybrid seed packet %d mode=%d: %w", packet, mode, modeErr)
+		}
+	}
+	return decoderSequenceSeed(4, 0,
+		decoderSequencePacketOp(0, packets[0]),
+		[]byte{2, 8},
+		decoderSequencePacketOp(0, packets[1]),
+		[]byte{3},
+		decoderSequencePacketOp(0, packets[0]),
+	), nil
 }

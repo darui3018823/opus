@@ -73,6 +73,14 @@ go test -run='^$' -fuzz='^FuzzDecoderSequence$' -fuzztime=30m -fuzzminimizetime=
 PASS: 1,036,678 executions, 1,565 new interesting inputs, zero crashes
 ```
 
+Post-adoption gates passed:
+
+```text
+go vet ./...
+go test -count=1 ./...
+go test -count=1 -tags opusref ./...
+```
+
 ### Follow-up candidates
 
 1. Add more valid transition seeds for CELT/SILK/hybrid mode and bandwidth

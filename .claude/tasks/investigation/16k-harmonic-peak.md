@@ -1,5 +1,9 @@
 # Codex タスク: 16k speech-harmonic の peak オーバーシュート / SNR 負けを詰める
 
+> **Status: completed on 2026-06-25.** The low-F0 first-frame pitch issue was
+> addressed by `88875e6`. This investigation is historical; do not execute it
+> as a current task.
+
 ## ゴール
 SILK encoder AB スコアボードで**唯一残った libopus への負け** =
 16k `speech-like-harmonic` の `gap_SNR_matched=+1.16dB` を解消（理想は ≤0、

@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-07-16
+Last reviewed: 2026-07-17
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -493,9 +493,9 @@ Current encoder limitations:
   limited low-bitrate SILK-only path, including stereo and 24/48 kHz input
   downsampled to WB SILK, and the initial high-bitrate 24/48 kHz hybrid voice
   path.
-- VBR/CVBR affects CELT target sizing and packet sizes, but the rate controller
-  is still a simplified CELT-only implementation rather than libopus-equivalent
-  full mode/rate control.
+- VBR/CVBR affects CELT target sizing and non-redundant hybrid packet sizing,
+  but broader SILK/hybrid rate control remains simplified rather than
+  libopus-equivalent full mode/rate control.
 - Both float32 and float64 PCM encoding APIs are available.
 - The public encoder exposes limited SILK-only and hybrid speech paths; it does
   not yet expose full libopus-equivalent SILK/hybrid mode selection.
@@ -1006,8 +1006,8 @@ Notes:
 - `TestEncoderHybridSelectionBoundariesStrict` covers the initial hybrid
   selection boundary, including low-bandwidth auto fallback to CELT and forced
   bandwidth overriding a lower max-bandwidth cap.
-- The former `cmd_diag` duplicate-`main` build failure is fixed (`toc_check.go`
-  moved to `cmd_diag/toccheck`).
+- The former `cmd_diag` duplicate-`main` build failure is fixed (the command
+  now lives at `cmd_diag/toccheck/main.go`).
 - Nightly fuzzing covers int16/float decoding, stateful decoder operation
   sequences, encoder setter/input operation sequences with adversarial PCM
   including non-finite float values, packet extensions, multistream

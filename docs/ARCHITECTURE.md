@@ -2,7 +2,7 @@
 
 > Historical design note: this document captures the initial architecture and
 > implementation plan. It is useful background, but it is not the current status
-> source. For the v1.1.1 code-derived implementation snapshot, see
+> source. For the current code-derived implementation snapshot, see
 > [`CURRENT_IMPLEMENTATION.md`](CURRENT_IMPLEMENTATION.md).
 
 ## Executive Summary

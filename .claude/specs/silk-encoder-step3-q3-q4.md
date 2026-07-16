@@ -1,5 +1,9 @@
 # SILK Encoder Quality — Step 3 (Q3+Q4) slice spec
 
+> **Status: completed on 2026-06-17.** Implemented by `623d0ec`. This is a
+> historical implementation contract; do not execute it as a current task.
+> Use `docs/CURRENT_IMPLEMENTATION.md` for current behavior.
+
 Branch `dev/silk-encoder`. Director: Claude. Implementer: Codex.
 Goal = **libopus quality-following** (NOT bit-exact; decoder is the only RFC-normative part).
 
@@ -196,4 +200,3 @@ Implement, then run (PowerShell for opusref/CGO per repo convention):
 - This is large. If you must stage it, land Q3 (shaping coefs feeding the OLD
   quantizer) and Q4 (del-dec) in one branch but you may commit in two reviewable
   commits — but both must be present before scoreboard.
-```

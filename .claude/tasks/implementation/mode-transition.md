@@ -1,5 +1,9 @@
 # タスク: Opus encoder の mode transition polish
 
+> **Status: completed on 2026-06-19.** Implemented by `b0a3522`; both
+> transition-redundancy directions are present. This is a historical task
+> brief; do not execute it as a current task.
+
 ## リポジトリ / 環境
 - repo: `github.com/darui3018823/opus` (pure-Go Opus codec, working dir = リポジトリroot)
 - branch: `dev/silk-encoder-phase4` (このブランチ上で作業)

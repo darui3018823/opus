@@ -1,5 +1,9 @@
 # Codex Task: Phase B — CTL/API parity matrix + 安い穴埋め
 
+> **Status: completed on 2026-07-15.** Initial implementation: `6ad3375`;
+> soft-clip follow-up: `f9f9420`. This brief is retained for decision history;
+> do not execute it as a current task.
+
 親プラン: `.claude/plans/post-audit-2026-07-15.md` Phase B。
 ブランチ: `codex/ctl-parity` を main (merge `7b899dd` 以降) から切ること。
 役割: Codex = 実装。判定に迷う点はこのファイルの Claude 向け質問欄に書いて止めるより、

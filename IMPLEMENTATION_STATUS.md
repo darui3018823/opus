@@ -2,7 +2,7 @@
 
 This document tracks gaps versus the Opus 1.3.1 specification, prioritizes implementation, and defines validation/compatibility work. The library must remain **Pure Go** (no cgo / external binaries).
 
-> **Status update (2026-06-24):** the **decoder** is complete for the
+> **Status update (2026-07-17):** the **decoder** is complete for the
 > current public surface and verified — it passes all 12 official RFC 8251
 > vectors (RMSE < 0.001) and matches the libopus 1.6.1 reference frame-by-frame
 > (`TestCGORef`, `-tags opusref`). The **encoder** has a CELT quality pipeline
@@ -14,21 +14,22 @@ This document tracks gaps versus the Opus 1.3.1 specification, prioritizes imple
 > operations, and single-logical-stream Ogg Opus containers are implemented.
 > It is not bit-exact with libopus.
 > The remaining work below is primarily encoder mode coverage/bit-exactness,
-> SILK/hybrid PLC, and full libopus CTL/rate-control parity. See
+> PLC/FEC quality parity, and full libopus CTL/rate-control parity. See
 > [docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md) for the
 > authoritative snapshot.
 
-## Current Coverage Snapshot
+## Coverage Snapshot
 - ✅ RFC6716 framing, TOC parsing, resampler, entropy coder.
 - ✅ **Decoder**: SILK / CELT / hybrid reconstruction; 12/12 official RFC 8251 vectors and libopus 1.6.1 parity. Official-vector automation is in-tree (`TestOfficialVectors`, `TestCGORef`).
 - ✅ **Encoder**: CELT quality pipeline with transient handling, TF analysis, allocation shaping, stereo/intensity decisions, bandwidth detection, VBR/CVBR, DTX, and multi-frame packetization, plus limited SILK-only speech encode for low-bitrate voice, initial hybrid speech encode for high-bitrate 24/48 kHz voice, and mono/stereo SILK LBRR emission. Output is standard Opus but not bit-exact with libopus.
 - ✅ **Packet and container APIs**: packet inspection, repacketizer/padding, packet extensions, multistream/surround, projection/Ambisonics, and single-logical-stream Ogg Opus reader/writer support are implemented.
-- ⚠️ Full libopus-equivalent mode/rate control, SILK/hybrid public PLC, arbitrary projection matrix generation, chained/multiplexed Ogg stream orchestration, and full multistream/surround CTL/psychoacoustic parity remain incomplete.
+- ✅ **Packet-loss handling**: public `DecodePLC` covers CELT-only, SILK-only, and hybrid streams; `DecodeFEC` recovers SILK-only/hybrid LBRR.
+- ⚠️ Full libopus-equivalent mode/rate control, PLC/FEC bit-exactness, arbitrary projection matrix generation, chained/multiplexed Ogg stream orchestration, and full multistream/surround CTL/psychoacoustic parity remain incomplete.
 
 ## Spec Gaps (prioritized)
 1. **SILK/hybrid encoder modes**: broaden the current limited SILK-only and hybrid paths toward fuller libopus mode coverage.
 2. **Encoder bit-exactness/quality parity**: close remaining gaps versus libopus encoder decisions where useful.
-3. **Packet loss concealment / FEC**: improve remaining FEC quality edge cases and add SILK/hybrid support to public `DecodePLC`.
+3. **Packet loss concealment / FEC**: improve remaining PLC/FEC quality and bit-exactness edge cases.
 4. **Multistream/Surround**: fill in remaining libopus CTL-style behavior and surround analysis parity beyond the implemented core mapping/packet support.
 5. **Container support**: seeking, chained logical streams, and multiplexed-stream demux beyond the implemented single-logical-stream Ogg Opus APIs.
 6. **Compatibility controls**: fuller CTL-style behavior for bitrate/VBR/application/signal options.
@@ -60,7 +61,7 @@ This document tracks gaps versus the Opus 1.3.1 specification, prioritizes imple
 
 ## Work Sequencing (issue/PR split)
 1. Broader SILK/hybrid encoder mode coverage.
-2. SILK/hybrid public PLC and remaining FEC quality edge cases.
+2. Remaining SILK/hybrid PLC/FEC quality and continuity edge cases.
 3. Remaining multistream/surround/Ogg parity beyond the implemented core APIs.
 4. Encoder parity/quality refinements against libopus.
 5. Robustness (fuzz + corrupted-frame cases) and documentation pass.

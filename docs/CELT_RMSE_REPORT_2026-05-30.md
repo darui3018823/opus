@@ -1,5 +1,9 @@
 # CELT RMSE confirmation report (2026-05-30)
 
+> **Historical measurement.** These RMSE values were later superseded; the
+> decoder now passes all 12 official RFC 8251 vectors. See
+> `CURRENT_IMPLEMENTATION.md` for current verification status.
+
 ## Summary
 
 Claude の指摘どおり、IMDCT 出力レイアウト修正後の `tv07`/`tv08` は大幅に改善済みだった。追加確認で、CELT 合成後の deemphasis が未適用だったため、`internal/celt/decoder.go` に libopus 相当の 1 次 IIR deemphasis を追加した。

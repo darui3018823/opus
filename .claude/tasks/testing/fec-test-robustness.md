@@ -1,5 +1,9 @@
 # Codex タスク: SILK FEC テストの位置ハック撤去（堅牢化）
 
+> **Status: completed on 2026-06-25.** Implemented by `a55d79b`; the tests now
+> gate quality assertions on parsed LBRR presence. This brief is historical;
+> do not execute it as a current task.
+
 ## ゴール
 `opus_cgo_silk_fec_test.go` の `TestCGODecodeFECMatchesLibopus` にある脆い
 位置ハードコード特別扱いを撤去し、「**実際に LBRR が積まれた subframe にだけ**

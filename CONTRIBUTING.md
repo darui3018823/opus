@@ -33,14 +33,15 @@ We appreciate code contributions! Please follow these steps:
 1. **Fork the Repository:** Fork the repository to your GitHub account.
 2. **Clone Your Fork:**
    ```bash
-   git clone https://github.com/darui3018823/opus.git
+   git clone https://github.com/YOUR_GITHUB_USERNAME/opus.git
    cd opus
+   git remote add upstream https://github.com/darui3018823/opus.git
    ```
 3. **Set Up Your Development Environment:**
-   - **Go:** Ensure you have Go 1.24 or newer installed.
+   - **Go:** Ensure you have Go 1.24.11 or newer installed.
    - **Dependencies:** Install Go modules.
      ```bash
-     go mod tidy
+     go mod download
      ```
 4. **Create a New Branch:**
    ```bash
@@ -49,9 +50,9 @@ We appreciate code contributions! Please follow these steps:
    git checkout -b fix/your-bug-fix-name
    ```
 5. **Make Your Changes:** Implement your changes, ensuring they adhere to the existing code style.
-   - **Formatting:** Use `gofmt` to format your Go code.
+   - **Formatting:** Format all Go packages.
      ```bash
-     gofmt -w .
+     go fmt ./...
      ```
    - **Vetting:**
      ```bash

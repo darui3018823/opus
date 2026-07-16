@@ -1,5 +1,10 @@
 # CELT デコーダー bit-exact 化 — 引き継ぎメモ (2026-05-30 更新)
 
+> **Historical handoff.** The unresolved state below was superseded: the
+> decoder now passes all 12 official RFC 8251 vectors. Use
+> `docs/CURRENT_IMPLEMENTATION.md` for current status; keep this file only for
+> its diagnostic history.
+
 ---
 
 ## ★ UPDATE 2026-05-30 セッション3 — resynth RMSE 調査（未解決）

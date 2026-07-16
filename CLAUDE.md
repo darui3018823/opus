@@ -35,9 +35,10 @@ Follow these rules when adding or maintaining files:
   unless the test infrastructure itself is the deliverable.
 - Use lowercase kebab-case filenames. Include `YYYY-MM-DD` in dated snapshots;
   do not add `codex_task_`, `claude_`, or similar author/tool prefixes.
-- Keep `.claude/`'s root free of Markdown files. Tool-owned files such as
-  `settings.local.json` and scheduler state remain at the root and must not be
-  moved into the document hierarchy.
+- Keep `.claude/`'s root free of Markdown files. Markdown documents under the
+  categorized directories are tracked. Tool-owned `settings.local.json` and
+  `scheduled_tasks.lock` remain untracked at the root and must not be moved
+  into the document hierarchy.
 - New or actively revised task briefs should state their objective, status or
   last-updated date, scope, acceptance criteria, and verification commands.
 - Use repository-relative links with `/` separators. When moving a document,
@@ -71,7 +72,7 @@ go test ./internal/entcode/
 go test ./internal/resampler/
 
 # Run a single test by name
-go test -run TestEncoderCreation ./...
+go test -run '^TestNewEncoder$' .
 
 # Run with coverage
 go test -cover ./...
@@ -86,7 +87,7 @@ go vet ./...
 
 This repository is primarily a library, but it also contains diagnostic command
 packages under `cmd_diag*`. The former duplicate-`main` build failure is fixed:
-`toc_check.go` now lives in its own command package `cmd_diag/toccheck`, so
+the command now lives at `cmd_diag/toccheck/main.go`, so
 `go build ./...` and `go vet ./...` are clean.
 
 ## Architecture
@@ -95,14 +96,14 @@ This is a pure Go implementation of the Opus audio codec (RFC 6716), with no
 runtime CGO dependency in the codec implementation (module:
 `github.com/darui3018823/opus`). The `internal/cgoref` package is a
 `//go:build opusref` libopus wrapper used only for golden/reference comparisons
-(a `!opusref` stub keeps the package empty for normal, CGO-free builds).
+(a `!opusref` stub keeps normal builds CGO-free).
 
 ### Layer structure
 
 ```
 opus.go / constants.go / errors.go    <- Public API (Encoder/Decoder)
 internal/opus_framing.go              <- TOC byte parsing/generation (RFC 6716 section 3.1)
-internal/celt/                        <- CELT codec work: decoder parity path plus simplified encoder
+internal/celt/                        <- CELT encoder and decoder
 internal/silk/                        <- SILK decoder/encoder work, tables, LPC/NLSF/pitch/gain helpers
 internal/dsp/                         <- FFT, MDCT/IMDCT, window functions, math utilities
 internal/entcode/                     <- Entropy range coder (encode + decode)
@@ -146,7 +147,7 @@ official-vector and `.bit`-based diagnostic tests `t.Skip` when `testdata/`
 
 #### Encoder
 
-The encoder implements the full CELT quality pipeline and limited public
+The encoder implements the current CELT quality pipeline and limited public
 SILK-only and hybrid speech paths. It emits standard RFC 6716 Opus packets that
 libopus 1.6.1 decodes correctly. It is not bit-exact with libopus and does not
 yet provide full libopus-equivalent SILK/hybrid mode selection or rate control.

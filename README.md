@@ -11,7 +11,7 @@
 A pure-Go implementation of the [Opus audio codec](https://opus-codec.org/)
 (RFC 6716 / RFC 8251) with **no runtime CGO dependency**. The **decoder** passes
 all 12 official RFC 8251 test vectors (RMSE < 0.001) and matches the libopus
-1.6.1 reference frame-by-frame. The **encoder** implements the full CELT quality
+1.6.1 reference frame-by-frame. The **encoder** implements the current CELT quality
 pipeline, plus a limited low-bitrate SILK-only speech path, and produces
 standard Opus packets that libopus decodes correctly — see [Status](#status).
 
@@ -25,7 +25,7 @@ standard Opus packets that libopus decodes correctly — see [Status](#status).
 | Area | State |
 |------|-------|
 | **Decoder** | ✅ Passes all 12 official RFC 8251 vectors (RMSE < 0.001); matches libopus 1.6.1 reference. SILK, CELT, and hybrid (SILK+CELT) modes are reconstructed, including hybrid SILK→CELT redundancy. |
-| **Encoder** | ✅ Full CELT quality pipeline (Phase 1+2), limited SILK-only speech encode for low-bitrate voice, and initial hybrid speech encode for high-bitrate 24/48 kHz voice. Emits standard Opus packets that libopus 1.6.1 decodes correctly. SNR: ~48 dB (440 Hz), ~47 dB (1 kHz), ~43 dB (stereo) at 64 kbps. **Not** bit-exact with libopus. |
+| **Encoder** | ✅ Current CELT quality pipeline (Phase 1+2), limited SILK-only speech encode for low-bitrate voice, and initial hybrid speech encode for high-bitrate 24/48 kHz voice. Emits standard Opus packets that libopus 1.6.1 decodes correctly. SNR: ~48 dB (440 Hz), ~47 dB (1 kHz), ~43 dB (stereo) at 64 kbps. **Not** bit-exact with libopus. |
 | **CGO** | None at runtime. A libopus wrapper exists only for reference tests, behind the `opusref` build tag. |
 | **CI** | `test`, `race`, `bench`, and `fuzz` workflows run on **amd64 and arm64**. |
 
@@ -38,7 +38,7 @@ authoritative, code-derived snapshot.
 go get github.com/darui3018823/opus
 ```
 
-Requires Go 1.24 or newer (see `go.mod`).
+Requires Go 1.24.11 or newer (see `go.mod`).
 
 ## Usage
 
@@ -326,7 +326,7 @@ github.com/darui3018823/opus/
 │   ├── dsp/                             # FFT, MDCT/IMDCT, windows, math
 │   ├── entcode/                         # Range encoder/decoder
 │   ├── resampler/                       # Opus-rate sample rate conversion
-│   ├── celt/                            # CELT decoder parity + simplified encoder
+│   ├── celt/                            # CELT encoder and decoder
 │   ├── silk/                            # SILK decoder/encoder, tables, helpers
 │   └── cgoref/                          # libopus reference wrapper (build tag: opusref)
 └── docs/                                # Design and status documentation
@@ -335,10 +335,10 @@ github.com/darui3018823/opus/
 **Decoding flow**: Opus packet → TOC parsed → CELT or SILK/hybrid path → range
 decoder + reconstruction → optional resample/channel adjust → PCM.
 
-**Encoding flow**: PCM → mode selection → either SILK-only speech encode
-(resampling 24/48 kHz voice input to WB SILK when selected) or optional resample
-to 48 kHz and CELT encode (MDCT, band processing, PVQ) → range coder → TOC
-prepended → Opus packet.
+**Encoding flow**: PCM → mode selection → CELT, SILK-only, or hybrid encode.
+CELT optionally resamples to 48 kHz; SILK-only may resample 24/48 kHz voice to
+WB SILK; hybrid combines a SILK low band with a CELT high band → range coder →
+TOC prepended → Opus packet.
 
 ## Building & Testing
 
@@ -387,13 +387,16 @@ target nightly and on demand.
 
 ## Continuous Integration
 
-Four GitHub Actions workflows, each running on a matrix of **amd64
+Four core GitHub Actions workflows run on a matrix of **amd64
 (`ubuntu-latest`)** and **arm64 (`ubuntu-24.04-arm`)**:
 
 - **`test.yml`** — `go vet`, `go test ./...`, and the official RFC 8251 vectors.
 - **`race.yml`** — `go test -race ./...`.
 - **`bench.yml`** — `go test -bench=. -benchmem`, uploading results as artifacts.
 - **`fuzz.yml`** — nightly + manual `go test -fuzz` per target.
+
+In addition, **`opusref.yml`** runs libopus interoperability and quality checks
+on Ubuntu, and **`claude.yml`** provides issue/PR automation.
 
 ## Documentation
 
@@ -404,7 +407,7 @@ Four GitHub Actions workflows, each running on a matrix of **amd64
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — design decisions and libopus analysis.
 - **[docs/ROADMAP.md](docs/ROADMAP.md)** — development phases and milestones.
 - **[docs/DEVELOPER.md](docs/DEVELOPER.md)** — code style, porting guidance, profiling tips.
-- **[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)** — spec gap list and compliance/test plan.
+- **[IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md)** — compliance and follow-up plan; defer to the current snapshot when it lags.
 
 ## Limitations
 

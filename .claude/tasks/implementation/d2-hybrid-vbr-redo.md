@@ -1,5 +1,9 @@
 # Codex Task: D-2 Iteration 0 REDO — hybrid VBR サイズ決定を libopus 忠実に
 
+> **Status: completed and merged.** Implemented by `ccd3e82` on 2026-07-15
+> and merged by `6ddc865`. This brief is retained as implementation rationale;
+> do not execute it as a current task.
+
 branch: `codex/d2-hybrid-target-clamp` に積む (PR #21 は draft 化済み)。
 先行 commit: `e330c8b` (spill 修正) + `99a4bc7` (cross-decode guard)。
 

@@ -4,7 +4,7 @@
 
 This document is a historical roadmap plus forward-looking task list for the
 Pure Go Opus library. For exact current behavior, prefer
-[`docs/CURRENT_IMPLEMENTATION.md`](CURRENT_IMPLEMENTATION.md); it is generated
+[`docs/CURRENT_IMPLEMENTATION.md`](CURRENT_IMPLEMENTATION.md); it is derived
 from the code state and takes precedence when this roadmap lags.
 
 ## Current Status: 2026-06-24 Snapshot
@@ -108,7 +108,7 @@ from the code state and takes precedence when this roadmap lags.
 
 > Historical detail: CELT decoder/encoder work described in this section has
 > largely been implemented. Keep this section as background for how the work was
-> originally decomposed; use the v1.1.1 snapshot above and
+> originally decomposed; use the dated snapshot above and
 > `CURRENT_IMPLEMENTATION.md` for current status.
 
 ### Part 1: CELT Decoder (Weeks 3-4)

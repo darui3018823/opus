@@ -1,5 +1,10 @@
 # Codex Task: Phase 2-6 — Root-cause opusref CELT random-packet divergence
 
+> **Status: completed on branch `codex/robustness`, not merged into current
+> `main`.** Branch-local result: `db40fca` (2026-07-16). Do not treat this
+> result as current-main behavior or rerun the brief without first selecting
+> or merging that branch.
+
 Source: Phase 2-5 qualification attempt after fixing the first SILK redundancy
 finding.
 Status authority: `docs/CURRENT_IMPLEMENTATION.md`.

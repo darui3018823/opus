@@ -1,6 +1,6 @@
 # CTL and Helper Parity Matrix
 
-Last reviewed: 2026-07-15
+Last reviewed: 2026-07-17
 
 Baseline: libopus 1.6.1 public headers:
 
@@ -32,18 +32,18 @@ Status values:
 
 | libopus CTL | Status | Go API / note |
 |---|---:|---|
-| `OPUS_SET_APPLICATION` / `OPUS_GET_APPLICATION` | Supported | `SetApplication`, `Application` |
-| `OPUS_SET_BITRATE` / `OPUS_GET_BITRATE` | Supported | `SetBitrate`, `Bitrate`, `EffectiveBitrate` |
+| `OPUS_SET_APPLICATION` / `OPUS_GET_APPLICATION` | Partial | `SetApplication`, `Application`; API/state is exposed, but mode policy is narrower than libopus |
+| `OPUS_SET_BITRATE` / `OPUS_GET_BITRATE` | Partial | `SetBitrate`, `Bitrate`, `EffectiveBitrate`; accepted numeric range is 6000–510000 bit/s plus auto/max sentinels |
 | `OPUS_SET_MAX_BANDWIDTH` / `OPUS_GET_MAX_BANDWIDTH` | Supported | `SetMaxBandwidth`, `MaxBandwidth` |
 | `OPUS_SET_BANDWIDTH` / `OPUS_GET_BANDWIDTH` | Supported | `SetBandwidth`, `Bandwidth`, `GetBandwidth` |
 | `OPUS_SET_COMPLEXITY` / `OPUS_GET_COMPLEXITY` | Supported | `SetComplexity`, `Complexity` |
 | `OPUS_SET_INBAND_FEC` / `OPUS_GET_INBAND_FEC` | Supported | `SetInbandFEC`, `InbandFEC`; LBRR is SILK/hybrid only |
 | `OPUS_SET_PACKET_LOSS_PERC` / `OPUS_GET_PACKET_LOSS_PERC` | Supported | `SetPacketLossPerc`, `PacketLossPerc` |
 | `OPUS_SET_DTX` / `OPUS_GET_DTX` | Supported | `SetDTX`, `DTX` |
-| `OPUS_SET_VBR` / `OPUS_GET_VBR` | Supported | `SetVBR`, `VBR` |
-| `OPUS_SET_VBR_CONSTRAINT` / `OPUS_GET_VBR_CONSTRAINT` | Supported | `SetVBRConstraint`, `VBRConstraint` |
+| `OPUS_SET_VBR` / `OPUS_GET_VBR` | Partial | `SetVBR`, `VBR`; CELT and non-redundant hybrid sizing are wired, while broader SILK/hybrid policy is narrower than libopus |
+| `OPUS_SET_VBR_CONSTRAINT` / `OPUS_GET_VBR_CONSTRAINT` | Partial | `SetVBRConstraint`, `VBRConstraint`; broader SILK/hybrid CVBR policy is narrower than libopus |
 | `OPUS_SET_FORCE_CHANNELS` / `OPUS_GET_FORCE_CHANNELS` | Supported | `SetForceChannels`, `ForceChannels` |
-| `OPUS_SET_SIGNAL` / `OPUS_GET_SIGNAL` | Supported | `SetSignalType`, `SignalType` |
+| `OPUS_SET_SIGNAL` / `OPUS_GET_SIGNAL` | Partial | `SetSignalType`, `SignalType`; API/state is exposed, but mode and quality policy is narrower than libopus |
 | `OPUS_GET_LOOKAHEAD` | Supported | `Lookahead` |
 | `OPUS_SET_LSB_DEPTH` / `OPUS_GET_LSB_DEPTH` | Supported | `SetLSBDepth`, `LSBDepth` |
 | `OPUS_SET_EXPERT_FRAME_DURATION` / `OPUS_GET_EXPERT_FRAME_DURATION` | Supported | `SetExpertFrameDuration`, `ExpertFrameDuration`; fixed durations treat Encode's `frameSize` as available samples and consume the selected prefix |

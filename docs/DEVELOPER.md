@@ -3,7 +3,7 @@
 ## Getting Started
 
 ### Prerequisites
-- Go 1.19 or later
+- Go 1.24.11 or later (see `go.mod`)
 - Basic understanding of digital signal processing
 - Familiarity with audio codecs (helpful but not required)
 
@@ -34,46 +34,27 @@ go test -bench=. ./internal/dsp/
 
 ```
 opus/
-├── constants.go          # Opus protocol constants
-├── errors.go             # Error definitions
-├── go.mod                # Go module file
-├── README.md             # Project overview
-│
-├── docs/                 # Documentation
-│   ├── ARCHITECTURE.md   # Architectural analysis
-│   ├── ROADMAP.md        # Implementation roadmap
-│   └── DEVELOPER.md      # This file
-│
-├── internal/             # Internal packages
-│   ├── dsp/              # Digital Signal Processing
-│   │   ├── fft.go        # Fast Fourier Transform
-│   │   ├── fft_test.go   # FFT tests
-│   │   ├── mdct.go       # Modified DCT
-│   │   ├── mdct_test.go  # MDCT tests
-│   │   ├── window.go     # Window functions
-│   │   ├── window_test.go
-│   │   ├── math.go       # Math utilities
-│   │   └── math_test.go
-│   │
-│   ├── entcode/          # Entropy Coding
-│   │   ├── common.go     # Shared utilities
-│   │   ├── encoder.go    # Range encoder
-│   │   ├── decoder.go    # Range decoder
-│   │   └── entcode_test.go
-│   │
-│   ├── celt/             # CELT codec (TODO)
-│   ├── silk/             # SILK codec (TODO)
-│   └── resampler/        # Resampler (TODO)
-│
-└── testdata/             # Test data (TODO)
-    ├── vectors/          # Official test vectors
-    └── samples/          # Audio samples
+├── opus.go / constants.go / errors.go       # Single-stream public API
+├── multistream.go / surround.go             # Multistream and surround APIs
+├── projection.go / mapping_matrix.go        # Projection/Ambisonics APIs
+├── packet.go / repacketizer.go              # Packet operations
+├── oggopus/                                  # Ogg and Ogg Opus APIs
+├── internal/
+│   ├── celt/ / silk/                         # Codec implementations
+│   ├── dsp/ / entcode/ / resampler/         # Shared codec machinery
+│   ├── extensions/                           # Packet-extension internals
+│   └── cgoref/                               # Optional libopus oracle
+├── docs/
+│   └── CURRENT_IMPLEMENTATION.md             # Authoritative status snapshot
+└── scripts/                                  # Generation and diagnostic helpers
 ```
+
+See `CURRENT_IMPLEMENTATION.md` for the complete current API and package map.
 
 ## Code Style
 
 ### General Guidelines
-- Follow standard Go conventions (`gofmt`, `golint`)
+- Follow standard Go conventions (`gofmt`, `go vet`)
 - Keep functions focused and small
 - Document all exported types and functions
 - Add inline comments for complex algorithms
@@ -92,8 +73,9 @@ opus/
 // 2. Pre-rotation and folding
 // 3. Perform FFT
 // 4. Post-rotation to get MDCT coefficients
-func (m *MDCT) Forward(input []float64) []float64 {
-    // Implementation...
+func (m *MDCT) Forward(input []float64) ([]float64, error) {
+    // Implementation validates the input length and returns an error when invalid.
+    return nil, nil
 }
 ```
 
@@ -110,9 +92,20 @@ Every major function should have tests:
 ```go
 func TestFFTRoundtrip(t *testing.T) {
     input := generateTestSignal()
-    fft := FFT(input)
-    ifft := IFFT(fft)
-    assertAlmostEqual(t, input, ifft, 1e-6)
+    spectrum, err := FFT(input)
+    if err != nil {
+        t.Fatal(err)
+    }
+    roundTrip, err := IFFT(spectrum)
+    if err != nil {
+        t.Fatal(err)
+    }
+    for i := range input {
+        if math.Abs(input[i].Real-roundTrip[i].Real) > 1e-6 ||
+            math.Abs(input[i].Imag-roundTrip[i].Imag) > 1e-6 {
+            t.Fatalf("sample %d differs: got=%v want=%v", i, roundTrip[i], input[i])
+        }
+    }
 }
 ```
 
@@ -188,11 +181,15 @@ void compute_mdct_forward(const float *x, float *X, int N) {
 }
 ```
 
-**Go code (this project)**:
+**Illustrative Go shape** (the production implementation uses an optimized
+FFT-backed path):
 ```go
 // Forward computes the MDCT of the input signal.
-func (m *MDCT) Forward(input []float64) []float64 {
+func (m *MDCT) Forward(input []float64) ([]float64, error) {
     n := m.size
+    if len(input) != 2*n {
+        return nil, errors.New("MDCT input must contain 2*N samples")
+    }
     output := make([]float64, n)
     
     for k := 0; k < n; k++ {
@@ -204,7 +201,7 @@ func (m *MDCT) Forward(input []float64) []float64 {
         output[k] = sum
     }
     
-    return output
+    return output, nil
 }
 ```
 
@@ -293,13 +290,12 @@ func process(input []float64, output []float64) {
 }
 ```
 
-**Inline hints**:
-```go
-// For small, frequently-called functions
-//go:inline
-func square(x float64) float64 {
-    return x * x
-}
+**Inlining**:
+Go decides inlining automatically; there is no supported `//go:inline`
+directive. Inspect compiler decisions when needed:
+
+```bash
+go test -gcflags='-m=2' ./internal/dsp
 ```
 
 ## Common Pitfalls
@@ -365,13 +361,13 @@ z := x + y  // OK
    ```bash
    go test ./...
    go test -race ./...
-   golangci-lint run
+   go vet ./...
    ```
 
 5. **Commit and push**
    ```bash
    git add .
-   git commit -m "Add polyphase resampler"
+   git commit -m "feat(resampler): add polyphase resampler"
    git push origin feature/resampler
    ```
 
@@ -395,8 +391,9 @@ z := x + y  // OK
 ## Getting Help
 
 ### Internal Documentation
+- Read `docs/CURRENT_IMPLEMENTATION.md` for authoritative implementation status
 - Read `docs/ARCHITECTURE.md` for design decisions
-- Check `docs/ROADMAP.md` for implementation status
+- Check `docs/ROADMAP.md` for historical milestones and forward-looking work
 - Look at existing tests for examples
 
 ### Code Comments

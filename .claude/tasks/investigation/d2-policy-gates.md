@@ -1,5 +1,9 @@
 # Codex Task: Phase D-2 — mode-rate-quality gate を測定駆動で 1 つずつ拡張
 
+> **Status: superseded on 2026-07-16.** The final iteration-0 fix is
+> `ccd3e82`; later gate expansion was stopped when the parent plan changed.
+> Keep this as experiment history and do not execute it as a current task.
+
 親プラン: `.claude/plans/post-audit-2026-07-15.md` Phase D。
 作業台: `docs/MODE_RATE_POLICY_DIFF.md` (D-1 差分表) + `docs/REAL_CORPUS_SCOREBOARD.md` (baseline)。
 前提 main: PR #20 マージ後 (merge `ff70c75` 以降)。

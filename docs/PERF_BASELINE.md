@@ -201,3 +201,22 @@ Median comparison against parent `7f0456f`:
 |---|---:|---:|---:|---:|---:|---:|
 | `BenchmarkPerf/encode/silk/stereo/48k/20ms-16` | 18640968 | 18501940 | -0.7% | 3156568 | 2776086 | -12.1% |
 | `BenchmarkPerf/encode/hybrid/stereo/48k/20ms-16` | 12137100 | 12289418 | +1.3% | 2262512 | 2093297 | -7.5% |
+
+## Phase 3-5 Comparison: Warped-Autocorrelation Stack Scratch
+
+Change: `silkWarpedAutocorrelationFLP` now uses fixed local arrays for its
+small state and accumulator scratch instead of allocating slices per call.
+
+The parent commit `bbd2cb7` was measured in a detached temporary worktree with
+the same command used for the new result:
+
+```text
+go test -run '^$' -bench '^BenchmarkPerf/encode/(silk|hybrid)/stereo/48k/20ms$' -benchtime=1s -count=5 -benchmem .
+```
+
+Median comparison against parent `bbd2cb7`:
+
+| Benchmark | Parent ns/op | New ns/op | Time | Parent B/op | New B/op | Alloc count |
+|---|---:|---:|---:|---:|---:|---:|
+| `BenchmarkPerf/encode/silk/stereo/48k/20ms-16` | 18943641 | 18238496 | -3.7% | 2776087 | 2639102 | -7.6% |
+| `BenchmarkPerf/encode/hybrid/stereo/48k/20ms-16` | 11984445 | 11935686 | -0.4% | 2093298 | 2032371 | -4.2% |

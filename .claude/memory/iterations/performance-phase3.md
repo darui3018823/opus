@@ -206,3 +206,50 @@ go test -count=1 -tags opusref ./...
 Adopted. The iteration meets the Phase 3 threshold through allocation reduction
 in both measured stereo encode workloads, with time effectively neutral in the
 same-condition parent comparison.
+
+## Iteration 5: stack-allocate warped-autocorrelation scratch (Qualified)
+
+### Implemented locally
+
+- Replaced the small per-call heap slices inside `silkWarpedAutocorrelationFLP`
+  with fixed `[silkMaxShapeLPCOrder + 1]float64` local arrays.
+- Kept the public function contract and arithmetic path unchanged; callers
+  still pass the same output slice and order.
+
+### Measurement
+
+The parent commit `bbd2cb7` was benchmarked in a detached temporary worktree
+with the same command used on this iteration:
+
+```text
+go test -run '^$' -bench '^BenchmarkPerf/encode/(silk|hybrid)/stereo/48k/20ms$' -benchtime=1s -count=5 -benchmem .
+```
+
+Median comparison against parent `bbd2cb7`:
+
+| Benchmark | Parent ns/op | New ns/op | Time | Parent B/op | New B/op | Alloc count |
+|---|---:|---:|---:|---:|---:|---:|
+| `encode/silk/stereo/48k/20ms` | 18943641 | 18238496 | -3.7% | 2776087 | 2639102 | -7.6% |
+| `encode/hybrid/stereo/48k/20ms` | 11984445 | 11935686 | -0.4% | 2093298 | 2032371 | -4.2% |
+
+### Qualification observations
+
+Targeted tests passed:
+
+```text
+go test -count=1 ./internal/silk -run "TestTrellisNSQVoicedRoundTrip|TestHomebrewToTrellisNSQStateHandoff|TestSILKInternalQualityBaseline" -v
+```
+
+Standard gates passed:
+
+```text
+go vet ./...
+go test -count=1 ./...
+go test -count=1 -tags opusref ./...
+```
+
+### Decision
+
+Adopted. The iteration is small, behavior-preserving, and removes enough SILK
+stereo allocations to pass the Phase 3 threshold by allocation count while
+keeping hybrid stereo effectively neutral.

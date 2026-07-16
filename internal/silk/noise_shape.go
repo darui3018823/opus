@@ -155,8 +155,10 @@ func silkQ15UnitFloat(x float64) float64 {
 }
 
 func silkWarpedAutocorrelationFLP(corr, input []float64, warping float64, length, order int) {
-	state := make([]float64, order+1)
-	acc := make([]float64, order+1)
+	var stateBuf [silkMaxShapeLPCOrder + 1]float64
+	var accBuf [silkMaxShapeLPCOrder + 1]float64
+	state := stateBuf[:order+1]
+	acc := accBuf[:order+1]
 	for n := 0; n < length && n < len(input); n++ {
 		tmp1 := input[n]
 		for i := 0; i < order; i += 2 {

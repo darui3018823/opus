@@ -6,6 +6,10 @@ Before making implementation or documentation claims, read
 `docs/CURRENT_IMPLEMENTATION.md`. It is the code-derived status snapshot and
 takes precedence over older roadmap or README claims when they disagree.
 
+Before working in this repository, also read `CLAUDE.md` for repository
+commands, architecture notes, and the rules for organizing and using documents
+under `.claude/`.
+
 ## Commit Messages
 
 All commits in this repository must use Conventional Commits.

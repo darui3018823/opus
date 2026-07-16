@@ -30,7 +30,8 @@ go.work.sum
 # Editor/IDE/AI
 .idea/
 .vscode/
-.claude/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
 
 # Testdata
 testdata/

@@ -2,11 +2,53 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Additional live handoff notes from Codex are kept in `.claude/Codex.md`; check that file before continuing CELT oracle/diagnostic work.
-
 For current repository status, read `docs/CURRENT_IMPLEMENTATION.md`. It is the
 code-derived snapshot and takes precedence over older roadmap or README claims
 when they disagree.
+
+## Documents under `.claude/`
+
+`.claude/` contains task briefs, plans, specifications, and historical working
+notes. These documents provide context for a specific piece of work; they are
+not the authority for the repository's current implementation status. Before
+relying on an older task or plan, compare it with `docs/CURRENT_IMPLEMENTATION.md`
+and the current code.
+
+Classify Markdown files by their primary purpose:
+
+```text
+.claude/
+├── tasks/
+│   ├── implementation/  # Bounded feature, API, or bug-fix work
+│   ├── investigation/   # Root-cause analysis, experiments, and measurements
+│   └── testing/         # Test-harness, fuzzing, and test-robustness work
+├── plans/               # Multi-phase roadmaps and sequencing decisions
+├── specs/               # Detailed design and implementation contracts
+└── memory/
+    └── audits/          # Dated audit snapshots and historical assessments
+```
+
+Follow these rules when adding or maintaining files:
+
+- Put each Markdown file in exactly one category based on its main deliverable.
+  If a task includes tests, keep it with the implementation or investigation
+  unless the test infrastructure itself is the deliverable.
+- Use lowercase kebab-case filenames. Include `YYYY-MM-DD` in dated snapshots;
+  do not add `codex_task_`, `claude_`, or similar author/tool prefixes.
+- Keep `.claude/`'s root free of Markdown files. Tool-owned files such as
+  `settings.local.json` and scheduler state remain at the root and must not be
+  moved into the document hierarchy.
+- New or actively revised task briefs should state their objective, status or
+  last-updated date, scope, acceptance criteria, and verification commands.
+- Use repository-relative links with `/` separators. When moving a document,
+  update references to it in the same change; do not leave a duplicate at the
+  old path.
+- Treat plans and audit memory as historical snapshots. Record supersession in
+  the document instead of rewriting old measurements to look current.
+- Keep completed task documents when they contain useful decisions or
+  reproducer data. Completion state belongs in the document, not in a separate
+  `archive/` folder. Delete a document only when its information is duplicated
+  elsewhere and no longer useful.
 
 ## Commands
 
@@ -79,8 +121,8 @@ internal/resampler/                   <- Opus-rate sample rate conversion
   and Ogg Opus APIs are available in their package-level files/subpackages.
 
 `DecodeFEC` extracts SILK LBRR for mono/stereo SILK-only and hybrid packets.
-`DecodePLC` is public but currently supports CELT-only streams after a
-successful CELT decode; SILK-only and hybrid PLC return `ErrUnimplemented`.
+`DecodePLC` supports CELT-only, SILK-only, and hybrid streams after a
+successful decode of the corresponding mode.
 
 ### Current implementation status
 
@@ -145,8 +187,7 @@ yet provide full libopus-equivalent SILK/hybrid mode selection or rate control.
 sine 440 Hz ≈ 48 dB · sine 1 kHz ≈ 47 dB · sine 4 kHz ≈ 39 dB · sine 1 kHz stereo ≈ 43 dB.
 
 **Known gaps:** SILK/hybrid encode is intentionally narrow and quality/rate
-control is still below libopus parity. Public PLC remains CELT-only; SILK-only
-and hybrid PLC are not implemented.
+control is still below libopus parity.
 
 ### Encoding data flow
 

@@ -1,6 +1,10 @@
 # Codex Task: Phase 2 Robustness
 
-Source: `.claude/plan_pure_go_completeness_2026-07-16.md` Phase 2.
+> **Status: completed and merged.** Phase 2-1 through 2-6 and their fixes were
+> merged into `main` by PR #22 (`60cb602`) on 2026-07-17. This brief is
+> retained as robustness-test history; do not execute it as a current task.
+
+Source: `.claude/plans/pure-go-completeness-2026-07-16.md` Phase 2.
 Status authority: `docs/CURRENT_IMPLEMENTATION.md`.
 Integration branch: `codex/robustness`, stacked on the completed
 `codex/feature-gaps` branch.

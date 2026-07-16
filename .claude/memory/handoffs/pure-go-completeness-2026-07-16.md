@@ -1,5 +1,9 @@
 # Pure Go Completeness Handoff - 2026-07-16
 
+> **Historical handoff.** The branches described below were subsequently
+> merged into `main` by PR #22 (`60cb602`) on 2026-07-17. Current status is in
+> `docs/CURRENT_IMPLEMENTATION.md` and the successor plan under `.claude/plans/`.
+
 ## Branches
 
 - `codex/d2-mode-hysteresis`: Phase 0 complete and unpushed. Iteration 2 was
@@ -100,7 +104,7 @@ Implemented and committed on `codex/robustness`:
   and one bounded seek replay per input.
 - `.github/workflows/fuzz.yml` adds `FuzzOggOpusReaderWriter` to the
   nightly/manual amd64/arm64 fuzz matrix.
-- `docs/CURRENT_IMPLEMENTATION.md` and `.claude/phase2_iteration_log.md` record
+- `docs/CURRENT_IMPLEMENTATION.md` and `.claude/memory/iterations/robustness-phase2.md` record
   the adopted coverage and qualification result.
 
 Qualification:
@@ -159,13 +163,13 @@ go test -count=1 -tags opusref ./...
 
 The next planned Phase 2-4 task is local-only `opusref` differential decoder
 fuzzing. The detailed task file is
-`.claude/codex_task_phase2_4_opusref_differential_fuzz.md`.
+`.claude/tasks/testing/opusref-differential-fuzz-phase2-4.md`.
 
 ## Operational Notes
 
 - User's standing objective for this branch is to keep moving toward a complete
   Pure Go Opus library. Treat
-  `.claude/plan_pure_go_completeness_2026-07-16.md` as the roadmap, with
+  `.claude/plans/pure-go-completeness-2026-07-16.md` as the roadmap, with
   `docs/CURRENT_IMPLEMENTATION.md` taking precedence for code-derived status.
 - The user explicitly allowed SubAgents/parallel review when useful for bounded
   subtasks.
@@ -178,11 +182,9 @@ fuzzing. The detailed task file is
 - Safety filtering flagged one delegated fuzz-reproduction attempt in Codex, but
   local Go fuzzing and tests completed normally. Keep future wording and tool
   use scoped to local authorized repository testing.
-- If explicit user approval is required while the user is away, send a Discord
-  webhook message mentioning `<@973782871963762698>` to:
-  `https://ptb.discord.com/api/webhooks/1518340045470171207/OzX8BDD0RwPYwGI2B4_vhga41dn_CMrjmXnDmVB9NnCx6GKoN7M8DmymwWPV6Uk-KUUr`
-  The user explicitly allowed recording this URL in the handoff, noting it can
-  be regenerated if leaked.
+- A notification webhook was recorded here during the original handoff. It has
+  been removed from the tracked document; any previously exposed credential
+  should be rotated before reuse.
 - The optional Phase 1-6 and v1.0 tag require explicit user approval.
 - `claude -p` was attempted once but failed due a local authentication/connector
   conflict and produced no useful result.

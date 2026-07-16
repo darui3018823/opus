@@ -1,12 +1,16 @@
 # Pure Go Opus 完成度ロードマップ (2026-07-16)
 
-前プラン: `.claude/plan_post_audit_2026-07-15.md` (A/B/C/D-1 + D-2 iter0 完了・main マージ済)。
+> **Status update (2026-07-17):** Phase 0–2 are complete and merged into
+> `main` by PR #22 (`60cb602`). Phase 3-1, the unified performance benchmark
+> harness and recorded baseline, is the next planned task.
+
+前プラン: `.claude/plans/post-audit-2026-07-15.md` (A/B/C/D-1 + D-2 iter0 完了・main マージ済)。
 本プランはその後継。**目標の再定義**: libopus の完全代替 (bit-exact / 全 CTL / 全品質 parity) は
 追わない。追うのは **「最良の Pure Go Opus ライブラリ」としての完成度** = 機能の完備・
 堅牢性・性能・リリース品質。encoder 品質の parity 追撃は凍結棚へ (根拠は下記)。
 
 体制: **Claude = 指示塔** (タスク切り出し・検分・判定・push/PR)、**Codex = 実装**。
-着手時に Claude が Phase ごとに `.claude/codex_task_<topic>.md` を切り出す。
+着手時に Claude が Phase ごとに `.claude/tasks/<type>/<topic>.md` を切り出す。
 
 ## なぜこの再定義か (根拠)
 
@@ -57,13 +61,13 @@ policy-gate 路線を正式に閉じる。
   **全クラス neutral (gap 悪化 +0.3dB 以内・bytes 比悪化なし) なら採用**。
   対象セル改善は要求しない。
 - 0-2. 採用なら iter2 を PR (D-2 最終成果)。棄却なら branch 放置。
-  いずれも `.claude/d2_iteration_log.md` に結論を書き、
+  いずれも親プランのステータスと関連 task brief に結論を書き、
   `docs/MODE_RATE_POLICY_DIFF.md` へ「D-2 は iter0(採用)/iter1(棄却)/iter2(採否) で終結、
   残差分は凍結」と明記。
 - 0-3. 候補 3-5 (SILK internal rate / stereo width / overhead 補正) は**着手せず凍結棚へ**
   (停止条件どおり)。
 
-完了条件: d2_iteration_log に終結宣言があり、docs が現状と一致している。
+完了条件: 親プランと関連 task brief に終結宣言があり、docs が現状と一致している。
 
 ## Phase 1: 機能ギャップの完備 (P1・ライブラリとしての穴埋め)
 
@@ -165,7 +169,7 @@ v1.0 タグ発行は**ユーザーの明示承認必須**。
    Phase 3 の最適化 iteration だけは harness (3-1) 完成前の着手禁止。
 2. Phase ごとに統合 branch (`codex/feature-gaps` など) + 一括 PR。main 直 push しない。
 3. 全 PR 前に PowerShell で `go test ./...` + `go test -tags opusref ./...`。
-4. Codex への指示書は Phase 着手時に `.claude/codex_task_<topic>.md` として切り出す。
+4. Codex への指示書は Phase 着手時に `.claude/tasks/<type>/<topic>.md` として切り出す。
 5. Phase 完了ごとに本ファイルのステータスへ ✅ + commit hash を追記し、
    memory (`MEMORY.md` / `project_pure_go_roadmap.md`) を更新する。
 
@@ -173,6 +177,6 @@ v1.0 タグ発行は**ユーザーの明示承認必須**。
 
 - [x] Phase 0: D-2 クローズアウト — iter2 採用・D-2 終結 (`0f17758`, 2026-07-16)
 - [x] Phase 1: 機能ギャップ (1-1〜1-5 完了、最終レビュー修正 `85eb9bb`, 2026-07-16。optional 1-6 は承認待ちのため未着手)
-- [ ] Phase 2: 堅牢性 (2-1 sequence fuzz / 2-2 ogg e2e / 2-3 encoder fuzz / 2-4 differential / 2-5 fix 集積)
+- [x] Phase 2: 堅牢性 — 2-1〜2-6 完了、PR #22 で main マージ済 (`60cb602`, 2026-07-17)
 - [ ] Phase 3: 性能 (3-1 harness → hotspot iterations)
 - [ ] Phase 4: リリース品質 (godoc / README / CI matrix / v1.0)

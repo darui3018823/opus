@@ -25,7 +25,9 @@ Classify Markdown files by their primary purpose:
 ├── plans/               # Multi-phase roadmaps and sequencing decisions
 ├── specs/               # Detailed design and implementation contracts
 └── memory/
-    └── audits/          # Dated audit snapshots and historical assessments
+    ├── audits/          # Dated audit snapshots and historical assessments
+    ├── handoffs/        # Dated cross-session handoff snapshots
+    └── iterations/      # Completed phase/iteration decision logs
 ```
 
 Follow these rules when adding or maintaining files:
@@ -44,8 +46,9 @@ Follow these rules when adding or maintaining files:
 - Use repository-relative links with `/` separators. When moving a document,
   update references to it in the same change; do not leave a duplicate at the
   old path.
-- Treat plans and audit memory as historical snapshots. Record supersession in
-  the document instead of rewriting old measurements to look current.
+- Treat superseded plans, audits, handoffs, and iteration logs as historical
+  snapshots. Record supersession in the document instead of rewriting old
+  measurements to look current.
 - Keep completed task documents when they contain useful decisions or
   reproducer data. Completion state belongs in the document, not in a separate
   `archive/` folder. Delete a document only when its information is duplicated

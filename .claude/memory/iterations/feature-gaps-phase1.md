@@ -1,5 +1,8 @@
 # Phase 1 Iteration Log
 
+> **Status: completed and merged.** These iterations reached `main` in PR #22
+> (`60cb602`) on 2026-07-17. Keep this file as a decision and verification log.
+
 ## Iteration 1: multistream and surround DecodeFEC
 
 - Branch: `codex/feature-gaps`

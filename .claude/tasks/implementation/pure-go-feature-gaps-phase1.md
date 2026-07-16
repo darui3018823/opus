@@ -1,6 +1,10 @@
 # Codex Task: Phase 1 Pure Go Feature Gaps
 
-Source: `.claude/plan_pure_go_completeness_2026-07-16.md` Phase 1.
+> **Status: completed and merged.** Required iterations 1-1 through 1-5 were
+> merged into `main` by PR #22 (`60cb602`) on 2026-07-17. This brief is
+> retained as implementation history; optional 1-6 remains out of scope.
+
+Source: `.claude/plans/pure-go-completeness-2026-07-16.md` Phase 1.
 Status authority: `docs/CURRENT_IMPLEMENTATION.md`.
 Integration branch: `codex/feature-gaps`.
 Status: complete through required iterations 1-1 to 1-5 on 2026-07-16.
@@ -24,7 +28,7 @@ For every iteration:
 - Run `go vet ./...`, `go test -count=1 ./...`, and
   `go test -count=1 -tags opusref ./...` from PowerShell.
 - Record the implementation, measurements, decision, and reason in
-  `.claude/phase1_iteration_log.md`.
+  `.claude/memory/iterations/feature-gaps-phase1.md`.
 - Use Conventional Commits and leave the branch unpushed for review.
 
 ## Feature-specific acceptance

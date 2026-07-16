@@ -1,9 +1,8 @@
 # Codex Task: Phase 2-6 — Root-cause opusref CELT random-packet divergence
 
-> **Status: completed on branch `codex/robustness`, not merged into current
-> `main`.** Branch-local result: `db40fca` (2026-07-16). Do not treat this
-> result as current-main behavior or rerun the brief without first selecting
-> or merging that branch.
+> **Status: completed and merged.** Result commit `db40fca` was merged into
+> `main` by PR #22 (`60cb602`) on 2026-07-17. The finding was reclassified as a
+> random-packet waveform-oracle overclaim; this brief is historical.
 
 Source: Phase 2-5 qualification attempt after fixing the first SILK redundancy
 finding.

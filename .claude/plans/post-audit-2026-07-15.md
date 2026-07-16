@@ -1,7 +1,8 @@
 # Post-Audit 改善マスタープラン (2026-07-15)
 
 > **2026-07-16 更新**: D-2 は iter1 棄却・iter2 (hysteresis) 測定中断の時点で
-> 路線を再定義した。後継プラン (2026-07-16) は現在の `.claude/` には未保管。
+> 路線を再定義した。後継プランは
+> `.claude/plans/pure-go-completeness-2026-07-16.md`。
 > (libopus parity 追撃を凍結し、Pure Go ライブラリとしての完成度を優先)。
 > 現在の状態は `docs/CURRENT_IMPLEMENTATION.md` を正とする。
 

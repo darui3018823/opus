@@ -1,6 +1,10 @@
 # Codex Task: Phase 2-4 — Local-only opusref differential decoder fuzzing
 
-Source: `.claude/plan_pure_go_completeness_2026-07-16.md` Phase 2.
+> **Status: completed and merged.** The structural differential oracle and its
+> follow-up regressions were merged into `main` by PR #22 (`60cb602`) on
+> 2026-07-17. This brief is retained as test-design history.
+
+Source: `.claude/plans/pure-go-completeness-2026-07-16.md` Phase 2.
 Status authority: `docs/CURRENT_IMPLEMENTATION.md`.
 Integration branch: `codex/robustness`.
 
@@ -100,7 +104,7 @@ iteration instead of masking it in the target.
 ## Deliverables
 
 - New `opusref` differential fuzz target.
-- `.claude/phase2_iteration_log.md` entry for Iteration 4 with:
+- `.claude/memory/iterations/robustness-phase2.md` entry for Iteration 4 with:
   - implementation summary
   - qualification command/result
   - any discovered divergence or explicit "zero findings"

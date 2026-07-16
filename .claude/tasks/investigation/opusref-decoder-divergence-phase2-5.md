@@ -1,5 +1,9 @@
 # Codex Task: Phase 2-5 — Root-cause opusref decoder differential finding
 
+> **Status: completed and merged.** The SILK redundancy-state fix and focused
+> regression were merged into `main` by PR #22 (`60cb602`) on 2026-07-17. The
+> later Phase 2-6 qualification is recorded in the Phase 2 iteration log.
+
 Source: Phase 2-4 local opusref differential decoder fuzzing.
 Status authority: `docs/CURRENT_IMPLEMENTATION.md`.
 Integration branch: `codex/robustness`.

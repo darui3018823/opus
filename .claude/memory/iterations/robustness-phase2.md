@@ -1,5 +1,8 @@
 # Phase 2 Iteration Log
 
+> **Status: completed and merged.** Phase 2-1 through 2-6 reached `main` in
+> PR #22 (`60cb602`) on 2026-07-17. Keep this file as a qualification log.
+
 Integration branch: `codex/robustness`.
 
 ## Iteration 1: stateful decoder sequence fuzz (Qualified)

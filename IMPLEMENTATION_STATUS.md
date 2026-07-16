@@ -11,7 +11,7 @@ This document tracks gaps versus the Opus 1.3.1 specification, prioritizes imple
 > to WB SILK. It also has an initial hybrid encode path for high-bitrate
 > 24/48 kHz voice packets and SILK-only/hybrid LBRR FEC for mono and stereo.
 > Public multistream/surround/projection APIs, packet extensions, repacketizer
-> operations, and single-logical-stream Ogg Opus containers are implemented.
+> operations, Ogg Opus chained-stream reading, and per-link seeking are implemented.
 > It is not bit-exact with libopus.
 > The remaining work below is primarily encoder mode coverage/bit-exactness,
 > PLC/FEC quality parity, and full libopus CTL/rate-control parity. See
@@ -22,16 +22,16 @@ This document tracks gaps versus the Opus 1.3.1 specification, prioritizes imple
 - ✅ RFC6716 framing, TOC parsing, resampler, entropy coder.
 - ✅ **Decoder**: SILK / CELT / hybrid reconstruction; 12/12 official RFC 8251 vectors and libopus 1.6.1 parity. Official-vector automation is in-tree (`TestOfficialVectors`, `TestCGORef`).
 - ✅ **Encoder**: CELT quality pipeline with transient handling, TF analysis, allocation shaping, stereo/intensity decisions, bandwidth detection, VBR/CVBR, DTX, and multi-frame packetization, plus limited SILK-only speech encode for low-bitrate voice, initial hybrid speech encode for high-bitrate 24/48 kHz voice, and mono/stereo SILK LBRR emission. Output is standard Opus but not bit-exact with libopus.
-- ✅ **Packet and container APIs**: packet inspection, repacketizer/padding, packet extensions, multistream/surround, projection/Ambisonics, and single-logical-stream Ogg Opus reader/writer support are implemented.
+- ✅ **Packet and container APIs**: packet inspection, repacketizer/padding, packet extensions, multistream/surround, projection/Ambisonics, Ogg Opus reader/writer support, chained-stream reading, and per-link seeking are implemented.
 - ✅ **Packet-loss handling**: public `DecodePLC` covers CELT-only, SILK-only, and hybrid streams; `DecodeFEC` recovers SILK-only/hybrid LBRR.
-- ⚠️ Full libopus-equivalent mode/rate control, PLC/FEC bit-exactness, arbitrary projection matrix generation, chained/multiplexed Ogg stream orchestration, and full multistream/surround CTL/psychoacoustic parity remain incomplete.
+- ⚠️ Full libopus-equivalent mode/rate control, PLC/FEC bit-exactness, arbitrary projection matrix generation, multiplexed Ogg stream demux, and full multistream/surround CTL/psychoacoustic parity remain incomplete.
 
 ## Spec Gaps (prioritized)
 1. **SILK/hybrid encoder modes**: broaden the current limited SILK-only and hybrid paths toward fuller libopus mode coverage.
 2. **Encoder bit-exactness/quality parity**: close remaining gaps versus libopus encoder decisions where useful.
 3. **Packet loss concealment / FEC**: improve remaining PLC/FEC quality and bit-exactness edge cases.
 4. **Multistream/Surround**: fill in remaining libopus CTL-style behavior and surround analysis parity beyond the implemented core mapping/packet support.
-5. **Container support**: seeking, chained logical streams, and multiplexed-stream demux beyond the implemented single-logical-stream Ogg Opus APIs.
+5. **Container support**: multiplexed-stream demux beyond the implemented chained-stream reader and per-link seek APIs.
 6. **Compatibility controls**: fuller CTL-style behavior for bitrate/VBR/application/signal options.
 7. **Robust malformed-input coverage**: invalid TOCs, malformed size fields, huge padding, and edge-case packet duration validation.
 

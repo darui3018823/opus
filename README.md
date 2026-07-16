@@ -201,6 +201,8 @@ func (e *Encoder) InbandFEC() bool
 func (e *Encoder) SetPacketLossPerc(perc int)            // clamped to 0–100
 func (e *Encoder) PacketLossPerc() int
 func (e *Encoder) SetPacketPadding(n int)
+func (e *Encoder) SetExpertFrameDuration(duration ExpertFrameDuration) error
+func (e *Encoder) ExpertFrameDuration() ExpertFrameDuration
 func (e *Encoder) SetForceChannels(channels int) error
 func (e *Encoder) ForceChannels() int
 func (e *Encoder) SetLSBDepth(depth int) error
@@ -258,14 +260,17 @@ func (d *Decoder) PhaseInversionDisabled() bool
 ```go
 func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, mapping []byte, application Application) (*MultistreamEncoder, error)
 func NewMultistreamDecoder(sampleRate, channels, streams, coupledStreams int, mapping []byte) (*MultistreamDecoder, error)
+func (d *MultistreamDecoder) DecodePLC(pcm []int16, frameSize int) (int, error)
+func (d *MultistreamDecoder) DecodeFEC(data []byte, pcm []int16) (int, error)
 
 func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application Application) (*SurroundEncoder, error)
 func NewSurroundDecoder(sampleRate, channels, mappingFamily int) (*SurroundDecoder, error)
 ```
 
 Multistream packets use RFC 6716 self-delimited framing and interoperate with
-libopus 1.6.1. Surround supports mapping families 0, 1 (Vorbis order, up to
-7.1), and 255.
+libopus 1.6.1, including PLC and in-band FEC decode. Surround exposes the same
+decoder methods and supports mapping families 0, 1 (Vorbis order, up to 7.1),
+and 255.
 
 ### Projection and Ambisonics
 
@@ -312,7 +317,8 @@ SILK/hybrid mode-rate-quality policy diff that gates future policy work.
 
 The `github.com/darui3018823/opus/oggopus` package provides CRC-checked Ogg
 page parsing/writing, packet continuation and lacing, `OpusHead`/`OpusTags`
-metadata, and complete single-logical-stream Ogg Opus readers and writers.
+metadata, packet timing trims, automatic chained logical-stream reading, and
+`(*Reader).SeekPCM` on seekable inputs. `Writer` writes one logical stream.
 
 ## Architecture
 
@@ -424,8 +430,8 @@ on Ubuntu, and **`claude.yml`** provides issue/PR automation.
   conceals CELT-only, SILK-only, and hybrid losses after a successful decode.
 - Projection family 3 uses the predefined libopus 1.6.1 matrices; the package
   does not currently generate arbitrary custom encoder matrices.
-- The Ogg Opus package handles one logical stream and does not provide seeking,
-  chained-stream orchestration, or multiplexed-stream demux.
+- The Ogg Opus reader handles chained logical streams and sample-accurate
+  per-link seeking, but the package does not provide multiplexed-stream demux.
 - Multistream/surround do not yet expose every libopus multistream CTL or the
   complete libopus surround energy-mask analysis.
 

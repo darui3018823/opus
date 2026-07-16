@@ -266,6 +266,51 @@ func TestMultistreamExpertFrameDuration(t *testing.T) {
 	}
 }
 
+func TestMultistreamExpertFrameDurationAllPCMInputs(t *testing.T) {
+	const (
+		rate      = 48000
+		channels  = 3
+		streams   = 2
+		available = 960
+		selected  = 480
+	)
+	tests := []struct {
+		name   string
+		encode func(*MultistreamEncoder) ([]byte, error)
+	}{
+		{"int16", func(e *MultistreamEncoder) ([]byte, error) {
+			return e.Encode(make([]int16, available*channels), available)
+		}},
+		{"int24", func(e *MultistreamEncoder) ([]byte, error) {
+			return e.Encode24(make([]int32, available*channels), available)
+		}},
+		{"float32", func(e *MultistreamEncoder) ([]byte, error) {
+			return e.EncodeFloat32(make([]float32, available*channels), available)
+		}},
+		{"float64", func(e *MultistreamEncoder) ([]byte, error) {
+			return e.EncodeFloat(make([]float64, available*channels), available)
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			enc, err := NewMultistreamEncoder(rate, channels, streams, 1, []byte{0, 1, 2}, ApplicationAudio)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := enc.SetExpertFrameDuration(ExpertFrameDuration10ms); err != nil {
+				t.Fatal(err)
+			}
+			packet, err := tc.encode(enc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, err := MultistreamPacketGetNumSamples(packet, streams, rate); err != nil || got != selected {
+				t.Fatalf("packet samples = %d, %v; want %d", got, err, selected)
+			}
+		})
+	}
+}
+
 func TestMultistreamExpertFrameDurationRejectsDivergentChildren(t *testing.T) {
 	enc, err := NewMultistreamEncoder(48000, 2, 2, 0, []byte{0, 1}, ApplicationAudio)
 	if err != nil {

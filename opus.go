@@ -3628,6 +3628,12 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 	}
 
 	rateKHz := silkConfigRateKHz(config)
+	if rateKHz != 8 && rateKHz != 12 && rateKHz != 16 {
+		return 0, fmt.Errorf("%w: invalid SILK rate %d kHz", ErrInvalidPacket, rateKHz)
+	}
+	if info.channels < 1 || info.channels > 2 {
+		return 0, fmt.Errorf("%w: invalid channel count %d", ErrInvalidPacket, info.channels)
+	}
 	ri := silkRateIdx(rateKHz)
 	ci := info.channels - 1
 	infoDec := d.silkDecoders[ri][ci]
@@ -3697,6 +3703,12 @@ func (d *Decoder) validateFECState(data []byte) error {
 		return fmt.Errorf("%w: FEC for multi-stream Opus packets", ErrUnimplemented)
 	}
 	rateKHz := silkConfigRateKHz(config)
+	if rateKHz != 8 && rateKHz != 12 && rateKHz != 16 {
+		return fmt.Errorf("%w: invalid SILK rate %d kHz", ErrInvalidPacket, rateKHz)
+	}
+	if info.channels < 1 || info.channels > 2 {
+		return fmt.Errorf("%w: invalid channel count %d", ErrInvalidPacket, info.channels)
+	}
 	infoDec := d.silkDecoders[silkRateIdx(rateKHz)][info.channels-1]
 	if infoDec == nil || infoDec.dec == nil {
 		return fmt.Errorf("%w: SILK decoder for %d kHz", ErrInvalidState, rateKHz)

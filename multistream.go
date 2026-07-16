@@ -186,41 +186,56 @@ func (e *MultistreamEncoder) selectEncodeFrameSize(frameSize int) (int, error) {
 
 // Encode encodes interleaved int16 PCM.
 func (e *MultistreamEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
+		return nil, err
+	}
 	required := frameSize * e.channels
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	selected := selectedFrameSize * e.channels
+	floatPCM := make([]float64, selected)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768
 	}
-	return e.EncodeFloat(floatPCM, frameSize)
+	return e.encodeFloatSelected(floatPCM, selectedFrameSize)
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
 func (e *MultistreamEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
+		return nil, err
+	}
 	required := frameSize * e.channels
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	selected := selectedFrameSize * e.channels
+	floatPCM := make([]float64, selected)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608
 	}
-	return e.EncodeFloat(floatPCM, frameSize)
+	return e.encodeFloatSelected(floatPCM, selectedFrameSize)
 }
 
 // EncodeFloat32 encodes interleaved float32 PCM.
 func (e *MultistreamEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
+		return nil, err
+	}
 	required := frameSize * e.channels
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	selected := selectedFrameSize * e.channels
+	floatPCM := make([]float64, selected)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i])
 	}
-	return e.EncodeFloat(floatPCM, frameSize)
+	return e.encodeFloatSelected(floatPCM, selectedFrameSize)
 }
 
 // EncodeFloat encodes interleaved float64 PCM.
@@ -233,6 +248,10 @@ func (e *MultistreamEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
+	return e.encodeFloatSelected(pcm[:selectedFrameSize*e.channels], selectedFrameSize)
+}
+
+func (e *MultistreamEncoder) encodeFloatSelected(pcm []float64, selectedFrameSize int) ([]byte, error) {
 	packets := make([][]byte, e.streams)
 	for stream, enc := range e.encoders {
 		streamChannels := enc.Channels()

@@ -92,3 +92,66 @@ go test -count=1 -tags opusref ./...
    separate commit.
 
 Decision: adopted for nightly/manual fuzz CI on amd64 and arm64.
+
+## Iteration 2: Ogg Opus Reader/Writer end-to-end fuzz (Qualified)
+
+### Implemented locally
+
+- Added `oggopus/stream_fuzz_test.go` with `FuzzOggOpusReaderWriter`.
+- The input schema builds one to three chained Ogg Opus logical streams, with
+  up to six audio packets per link and 18 packets per physical stream. Packet
+  payloads are bounded to 32 bytes and use valid Opus TOC bytes for 2.5, 5, 10,
+  and 20 ms durations in mono or stereo mapping-family 0 streams.
+- The Writer path is replayed twice and byte-compared to assert deterministic
+  output. Normal generated streams are capped at 8 KiB, with one explicit
+  96 KiB large-comment continuation lane retained for header continuation
+  coverage.
+- Each generated stream is optionally mutated once through a structured
+  corruption: byte flip, truncation, granule delta, serial change, sequence
+  change, continued/EOS header toggle, or page payload/header bit flip.
+- The Reader path is replayed twice and deep-compared for deterministic
+  accepted/rejected results. For unmutated streams, the target verifies packet
+  data, decoded duration, link index, serial, channel/pre-skip/tag metadata,
+  pre-skip discard totals, end-trim discard totals, and repeatable EOF.
+- One bounded seek replay is performed per input. The seek oracle scans from
+  the current link audio offset so chained-link seek sampling does not confuse
+  earlier logical streams with the current link.
+- Added `FuzzOggOpusReaderWriter` to the nightly/manual fuzz CI matrix for both
+  amd64 and arm64, using the existing single-worker bounded minimization setup.
+
+### Qualification observations
+
+A first short fuzz run found a harness oracle bug, not a production crash: the
+seek replay computed the current link's playable duration by scanning from the
+physical stream start. For later chained links, `findLogicalStreamEnd` could
+stop at an earlier serial and report "logical stream has no EOS page". The
+harness now passes `reader.audioOffset` to the playable-duration scan.
+
+After that fix, the target completed the required local qualification:
+
+```text
+go test -run='^$' -fuzz='^FuzzOggOpusReaderWriter$' -fuzztime=30m -fuzzminimizetime=10x -parallel=1 -timeout=31m -v ./oggopus
+
+PASS: 831,659 executions, 98 new interesting inputs, zero crashes
+```
+
+Post-adoption gates passed:
+
+```text
+go vet ./...
+go test -count=1 ./...
+go test -count=1 -tags opusref ./...
+```
+
+### Follow-up candidates
+
+1. Add a stronger seek oracle for unmutated streams that checks post-seek packet
+   discard metadata against the target sample instead of only requiring
+   deterministic success.
+2. Add a targeted seed for a continued audio packet crossing an EOS-adjacent
+   page boundary if a compact one is found.
+3. If a real Reader/Writer crash or divergence is found later, commit the
+   minimized input under `oggopus/testdata/fuzz/FuzzOggOpusReaderWriter/` and
+   fix the production root cause in a separate commit.
+
+Decision: adopted for nightly/manual fuzz CI on amd64 and arm64.

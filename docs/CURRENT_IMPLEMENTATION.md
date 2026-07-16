@@ -1010,8 +1010,9 @@ Notes:
   moved to `cmd_diag/toccheck`).
 - Nightly fuzzing covers int16/float decoding, stateful decoder operation
   sequences, packet extensions, multistream self-delimited framing,
-  repacketization/padding, and Ogg page/metadata/stream parsing on amd64 and
-  arm64.
+  repacketization/padding, Ogg page/metadata parsing, and Ogg Opus
+  Writer-to-Reader stream round trips with chaining, mutation, continuation,
+  timing, and seek coverage on amd64 and arm64.
 
 The decoder passes the full official Opus test-vector suite and the libopus
 reference comparison.

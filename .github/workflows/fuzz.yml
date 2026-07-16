@@ -36,6 +36,7 @@ jobs:
           - FuzzRepacketizer
           - FuzzDecoderSequence
           - FuzzOggParsers
+          - FuzzOggOpusReaderWriter
         arch: [amd64, arm64]
         include:
           - arch: amd64
@@ -43,6 +44,8 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
           - target: FuzzOggParsers
+            package: ./oggopus
+          - target: FuzzOggOpusReaderWriter
             package: ./oggopus
     steps:
       - uses: actions/checkout@v7

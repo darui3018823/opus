@@ -442,12 +442,18 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 }
 
 func (e *Encoder) noiseShapeAnalysisBuffer(signal []float64, laShape int) []float64 {
-	buf := make([]float64, laShape+len(signal))
+	n := laShape + len(signal)
+	if cap(e.noiseShapeBuf) < n {
+		e.noiseShapeBuf = make([]float64, n)
+	}
+	buf := e.noiseShapeBuf[:n]
 	pastStart := len(e.pitchHist) - laShape
 	if pastStart < 0 {
 		pastStart = 0
 	}
-	copy(buf[laShape-(len(e.pitchHist)-pastStart):laShape], e.pitchHist[pastStart:])
+	pastLen := len(e.pitchHist) - pastStart
+	clear(buf[:laShape-pastLen])
+	copy(buf[laShape-pastLen:laShape], e.pitchHist[pastStart:])
 	copy(buf[laShape:], signal)
 	return buf
 }

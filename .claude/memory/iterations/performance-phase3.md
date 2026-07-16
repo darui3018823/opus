@@ -158,3 +158,51 @@ go test -count=1 -tags opusref ./...
 Adopted. The iteration meets the Phase 3 threshold through a clear allocation
 reduction in SILK and hybrid stereo encode workloads without measured time
 regression in the same-condition parent comparison.
+
+## Iteration 4: reuse noise-shape analysis input buffer (Qualified)
+
+### Implemented locally
+
+- Added an internal `noiseShapeBuf` scratch slice to `internal/silk.Encoder`.
+- Changed `noiseShapeAnalysisBuffer` to reuse that scratch buffer across calls
+  when capacity permits.
+- Preserved the old zero-initialized behavior for missing pitch history by
+  clearing the lookback prefix before copying the available history.
+
+### Measurement
+
+The parent commit `7f0456f` was benchmarked in a detached temporary worktree
+with the same command used on this iteration:
+
+```text
+go test -run '^$' -bench '^BenchmarkPerf/encode/(silk|hybrid)/stereo/48k/20ms$' -benchtime=1s -count=5 -benchmem .
+```
+
+Median comparison against parent `7f0456f`:
+
+| Benchmark | Parent ns/op | New ns/op | Time | Parent B/op | New B/op | Allocation |
+|---|---:|---:|---:|---:|---:|---:|
+| `encode/silk/stereo/48k/20ms` | 18640968 | 18501940 | -0.7% | 3156568 | 2776086 | -12.1% |
+| `encode/hybrid/stereo/48k/20ms` | 12137100 | 12289418 | +1.3% | 2262512 | 2093297 | -7.5% |
+
+### Qualification observations
+
+Targeted tests passed:
+
+```text
+go test -count=1 ./internal/silk -run "TestTrellisNSQVoicedRoundTrip|TestHomebrewToTrellisNSQStateHandoff|TestSILKInternalQualityBaseline" -v
+```
+
+Standard gates passed:
+
+```text
+go vet ./...
+go test -count=1 ./...
+go test -count=1 -tags opusref ./...
+```
+
+### Decision
+
+Adopted. The iteration meets the Phase 3 threshold through allocation reduction
+in both measured stereo encode workloads, with time effectively neutral in the
+same-condition parent comparison.

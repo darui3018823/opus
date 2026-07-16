@@ -74,6 +74,7 @@ type Encoder struct {
 	hybridMode      bool
 	shapeHarmSmooth float64
 	shapeTiltSmooth float64
+	noiseShapeBuf   []float64
 	side            *Encoder // side-channel encoder for stereo packets
 	stereoState     stereoPredState
 	prevOnlyMiddle  bool // previous stereo frame omitted the side channel

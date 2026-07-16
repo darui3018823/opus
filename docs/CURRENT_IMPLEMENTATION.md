@@ -308,6 +308,10 @@ The next allocation pass hoists per-subframe noise-shape scratch buffers inside
 same 1s benchmark command, it reduces SILK stereo encode allocation from
 4.77 MB to 3.16 MB and hybrid stereo encode allocation from 2.98 MB to
 2.26 MB.
+The following pass reuses the noise-shape analysis input buffer on the SILK
+encoder, preserving the zero-filled prefix semantics for short pitch history;
+under the same 1s parent-worktree benchmark, it further reduces SILK stereo
+encode allocation to 2.78 MB and hybrid stereo encode allocation to 2.09 MB.
 
 ### Phase 2: Production CELT Encoder (In Progress)
 
@@ -974,6 +978,13 @@ targeted SILK trellis/quality tests plus `go vet ./...`,
 The same-condition parent-worktree benchmark reduced SILK stereo encode
 allocation by approximately 34% and hybrid stereo encode allocation by
 approximately 24%.
+
+Phase 3-4 noise-shape input-buffer reuse verification on 2026-07-17: passing
+targeted SILK trellis/quality tests plus `go vet ./...`,
+`go test -count=1 ./...`, and `go test -count=1 -tags opusref ./...`.
+The same-condition parent-worktree benchmark reduced SILK stereo encode
+allocation by approximately 12% and hybrid stereo encode allocation by
+approximately 8%.
 
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.

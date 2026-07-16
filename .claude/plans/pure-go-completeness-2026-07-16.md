@@ -179,5 +179,5 @@ v1.0 タグ発行は**ユーザーの明示承認必須**。
 - [x] Phase 0: D-2 クローズアウト — iter2 採用・D-2 終結 (`0f17758`, 2026-07-16)
 - [x] Phase 1: 機能ギャップ (1-1〜1-5 完了、最終レビュー修正 `85eb9bb`, 2026-07-16。optional 1-6 は承認待ちのため未着手)
 - [x] Phase 2: 堅牢性 — 2-1〜2-6 完了、PR #22 で main マージ済 (`60cb602`, 2026-07-17)
-- [ ] Phase 3: 性能 (3-1 harness, 3-2 NSQ restore, and 3-3 noise-shape scratch optimizations qualified locally)
+- [ ] Phase 3: 性能 (3-1 harness, 3-2 NSQ restore, 3-3 noise-shape scratch, and 3-4 noise-shape buffer optimizations qualified locally)
 - [ ] Phase 4: リリース品質 (godoc / README / CI matrix / v1.0)

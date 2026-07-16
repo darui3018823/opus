@@ -181,3 +181,23 @@ Median comparison against parent `aef1481`:
 |---|---:|---:|---:|---:|---:|---:|
 | `BenchmarkPerf/encode/silk/stereo/48k/20ms-16` | 21135259 | 20171730 | -4.6% | 4766144 | 3156567 | -33.8% |
 | `BenchmarkPerf/encode/hybrid/stereo/48k/20ms-16` | 13511848 | 13134365 | -2.8% | 2978435 | 2262515 | -24.1% |
+
+## Phase 3-4 Comparison: Noise-Shape Input Buffer Reuse
+
+Change: `noiseShapeAnalysisBuffer` now reuses an internal SILK encoder scratch
+buffer across analysis calls and explicitly clears the prefix that was
+previously zero-filled by `make`.
+
+The parent commit `7f0456f` was measured in a detached temporary worktree with
+the same command used for the new result:
+
+```text
+go test -run '^$' -bench '^BenchmarkPerf/encode/(silk|hybrid)/stereo/48k/20ms$' -benchtime=1s -count=5 -benchmem .
+```
+
+Median comparison against parent `7f0456f`:
+
+| Benchmark | Parent ns/op | New ns/op | Time | Parent B/op | New B/op | Allocation |
+|---|---:|---:|---:|---:|---:|---:|
+| `BenchmarkPerf/encode/silk/stereo/48k/20ms-16` | 18640968 | 18501940 | -0.7% | 3156568 | 2776086 | -12.1% |
+| `BenchmarkPerf/encode/hybrid/stereo/48k/20ms-16` | 12137100 | 12289418 | +1.3% | 2262512 | 2093297 | -7.5% |

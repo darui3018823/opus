@@ -1,10 +1,13 @@
 package opus
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math"
+	"os"
 	"slices"
 	"testing"
+	"time"
 )
 
 const (
@@ -35,6 +38,8 @@ func FuzzDecoderSequence(f *testing.F) {
 		if len(data) < 2 || len(data) > maxDecoderSequenceInput {
 			return
 		}
+		stopSlowTrace := decoderSequenceTraceSlowInput(data)
+		defer stopSlowTrace()
 		rates := [...]int{8000, 12000, 16000, 24000, 48000}
 		rate := rates[int(data[0])%len(rates)]
 		channels := 1 + int(data[1]&1)
@@ -48,6 +53,25 @@ func FuzzDecoderSequence(f *testing.F) {
 		}
 		decoderSequenceReplay(t, data[2:], rate, channels, a, b)
 	})
+}
+
+func decoderSequenceTraceSlowInput(data []byte) func() {
+	path := os.Getenv("OPUS_FUZZ_TRACE_SLOW")
+	if path == "" {
+		return func() {}
+	}
+	done := make(chan struct{})
+	data = slices.Clone(data)
+	go func() {
+		timer := time.NewTimer(250 * time.Millisecond)
+		defer timer.Stop()
+		select {
+		case <-done:
+		case <-timer.C:
+			_ = os.WriteFile(path, []byte(hex.EncodeToString(data)), 0o600)
+		}
+	}()
+	return func() { close(done) }
 }
 
 func decoderSequenceReplay(t *testing.T, data []byte, rate, channels int, a, b *Decoder) {

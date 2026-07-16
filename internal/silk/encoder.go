@@ -677,7 +677,7 @@ func (e *Encoder) restoreFrameState(st encoderFrameState) {
 	if len(st.ltpState) == len(e.ltpState) {
 		copy(e.ltpState, st.ltpState)
 	}
-	e.nsq = st.nsq.clone()
+	e.nsq.copyFrom(st.nsq)
 	e.shapeHarmSmooth = st.shapeHarmSmooth
 	e.shapeTiltSmooth = st.shapeTiltSmooth
 	e.ltpSumLogGainQ7 = st.ltpSumLogGainQ7

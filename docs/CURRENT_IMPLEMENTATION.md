@@ -298,6 +298,11 @@ and hybrid packets across mono and stereo, with `-benchmem` allocation
 reporting. The first local baseline is recorded in `docs/PERF_BASELINE.md`;
 future optimization iterations are expected to compare against it with
 benchstat-style before/after data and preserve packet/PCM behavior.
+The first SILK encoder optimization reuses NSQ history buffers during
+speculative rate-control state restoration while keeping snapshots immutable,
+reducing the measured SILK stereo encode baseline from 20.14 ms to 18.47 ms
+and hybrid stereo encode allocation from 3.23 MB to 2.96 MB on the local
+Windows amd64 machine.
 
 ### Phase 2: Production CELT Encoder (In Progress)
 
@@ -950,6 +955,13 @@ Phase 3-1 performance-harness verification on 2026-07-17: passing
 `go test -run '^$' -bench '^BenchmarkPerf/' -benchtime=200ms -count=5
 -benchmem .`, `go vet ./...`, `go test -count=1 ./...`, and
 `go test -count=1 -tags opusref ./...`).
+
+Phase 3-2 NSQ restore-buffer reuse verification on 2026-07-17: passing
+targeted SILK/hybrid state, quality, final-range, and opusref tests plus
+`go vet ./...`, `go test -count=1 ./...`, and
+`go test -count=1 -tags opusref ./...`. The measured 48 kHz / 20 ms public
+benchmarks improved the SILK mono/stereo encode medians by approximately 8%
+and reduced hybrid stereo encode allocation by approximately 8%.
 
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.

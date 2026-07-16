@@ -138,3 +138,26 @@ BenchmarkPerf/decode/hybrid/stereo/48k/20ms-16     	     646	    322342 ns/op	  
 PASS
 ok  	github.com/darui3018823/opus	69.906s
 ```
+
+## Phase 3-2 Comparison: NSQ Restore Buffer Reuse
+
+Change: `restoreFrameState` now restores saved SILK NSQ history into existing
+encoder buffers when possible, while `snapshotFrameState` remains a deep copy.
+
+Command:
+
+```text
+go test -run '^$' -bench '^BenchmarkPerf/' -benchtime=200ms -count=5 -benchmem .
+```
+
+Median comparison:
+
+| Benchmark | Baseline ns/op | New ns/op | Time | Baseline B/op | New B/op | Allocation |
+|---|---:|---:|---:|---:|---:|---:|
+| `BenchmarkPerf/encode/silk/mono/48k/20ms-16` | 5594485 | 5118559 | -8.5% | 683858 | 686536 | +0.4% |
+| `BenchmarkPerf/encode/silk/stereo/48k/20ms-16` | 20143800 | 18465131 | -8.3% | 5095172 | 4663431 | -8.4% |
+| `BenchmarkPerf/encode/hybrid/mono/48k/20ms-16` | 3544840 | 3413251 | -3.7% | 670307 | 657077 | -2.0% |
+| `BenchmarkPerf/encode/hybrid/stereo/48k/20ms-16` | 12391829 | 12004582 | -3.1% | 3226950 | 2962475 | -8.2% |
+
+The change is confined to SILK encoder speculative state rollback, so CELT-only
+and decode workloads are outside the expected effect surface.

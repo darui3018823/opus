@@ -292,6 +292,13 @@ convolution FFTs in place. On the Windows amd64 audit machine this reduced the
 to 192 KB/33 allocations for decode. `TestCoreAllocationRegression` guards the
 allocation counts after plan warm-up.
 
+Phase 3 performance work now has a unified public benchmark harness:
+`BenchmarkPerf` covers encode and decode for 48 kHz / 20 ms CELT, SILK-only,
+and hybrid packets across mono and stereo, with `-benchmem` allocation
+reporting. The first local baseline is recorded in `docs/PERF_BASELINE.md`;
+future optimization iterations are expected to compare against it with
+benchstat-style before/after data and preserve packet/PCM behavior.
+
 ### Phase 2: Production CELT Encoder (In Progress)
 
 #### Slice 2-1: VBR/CVBR Rate Control (Complete)
@@ -937,6 +944,12 @@ Phase 6 unvoiced-scope verification on 2026-06-29: passing
 "TestOpusSILKStereoABAgainstLibopusEncoder|TestOpusSILKHybridABAgainstLibopusEncoder" -v .`,
 and `go test -count=1 -tags opusref -run
 "TestCGOEncodeRefSILKFEC|TestCGOEncodeRefSILKOnly|TestCGOEncodeRefHybrid" -v .`).
+
+Phase 3-1 performance-harness verification on 2026-07-17: passing
+(`go test -run '^$' -bench '^BenchmarkPerf/' -benchtime=1x -benchmem .`,
+`go test -run '^$' -bench '^BenchmarkPerf/' -benchtime=200ms -count=5
+-benchmem .`, `go vet ./...`, `go test -count=1 ./...`, and
+`go test -count=1 -tags opusref ./...`).
 
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.

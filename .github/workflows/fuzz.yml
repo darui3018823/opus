@@ -35,6 +35,7 @@ jobs:
           - FuzzMultistreamDecode
           - FuzzRepacketizer
           - FuzzDecoderSequence
+          - FuzzEncoderSequence
           - FuzzOggParsers
           - FuzzOggOpusReaderWriter
         arch: [amd64, arm64]

@@ -1009,10 +1009,11 @@ Notes:
 - The former `cmd_diag` duplicate-`main` build failure is fixed (`toc_check.go`
   moved to `cmd_diag/toccheck`).
 - Nightly fuzzing covers int16/float decoding, stateful decoder operation
-  sequences, packet extensions, multistream self-delimited framing,
-  repacketization/padding, Ogg page/metadata parsing, and Ogg Opus
-  Writer-to-Reader stream round trips with chaining, mutation, continuation,
-  timing, and seek coverage on amd64 and arm64.
+  sequences, encoder setter/input operation sequences with adversarial PCM
+  including non-finite float values, packet extensions, multistream
+  self-delimited framing, repacketization/padding, Ogg page/metadata parsing,
+  and Ogg Opus Writer-to-Reader stream round trips with chaining, mutation,
+  continuation, timing, and seek coverage on amd64 and arm64.
 
 The decoder passes the full official Opus test-vector suite and the libopus
 reference comparison.

@@ -155,3 +155,59 @@ go test -count=1 -tags opusref ./...
    fix the production root cause in a separate commit.
 
 Decision: adopted for nightly/manual fuzz CI on amd64 and arm64.
+
+## Iteration 3: encoder adversarial-input and setter-sequence fuzz (Qualified)
+
+### Implemented locally
+
+- Added `encoder_sequence_fuzz_test.go` with `FuzzEncoderSequence`.
+- The input schema selects a valid Opus sample rate, mono/stereo channel count,
+  application, and encoder defaults profile, then runs up to 12 bounded
+  operations.
+- Operation descriptors cover all four public single-stream encode APIs
+  (`Encode`, `Encode24`, `EncodeFloat`, and `EncodeFloat32`) plus bitrate,
+  complexity, VBR/CVBR, DTX, in-band FEC, packet-loss, packet-padding,
+  force-channels, LSB-depth, expert-frame-duration, prediction-disabled,
+  phase-inversion-disabled, max/forced bandwidth, signal, application, and reset
+  controls.
+- PCM generation includes silence, full-scale integer extremes, out-of-range
+  integer values for the 24-bit API, out-of-range float values, and explicit
+  `NaN` / `+Inf` / `-Inf` values for the float APIs. Encode calls also vary
+  exact, undersized, oversized, zero-length, and invalid-frame-size input
+  buffers.
+- The target replays every operation sequence through two fresh encoders and
+  compares errors, packet bytes, and observable encoder state. Every successful
+  packet must have a valid packet duration and must decode successfully through
+  a fresh decoder without modifying destination guard samples.
+- Added `FuzzEncoderSequence` to the nightly/manual fuzz CI matrix for both
+  amd64 and arm64.
+
+### Qualification observations
+
+The target completed the required local qualification:
+
+```text
+go test -run='^$' -fuzz='^FuzzEncoderSequence$' -fuzztime=30m -fuzzminimizetime=10x -parallel=1 -timeout=31m -v .
+
+PASS: 129,078 executions, 1,514 new interesting inputs, zero crashes
+```
+
+Post-adoption gates passed:
+
+```text
+go vet ./...
+go test -count=1 ./...
+go test -count=1 -tags opusref ./...
+```
+
+### Follow-up candidates
+
+1. Add multistream/surround/projection encoder setter-sequence fuzzing after the
+   single-stream target has had some CI soak time.
+2. If throughput becomes a CI issue, split pure setter/error-path operations
+   from successful encode/decode validation rather than weakening the oracle.
+3. If a real encoder crash or invalid-success packet is found later, commit the
+   minimized input under `testdata/fuzz/FuzzEncoderSequence/` and fix the
+   production root cause in a separate commit.
+
+Decision: adopted for nightly/manual fuzz CI on amd64 and arm64.

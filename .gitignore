@@ -32,6 +32,8 @@ go.work.sum
 .vscode/
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
+.claude/webhooks.local.json
+.claude/rules/webhook-rules.md
 
 # Testdata
 testdata/

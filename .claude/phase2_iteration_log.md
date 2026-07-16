@@ -2,16 +2,18 @@
 
 Integration branch: `codex/robustness`.
 
-## Iteration 1: stateful decoder sequence fuzz (WIP)
+## Iteration 1: stateful decoder sequence fuzz (Qualified)
 
 ### Implemented locally
 
 - Added `decoder_sequence_fuzz_test.go` with `FuzzDecoderSequence`.
 - The input schema selects one of the five Opus output rates and mono/stereo,
   then executes a bounded sequence of normal decode, FEC, PLC, reset, gain, and
-  phase-inversion operations.
-- Bounds were reduced empirically to 4 KiB input, 16 operations, and 512 bytes
-  per packet. Existing stateless fuzz targets retain responsibility for larger
+  phase-inversion operations. Descriptor bytes are separated from packet payload
+  bytes so a mutated packet length cannot consume the remaining operation stream.
+- Bounds were reduced empirically to 4 KiB input, 16 operations, 512 bytes per
+  packet, and 240 ms of successful or potentially successful decode/PLC work per
+  input. Existing stateless fuzz targets retain responsibility for larger
   arbitrary packets.
 - Every sequence is replayed through two fresh decoders. The target compares
   return counts, errors, complete PCM buffers, duration, bandwidth, final range,
@@ -19,11 +21,11 @@ Integration branch: `codex/robustness`.
 - Additional invariants cover output preservation on error, destination guards
   on success, packet-duration agreement, PLC duration, constructor identity,
   control round trips, and reset state.
-- Seeds cover CELT, malformed packet interleaving, reset-before-PLC, and a
-  Pure-Go-generated SILK/LBRR loss sequence.
-- Arbitrary FEC calls were restricted to packets for which `PacketHasLBRR`
-  succeeds, because malformed arbitrary FEC payload probing appeared to be one
-  possible source of poor iteration latency. The realistic FEC seed remains.
+- Seeds cover CELT, malformed packet interleaving, reset-before-PLC, a
+  Pure-Go-generated SILK/LBRR loss sequence, and a verified hybrid sequence.
+- Arbitrary FEC calls are allowed again after adding the per-input work budget,
+  so malformed, CELT, and no-LBRR packets exercise the FEC error path while
+  realistic SILK/LBRR recovery remains covered by a deterministic seed.
 
 ### Qualification observations
 
@@ -56,20 +58,29 @@ slow in-flight candidate, under:
 C:\Users\daruks\AppData\Local\go-build\fuzz\github.com\darui3018823\opus\FuzzDecoderSequence
 ```
 
-### Next steps
+Follow-up isolation showed the 30-second stall pattern was Go fuzz minimization
+time for newly discovered coverage, not a decoder call that exceeded the target
+body watchdog. Running with `-fuzzminimizetime=10x` kept minimization bounded and
+restored continuous progress.
 
-1. Do not mark Phase 2-1 complete and do not add the target to nightly CI yet.
-2. Isolate operation latency by temporarily splitting normal Decode, FEC, and
-   PLC sequence lanes or by running each cached/generated candidate in a child
-   test process with a per-input timeout and input logging.
-3. Determine whether the slow candidate is normal Decode after a rejected
-   packet, long PLC after corrupted state, or FEC/LBRR probing.
-4. If a reproducible slow input is found, commit it under
+After splitting descriptors from payload, bounding per-input decode/PLC work,
+using rate/channel-sized PCM buffers, re-enabling arbitrary FEC error calls, and
+adding the hybrid seed, the target completed the required local qualification:
+
+```text
+go test -run='^$' -fuzz='^FuzzDecoderSequence$' -fuzztime=30m -fuzzminimizetime=10x -parallel=1 -timeout=31m -v .
+
+PASS: 1,036,678 executions, 1,565 new interesting inputs, zero crashes
+```
+
+### Follow-up candidates
+
+1. Add more valid transition seeds for CELT/SILK/hybrid mode and bandwidth
+   switching.
+2. Add a separate state-preservation oracle that compares an errored decoder
+   against a control decoder that skipped the rejected operation.
+3. If a reproducible slow input is found later, commit it under
    `testdata/fuzz/FuzzDecoderSequence/` and fix the production root cause in a
    separate commit.
-5. Restore useful sequence breadth, run the required 30-minute zero-crash
-   qualification, then update `.github/workflows/fuzz.yml`, docs, and the Phase
-   2 status.
 
-Decision: WIP, not adopted. The target is committed only as a shutdown-safe
-checkpoint.
+Decision: adopted for nightly/manual fuzz CI on amd64 and arm64.

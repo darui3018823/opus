@@ -22,6 +22,7 @@ jobs:
   fuzz:
     name: fuzz ${{ matrix.target }} (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -33,6 +34,7 @@ jobs:
           - FuzzPacketExtensions
           - FuzzMultistreamDecode
           - FuzzRepacketizer
+          - FuzzDecoderSequence
           - FuzzOggParsers
         arch: [amd64, arm64]
         include:
@@ -61,6 +63,9 @@ jobs:
           go test -run='^$' \
             -fuzz="^${{ matrix.target }}$" \
             -fuzztime="${{ github.event.inputs.fuzztime || '120s' }}" \
+            -fuzzminimizetime=10x \
+            -parallel=1 \
+            -timeout=45m \
             "${{ matrix.package || '.' }}"
 
       - name: Upload crashers on failure

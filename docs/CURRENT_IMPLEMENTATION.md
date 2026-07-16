@@ -1008,9 +1008,10 @@ Notes:
   bandwidth overriding a lower max-bandwidth cap.
 - The former `cmd_diag` duplicate-`main` build failure is fixed (`toc_check.go`
   moved to `cmd_diag/toccheck`).
-- Nightly fuzzing covers int16/float decoding, packet extensions, multistream
-  self-delimited framing, repacketization/padding, and Ogg page/metadata/stream
-  parsing on amd64 and arm64.
+- Nightly fuzzing covers int16/float decoding, stateful decoder operation
+  sequences, packet extensions, multistream self-delimited framing,
+  repacketization/padding, and Ogg page/metadata/stream parsing on amd64 and
+  arm64.
 
 The decoder passes the full official Opus test-vector suite and the libopus
 reference comparison.

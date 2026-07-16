@@ -3004,7 +3004,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		pcm = padOrTrim(pcm, samplesPerStream)
 		if si == 0 && celtToSilk && redundancyBytes >= 2 {
 			if redPCM := d.decodeLeadingRedundancy(stream[len(stream)-redundancyBytes:], pktChannels, 17); redPCM != nil &&
-				d.prevMode == framing.ModeCELTOnly {
+				d.prevMode != framing.ModeSILKOnly {
 				d.crossfadeLeadingRedundancy(pcm, redPCM)
 			}
 		}
@@ -3242,7 +3242,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 				}
 				silkOut[i] = v
 			}
-			if len(leadingRedundancy) >= (d.sampleRate/200)*d.channels && d.prevMode == framing.ModeCELTOnly {
+			if len(leadingRedundancy) >= (d.sampleRate/200)*d.channels && d.prevMode != framing.ModeSILKOnly {
 				d.crossfadeLeadingRedundancy(silkOut, leadingRedundancy)
 			}
 

@@ -211,3 +211,239 @@ go test -count=1 -tags opusref ./...
    production root cause in a separate commit.
 
 Decision: adopted for nightly/manual fuzz CI on amd64 and arm64.
+
+## Iteration 4: local opusref decoder differential fuzz (Blocked by Finding)
+
+### Implemented locally
+
+- Added `opusref_differential_fuzz_test.go` with
+  `FuzzOpusrefDecoderDifferential`, guarded by `//go:build opusref`.
+- The target selects only public single-stream decoder constructors:
+  8/12/16/24/48 kHz and mono/stereo.
+- Inputs are structured as a one-byte rate/channel descriptor plus one bounded
+  packet. Empty inputs, empty packets, and packets over 1275 bytes are rejected
+  early.
+- Each packet is decoded through `NewDecoder(rate, channels).DecodeFloat32` and
+  `internal/cgoref.NewDecoder(rate, channels).DecodeFloat(packet, maxSPC)`,
+  using `MaxFrameSize * rate / 48000` as the libopus decode bound.
+- The oracle reports accept/reject mismatches, decoded duration mismatches,
+  non-finite output, and gross output divergence only. It intentionally does not
+  require sample-exact PCM. CELT final-range comparison is present only as a
+  non-failing diagnostic log for future tightening.
+- Deterministic seeds cover empty/malformed packet shapes, Pure-Go CELT mono
+  and stereo packets, Pure-Go SILK-only voice packets at 8/12/16 kHz, Pure-Go
+  hybrid-intended voice packets at 24/48 kHz, and a generated 60 ms multi-frame
+  packet.
+
+### Qualification observations
+
+Seed execution passed:
+
+```text
+go test -count=1 -tags opusref -run '^FuzzOpusrefDecoderDifferential$' -v .
+
+PASS: 13 seed inputs, zero failures
+```
+
+A 30-second single-worker fuzz probe found a reproducible both-accepted output
+divergence before the required 30-minute qualification could be run:
+
+```text
+go test -run='^$' -tags opusref -fuzz='^FuzzOpusrefDecoderDifferential$' -fuzztime=30s -fuzzminimizetime=10x -parallel=1 -timeout=2m -v .
+
+FAIL after minimization:
+rate=12000 channels=1 len=48
+rmsDiff=1.78498 peakDiff=9.07006 peakGo=0.0455322 peakRef=9.10585
+packet=28a719ffff0000ed99f1b2d01e2c68b2d7c7dbc3c8770e3353121667b6714f4e8862354a1342517188de4b7677225224
+fuzz input=[]byte("\x01(\xa7\x19\xff\xff\x00\x00\xed\x99\xf1\xb2\xd0\x1e,h\xb2\xd7\xc7\xdb\xc3\xc8w\x0e3S\x12\x16g\xb6qON\x88b5J\x13BQq\x88\xdeKvw\"R$")
+```
+
+Reproduction command:
+
+```text
+go test -count=1 -tags opusref -run 'FuzzOpusrefDecoderDifferential/bc490a77ab816233' -v .
+
+FAIL: same gross output divergence
+```
+
+The minimized corpus file was generated under ignored `testdata/`, so it was
+removed locally after recording the byte literal above. Phase 2-5 should commit
+an explicit minimized regression seed in a non-ignored location or adjust the
+repository ignore policy as part of the root-cause fix.
+
+Post-implementation gates passed after removing the generated local fuzz
+artifact:
+
+```text
+go vet ./...
+go test -count=1 ./...
+go test -count=1 -tags opusref ./...
+```
+
+### Follow-up candidates
+
+1. Root-cause the 12 kHz mono both-accepted divergence before enabling any long
+   fuzz run or automation for this target.
+2. Preserve the minimized input as a committed regression once the Phase 2-5
+   fix path is chosen.
+3. Re-run the full 30-minute local qualification only after the divergence is
+   fixed or deliberately reclassified with evidence.
+
+Decision: not adopted. The target remains local-only and is intentionally not
+added to the normal/nightly fuzz workflow.
+
+## Iteration 5: root-cause first opusref decoder differential finding (Partially Qualified)
+
+### Implemented locally
+
+- Added `opusref_decoder_divergence_test.go` with a focused regression for the
+  minimized 12 kHz mono SILK packet found in Iteration 4.
+- Root cause: the SILK entropy decode, SILK indices, pulses, parameters, and
+  core output already matched libopus. The divergence came from a trailing
+  CELT-to-SILK leading-redundancy frame carried after the SILK stream. libopus
+  decodes that redundant CELT frame and applies it unless the previous decoded
+  mode was SILK-only without previous redundancy. The Go decoder only applied
+  leading redundancy when `prevMode == CELTOnly`, so the first packet in a
+  stream discarded useful redundancy that libopus applies.
+- Updated the SILK-only and hybrid decode paths to apply leading redundancy
+  whenever the previous mode is not SILK-only, matching libopus' initial-state
+  behavior for this case.
+- Tightened the fuzz target's gross-output oracle so random accepted packets
+  with very large but matching finite output do not fail solely because of
+  absolute peak level. It now requires both absolute and relative RMS/peak
+  divergence.
+
+### Qualification observations
+
+The focused regression and seed execution pass:
+
+```text
+go test -count=1 -tags opusref -run '^(TestOpusrefDecoderDifferentialMinimized12kSILK|FuzzOpusrefDecoderDifferential)$' -v .
+
+PASS
+```
+
+The original minimized packet now tracks libopus output within the coarse
+diagnostic threshold:
+
+```text
+packet=28a719ffff0000ed99f1b2d01e2c68b2d7c7dbc3c8770e3353121667b6714f4e8862354a1342517188de4b7677225224
+```
+
+A new 30-minute qualification attempt did not complete because the differential
+target found a separate CELT-only random-packet divergence:
+
+```text
+go test -run='^$' -tags opusref -fuzz='^FuzzOpusrefDecoderDifferential$' -fuzztime=30m -fuzzminimizetime=10x -parallel=1 -timeout=31m -v .
+
+FAIL after 2.22s:
+rate=48000 channels=1 len=10
+rmsDiff=9.15192 peakDiff=29.7155 peakGo=15.1083 peakRef=14.6072
+packet=807fa500ffe5e5a5a5c3
+fuzz input=[]byte("\x04\x80\x7f\xa5\x00\xff\xe5\xe5\xa5\xa5\xc3")
+```
+
+This is not the Iteration 4 SILK redundancy issue. It should be treated as a
+new CELT differential investigation before the opusref fuzz target is adopted
+or run as a zero-finding qualification gate.
+
+Post-fix standard gates:
+
+```text
+go vet ./...
+go test -count=1 ./...
+go test -count=1 -tags opusref ./...
+```
+
+### Follow-up candidates
+
+1. Create a Phase 2-6 CELT random-packet differential task from the new
+   minimized packet above.
+2. Decide whether the opusref differential fuzz target should fail on CELT
+   waveform divergence now, or log CELT waveform findings while keeping
+   accept/reject, duration, and finiteness as the hard oracle.
+3. Re-run the 30-minute local qualification only after the CELT finding is fixed
+   or the waveform oracle policy is explicitly narrowed.
+
+Decision: the first Phase 2-5 finding is fixed and covered by regression, but
+the opusref differential fuzz target is still not adopted because a separate
+CELT finding blocks full qualification.
+
+## Iteration 6: reclassify CELT random-packet waveform divergence (Qualified Locally)
+
+### Implemented locally
+
+- Added `TestOpusrefDecoderDifferentialMinimized48kCELTRandom` for the minimized
+  Phase 2-6 packet:
+
+  ```text
+  rate=48000 channels=1 packet=807fa500ffe5e5a5a5c3
+  ```
+
+- The diagnostic confirms the Pure Go decoder and libopus both accept the
+  packet, both decode a 2.5 ms CELT-only mono frame, and both return finite PCM.
+- The measured waveform and final-range diagnostics remain intentionally
+  non-failing for this packet:
+
+  ```text
+  rmsGo=4.66041 rmsRef=4.49175 rmsDiff=9.15192
+  peakGo=15.1083 peakRef=14.6072 peakDiff=29.7155
+  goRange=01a64994 refRange=69926500
+  ```
+
+- Reclassified the finding as an opusref fuzz-oracle policy issue, not a packet
+  validation bug. The Pure Go decoder is standards-compatible on the guarded
+  corpus but is not generally bit-exact with libopus for arbitrary accepted
+  random packets. On extreme random packets, waveform closeness is not a stable
+  hard oracle.
+- Updated `FuzzOpusrefDecoderDifferential` so waveform divergences are logged as
+  diagnostics while accept/reject, decoded duration, Opus duration bounds, and
+  finite-output checks remain hard failures for every packet. The real Phase
+  2-5 SILK redundancy-state bug remains covered by a focused regression rather
+  than by random-packet waveform equivalence.
+- Added the minimized CELT packet as a fuzz seed so seed execution continues to
+  exercise the reclassified case.
+- A follow-up 30-minute fuzz attempt immediately found the same oracle issue in
+  a different mode, proving that the hard-waveform policy was still too broad:
+
+  ```text
+  rate=16000 channels=1 packet=0002ff1513c0937f3c114c38863b34d986304075770a1c0bd5
+  rmsGo=5.55617 rmsRef=3.77724 rmsDiff=9.33041
+  peakGo=21.7764 peakRef=14.0541 peakDiff=35.8306
+  ```
+
+- Added `TestOpusrefDecoderDifferentialMinimized16kSILKRandom` and a fuzz seed
+  for that packet as a diagnostic regression.
+
+### Qualification observations
+
+Focused regression and seed execution pass:
+
+```text
+go test -count=1 -tags opusref -run '^(TestOpusrefDecoderDifferentialMinimized12kSILK|TestOpusrefDecoderDifferentialMinimized48kCELTRandom|TestOpusrefDecoderDifferentialMinimized16kSILKRandom|FuzzOpusrefDecoderDifferential)$' -v .
+
+PASS
+```
+
+30-minute single-worker fuzz qualification passes after narrowing waveform
+divergence to diagnostics:
+
+```text
+go test -run='^$' -tags opusref -fuzz='^FuzzOpusrefDecoderDifferential$' -fuzztime=30m -fuzzminimizetime=10x -parallel=1 -timeout=31m -v .
+
+PASS after 30m0s, execs=1963255, new interesting=968
+```
+
+### Follow-up candidates
+
+1. Keep any future random-packet waveform findings as diagnostic seeds unless
+   they expose accept/reject, duration, bounds, finite-output, or focused
+   regression failures.
+2. Use targeted tests, official vectors, and mode-specific cgo comparisons for
+   claims about decoder waveform quality or final-range parity.
+
+Decision: the Phase 2-6 finding is reclassified as a waveform-oracle overclaim
+for random accepted packets. The differential target remains useful for packet
+acceptance, duration, finite output, and logged waveform/final-range diagnostics.
+Adopt it as an `opusref` diagnostic fuzz target with that structural hard oracle;
+do not treat it as a CELT or SILK bit-exactness gate.

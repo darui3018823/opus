@@ -11,18 +11,25 @@ const (
 	maxDecoderSequenceInput  = 4 << 10
 	maxDecoderSequenceOps    = 16
 	maxDecoderSequencePacket = 512
+	maxDecoderSequenceWorkMS = 240
+	decoderSequenceOpWidth   = 4
 	decoderSequenceSentinel  = int16(-23457)
 )
+
+type decoderSequenceOp struct {
+	desc    [decoderSequenceOpWidth]byte
+	payload []byte
+}
 
 func FuzzDecoderSequence(f *testing.F) {
 	f.Add(decoderSequenceSeed(4, 0,
 		decoderSequencePacketOp(0, []byte{0xf8, 0xff, 0xfe}),
-		[]byte{2, 3}, []byte{4, 0, 1}, []byte{5, 1}, []byte{3}, []byte{2, 3},
+		decoderSequencePLCOp(5), decoderSequenceGainOp(0x0100), decoderSequencePhaseOp(true), decoderSequenceResetOp(), decoderSequencePLCOp(5),
 	))
 	f.Add(decoderSequenceSeed(2, 1,
 		decoderSequencePacketOp(0, []byte{0x00, 0x00}),
 		decoderSequencePacketOp(1, []byte{0x7f}),
-		[]byte{2, 8}, []byte{3},
+		decoderSequencePLCOp(6), decoderSequenceResetOp(),
 	))
 	f.Add([]byte{4, 1, 0, 0xff, 0x07, 0xfc, 0, 1, 2, 3, 4})
 
@@ -59,29 +66,42 @@ func FuzzDecoderSequence(f *testing.F) {
 
 func decoderSequenceReplay(t *testing.T, data []byte, rate, channels int, a, b *Decoder) {
 	t.Helper()
-	for operation := 0; operation < maxDecoderSequenceOps && len(data) > 0; operation++ {
-		tag := data[0] % 6
-		data = data[1:]
+	if len(data) == 0 {
+		return
+	}
+	ops := 1 + int(data[0])%maxDecoderSequenceOps
+	data = data[1:]
+	if maxOps := len(data) / decoderSequenceOpWidth; ops > maxOps {
+		ops = maxOps
+	}
+	descriptors := data[:ops*decoderSequenceOpWidth]
+	payload := data[ops*decoderSequenceOpWidth:]
+	workBudget := rate * maxDecoderSequenceWorkMS / 1000
+	workUsed := 0
+	for operation := 0; operation < ops; operation++ {
+		desc := descriptors[operation*decoderSequenceOpWidth:][:decoderSequenceOpWidth]
+		tag := desc[0] % 6
 		switch tag {
 		case 0, 1:
-			if len(data) < 2 {
+			length := (int(desc[1]) | int(desc[2])<<8) % (maxDecoderSequencePacket + 1)
+			if length > len(payload) {
 				return
 			}
-			length := (int(data[0]) | int(data[1])<<8) % (maxDecoderSequencePacket + 1)
-			data = data[2:]
-			if length > len(data) {
-				length = len(data)
+			packet := payload[:length]
+			payload = payload[length:]
+			cost := decoderSequenceCallCost(tag, packet, 0, rate)
+			if workUsed+cost > workBudget {
+				continue
 			}
-			packet := data[:length]
-			data = data[length:]
+			workUsed += cost
 			decoderSequenceCompareCall(t, tag, packet, 0, rate, channels, a, b)
 		case 2:
-			if len(data) == 0 {
-				return
+			frameSize := decoderSequencePLCFrameSize(desc[1], rate)
+			cost := decoderSequenceCallCost(tag, nil, frameSize, rate)
+			if workUsed+cost > workBudget {
+				continue
 			}
-			durations400 := [...]int{1, 2, 4, 8, 16, 24, 32, 40, 48}
-			frameSize := rate * durations400[int(data[0])%len(durations400)] / 400
-			data = data[1:]
+			workUsed += cost
 			decoderSequenceCompareCall(t, tag, nil, frameSize, rate, channels, a, b)
 		case 3:
 			errA, errB := a.Reset(), b.Reset()
@@ -92,22 +112,14 @@ func decoderSequenceReplay(t *testing.T, data []byte, rate, channels int, a, b *
 				}
 			}
 		case 4:
-			if len(data) < 2 {
-				return
-			}
-			gain := int(int16(uint16(data[0]) | uint16(data[1])<<8))
-			data = data[2:]
+			gain := int(int32(uint32(desc[1])|uint32(desc[2])<<8|uint32(desc[3])<<16) << 8 >> 8)
 			errA, errB := a.SetGain(gain), b.SetGain(gain)
 			decoderSequenceCompareError(t, errA, errB)
 			if errA == nil && (a.Gain() != gain || b.Gain() != gain) {
 				t.Fatalf("gain did not round trip: %d/%d want %d", a.Gain(), b.Gain(), gain)
 			}
 		case 5:
-			if len(data) == 0 {
-				return
-			}
-			disabled := data[0]&1 != 0
-			data = data[1:]
+			disabled := desc[1]&1 != 0
 			a.SetPhaseInversionDisabled(disabled)
 			b.SetPhaseInversionDisabled(disabled)
 			if a.PhaseInversionDisabled() != disabled || b.PhaseInversionDisabled() != disabled {
@@ -120,13 +132,8 @@ func decoderSequenceReplay(t *testing.T, data []byte, rate, channels int, a, b *
 
 func decoderSequenceCompareCall(t *testing.T, tag byte, packet []byte, frameSize, rate, channels int, a, b *Decoder) {
 	t.Helper()
-	if tag == 1 {
-		hasLBRR, err := PacketHasLBRR(packet)
-		if err != nil || !hasLBRR {
-			return
-		}
-	}
-	pcmA := make([]int16, MaxFrameSize*2+8)
+	pcmLen := decoderSequencePCMLen(tag, packet, frameSize, rate, channels)
+	pcmA := make([]int16, pcmLen)
 	pcmB := make([]int16, len(pcmA))
 	for i := range pcmA {
 		pcmA[i], pcmB[i] = decoderSequenceSentinel, decoderSequenceSentinel
@@ -199,22 +206,92 @@ func decoderSequenceCompareState(t *testing.T, rate, channels int, a, b *Decoder
 
 func decoderSequenceCompareError(t *testing.T, a, b error) {
 	t.Helper()
-	if fmt.Sprint(a) != fmt.Sprint(b) {
+	if (a == nil) != (b == nil) {
+		t.Fatalf("errors differ: %v / %v", a, b)
+	}
+	if a != nil && a.Error() != b.Error() {
 		t.Fatalf("errors differ: %v / %v", a, b)
 	}
 }
 
-func decoderSequenceSeed(rateSelector, channelSelector byte, operations ...[]byte) []byte {
-	out := []byte{rateSelector, channelSelector}
+func decoderSequenceCallCost(tag byte, packet []byte, frameSize, rate int) int {
+	minCost := rate / 400
+	switch tag {
+	case 0, 1:
+		if samples, err := PacketGetNumSamples(packet, rate); err == nil && samples > 0 {
+			return samples
+		}
+	case 2:
+		if frameSize > 0 {
+			maxFrameSize := MaxFrameSize * rate / 48000
+			if frameSize <= maxFrameSize {
+				return frameSize
+			}
+			return maxFrameSize
+		}
+	}
+	return minCost
+}
+
+func decoderSequencePCMLen(tag byte, packet []byte, frameSize, rate, channels int) int {
+	samplesPerChannel := MaxFrameSize * rate / 48000
+	switch tag {
+	case 0, 1:
+		if samples, err := PacketGetNumSamples(packet, rate); err == nil && samples > 0 {
+			samplesPerChannel = samples
+		}
+	case 2:
+		if frameSize > 0 && frameSize < samplesPerChannel {
+			samplesPerChannel = frameSize
+		}
+	}
+	return samplesPerChannel*channels + 8
+}
+
+func decoderSequencePLCFrameSize(selector byte, rate int) int {
+	durations400 := [...]int{-1, 0, 1, 2, 4, 8, 16, 24, 32, 40, 48, 49}
+	duration := durations400[int(selector)%len(durations400)]
+	if duration < 0 {
+		return duration
+	}
+	return rate * duration / 400
+}
+
+func decoderSequenceSeed(rateSelector, channelSelector byte, operations ...decoderSequenceOp) []byte {
+	out := []byte{rateSelector, channelSelector, byte(len(operations))}
 	for _, operation := range operations {
-		out = append(out, operation...)
+		out = append(out, operation.desc[:]...)
+	}
+	for _, operation := range operations {
+		out = append(out, operation.payload...)
 	}
 	return out
 }
 
-func decoderSequencePacketOp(tag byte, packet []byte) []byte {
-	out := []byte{tag, byte(len(packet)), byte(len(packet) >> 8)}
-	return append(out, packet...)
+func decoderSequencePacketOp(tag byte, packet []byte) decoderSequenceOp {
+	return decoderSequenceOp{
+		desc:    [decoderSequenceOpWidth]byte{tag, byte(len(packet)), byte(len(packet) >> 8), 0},
+		payload: packet,
+	}
+}
+
+func decoderSequencePLCOp(selector byte) decoderSequenceOp {
+	return decoderSequenceOp{desc: [decoderSequenceOpWidth]byte{2, selector, 0, 0}}
+}
+
+func decoderSequenceResetOp() decoderSequenceOp {
+	return decoderSequenceOp{desc: [decoderSequenceOpWidth]byte{3, 0, 0, 0}}
+}
+
+func decoderSequenceGainOp(gain int) decoderSequenceOp {
+	return decoderSequenceOp{desc: [decoderSequenceOpWidth]byte{4, byte(gain), byte(gain >> 8), byte(gain >> 16)}}
+}
+
+func decoderSequencePhaseOp(disabled bool) decoderSequenceOp {
+	if disabled {
+		return decoderSequenceOp{desc: [decoderSequenceOpWidth]byte{5, 1, 0, 0}}
+	}
+	return decoderSequenceOp{desc: [decoderSequenceOpWidth]byte{5, 0, 0, 0}}
 }
 
 func makeDecoderFECSequenceSeed() ([]byte, error) {
@@ -244,17 +321,17 @@ func makeDecoderFECSequenceSeed() ([]byte, error) {
 		}
 		mode, modeErr := PacketGetMode(packets[packet])
 		if modeErr != nil || mode != ModeSILKOnly {
-			return nil, fmt.Errorf("SILK seed packet %d mode=%d: %w", packet, mode, modeErr)
+			return nil, fmt.Errorf("SILK seed packet %d mode=%d err=%v", packet, mode, modeErr)
 		}
 	}
 	if hasLBRR, lbrrErr := PacketHasLBRR(packets[5]); lbrrErr != nil || !hasLBRR {
-		return nil, fmt.Errorf("SILK seed packet hasLBRR=%v: %w", hasLBRR, lbrrErr)
+		return nil, fmt.Errorf("SILK seed packet hasLBRR=%v err=%v", hasLBRR, lbrrErr)
 	}
-	operations := make([][]byte, 0, 9)
+	operations := make([]decoderSequenceOp, 0, 9)
 	for i := 0; i < 4; i++ {
 		operations = append(operations, decoderSequencePacketOp(0, packets[i]))
 	}
-	operations = append(operations, decoderSequencePacketOp(1, packets[5]), decoderSequencePacketOp(0, packets[5]), []byte{2, 3}, []byte{3}, []byte{2, 3})
+	operations = append(operations, decoderSequencePacketOp(1, packets[5]), decoderSequencePacketOp(0, packets[5]), decoderSequencePLCOp(5), decoderSequenceResetOp(), decoderSequencePLCOp(5))
 	return decoderSequenceSeed(2, 0, operations...), nil
 }
 
@@ -287,14 +364,14 @@ func makeDecoderHybridSequenceSeed() ([]byte, error) {
 		}
 		mode, modeErr := PacketGetMode(packets[packet])
 		if modeErr != nil || mode != ModeHybrid {
-			return nil, fmt.Errorf("hybrid seed packet %d mode=%d: %w", packet, mode, modeErr)
+			return nil, fmt.Errorf("hybrid seed packet %d mode=%d err=%v", packet, mode, modeErr)
 		}
 	}
 	return decoderSequenceSeed(4, 0,
 		decoderSequencePacketOp(0, packets[0]),
-		[]byte{2, 8},
+		decoderSequencePLCOp(5),
 		decoderSequencePacketOp(0, packets[1]),
-		[]byte{3},
+		decoderSequenceResetOp(),
 		decoderSequencePacketOp(0, packets[0]),
 	), nil
 }

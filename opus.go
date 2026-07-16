@@ -74,13 +74,14 @@ type Encoder struct {
 	silkResampler  *resampler.Resampler // input sampleRate -> silkSampleRate
 
 	// Configuration
-	bitrateSetting int // requested bitrate or BitrateAuto/BitrateMax
-	bitrate        int // effective numeric bitrate for the current frame size
-	complexity     int
-	rateMode       celt.RateMode // CBR/VBR/CVBR
-	frameSize      int           // frame size in samples at sampleRate
-	padBytes       int           // code-3 padding-data bytes to append (0 = none)
-	dtx            bool          // discontinuous transmission: minimal silence packets
+	bitrateSetting      int // requested bitrate or BitrateAuto/BitrateMax
+	bitrate             int // effective numeric bitrate for the current frame size
+	complexity          int
+	rateMode            celt.RateMode // CBR/VBR/CVBR
+	frameSize           int           // frame size in samples at sampleRate
+	expertFrameDuration ExpertFrameDuration
+	padBytes            int  // code-3 padding-data bytes to append (0 = none)
+	dtx                 bool // discontinuous transmission: minimal silence packets
 
 	// Inband FEC (SILK LBRR). useInbandFEC requests redundant coding; the SILK
 	// encoder only emits LBRR when this is on and packetLossPerc > 0.
@@ -172,22 +173,23 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 	}
 
 	enc := &Encoder{
-		sampleRate:        sampleRate,
-		channels:          channels,
-		application:       application,
-		celtEncoder:       celtEnc,
-		bitrateSetting:    64000,
-		bitrate:           64000,            // Default bitrate
-		complexity:        5,                // Default complexity
-		rateMode:          celt.RateModeCBR, // Default CBR (backward compatible)
-		frameSize:         frameSize,
-		maxBandwidth:      BandwidthFullband,
-		forcedBandwidth:   BandwidthAuto,
-		lastDetectedBW:    -1, // no detection history yet
-		internalFrameSize: internalFrameSize,
-		prevMode:          -1, // no previous packet yet
-		forceChannels:     ChannelsAuto,
-		lsbDepth:          LSBDepthDefault,
+		sampleRate:          sampleRate,
+		channels:            channels,
+		application:         application,
+		celtEncoder:         celtEnc,
+		bitrateSetting:      64000,
+		bitrate:             64000,            // Default bitrate
+		complexity:          5,                // Default complexity
+		rateMode:            celt.RateModeCBR, // Default CBR (backward compatible)
+		frameSize:           frameSize,
+		expertFrameDuration: ExpertFrameDurationArgument,
+		maxBandwidth:        BandwidthFullband,
+		forcedBandwidth:     BandwidthAuto,
+		lastDetectedBW:      -1, // no detection history yet
+		internalFrameSize:   internalFrameSize,
+		prevMode:            -1, // no previous packet yet
+		forceChannels:       ChannelsAuto,
+		lsbDepth:            LSBDepthDefault,
 	}
 	enc.celtEncoders[3] = celtEnc
 
@@ -265,10 +267,12 @@ func signalTypeForApplication(application Application) celt.SignalType {
 // Encode encodes PCM audio samples
 //
 // pcm contains interleaved 16-bit PCM samples (left, right, left, right, ...)
-// frameSize is the number of samples per channel (at the encoder's sample rate)
+// frameSize is the number of samples per channel (at the encoder's sample rate).
+// With a fixed expert frame duration, frameSize is the available sample count.
 // Returns compressed Opus packet
 func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
-	if _, err := e.validateFrameSize(frameSize); err != nil {
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
 		return nil, err
 	}
 	expectedSize := frameSize * e.channels
@@ -277,37 +281,42 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	}
 
 	// Convert int16 to float64
-	floatPCM := make([]float64, expectedSize)
-	for i := 0; i < expectedSize; i++ {
+	selectedSize := selectedFrameSize * e.channels
+	floatPCM := make([]float64, selectedSize)
+	for i := 0; i < selectedSize; i++ {
 		floatPCM[i] = float64(pcm[i]) / 32768.0
 	}
 
-	return e.encodeFloat(floatPCM, frameSize)
+	return e.encodeFloat(floatPCM, selectedFrameSize)
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
 // The nominal input range is [-8388608, 8388607].
 func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
-	if _, err := e.validateFrameSize(frameSize); err != nil {
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
 		return nil, err
 	}
 	expectedSize := frameSize * e.channels
 	if len(pcm) < expectedSize {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
-	floatPCM := make([]float64, expectedSize)
+	selectedSize := selectedFrameSize * e.channels
+	floatPCM := make([]float64, selectedSize)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608.0
 	}
-	return e.encodeFloat(floatPCM, frameSize)
+	return e.encodeFloat(floatPCM, selectedFrameSize)
 }
 
 // EncodeFloat encodes floating-point PCM samples
 //
 // pcm contains interleaved float64 samples in range [-1.0, 1.0]
-// frameSize is the number of samples per channel (at the encoder's sample rate)
+// frameSize is the number of samples per channel (at the encoder's sample rate).
+// With a fixed expert frame duration, frameSize is the available sample count.
 func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
-	if _, err := e.validateFrameSize(frameSize); err != nil {
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
 		return nil, err
 	}
 	expectedSize := frameSize * e.channels
@@ -315,24 +324,28 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
 
-	return e.encodeFloat(pcm[:expectedSize], frameSize)
+	selectedSize := selectedFrameSize * e.channels
+	return e.encodeFloat(pcm[:selectedSize], selectedFrameSize)
 }
 
 // EncodeFloat32 encodes interleaved float32 PCM samples in range [-1.0, 1.0].
 // frameSize is the number of samples per channel at the encoder sample rate.
+// With a fixed expert frame duration, frameSize is the available sample count.
 func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
-	if _, err := e.validateFrameSize(frameSize); err != nil {
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
 		return nil, err
 	}
 	expectedSize := frameSize * e.channels
 	if len(pcm) < expectedSize {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
-	floatPCM := make([]float64, expectedSize)
+	selectedSize := selectedFrameSize * e.channels
+	floatPCM := make([]float64, selectedSize)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i])
 	}
-	return e.encodeFloat(floatPCM, frameSize)
+	return e.encodeFloat(floatPCM, selectedFrameSize)
 }
 
 // encodeFloat is the internal encoding path shared by Encode and EncodeFloat.
@@ -1216,6 +1229,50 @@ func bandwidthRank(bw int) int {
 	}
 }
 
+func frameSizeForExpertDuration(duration ExpertFrameDuration, sampleRate, argumentFrameSize int) (int, bool) {
+	switch duration {
+	case ExpertFrameDurationArgument:
+		return argumentFrameSize, true
+	case ExpertFrameDuration2_5ms:
+		return sampleRate / 400, true
+	case ExpertFrameDuration5ms:
+		return sampleRate / 200, true
+	case ExpertFrameDuration10ms:
+		return sampleRate / 100, true
+	case ExpertFrameDuration20ms:
+		return sampleRate / 50, true
+	case ExpertFrameDuration40ms:
+		return sampleRate / 25, true
+	case ExpertFrameDuration60ms:
+		return sampleRate * 3 / 50, true
+	case ExpertFrameDuration80ms:
+		return sampleRate * 2 / 25, true
+	case ExpertFrameDuration100ms:
+		return sampleRate / 10, true
+	case ExpertFrameDuration120ms:
+		return sampleRate * 3 / 25, true
+	default:
+		return 0, false
+	}
+}
+
+// selectEncodeFrameSize resolves the duration without changing encoder state.
+// In fixed-duration mode, frameSize describes available input rather than the
+// duration to encode.
+func (e *Encoder) selectEncodeFrameSize(frameSize int) (int, error) {
+	selected, ok := frameSizeForExpertDuration(e.expertFrameDuration, e.sampleRate, frameSize)
+	if !ok {
+		return 0, fmt.Errorf("%w: invalid expert frame duration %d", ErrInvalidState, e.expertFrameDuration)
+	}
+	if e.expertFrameDuration != ExpertFrameDurationArgument && frameSize < selected {
+		return 0, fmt.Errorf("%w: available frameSize %d is shorter than selected frame size %d at %d Hz", ErrBadArg, frameSize, selected, e.sampleRate)
+	}
+	if _, err := e.validateFrameSize(selected); err != nil {
+		return 0, err
+	}
+	return selected, nil
+}
+
 func (e *Encoder) validateFrameSize(frameSize int) (int, error) {
 	base := e.frameSize
 	if base <= 0 || frameSize <= 0 {
@@ -1361,6 +1418,24 @@ func (e *Encoder) InDTX() bool { return e.inDTX }
 // Application returns the current application mode.
 func (e *Encoder) Application() Application { return e.application }
 
+// SetExpertFrameDuration selects a fixed packet duration. Argument restores
+// the default behavior where each Encode call's frameSize selects the duration.
+func (e *Encoder) SetExpertFrameDuration(duration ExpertFrameDuration) error {
+	if _, ok := frameSizeForExpertDuration(duration, e.sampleRate, e.frameSize); !ok {
+		return fmt.Errorf("%w: invalid expert frame duration %d", ErrBadArg, duration)
+	}
+	e.expertFrameDuration = duration
+	if e.forcedMono != nil {
+		e.forcedMono.expertFrameDuration = duration
+	}
+	return nil
+}
+
+// ExpertFrameDuration returns the configured packet-duration selection.
+func (e *Encoder) ExpertFrameDuration() ExpertFrameDuration {
+	return e.expertFrameDuration
+}
+
 // SetForceChannels controls the channel count written to the Opus stream.
 // ChannelsAuto uses the constructor channel count. A stereo encoder may be
 // forced to mono; forcing stereo from a mono input is invalid.
@@ -1446,6 +1521,9 @@ func (e *Encoder) monoEncoder() (*Encoder, error) {
 		return nil, err
 	}
 	if err := m.SetBandwidth(e.forcedBandwidth); err != nil {
+		return nil, err
+	}
+	if err := m.SetExpertFrameDuration(e.expertFrameDuration); err != nil {
 		return nil, err
 	}
 	m.SetDTX(e.dtx)
@@ -2926,7 +3004,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		pcm = padOrTrim(pcm, samplesPerStream)
 		if si == 0 && celtToSilk && redundancyBytes >= 2 {
 			if redPCM := d.decodeLeadingRedundancy(stream[len(stream)-redundancyBytes:], pktChannels, 17); redPCM != nil &&
-				d.prevMode == framing.ModeCELTOnly {
+				d.prevMode != framing.ModeSILKOnly {
 				d.crossfadeLeadingRedundancy(pcm, redPCM)
 			}
 		}
@@ -3164,7 +3242,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 				}
 				silkOut[i] = v
 			}
-			if len(leadingRedundancy) >= (d.sampleRate/200)*d.channels && d.prevMode == framing.ModeCELTOnly {
+			if len(leadingRedundancy) >= (d.sampleRate/200)*d.channels && d.prevMode != framing.ModeSILKOnly {
 				d.crossfadeLeadingRedundancy(silkOut, leadingRedundancy)
 			}
 
@@ -3342,8 +3420,8 @@ func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
 	if len(pcm) < required {
 		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
 	}
-	if d.prevMode == -1 {
-		return 0, fmt.Errorf("%w: PLC requires a previously decoded packet", ErrInvalidState)
+	if err := d.validatePLCState(frameSize); err != nil {
+		return 0, err
 	}
 
 	floatPCM, err := d.decodePLCFloat(frameSize)
@@ -3363,6 +3441,55 @@ func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
 	}
 	d.lastPacketDuration = frameSize
 	return frameSize, nil
+}
+
+// validatePLCState checks every deterministic PLC failure condition without
+// advancing entropy, synthesis, or resampler state.
+func (d *Decoder) validatePLCState(frameSize int) error {
+	if !isValidPacketFrameSize(frameSize, d.sampleRate) {
+		return fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+	}
+	if d.prevMode == -1 {
+		return fmt.Errorf("%w: PLC requires a previously decoded packet", ErrInvalidState)
+	}
+	if d.prevMode == framing.ModeCELTOnly {
+		if d.lastCeltDec == nil {
+			return fmt.Errorf("%w: missing CELT decoder history", ErrInvalidState)
+		}
+		activeFrameSize := d.lastCeltDec.FrameSize() * d.sampleRate / 48000
+		if activeFrameSize <= 0 || frameSize%activeFrameSize != 0 {
+			return fmt.Errorf("%w: frameSize %d is not a multiple of active CELT frame size %d", ErrUnsupportedFrameSize, frameSize, activeFrameSize)
+		}
+		return nil
+	}
+	if d.prevMode != framing.ModeSILKOnly && d.prevMode != framing.ModeHybrid {
+		return fmt.Errorf("%w: unsupported previous decoder mode %d", ErrInvalidState, d.prevMode)
+	}
+	if d.lastPacketConfig < 0 || d.lastPacketChannels < 1 {
+		return fmt.Errorf("%w: missing SILK decoder history", ErrInvalidState)
+	}
+	rateKHz := silkConfigRateKHz(d.lastPacketConfig)
+	info := d.silkDecoders[silkRateIdx(rateKHz)][d.lastPacketChannels-1]
+	if info == nil || info.dec == nil {
+		return fmt.Errorf("%w: SILK decoder for %d kHz and %d channels", ErrInvalidState, rateKHz, d.lastPacketChannels)
+	}
+	silkFrameMs := 20
+	if is10msConfig(d.lastPacketConfig) {
+		silkFrameMs = 10
+	}
+	activeFrameSize := d.sampleRate * silkFrameMs / 1000
+	if activeFrameSize <= 0 || frameSize%activeFrameSize != 0 {
+		return fmt.Errorf("%w: frameSize %d is not a multiple of active SILK frame size %d", ErrUnsupportedFrameSize, frameSize, activeFrameSize)
+	}
+	if d.prevMode == framing.ModeHybrid {
+		if d.lastCeltDec == nil {
+			return fmt.Errorf("%w: missing CELT history for hybrid PLC", ErrInvalidState)
+		}
+		if celtFrameSize := d.lastCeltDec.FrameSize() * d.sampleRate / 48000; celtFrameSize != activeFrameSize {
+			return fmt.Errorf("%w: hybrid SILK/CELT frame sizes differ (%d != %d)", ErrInvalidState, activeFrameSize, celtFrameSize)
+		}
+	}
+	return nil
 }
 
 func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
@@ -3501,6 +3628,12 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 	}
 
 	rateKHz := silkConfigRateKHz(config)
+	if rateKHz != 8 && rateKHz != 12 && rateKHz != 16 {
+		return 0, fmt.Errorf("%w: invalid SILK rate %d kHz", ErrInvalidPacket, rateKHz)
+	}
+	if info.channels < 1 || info.channels > 2 {
+		return 0, fmt.Errorf("%w: invalid channel count %d", ErrInvalidPacket, info.channels)
+	}
 	ri := silkRateIdx(rateKHz)
 	ci := info.channels - 1
 	infoDec := d.silkDecoders[ri][ci]
@@ -3551,6 +3684,36 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 		d.prevMode = framing.ModeSILKOnly
 	}
 	return info.totalSamples, nil
+}
+
+func (d *Decoder) validateFECState(data []byte) error {
+	info, err := inspectPacket(data, d.sampleRate)
+	if err != nil {
+		return err
+	}
+	if info.mode != ModeSILKOnly && info.mode != ModeHybrid {
+		return fmt.Errorf("%w: CELT-only packets do not carry SILK LBRR", ErrUnimplemented)
+	}
+	config, _, countCode := framing.ParseTOC(data[0])
+	streams, err := splitOpusFrames(data[1:], countCode)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidPacket, err)
+	}
+	if len(streams) != 1 {
+		return fmt.Errorf("%w: FEC for multi-stream Opus packets", ErrUnimplemented)
+	}
+	rateKHz := silkConfigRateKHz(config)
+	if rateKHz != 8 && rateKHz != 12 && rateKHz != 16 {
+		return fmt.Errorf("%w: invalid SILK rate %d kHz", ErrInvalidPacket, rateKHz)
+	}
+	if info.channels < 1 || info.channels > 2 {
+		return fmt.Errorf("%w: invalid channel count %d", ErrInvalidPacket, info.channels)
+	}
+	infoDec := d.silkDecoders[silkRateIdx(rateKHz)][info.channels-1]
+	if infoDec == nil || infoDec.dec == nil {
+		return fmt.Errorf("%w: SILK decoder for %d kHz", ErrInvalidState, rateKHz)
+	}
+	return nil
 }
 
 // Reset resets the decoder state

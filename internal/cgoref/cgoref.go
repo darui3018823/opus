@@ -42,6 +42,30 @@ static int go_opus_encoder_set_packet_loss(OpusEncoder *enc, int perc) {
 	return opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(perc));
 }
 
+static int go_opus_encoder_set_expert_frame_duration(OpusEncoder *enc, int duration) {
+	return opus_encoder_ctl(enc, OPUS_SET_EXPERT_FRAME_DURATION(duration));
+}
+
+static int go_opus_encoder_get_expert_frame_duration(OpusEncoder *enc, int *duration) {
+	return opus_encoder_ctl(enc, OPUS_GET_EXPERT_FRAME_DURATION(duration));
+}
+
+static int go_opus_multistream_encoder_set_bitrate(OpusMSEncoder *enc, int bps) {
+	return opus_multistream_encoder_ctl(enc, OPUS_SET_BITRATE(bps));
+}
+
+static int go_opus_multistream_encoder_set_voice(OpusMSEncoder *enc) {
+	return opus_multistream_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+}
+
+static int go_opus_multistream_encoder_set_inband_fec(OpusMSEncoder *enc, int enabled) {
+	return opus_multistream_encoder_ctl(enc, OPUS_SET_INBAND_FEC(enabled));
+}
+
+static int go_opus_multistream_encoder_set_packet_loss(OpusMSEncoder *enc, int perc) {
+	return opus_multistream_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(perc));
+}
+
 static int go_opus_decoder_disable_osce_bwe(OpusDecoder *dec) {
 #ifdef OPUS_SET_OSCE_BWE_REQUEST
 	int ret = opus_decoder_ctl(dec, OPUS_SET_OSCE_BWE(0));
@@ -141,6 +165,42 @@ func NewMultistreamDecoder(sampleRate, channels, streams, coupledStreams int, ma
 	return &MultistreamDecoder{dec: dec, channels: channels}, nil
 }
 
+// SetBitrate sets the libopus multistream encoder's aggregate target bitrate.
+func (e *MultistreamEncoder) SetBitrate(bps int) error {
+	code := C.go_opus_multistream_encoder_set_bitrate(e.enc, C.int(bps))
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_BITRATE: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
+// SetVoiceMode biases every libopus elementary stream toward voice coding.
+func (e *MultistreamEncoder) SetVoiceMode() error {
+	code := C.go_opus_multistream_encoder_set_voice(e.enc)
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE): %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
+// SetInbandFEC enables or disables LBRR on the libopus multistream encoder.
+func (e *MultistreamEncoder) SetInbandFEC(enabled bool) error {
+	code := C.go_opus_multistream_encoder_set_inband_fec(e.enc, boolToCInt(enabled))
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_INBAND_FEC: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
+// SetPacketLossPerc sets the expected packet-loss percentage for libopus.
+func (e *MultistreamEncoder) SetPacketLossPerc(perc int) error {
+	code := C.go_opus_multistream_encoder_set_packet_loss(e.enc, C.int(perc))
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_PACKET_LOSS_PERC: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
 // SetBitrate sets the libopus encoder target bitrate in bits per second.
 func (e *Encoder) SetBitrate(bps int) error {
 	code := C.go_opus_encoder_set_bitrate(e.enc, C.int(bps))
@@ -211,6 +271,25 @@ func (e *Encoder) SetPacketLossPerc(perc int) error {
 		return fmt.Errorf("OPUS_SET_PACKET_LOSS_PERC: %s", C.GoString(C.opus_strerror(code)))
 	}
 	return nil
+}
+
+// SetExpertFrameDuration sets libopus' OPUS_SET_EXPERT_FRAME_DURATION value.
+func (e *Encoder) SetExpertFrameDuration(duration int) error {
+	code := C.go_opus_encoder_set_expert_frame_duration(e.enc, C.int(duration))
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_EXPERT_FRAME_DURATION: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
+// ExpertFrameDuration returns libopus' configured expert frame duration.
+func (e *Encoder) ExpertFrameDuration() (int, error) {
+	var duration C.int
+	code := C.go_opus_encoder_get_expert_frame_duration(e.enc, &duration)
+	if code != 0 {
+		return 0, fmt.Errorf("OPUS_GET_EXPERT_FRAME_DURATION: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return int(duration), nil
 }
 
 // Encode encodes one interleaved float32 PCM frame with libopus.
@@ -325,6 +404,21 @@ func (d *MultistreamDecoder) DecodeFloat(packet []byte, maxSPC int) ([]float32, 
 		(*C.float)(unsafe.Pointer(&pcm[0])), C.int(maxSPC), 0)
 	if n < 0 {
 		return nil, fmt.Errorf("opus_multistream_decode_float: %s", C.GoString(C.opus_strerror(n)))
+	}
+	return pcm[:int(n)*d.channels], nil
+}
+
+// DecodeFloatFEC reconstructs the lost multistream frame preceding packet.
+func (d *MultistreamDecoder) DecodeFloatFEC(packet []byte, frameSize int) ([]float32, error) {
+	if len(packet) == 0 {
+		return nil, fmt.Errorf("empty multistream packet for FEC decode")
+	}
+	pcm := make([]float32, frameSize*d.channels)
+	n := C.opus_multistream_decode_float(d.dec,
+		(*C.uchar)(unsafe.Pointer(&packet[0])), C.opus_int32(len(packet)),
+		(*C.float)(unsafe.Pointer(&pcm[0])), C.int(frameSize), 1)
+	if n < 0 {
+		return nil, fmt.Errorf("opus_multistream_decode_float(FEC): %s", C.GoString(C.opus_strerror(n)))
 	}
 	return pcm[:int(n)*d.channels], nil
 }

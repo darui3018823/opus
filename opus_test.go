@@ -903,6 +903,22 @@ func TestDecodeFECRejectsUnsupportedModes(t *testing.T) {
 	}
 }
 
+func TestDecodeFECMalformedSILKDoesNotPanic(t *testing.T) {
+	dec, err := NewDecoder(16000, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("DecodeFEC panicked on malformed SILK packet: %v", r)
+		}
+	}()
+	pcm := make([]int16, 320)
+	if _, err := dec.DecodeFEC([]byte{0x01, 0x00}, pcm); err == nil {
+		t.Fatal("DecodeFEC accepted malformed SILK FEC packet")
+	}
+}
+
 func TestDecodeFECMonoSILK(t *testing.T) {
 	const (
 		rate    = 16000

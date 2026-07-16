@@ -1,63 +1,322 @@
 package oggopus
 
 import (
+	"errors"
 	"fmt"
 	"io"
+
+	opus "github.com/darui3018823/opus"
 )
 
-// Reader parses one complete Ogg Opus logical bitstream.
+// Reader parses an Ogg Opus physical stream, including chained logical streams.
 type Reader struct {
-	packets *PacketReader
-	Head    Head
-	Tags    Tags
+	source              io.Reader
+	packets             *PacketReader
+	seeker              io.ReadSeeker
+	audioOffset         int64
+	audioSequence       uint32
+	serial              uint32
+	pending             []Packet
+	preSkipRemaining    int
+	previousPageGranule int64
+	haveAudioGranule    bool
+	seekDiscardActive   bool
+	seekTargetGranule   int64
+	atEnd               bool
+	linkEndOffset       int64
+	linkFinalGranule    int64
+	haveLinkEnd         bool
+	linkIndex           int
+	physicalEOF         bool
+	terminalErr         error
+	seenSerials         map[uint32]struct{}
+	Head                Head
+	Tags                Tags
 }
 
 // NewReader reads and validates the mandatory OpusHead and OpusTags packets.
 func NewReader(r io.Reader) (*Reader, error) {
+	seeker, _ := r.(io.ReadSeeker)
 	packets := NewPacketReader(r)
+	headPacket, head, tags, err := readLinkHeaders(packets)
+	if err != nil {
+		return nil, err
+	}
+	var audioOffset int64
+	if seeker != nil {
+		audioOffset, err = seeker.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return nil, fmt.Errorf("%w: determine audio offset: %v", ErrNotSeekable, err)
+		}
+	}
+	// RFC 7845 permits a pasted live stream to begin its audio data with a
+	// continued packet whose missing prefix must be discarded.
+	packets.allowOrphan = true
+	return &Reader{
+		source:           r,
+		packets:          packets,
+		seeker:           seeker,
+		audioOffset:      audioOffset,
+		audioSequence:    packets.nextSeq,
+		serial:           headPacket.Serial,
+		preSkipRemaining: int(head.PreSkip),
+		Head:             head,
+		Tags:             tags,
+		seenSerials:      map[uint32]struct{}{headPacket.Serial: {}},
+	}, nil
+}
+
+func readLinkHeaders(packets *PacketReader) (Packet, Head, Tags, error) {
 	headPacket, err := packets.Next()
 	if err != nil {
-		return nil, fmt.Errorf("%w: read OpusHead: %v", ErrInvalidOpusStream, err)
+		return Packet{}, Head{}, Tags{}, fmt.Errorf("%w: read OpusHead: %w", ErrInvalidOpusStream, err)
 	}
 	if !headPacket.BOS || headPacket.PageSequence != 0 || headPacket.GranulePosition != 0 ||
 		!headPacket.FirstPacketOnPage || !headPacket.LastPacketOnPage {
-		return nil, fmt.Errorf("%w: OpusHead must be the only packet on BOS page 0 with granule 0", ErrInvalidOpusStream)
+		return Packet{}, Head{}, Tags{}, fmt.Errorf("%w: OpusHead must be the only packet on BOS page 0 with granule 0", ErrInvalidOpusStream)
 	}
 	head, err := ParseHead(headPacket.Data)
 	if err != nil {
-		return nil, err
+		return Packet{}, Head{}, Tags{}, err
 	}
 	tagsPacket, err := packets.Next()
 	if err != nil {
-		return nil, fmt.Errorf("%w: read OpusTags: %v", ErrInvalidOpusStream, err)
+		return Packet{}, Head{}, Tags{}, fmt.Errorf("%w: read OpusTags: %w", ErrInvalidOpusStream, err)
 	}
 	if tagsPacket.BOS || tagsPacket.GranulePosition != 0 || !tagsPacket.LastPacketOnPage {
-		return nil, fmt.Errorf("%w: OpusTags must finish its page with granule 0", ErrInvalidOpusStream)
+		return Packet{}, Head{}, Tags{}, fmt.Errorf("%w: OpusTags must finish its page with granule 0", ErrInvalidOpusStream)
 	}
 	tags, err := ParseTags(tagsPacket.Data)
 	if err != nil {
-		return nil, err
+		return Packet{}, Head{}, Tags{}, err
 	}
-	return &Reader{packets: packets, Head: head, Tags: tags}, nil
+	return headPacket, head, tags, nil
 }
 
 func (r *Reader) Serial() uint32 {
-	serial, _ := r.packets.Serial()
-	return serial
+	return r.serial
 }
 
-func (r *Reader) EOS() bool { return r.packets.EOS() }
+// Link returns the zero-based index of the current chained logical stream.
+func (r *Reader) Link() int { return r.linkIndex }
+
+func (r *Reader) EOS() bool { return r.atEnd || r.packets.EOS() }
 
 // NextPacket returns the next Opus audio packet and its Ogg metadata.
 func (r *Reader) NextPacket() (Packet, error) {
-	packet, err := r.packets.Next()
-	if err != nil {
-		return Packet{}, err
+	if r.terminalErr != nil {
+		return Packet{}, r.terminalErr
 	}
-	if len(packet.Data) == 0 {
-		return Packet{}, fmt.Errorf("%w: zero-length audio packet", ErrInvalidOpusStream)
+	if r.physicalEOF {
+		return Packet{}, io.EOF
 	}
+	if r.atEnd {
+		r.atEnd = false
+		if err := r.advanceLink(); err != nil {
+			return Packet{}, err
+		}
+	}
+	for len(r.pending) == 0 {
+		if err := r.readAudioPage(); err != nil {
+			if errors.Is(err, io.EOF) && r.packets.EOS() {
+				if err := r.validateLogicalEOS(); err != nil {
+					r.terminalErr = err
+					return Packet{}, err
+				}
+				if err := r.advanceLink(); err != nil {
+					return Packet{}, err
+				}
+				continue
+			}
+			if errors.Is(err, io.EOF) {
+				err = fmt.Errorf("%w: physical EOF before EOS", ErrInvalidOpusStream)
+			}
+			r.terminalErr = err
+			return Packet{}, err
+		}
+	}
+	packet := r.pending[0]
+	r.pending = r.pending[1:]
 	return packet, nil
+}
+
+func (r *Reader) validateLogicalEOS() error {
+	if !r.packets.haveEOS {
+		return fmt.Errorf("%w: missing EOS page metadata", ErrInvalidOpusStream)
+	}
+	if r.haveLinkEnd {
+		return nil
+	}
+	if !r.haveAudioGranule || r.packets.eosGranule != r.previousPageGranule {
+		return fmt.Errorf("%w: empty EOS granule %d, want %d", ErrInvalidOpusStream, r.packets.eosGranule, r.previousPageGranule)
+	}
+	if r.seeker != nil {
+		offset, err := r.seeker.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return err
+		}
+		r.linkEndOffset = offset
+		r.linkFinalGranule = r.packets.eosGranule
+		r.haveLinkEnd = true
+	}
+	return nil
+}
+
+func (r *Reader) advanceLink() error {
+	packets := NewPacketReader(r.source)
+	headPacket, head, tags, err := readLinkHeaders(packets)
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			r.physicalEOF = true
+			return io.EOF
+		}
+		r.terminalErr = err
+		return err
+	}
+	if _, duplicate := r.seenSerials[headPacket.Serial]; duplicate {
+		err := fmt.Errorf("%w: chained stream reuses serial %d", ErrSerial, headPacket.Serial)
+		r.terminalErr = err
+		return err
+	}
+	r.seenSerials[headPacket.Serial] = struct{}{}
+	packets.allowOrphan = true
+	r.packets = packets
+	r.pending = nil
+	r.serial = headPacket.Serial
+	r.linkIndex++
+	r.Head = head
+	r.Tags = tags
+	r.preSkipRemaining = int(head.PreSkip)
+	r.previousPageGranule = 0
+	r.haveAudioGranule = false
+	r.seekDiscardActive = false
+	r.atEnd = false
+	r.haveLinkEnd = false
+	if r.seeker != nil {
+		r.audioOffset, err = r.seeker.Seek(0, io.SeekCurrent)
+		if err != nil {
+			r.terminalErr = err
+			return err
+		}
+		r.audioSequence = packets.nextSeq
+	}
+	return nil
+}
+
+func (r *Reader) readAudioPage() error {
+	var pagePackets []Packet
+	for {
+		packet, err := r.packets.Next()
+		if err != nil {
+			return err
+		}
+		if len(packet.Data) == 0 {
+			return fmt.Errorf("%w: zero-length audio packet", ErrInvalidOpusStream)
+		}
+		duration, err := r.packetDuration(packet.Data)
+		if err != nil {
+			return fmt.Errorf("%w: packet duration: %v", ErrInvalidOpusStream, err)
+		}
+		packet.Duration48k = duration
+		packet.LinkIndex = r.linkIndex
+		pagePackets = append(pagePackets, packet)
+		if packet.LastPacketOnPage {
+			break
+		}
+	}
+
+	last := &pagePackets[len(pagePackets)-1]
+	granule := last.GranulePosition
+	if granule < 0 {
+		return fmt.Errorf("%w: completed audio page has no granule position", ErrInvalidOpusStream)
+	}
+	var pageDuration int64
+	for i := range pagePackets {
+		pageDuration += int64(pagePackets[i].Duration48k)
+	}
+
+	naturalEnd := pageDuration
+	if r.haveAudioGranule {
+		naturalEnd += r.previousPageGranule
+		if last.EOS {
+			if granule < r.previousPageGranule || granule > naturalEnd {
+				return fmt.Errorf("%w: EOS granule %d outside [%d,%d]", ErrInvalidOpusStream, granule, r.previousPageGranule, naturalEnd)
+			}
+		} else if granule != naturalEnd {
+			return fmt.Errorf("%w: audio granule %d, want %d", ErrInvalidOpusStream, granule, naturalEnd)
+		}
+	} else if last.EOS {
+		if granule < int64(r.Head.PreSkip) {
+			return fmt.Errorf("%w: EOS granule %d is smaller than pre-skip %d", ErrInvalidOpusStream, granule, r.Head.PreSkip)
+		}
+		if granule > naturalEnd {
+			naturalEnd = granule
+		}
+	} else if granule < naturalEnd {
+		return fmt.Errorf("%w: initial audio granule %d is smaller than page duration %d", ErrInvalidOpusStream, granule, naturalEnd)
+	}
+	pageStart := int64(0)
+	if r.haveAudioGranule {
+		pageStart = r.previousPageGranule
+	} else if granule >= pageDuration {
+		pageStart = granule - pageDuration
+	}
+	if !r.haveAudioGranule && pageStart > 0 && r.preSkipRemaining > 0 {
+		alreadySkipped := min(int64(r.preSkipRemaining), pageStart)
+		r.preSkipRemaining -= int(alreadySkipped)
+	}
+
+	for i := range pagePackets {
+		discard := min(r.preSkipRemaining, pagePackets[i].Duration48k)
+		pagePackets[i].DiscardStart = discard
+		r.preSkipRemaining -= discard
+	}
+	if r.seekDiscardActive {
+		packetStart := pageStart
+		for i := range pagePackets {
+			duration := int64(pagePackets[i].Duration48k)
+			if r.seekTargetGranule > packetStart {
+				discard := min(duration, r.seekTargetGranule-packetStart)
+				if int(discard) > pagePackets[i].DiscardStart {
+					pagePackets[i].DiscardStart = int(discard)
+				}
+			}
+			packetStart += duration
+		}
+		if pageStart+pageDuration >= r.seekTargetGranule {
+			r.seekDiscardActive = false
+		}
+	}
+	if last.EOS {
+		trim := naturalEnd - granule
+		for i := len(pagePackets) - 1; i >= 0 && trim > 0; i-- {
+			available := pagePackets[i].Duration48k - pagePackets[i].DiscardStart
+			discard := min(int64(available), trim)
+			pagePackets[i].DiscardEnd = int(discard)
+			trim -= discard
+		}
+		if trim != 0 {
+			return fmt.Errorf("%w: end trim exceeds decoded audio", ErrInvalidOpusStream)
+		}
+	}
+	if last.EOS && r.seeker != nil {
+		if offset, err := r.seeker.Seek(0, io.SeekCurrent); err == nil {
+			r.linkEndOffset = offset
+			r.linkFinalGranule = granule
+			r.haveLinkEnd = true
+		}
+	}
+	r.previousPageGranule = granule
+	r.haveAudioGranule = true
+	r.pending = pagePackets
+	return nil
+}
+
+func (r *Reader) packetDuration(data []byte) (int, error) {
+	if r.Head.MappingFamily == 0 {
+		return opus.PacketGetNumSamples(data, opus.SampleRate48kHz)
+	}
+	return opus.MultistreamPacketGetNumSamples(data, int(r.Head.StreamCount), opus.SampleRate48kHz)
 }
 
 // Writer writes one complete Ogg Opus logical bitstream.

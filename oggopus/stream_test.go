@@ -146,3 +146,32 @@ func TestOggOpusReaderValidatesHeaderPageRules(t *testing.T) {
 		t.Fatalf("header page error = %v", err)
 	}
 }
+
+func TestOggOpusReaderRejectsMissingFinalEOS(t *testing.T) {
+	var stream bytes.Buffer
+	writer, err := NewWriter(&stream, 100,
+		Head{Version: 1, Channels: 1},
+		Tags{Vendor: "test"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WritePacket([]byte{0xf8, 0xff, 0xfe}, PacketWriteOptions{
+		GranulePosition: 960,
+		Flush:           true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := NewReader(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.NextPacket(); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := reader.NextPacket(); !errors.Is(err, ErrInvalidOpusStream) {
+			t.Fatalf("attempt %d missing EOS error = %v", attempt, err)
+		}
+	}
+}

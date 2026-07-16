@@ -122,17 +122,18 @@ func (e *SurroundEncoder) prepareFrame(frameSize int) error {
 	if len(e.encoders) == 0 {
 		return fmt.Errorf("%w: no surround streams", ErrInvalidState)
 	}
-	if _, err := e.encoders[0].validateFrameSize(frameSize); err != nil {
+	selectedFrameSize, err := e.MultistreamEncoder.selectEncodeFrameSize(frameSize)
+	if err != nil {
 		return err
 	}
-	rates := e.allocateRates(frameSize)
+	rates := e.allocateRates(selectedFrameSize)
 	for stream, rate := range rates {
 		if err := e.encoders[stream].SetBitrate(rate); err != nil {
 			return fmt.Errorf("stream %d bitrate %d: %w", stream, rate, err)
 		}
 	}
 	if e.mappingFamily == MappingFamilyVorbis {
-		e.applySurroundBandwidth(frameSize)
+		e.applySurroundBandwidth(selectedFrameSize)
 	}
 	return nil
 }

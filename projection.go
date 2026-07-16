@@ -157,6 +157,17 @@ func (e *ProjectionEncoder) SetComplexity(complexity int) error {
 	return e.multistream.SetComplexity(complexity)
 }
 
+// SetExpertFrameDuration applies a fixed packet duration to every elementary
+// stream. Argument restores frameSize-selected durations.
+func (e *ProjectionEncoder) SetExpertFrameDuration(duration ExpertFrameDuration) error {
+	return e.multistream.SetExpertFrameDuration(duration)
+}
+
+// ExpertFrameDuration returns the configured packet-duration selection.
+func (e *ProjectionEncoder) ExpertFrameDuration() ExpertFrameDuration {
+	return e.multistream.ExpertFrameDuration()
+}
+
 func (e *ProjectionEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	required := frameSize * e.channels
 	if len(pcm) < required {
@@ -201,10 +212,11 @@ func (e *ProjectionEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, e
 	if len(e.multistream.encoders) == 0 {
 		return nil, fmt.Errorf("%w: no projection streams", ErrInvalidState)
 	}
-	if _, err := e.multistream.encoders[0].validateFrameSize(frameSize); err != nil {
+	selectedFrameSize, err := e.multistream.selectEncodeFrameSize(frameSize)
+	if err != nil {
 		return nil, err
 	}
-	if err := e.prepareRates(frameSize); err != nil {
+	if err := e.prepareRates(selectedFrameSize); err != nil {
 		return nil, err
 	}
 	mixed := pcm[:required]

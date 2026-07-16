@@ -3,6 +3,8 @@ package opus
 import (
 	"fmt"
 	"math"
+
+	framing "github.com/darui3018823/opus/internal"
 )
 
 // MultistreamEncoder encodes several elementary Opus streams into one RFC 7845
@@ -139,43 +141,101 @@ func (e *MultistreamEncoder) SetComplexity(complexity int) error {
 	return nil
 }
 
+// SetExpertFrameDuration applies a fixed packet duration to every elementary
+// stream. Argument restores frameSize-selected durations.
+func (e *MultistreamEncoder) SetExpertFrameDuration(duration ExpertFrameDuration) error {
+	if _, ok := frameSizeForExpertDuration(duration, e.sampleRate, 0); !ok {
+		return fmt.Errorf("%w: invalid expert frame duration %d", ErrBadArg, duration)
+	}
+	for _, enc := range e.encoders {
+		if err := enc.SetExpertFrameDuration(duration); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ExpertFrameDuration returns the packet-duration selection shared by all
+// elementary streams.
+func (e *MultistreamEncoder) ExpertFrameDuration() ExpertFrameDuration {
+	if len(e.encoders) == 0 {
+		return ExpertFrameDurationArgument
+	}
+	return e.encoders[0].ExpertFrameDuration()
+}
+
+func (e *MultistreamEncoder) selectEncodeFrameSize(frameSize int) (int, error) {
+	if len(e.encoders) == 0 {
+		return 0, fmt.Errorf("%w: no multistream encoders", ErrInvalidState)
+	}
+	selected, err := e.encoders[0].selectEncodeFrameSize(frameSize)
+	if err != nil {
+		return 0, fmt.Errorf("stream 0: %w", err)
+	}
+	for stream := 1; stream < len(e.encoders); stream++ {
+		streamSelected, err := e.encoders[stream].selectEncodeFrameSize(frameSize)
+		if err != nil {
+			return 0, fmt.Errorf("stream %d: %w", stream, err)
+		}
+		if streamSelected != selected {
+			return 0, fmt.Errorf("%w: stream %d selects %d samples, stream 0 selects %d", ErrInvalidState, stream, streamSelected, selected)
+		}
+	}
+	return selected, nil
+}
+
 // Encode encodes interleaved int16 PCM.
 func (e *MultistreamEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
+		return nil, err
+	}
 	required := frameSize * e.channels
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	selected := selectedFrameSize * e.channels
+	floatPCM := make([]float64, selected)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768
 	}
-	return e.EncodeFloat(floatPCM, frameSize)
+	return e.encodeFloatSelected(floatPCM, selectedFrameSize)
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
 func (e *MultistreamEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
+		return nil, err
+	}
 	required := frameSize * e.channels
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	selected := selectedFrameSize * e.channels
+	floatPCM := make([]float64, selected)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608
 	}
-	return e.EncodeFloat(floatPCM, frameSize)
+	return e.encodeFloatSelected(floatPCM, selectedFrameSize)
 }
 
 // EncodeFloat32 encodes interleaved float32 PCM.
 func (e *MultistreamEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
+		return nil, err
+	}
 	required := frameSize * e.channels
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	selected := selectedFrameSize * e.channels
+	floatPCM := make([]float64, selected)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i])
 	}
-	return e.EncodeFloat(floatPCM, frameSize)
+	return e.encodeFloatSelected(floatPCM, selectedFrameSize)
 }
 
 // EncodeFloat encodes interleaved float64 PCM.
@@ -184,10 +244,18 @@ func (e *MultistreamEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, 
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
+	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
+	if err != nil {
+		return nil, err
+	}
+	return e.encodeFloatSelected(pcm[:selectedFrameSize*e.channels], selectedFrameSize)
+}
+
+func (e *MultistreamEncoder) encodeFloatSelected(pcm []float64, selectedFrameSize int) ([]byte, error) {
 	packets := make([][]byte, e.streams)
 	for stream, enc := range e.encoders {
 		streamChannels := enc.Channels()
-		streamPCM := make([]float64, frameSize*streamChannels)
+		streamPCM := make([]float64, selectedFrameSize*streamChannels)
 		for codedChannel := 0; codedChannel < streamChannels; codedChannel++ {
 			mapped := stream*2 + codedChannel
 			if stream >= e.coupledStreams {
@@ -197,11 +265,11 @@ func (e *MultistreamEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, 
 			if inputChannel < 0 {
 				return nil, fmt.Errorf("%w: coded channel %d is unmapped", ErrInvalidState, mapped)
 			}
-			for i := 0; i < frameSize; i++ {
+			for i := 0; i < selectedFrameSize; i++ {
 				streamPCM[i*streamChannels+codedChannel] = pcm[i*e.channels+inputChannel]
 			}
 		}
-		packet, err := enc.EncodeFloat(streamPCM, frameSize)
+		packet, err := enc.EncodeFloat(streamPCM, selectedFrameSize)
 		if err != nil {
 			return nil, fmt.Errorf("stream %d: %w", stream, err)
 		}
@@ -348,6 +416,121 @@ func (d *MultistreamDecoder) Decode(data []byte, pcm []int16) (int, error) {
 		}
 		pcm[i] = int16(math.Round(scaled))
 	}
+	return duration, nil
+}
+
+// DecodePLC performs packet-loss concealment for frameSize samples per channel
+// on every elementary stream.
+func (d *MultistreamDecoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
+	if !isValidPacketFrameSize(frameSize, d.sampleRate) {
+		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+	}
+	required := frameSize * d.channels
+	if len(pcm) < required {
+		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
+	}
+
+	// Keep caller-owned PCM untouched unless every elementary stream succeeds.
+	for stream, dec := range d.decoders {
+		if err := dec.validatePLCState(frameSize); err != nil {
+			return 0, fmt.Errorf("stream %d: %w", stream, err)
+		}
+	}
+	out := make([]int16, required)
+	for stream, dec := range d.decoders {
+		streamChannels := dec.Channels()
+		streamPCM := make([]int16, frameSize*streamChannels)
+		decoded, err := dec.DecodePLC(streamPCM, frameSize)
+		if err != nil {
+			return 0, fmt.Errorf("stream %d: %w", stream, err)
+		}
+		if decoded != frameSize {
+			return 0, fmt.Errorf("%w: stream %d decoded %d samples, want %d", ErrInvalidState, stream, decoded, frameSize)
+		}
+
+		for outputChannel, mapped := range d.mapping {
+			if mapped == 255 {
+				continue
+			}
+			sourceStream, sourceChannel := codedChannelLocation(int(mapped), d.coupledStreams)
+			if sourceStream != stream || sourceChannel >= streamChannels {
+				continue
+			}
+			for i := 0; i < frameSize; i++ {
+				out[i*d.channels+outputChannel] = streamPCM[i*streamChannels+sourceChannel]
+			}
+		}
+	}
+
+	copy(pcm[:required], out)
+	return frameSize, nil
+}
+
+// DecodeFEC decodes in-band forward-error-correction data from the multistream
+// packet following a loss. Elementary CELT streams, which carry no FEC data,
+// are recovered with packet-loss concealment for the shared packet duration.
+func (d *MultistreamDecoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
+	packets, duration, err := splitMultistreamPackets(data, d.streams, d.sampleRate)
+	if err != nil {
+		return 0, err
+	}
+	required := duration * d.channels
+	if len(pcm) < required {
+		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
+	}
+
+	// Preflight every child before any decoder state advances.
+	usePLC := make([]bool, len(packets))
+	for stream, packet := range packets {
+		info, err := inspectPacket(packet, d.sampleRate)
+		if err != nil {
+			return 0, fmt.Errorf("stream %d: %w", stream, err)
+		}
+		usePLC[stream] = info.mode == ModeCELTOnly || d.decoders[stream].prevMode == framing.ModeCELTOnly
+		if usePLC[stream] {
+			err = d.decoders[stream].validatePLCState(duration)
+		} else {
+			err = d.decoders[stream].validateFECState(packet)
+		}
+		if err != nil {
+			return 0, fmt.Errorf("stream %d: %w", stream, err)
+		}
+	}
+
+	// Keep caller-owned PCM untouched unless every elementary stream succeeds.
+	out := make([]int16, required)
+	for stream, packet := range packets {
+		streamChannels := d.decoders[stream].Channels()
+		streamPCM := make([]int16, duration*streamChannels)
+
+		var decoded int
+		if usePLC[stream] {
+			decoded, err = d.decoders[stream].DecodePLC(streamPCM, duration)
+		} else {
+			decoded, err = d.decoders[stream].DecodeFEC(packet, streamPCM)
+		}
+		if err != nil {
+			return 0, fmt.Errorf("stream %d: %w", stream, err)
+		}
+		if decoded != duration {
+			return 0, fmt.Errorf("%w: stream %d decoded %d samples, want %d", ErrInvalidState, stream, decoded, duration)
+		}
+
+		for outputChannel, mapped := range d.mapping {
+			if mapped == 255 {
+				continue
+			}
+			sourceStream, sourceChannel := codedChannelLocation(int(mapped), d.coupledStreams)
+			if sourceStream != stream || sourceChannel >= streamChannels {
+				continue
+			}
+			for i := 0; i < duration; i++ {
+				out[i*d.channels+outputChannel] = streamPCM[i*streamChannels+sourceChannel]
+			}
+		}
+	}
+
+	copy(pcm[:required], out)
 	return duration, nil
 }
 
@@ -534,6 +717,12 @@ func splitMultistreamPackets(data []byte, streams, sampleRate int) ([][]byte, in
 func multistreamPacketDuration(data []byte, streams, sampleRate int) (int, error) {
 	_, duration, err := splitMultistreamPackets(data, streams, sampleRate)
 	return duration, err
+}
+
+// MultistreamPacketGetNumSamples returns a multistream packet's duration in
+// samples per channel. Every elementary stream must have the same duration.
+func MultistreamPacketGetNumSamples(data []byte, streams, sampleRate int) (int, error) {
+	return multistreamPacketDuration(data, streams, sampleRate)
 }
 
 func parseSelfDelimitedPacket(data []byte) ([]byte, int, error) {

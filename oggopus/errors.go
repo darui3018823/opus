@@ -20,4 +20,6 @@ var (
 	ErrInvalidOpusStream  = errors.New("oggopus: invalid Ogg Opus stream")
 	ErrWriterClosed       = errors.New("oggopus: writer is closed")
 	ErrInvalidGranule     = errors.New("oggopus: invalid granule position")
+	ErrNotSeekable        = errors.New("oggopus: source is not seekable")
+	ErrSeekOutOfRange     = errors.New("oggopus: seek sample is out of range")
 )

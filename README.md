@@ -380,9 +380,10 @@ go test -run='^$' -fuzz='^FuzzDecode$' -fuzztime=60s .
 go test -run='^$' -fuzz='^FuzzOggParsers$' -fuzztime=60s ./oggopus
 ```
 
-The fuzz suite covers single-stream decoding, packet extensions, multistream
-self-delimited framing, repacketization/padding, and Ogg Opus parsing. The
-`fuzz` CI workflow runs every target nightly and on demand.
+The fuzz suite covers single-stream decoding, stateful decoder operation
+sequences, packet extensions, multistream self-delimited framing,
+repacketization/padding, and Ogg Opus parsing. The `fuzz` CI workflow runs every
+target nightly and on demand.
 
 ## Continuous Integration
 

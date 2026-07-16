@@ -49,6 +49,16 @@ func (e *Encoder) SetVoiceMode() error {
 	return fmt.Errorf("cgoref encoder requires -tags opusref")
 }
 
+// SetExpertFrameDuration is unavailable in non-opusref builds.
+func (e *Encoder) SetExpertFrameDuration(duration int) error {
+	return fmt.Errorf("cgoref encoder requires -tags opusref")
+}
+
+// ExpertFrameDuration is unavailable in non-opusref builds.
+func (e *Encoder) ExpertFrameDuration() (int, error) {
+	return 0, fmt.Errorf("cgoref encoder requires -tags opusref")
+}
+
 // Encode is unavailable in non-opusref builds.
 func (e *Encoder) Encode(pcm []float32, frameSize int) ([]byte, error) {
 	return nil, fmt.Errorf("cgoref encoder requires -tags opusref")
@@ -59,6 +69,22 @@ func (e *Encoder) Close() {}
 
 func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, mapping []byte, application int) (*MultistreamEncoder, error) {
 	return nil, fmt.Errorf("cgoref multistream encoder requires -tags opusref")
+}
+
+func (e *MultistreamEncoder) SetBitrate(bps int) error {
+	return fmt.Errorf("cgoref multistream encoder requires -tags opusref")
+}
+
+func (e *MultistreamEncoder) SetVoiceMode() error {
+	return fmt.Errorf("cgoref multistream encoder requires -tags opusref")
+}
+
+func (e *MultistreamEncoder) SetInbandFEC(enabled bool) error {
+	return fmt.Errorf("cgoref multistream encoder requires -tags opusref")
+}
+
+func (e *MultistreamEncoder) SetPacketLossPerc(perc int) error {
+	return fmt.Errorf("cgoref multistream encoder requires -tags opusref")
 }
 
 func (e *MultistreamEncoder) Encode(pcm []float32, frameSize int) ([]byte, error) {
@@ -72,6 +98,10 @@ func NewMultistreamDecoder(sampleRate, channels, streams, coupledStreams int, ma
 }
 
 func (d *MultistreamDecoder) DecodeFloat(packet []byte, maxSPC int) ([]float32, error) {
+	return nil, fmt.Errorf("cgoref multistream decoder requires -tags opusref")
+}
+
+func (d *MultistreamDecoder) DecodeFloatFEC(packet []byte, frameSize int) ([]float32, error) {
 	return nil, fmt.Errorf("cgoref multistream decoder requires -tags opusref")
 }
 

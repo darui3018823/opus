@@ -1,6 +1,6 @@
 # SILK/Hybrid Mode-Rate-Quality Policy Diff
 
-Last reviewed: 2026-07-15
+Last reviewed: 2026-07-16
 
 Scope: Phase D-1 only. This document compares libopus 1.6.1 mode decision and
 rate-control policy against the current Go implementation. It deliberately does
@@ -39,7 +39,7 @@ simpler rate allocation once inside those gates.
 | Hybrid entry | Uses the same mode decision loop and chooses hybrid when predictive mode and SWB/FB bandwidth are appropriate. | Enters hybrid only for voice intent, 20 ms base frames, 24/48 kHz SWB/FB bandwidth, bitrate above SILK-only and <= 112 kbps mono / 192 kbps stereo, plus 16 kbps per channel with active FEC. | Partial |
 | Music predictive mode | libopus still has music-side thresholds and can use mode decisions based on analysis, not only caller intent. | `SignalMusic` explicitly prevents SILK/hybrid routing. | Unsupported |
 | Hysteresis | Uses threshold/hysteresis tables and previous mode state. | Keeps previous mode only for CELT/SILK/hybrid transition redundancy and one-frame hybrid deferral; mode thresholds themselves have no hysteresis table. | Partial |
-| Frame duration | `OPUS_SET_EXPERT_FRAME_DURATION` and `frame_size_select()` can alter the chosen analysis/encode frame duration. | Public frame duration is the caller's `frameSize`; expert duration CTL is not wired. | Unsupported |
+| Frame duration | `OPUS_SET_EXPERT_FRAME_DURATION` and `frame_size_select()` can alter the chosen analysis/encode frame duration. | `SetExpertFrameDuration` selects 2.5 through 120 ms or argument-derived duration for single-stream, multistream, surround, and projection encoders. Fixed mode consumes the selected prefix of the caller's available frame. | Supported |
 
 ## Bandwidth Policy Diff
 

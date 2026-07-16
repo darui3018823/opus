@@ -46,7 +46,7 @@ Status values:
 | `OPUS_SET_SIGNAL` / `OPUS_GET_SIGNAL` | Supported | `SetSignalType`, `SignalType` |
 | `OPUS_GET_LOOKAHEAD` | Supported | `Lookahead` |
 | `OPUS_SET_LSB_DEPTH` / `OPUS_GET_LSB_DEPTH` | Supported | `SetLSBDepth`, `LSBDepth` |
-| `OPUS_SET_EXPERT_FRAME_DURATION` / `OPUS_GET_EXPERT_FRAME_DURATION` | Unsupported | Public frame duration is selected by the `frameSize` argument; libopus expert framing control is not wired |
+| `OPUS_SET_EXPERT_FRAME_DURATION` / `OPUS_GET_EXPERT_FRAME_DURATION` | Supported | `SetExpertFrameDuration`, `ExpertFrameDuration`; fixed durations treat Encode's `frameSize` as available samples and consume the selected prefix |
 | `OPUS_SET_PREDICTION_DISABLED` / `OPUS_GET_PREDICTION_DISABLED` | Supported | `SetPredictionDisabled`, `PredictionDisabled` |
 | `OPUS_SET_DRED_DURATION` / `OPUS_GET_DRED_DURATION` | Out of scope | DRED payload transport is opaque; neural recovery is not implemented |
 | `OPUS_SET_DNN_BLOB` | Out of scope | DNN blob loading is not part of the pure-Go codec |
@@ -87,7 +87,7 @@ Status values:
 |---|---:|---|
 | `OPUS_MULTISTREAM_GET_ENCODER_STATE` | Supported | `(*MultistreamEncoder).StreamEncoder` |
 | `OPUS_MULTISTREAM_GET_DECODER_STATE` | Supported | `(*MultistreamDecoder).StreamDecoder` |
-| Generic encoder/decoder CTLs on multistream states | Partial | Aggregate bitrate, reset, final range, and per-stream access are public; not every CTL has an aggregate convenience wrapper |
+| Generic encoder/decoder CTLs on multistream states | Partial | Aggregate bitrate, expert frame duration, reset, final range, and per-stream access are public; not every CTL has an aggregate convenience wrapper |
 
 ## Projection CTLs
 
@@ -96,4 +96,4 @@ Status values:
 | `OPUS_PROJECTION_GET_DEMIXING_MATRIX_GAIN` | Supported | `(*MappingMatrix).Gain` |
 | `OPUS_PROJECTION_GET_DEMIXING_MATRIX_SIZE` | Supported | Matrix dimensions and serialized size are available through `MappingMatrix` metadata/bytes |
 | `OPUS_PROJECTION_GET_DEMIXING_MATRIX` | Supported | `(*MappingMatrix).Bytes`, projection decoder construction with demixing matrix bytes |
-| Generic/multistream CTLs on projection states | Partial | Projection wraps multistream behavior; per-stream access is available through the underlying projection/multistream APIs where exposed |
+| Generic/multistream CTLs on projection states | Partial | Projection exposes expert frame duration and wraps multistream behavior; per-stream access is available where exposed |

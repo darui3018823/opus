@@ -8,8 +8,18 @@ import (
 // Packet is a reconstructed Ogg packet. GranulePosition is meaningful only
 // for the last packet completed on a page; it is -1 for earlier packets.
 type Packet struct {
-	Data              []byte
-	GranulePosition   int64
+	Data            []byte
+	GranulePosition int64
+	// Duration48k is the decoded packet duration per channel at 48 kHz.
+	// PacketReader leaves it zero; Reader populates it for audio packets.
+	Duration48k int
+	// DiscardStart and DiscardEnd are decoded samples per channel to remove
+	// for Opus pre-skip, seeking, or end trimming. Reader populates them.
+	DiscardStart int
+	DiscardEnd   int
+	// LinkIndex is the zero-based chained logical-stream index. PacketReader
+	// leaves it zero; Reader populates it for audio packets.
+	LinkIndex         int
 	Serial            uint32
 	PageSequence      uint32
 	BOS               bool
@@ -29,10 +39,23 @@ type PacketReader struct {
 	queue       []Packet
 	eos         bool
 	terminalErr error
+	allowOrphan bool
+	eosGranule  int64
+	haveEOS     bool
 }
 
 func NewPacketReader(r io.Reader) *PacketReader {
 	return &PacketReader{r: r}
+}
+
+func newPacketReaderAt(r io.Reader, serial, sequence uint32, allowOrphan bool) *PacketReader {
+	return &PacketReader{
+		r:           r,
+		serial:      serial,
+		haveSerial:  true,
+		nextSeq:     sequence,
+		allowOrphan: allowOrphan,
+	}
 }
 
 func (r *PacketReader) Serial() (uint32, bool) { return r.serial, r.haveSerial }
@@ -82,8 +105,27 @@ func (r *PacketReader) readPage() error {
 	}
 	r.nextSeq++
 
+	segments := page.Segments
+	pageData := page.Data
 	if page.Continued() && len(r.partial) == 0 {
-		return ErrUnexpectedContinue
+		if !r.allowOrphan {
+			return ErrUnexpectedContinue
+		}
+		discardBytes := 0
+		discardSegments := 0
+		for discardSegments < len(segments) {
+			lace := segments[discardSegments]
+			discardBytes += int(lace)
+			discardSegments++
+			if lace < 255 {
+				r.allowOrphan = false
+				break
+			}
+		}
+		segments = segments[discardSegments:]
+		pageData = pageData[discardBytes:]
+	} else {
+		r.allowOrphan = false
 	}
 	if !page.Continued() && len(r.partial) != 0 {
 		r.partial = nil
@@ -91,19 +133,19 @@ func (r *PacketReader) readPage() error {
 	}
 
 	completions := 0
-	for _, lace := range page.Segments {
+	for _, lace := range segments {
 		if lace < 255 {
 			completions++
 		}
 	}
 	completed := make([]Packet, 0, completions)
 	offset := 0
-	for i, lace := range page.Segments {
+	for i, lace := range segments {
 		if i == 0 && len(r.partial) == 0 && page.BOS() {
 			r.partialBOS = true
 		}
 		size := int(lace)
-		r.partial = append(r.partial, page.Data[offset:offset+size]...)
+		r.partial = append(r.partial, pageData[offset:offset+size]...)
 		offset += size
 		if lace < 255 {
 			completed = append(completed, Packet{
@@ -129,6 +171,8 @@ func (r *PacketReader) readPage() error {
 	r.queue = append(r.queue, completed...)
 	if page.EOS() {
 		r.eos = true
+		r.eosGranule = page.GranulePosition
+		r.haveEOS = true
 		if len(r.partial) != 0 {
 			r.partial = nil
 			r.terminalErr = ErrTruncatedPacket

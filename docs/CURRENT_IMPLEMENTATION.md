@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-07-15
+Last reviewed: 2026-07-16
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -60,6 +60,8 @@ Implemented public entry points:
 - `(*Encoder).SetPacketPadding(n int)`
 - `(*Encoder).SetForceChannels(channels int) error` / `(*Encoder).ForceChannels() int`
 - `(*Encoder).SetLSBDepth(depth int) error` / `(*Encoder).LSBDepth() int`
+- `(*Encoder).SetExpertFrameDuration(duration ExpertFrameDuration) error` /
+  `(*Encoder).ExpertFrameDuration() ExpertFrameDuration`
 - `(*Encoder).SetPredictionDisabled(bool)` / `(*Encoder).PredictionDisabled() bool`
 - `(*Encoder).SetPhaseInversionDisabled(bool)` / `(*Encoder).PhaseInversionDisabled() bool`
 - `(*Encoder).SetApplication(application Application) error`
@@ -114,8 +116,11 @@ Public multistream and surround entry points:
 - `NewMultistreamEncoder(...) (*MultistreamEncoder, error)`
 - `NewMultistreamDecoder(...) (*MultistreamDecoder, error)`
 - int16, signed-24-bit-in-int32, float32, and float64 encode/decode methods
-- per-stream encoder/decoder access, aggregate bitrate control, reset, mapping,
-  stream-count, coupled-stream-count, and final-range getters
+- multistream/surround int16 PLC and in-band FEC decode, including per-stream
+  CELT PLC fallback during FEC recovery
+- per-stream encoder/decoder access, aggregate bitrate and expert frame-duration
+  control, reset, mapping, stream-count, coupled-stream-count, and final-range
+  getters
 - `NewSurroundEncoder(...) (*SurroundEncoder, error)`
 - `NewSurroundDecoder(...) (*SurroundDecoder, error)`
 - mapping families 0 (mono/stereo), 1 (Vorbis order, 1 through 8 channels), and
@@ -123,8 +128,11 @@ Public multistream and surround entry points:
 
 Multistream packets use RFC 6716 Appendix B self-delimited framing for every
 elementary stream except the last. Tests cover Go encode/decode round trips,
-duplicate and silent mappings, duration validation, and bidirectional libopus
-1.6.1 interoperability. Surround mapping-family 1 uses the libopus/Vorbis
+duplicate and silent mappings, duration validation, mixed CELT/SILK PLC bursts,
+multistream FEC recovery, and bidirectional libopus 1.6.1 interoperability. The
+FEC path is additionally cross-checked with libopus-generated two-stream LBRR
+packets. Surround
+mapping-family 1 uses the libopus/Vorbis
 stream layouts, identifies the LFE stream for 5.1/6.1/7.1, applies
 frame-duration-dependent stream bitrate allocation, and keeps coupled streams
 on stereo CELT to preserve the spatial image.
@@ -142,7 +150,8 @@ RFC 8486 mapping family 2 supports ACN/SN3D Ambisonics through channel mapping,
 including optional non-diegetic stereo. Mapping family 3 uses projection
 mixing/demixing matrices; predefined libopus 1.6.1 matrices are available for
 first- through fifth-order layouts. Tests cover PCM API variants, round trips,
-matrix validation, and bidirectional family 2/3 libopus interoperability.
+matrix validation, expert frame-duration propagation, and bidirectional family
+2/3 libopus interoperability.
 
 The `oggopus` subpackage provides:
 
@@ -150,7 +159,11 @@ The `oggopus` subpackage provides:
 - lacing and continued-packet reconstruction through `PacketReader`
 - packet-to-page output through `PacketWriter`
 - `OpusHead` and `OpusTags` parsing and marshaling
-- complete single-logical-stream Ogg Opus `Reader` and `Writer` APIs
+- Ogg Opus `Reader` and `Writer` APIs, including automatic chained logical
+  stream continuation with per-link headers, tags, serials, and packet indices
+- validated 48 kHz packet timing with pre-skip/end-trim discard metadata
+- `(*Reader).SeekPCM(sample int64)` for granule-position bisection seeking on
+  `io.ReadSeeker` sources with RFC 7845 80 ms decoder pre-roll
 
 The decoder exposes `SampleRate`, `Channels`, `FinalRange`, and `Pitch`
 getters. `FinalRange` is the XOR of the constituent frame entropy ranges, as
@@ -264,7 +277,13 @@ all three transition forms (verified by
 Supported public encode packet durations are 2.5, 5, and 10 ms CELT packets,
 plus exact 20 ms multiples from 20 through 120 ms. Unsupported frame sizes and
 durations over the Opus 120 ms packet limit are rejected with
-`ErrUnsupportedFrameSize`.
+`ErrUnsupportedFrameSize`. `SetExpertFrameDuration` selects any of those fixed
+durations, or `ExpertFrameDurationArgument` to retain the default behavior. In
+fixed mode, an Encode call's `frameSize` is the number of available samples per
+channel; it must be at least the selected duration, the matching full input
+buffer must be present, and only the selected prefix is consumed. The control
+is propagated by multistream, surround, and projection encoders, survives
+`Reset`, and is cross-checked against libopus 1.6.1 for every fixed duration.
 
 The arbitrary-length FFT path caches immutable Bluestein plans and performs the
 convolution FFTs in place. On the Windows amd64 audit machine this reduced the
@@ -989,9 +1008,12 @@ Notes:
   bandwidth overriding a lower max-bandwidth cap.
 - The former `cmd_diag` duplicate-`main` build failure is fixed (`toc_check.go`
   moved to `cmd_diag/toccheck`).
-- Nightly fuzzing covers int16/float decoding, packet extensions, multistream
-  self-delimited framing, repacketization/padding, and Ogg page/metadata/stream
-  parsing on amd64 and arm64.
+- Nightly fuzzing covers int16/float decoding, stateful decoder operation
+  sequences, encoder setter/input operation sequences with adversarial PCM
+  including non-finite float values, packet extensions, multistream
+  self-delimited framing, repacketization/padding, Ogg page/metadata parsing,
+  and Ogg Opus Writer-to-Reader stream round trips with chaining, mutation,
+  continuation, timing, and seek coverage on amd64 and arm64.
 
 The decoder passes the full official Opus test-vector suite and the libopus
 reference comparison.
@@ -1000,19 +1022,22 @@ reference comparison.
 
 - Projection family 3 encoder setup uses the predefined libopus 1.6.1 matrices;
   arbitrary custom encoder-matrix generation is not exposed.
-- The Ogg Opus package handles one logical stream and does not provide seeking,
-  chained-stream orchestration, or multiplexed-stream demux.
+- The Ogg Opus package handles chained logical streams and provides
+  sample-accurate per-link seek metadata, but does not provide multiplexed-stream
+  demux.
 - Multistream/surround provide core encode/decode, mapping, aggregate bitrate,
   and per-stream state access, but do not yet mirror every libopus multistream
   CTL or its full surround psychoacoustic energy-mask analysis.
-- Public PLC covers CELT-only, SILK-only, and hybrid streams for mono and
-  stereo output.
+- Public PLC covers CELT-only, SILK-only, and hybrid streams for mono, stereo,
+  multistream, and surround output.
 - Top-level SILK/hybrid encoder selection is voice-oriented and now accounts
   for rate, channels, bandwidth, CVBR, and active FEC, but it is not yet a full
   libopus-equivalent mode/rate/quality policy. See
   `docs/MODE_RATE_POLICY_DIFF.md` for the current gap map.
-- SILK-only and hybrid LBRR/FEC encoding and decoding are available for mono
-  and stereo. Hybrid FEC reconstructs the redundant SILK low band.
+- SILK-only and hybrid LBRR/FEC encoding and decoding are available for mono,
+  stereo, multistream, and surround output. Hybrid FEC reconstructs the
+  redundant SILK low band; CELT elementary streams use PLC during multistream
+  FEC recovery.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
   to full libopus-compatible mode/rate-control behavior.
 - Decoder parity is achieved on the official vectors and the libopus reference;

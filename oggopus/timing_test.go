@@ -43,6 +43,56 @@ func TestReaderPacketTimingPreSkipAndEndTrim(t *testing.T) {
 	}
 }
 
+func TestReaderPacketTimingInitialGranuleOffsetConsumesPreSkip(t *testing.T) {
+	const (
+		serial         = 14
+		packetDuration = 960
+		initialOffset  = 600
+		preSkip        = 1200
+	)
+	head, err := (Head{Version: 1, Channels: 1, PreSkip: preSkip}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tags, err := (Tags{Vendor: "timing"}).MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stream bytes.Buffer
+	for _, page := range []Page{
+		{Version: 0, HeaderType: HeaderBOS, GranulePosition: 0, Serial: serial, Sequence: 0, Segments: []byte{byte(len(head))}, Data: head},
+		{Version: 0, GranulePosition: 0, Serial: serial, Sequence: 1, Segments: []byte{byte(len(tags))}, Data: tags},
+		{
+			Version:         0,
+			HeaderType:      HeaderContinued | HeaderEOS,
+			GranulePosition: initialOffset + packetDuration,
+			Serial:          serial,
+			Sequence:        2,
+			Segments:        []byte{3, 3},
+			Data:            []byte{1, 2, 3, 0xf8, 0xff, 0xfe},
+		},
+	} {
+		if err := WritePage(&stream, page); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r, err := NewReader(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := r.NextPacket()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if packet.DiscardStart != preSkip-initialOffset {
+		t.Fatalf("discard start = %d, want %d", packet.DiscardStart, preSkip-initialOffset)
+	}
+	if packet.DiscardEnd != 0 || packet.Duration48k != packetDuration {
+		t.Fatalf("packet timing = duration %d start %d end %d", packet.Duration48k, packet.DiscardStart, packet.DiscardEnd)
+	}
+}
+
 func TestReaderPacketTimingTrimsFinalPageBackwards(t *testing.T) {
 	var stream bytes.Buffer
 	w, err := NewWriter(&stream, 11, Head{Version: 1, Channels: 1}, Tags{Vendor: "trim"})

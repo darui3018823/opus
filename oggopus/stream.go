@@ -261,6 +261,10 @@ func (r *Reader) readAudioPage() error {
 	} else if granule >= pageDuration {
 		pageStart = granule - pageDuration
 	}
+	if !r.haveAudioGranule && pageStart > 0 && r.preSkipRemaining > 0 {
+		alreadySkipped := min(int64(r.preSkipRemaining), pageStart)
+		r.preSkipRemaining -= int(alreadySkipped)
+	}
 
 	for i := range pagePackets {
 		discard := min(r.preSkipRemaining, pagePackets[i].Duration48k)

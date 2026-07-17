@@ -461,14 +461,18 @@ func (d *Decoder) DecodeFEC(packet []byte, nFrames int) ([]float64, error) {
 		nFrames = 1
 	}
 	if len(packet) < 2 {
+		d.lastFinalRange = 0
 		return d.concealFECFrames(nFrames)
 	}
 	dec := entcode.NewDecoder(packet)
 	if dec.Error() != nil {
+		d.lastFinalRange = 0
 		return d.concealFECFrames(nFrames)
 	}
 	if d.channels == 2 {
-		return d.decodeFECStereo(dec, nFrames)
+		pcm, err := d.decodeFECStereo(dec, nFrames)
+		d.lastFinalRange = dec.GetRng()
+		return pcm, err
 	}
 
 	// Regular-frame VAD flags precede the packet-level LBRR flag.
@@ -477,7 +481,9 @@ func (d *Decoder) DecodeFEC(packet []byte, nFrames int) ([]float64, error) {
 	}
 	lbrrFlag := dec.DecodeBitLogp(1)
 	if !lbrrFlag {
-		return d.concealFECFrames(nFrames)
+		pcm, err := d.concealFECFrames(nFrames)
+		d.lastFinalRange = dec.GetRng()
+		return pcm, err
 	}
 	mask := 1
 	if nFrames == 2 {
@@ -486,7 +492,9 @@ func (d *Decoder) DecodeFEC(packet []byte, nFrames int) ([]float64, error) {
 		mask = dec.DecodeIcdf(silkLBRRFlags3ICDF[:], 8) + 1
 	}
 
-	return d.decodeFECChannel(dec, nFrames, mask)
+	pcm, err := d.decodeFECChannel(dec, nFrames, mask)
+	d.lastFinalRange = dec.GetRng()
+	return pcm, err
 }
 
 // DecodePLC conceals nFrames consecutive lost SILK frames using the current

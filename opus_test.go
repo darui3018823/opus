@@ -707,8 +707,8 @@ func TestDecoderPLCSILKFrameAlignment(t *testing.T) {
 	if _, err := dec.Decode(packet, make([]int16, frameSize)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dec.DecodePLC(make([]int16, frameSize/2), frameSize/2); !errors.Is(err, ErrUnsupportedFrameSize) {
-		t.Fatalf("10 ms PLC after 20 ms SILK error = %v, want ErrUnsupportedFrameSize", err)
+	if n, err := dec.DecodePLC(make([]int16, frameSize/2), frameSize/2); err != nil || n != frameSize/2 {
+		t.Fatalf("10 ms PLC after 20 ms SILK = (%d, %v), want (%d, nil)", n, err, frameSize/2)
 	}
 }
 
@@ -754,8 +754,15 @@ func TestDecoderPLCValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dec.DecodePLC(make([]int16, 960), 960); !errors.Is(err, ErrInvalidState) {
-		t.Fatalf("DecodePLC without history error = %v, want ErrInvalidState", err)
+	initial := make([]int16, 960)
+	if n, err := dec.DecodePLC(initial, 960); err != nil || n != 960 {
+		t.Fatalf("DecodePLC without history = (%d, %v), want (960, nil)", n, err)
+	}
+	if signalEnergyI16(initial) != 0 {
+		t.Fatal("DecodePLC without history returned non-zero PCM")
+	}
+	if dec.FinalRange() != 0 {
+		t.Fatalf("initial PLC final range = %08x, want 0", dec.FinalRange())
 	}
 	if _, err := dec.DecodePLC(make([]int16, 959), 960); !errors.Is(err, ErrBufferTooSmall) {
 		t.Fatalf("DecodePLC small buffer error = %v, want ErrBufferTooSmall", err)

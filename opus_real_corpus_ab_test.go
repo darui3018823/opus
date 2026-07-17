@@ -181,6 +181,10 @@ func encodeRealCorpusRef(t *testing.T, clip corpusClip, kind string, bitrate int
 		if err := enc.SetVoiceMode(); err != nil {
 			return nil, 0, 0, err
 		}
+	} else if signal == SignalMusic {
+		if err := enc.SetMusicMode(); err != nil {
+			return nil, 0, 0, err
+		}
 	}
 	frameSize := clip.rate * 20 / 1000
 	return encodeRealCorpusPackets(clip, frameSize, func(pcm []float64) ([]byte, error) {

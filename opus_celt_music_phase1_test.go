@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"math"
 	"testing"
+
+	"github.com/darui3018823/opus/internal/cgoref"
 )
 
 // TestCELTMusicChordsMatchedBitrateReproducer preserves the deterministic
@@ -21,15 +23,9 @@ func TestCELTMusicChordsMatchedBitrateReproducer(t *testing.T) {
 
 	for _, bitrate := range []int{24000, 48000, 64000} {
 		t.Run(phase1BitrateName(bitrate), func(t *testing.T) {
-			ownPackets, ownBytes, ownFirst, err := encodeRealCorpusOwn(clip, "music", bitrate)
-			if err != nil {
-				t.Fatal(err)
-			}
-			repeated, repeatedBytes, repeatedFirst, err := encodeRealCorpusOwn(clip, "music", bitrate)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if ownBytes != repeatedBytes || ownFirst != repeatedFirst || !phase1PacketsEqual(ownPackets, repeated) {
+			ownPackets, ownRanges, ownBytes := phase1EncodeOwnWithRanges(t, clip, bitrate)
+			repeated, repeatedRanges, repeatedBytes := phase1EncodeOwnWithRanges(t, clip, bitrate)
+			if ownBytes != repeatedBytes || !phase1PacketsEqual(ownPackets, repeated) || !phase1RangesEqual(ownRanges, repeatedRanges) {
 				t.Fatal("Go encoding is not stable across repeated runs")
 			}
 
@@ -43,7 +39,7 @@ func TestCELTMusicChordsMatchedBitrateReproducer(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			ownOut := decodePacketSequenceWithLoss(t, ownPackets, clip.rate, clip.channels, frameSize, 0)
+			ownOut, crossDecodeSNR := phase1DecodeAndCheckRanges(t, ownPackets, ownRanges, clip)
 			refOut := decodePacketSequenceWithLoss(t, refPackets, clip.rate, clip.channels, frameSize, 0)
 			matchedOut := decodePacketSequenceWithLoss(t, matchedPackets, clip.rate, clip.channels, frameSize, 0)
 			ownSNR, _, _, _ := opusSILKABAlignedSNR(clip.pcm, ownOut, frameSize)
@@ -56,9 +52,9 @@ func TestCELTMusicChordsMatchedBitrateReproducer(t *testing.T) {
 			matchedConfigs := phase1PacketConfigs(t, matchedPackets)
 			ownHash := phase1PacketHash(ownPackets)
 
-			t.Logf("rate=48000 channels=2 frame=20ms CVBR=true complexity=5 signal=music bitrate=%d frames=%d own=%dB ref=%dB matched_rate=%d matched=%dB ratio=%.6f SNR own=%.3f ref=%.3f matched=%.3f gap=%.3f dB TOC own=%v ref=%v matched=%v own_sha256=%x",
+			t.Logf("rate=48000 channels=2 frame=20ms CVBR=true complexity=5 signal=music bitrate=%d frames=%d own=%dB ref=%dB matched_rate=%d matched=%dB ratio=%.6f SNR own=%.3f ref=%.3f matched=%.3f gap=%.3f dB cross_decode=%.3f dB final_range=ok TOC own=%v ref=%v matched=%v own_sha256=%x",
 				bitrate, len(ownPackets), ownBytes, refBytes, matchedBitrate, matchedBytes, ratio,
-				ownSNR, refSNR, matchedSNR, gap, ownConfigs, refConfigs, matchedConfigs, ownHash)
+				ownSNR, refSNR, matchedSNR, gap, crossDecodeSNR, ownConfigs, refConfigs, matchedConfigs, ownHash)
 
 			if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0.95 || ratio > 1.05 {
 				t.Fatalf("matched-byte ratio %.6f is not comparable", ratio)
@@ -68,13 +64,92 @@ func TestCELTMusicChordsMatchedBitrateReproducer(t *testing.T) {
 					t.Fatalf("%s SNR is not finite: %v", label, snr)
 				}
 			}
-			// Slice 1-1 baseline guard. Slice 1-5 replaces this with the adopted
-			// non-regression threshold after the root-cause decision.
-			if gap < 6 {
-				t.Fatalf("baseline gap %.3f dB no longer reproduces the material CELT/music loss", gap)
+			baselineBytes := map[int]int{24000: 2960, 48000: 5870, 64000: 7810}[bitrate]
+			if ownBytes > baselineBytes*105/100 {
+				t.Fatalf("own bytes %d exceed the 5%% budget over baseline %d", ownBytes, baselineBytes)
+			}
+			maxGap := map[int]float64{24000: 6.1, 48000: 2, 64000: 2}[bitrate]
+			if gap > maxGap {
+				t.Fatalf("matched CELT/music gap %.3f dB exceeds %.1f dB regression limit", gap, maxGap)
 			}
 		})
 	}
+}
+
+func phase1EncodeOwnWithRanges(t *testing.T, clip corpusClip, bitrate int) ([][]byte, []uint32, int) {
+	t.Helper()
+	enc, err := NewEncoder(clip.rate, clip.channels, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetBitrate(bitrate); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetComplexity(5); err != nil {
+		t.Fatal(err)
+	}
+	enc.SetVBR(true)
+	enc.SetVBRConstraint(true)
+	enc.SetSignalType(SignalMusic)
+
+	const frameSize = 960
+	stride := frameSize * clip.channels
+	frames := len(clip.pcm) / stride
+	packets := make([][]byte, 0, frames)
+	ranges := make([]uint32, 0, frames)
+	totalBytes := 0
+	for frame := 0; frame < frames; frame++ {
+		packet, err := enc.EncodeFloat(clip.pcm[frame*stride:(frame+1)*stride], frameSize)
+		if err != nil {
+			t.Fatalf("frame %d encode: %v", frame, err)
+		}
+		packets = append(packets, packet)
+		ranges = append(ranges, enc.FinalRange())
+		totalBytes += len(packet)
+	}
+	return packets, ranges, totalBytes
+}
+
+func phase1DecodeAndCheckRanges(t *testing.T, packets [][]byte, ranges []uint32, clip corpusClip) ([]float64, float64) {
+	t.Helper()
+	goDec, err := NewDecoder(clip.rate, clip.channels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refDec, err := cgoref.NewDecoder(clip.rate, clip.channels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer refDec.Close()
+
+	goOut := make([]float64, 0, len(packets)*960*clip.channels)
+	refOut := make([]float64, 0, cap(goOut))
+	for i, packet := range packets {
+		pcm, err := goDec.DecodeFloat(packet)
+		if err != nil {
+			t.Fatalf("Go decode frame %d: %v", i, err)
+		}
+		refPCM, err := refDec.DecodeFloat(packet, 960)
+		if err != nil {
+			t.Fatalf("libopus decode frame %d: %v", i, err)
+		}
+		refRange, err := refDec.FinalRange()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := goDec.FinalRange(); got != ranges[i] || refRange != ranges[i] {
+			t.Fatalf("frame %d final range encoder=%08x Go=%08x libopus=%08x", i, ranges[i], got, refRange)
+		}
+		goOut = append(goOut, pcm...)
+		for _, sample := range refPCM {
+			refOut = append(refOut, float64(sample))
+		}
+	}
+	crossSNR, _, _, _ := opusSILKABAlignedSNR(goOut, refOut, 0)
+	if math.IsNaN(crossSNR) || math.IsInf(crossSNR, 0) || crossSNR < 60 {
+		t.Fatalf("Go/libopus cross-decode SNR %.3f dB", crossSNR)
+	}
+	return goOut, crossSNR
 }
 
 func phase1StereoChordsClip() corpusClip {
@@ -105,6 +180,18 @@ func phase1PacketsEqual(a, b [][]byte) bool {
 	}
 	for i := range a {
 		if !bytes.Equal(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func phase1RangesEqual(a, b []uint32) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
 			return false
 		}
 	}

@@ -241,10 +241,6 @@ func (e *Encoder) EncodeHybrid(samples []float64, enc *entcode.Encoder, maxBytes
 }
 
 func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, maxTargetBytes, startBand, endBand int, sourceSilence bool) (int, []byte, error) {
-	// Temporary post-audit Phase 1 instrumentation. The focused opusref
-	// diagnostic sets one value at a time and the production adoption slice
-	// removes this gate after ranking the decisions.
-	phase1Ablation := os.Getenv("OPUS_PHASE1_CELT_ABLATION")
 	if len(samples) != e.mode.FrameSize*e.mode.Channels {
 		return 0, nil, errors.New("celt: invalid input size")
 	}
@@ -337,10 +333,6 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	if lm > 0 && e.complexity >= 1 {
 		isTransient, tfChan, tfEstimate = transientAnalysis(bufs, frameSize+ov, ch)
 	}
-	if phase1Ablation == "force-short-blocks" && lm > 0 {
-		isTransient = true
-	}
-
 	// Pass 2: forward MDCT (M interleaved short blocks on transients, else one
 	// long block), band energy, and per-band normalisation.
 	//
@@ -539,31 +531,12 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			}
 		}
 	}
-	if phase1Ablation == "full-rate-target" && e.rateMode != RateModeCBR && !shared {
-		targetBytes = maxTargetBytes
-	}
-	if phase1Ablation == "cvbr-blend" && e.rateMode == RateModeCVBR && !shared && targetBytes < maxTargetBytes {
-		// libopus compute_vbr makes constrained VBR less aggressive with
-		// base_target + 0.67*(target-base_target).
+	if e.rateMode == RateModeCVBR && !shared && targetBytes < maxTargetBytes {
+		// Match libopus compute_vbr's constrained-VBR damping:
+		// base_target + 0.67*(target-base_target). The activity curve can
+		// otherwise start a quiet tonal stream at one quarter of its nominal
+		// target and take several damaged frames to refill the reservoir.
 		targetBytes = maxTargetBytes - (2*(maxTargetBytes-targetBytes)+1)/3
-	}
-	if e.rateMode != RateModeCBR && !shared {
-		floorBytes := 0
-		switch phase1Ablation {
-		case "rate-target-floor-50":
-			floorBytes = maxTargetBytes / 2
-		case "rate-target-floor-625":
-			floorBytes = 5 * maxTargetBytes / 8
-		case "rate-target-floor-667":
-			floorBytes = 2 * maxTargetBytes / 3
-		case "rate-target-floor-75":
-			floorBytes = 3 * maxTargetBytes / 4
-		case "rate-target-floor-875":
-			floorBytes = 7 * maxTargetBytes / 8
-		}
-		if targetBytes < floorBytes {
-			targetBytes = floorBytes
-		}
 	}
 
 	totalBits := targetBytes * 8
@@ -635,19 +608,13 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	vbrOn := e.rateMode != RateModeCBR
 	constrainedVBR := e.rateMode == RateModeCVBR
 	offsets, importance := dynallocAnalysis(logE, logE2, numBands, end, ch, lm, isTransient, vbrOn, constrainedVBR)
-	if phase1Ablation == "neutral-dynalloc-trim" {
-		clear(offsets)
-		clear(importance)
-	} else if phase1Ablation == "disable-dynalloc" {
-		clear(offsets)
-	}
 
 	// Time-frequency resolution. tf_analysis runs a Viterbi search over per-band
 	// L1 sparsity to pick tfRes[]/tf_select; libopus disables it (tf_res =
 	// isTransient) at very low bitrate or below complexity 2.
 	tfRes := make([]int, numBands)
 	tfSelect := 0
-	if phase1Ablation != "disable-tf" && targetBytes >= 15*ch && e.complexity >= 2 {
+	if targetBytes >= 15*ch && e.complexity >= 2 {
 		lambda := 20480/targetBytes + 2
 		if lambda < 80 {
 			lambda = 80
@@ -681,9 +648,6 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 
 	// Allocation trim (spectral tilt + stereo correlation).
 	allocTrim := allocTrimAnalysis(X, logE, numBands, end, lm, ch, frameLen, end, e.bitrate)
-	if phase1Ablation == "neutral-dynalloc-trim" || phase1Ablation == "neutral-trim" {
-		allocTrim = 5
-	}
 	if enc.ECTell()+6 <= totalBits {
 		enc.EncodeIcdf(allocTrim, TrimICDF[:], 7)
 	}
@@ -786,10 +750,6 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			encIntensity = start
 		}
 		if encIntensity > end {
-			encIntensity = end
-		}
-		if phase1Ablation == "force-dual-no-intensity" {
-			encDualStereo = true
 			encIntensity = end
 		}
 	}

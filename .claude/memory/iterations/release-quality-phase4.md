@@ -158,3 +158,74 @@ Adopted for local integration. The workflow syntax, local gates, and all target
 cross-builds pass. Final qualification still requires the configured hosted
 jobs to run on a pushed PR; no push or PR was performed without user approval.
 Iteration 4-4 may proceed independently.
+
+## Iteration 4-4: release and semver hygiene (Qualified)
+
+### Implemented locally
+
+- Audited the complete release path from `VERSION` and the generator through
+  generated constants, tests, support policy, existing tags, and publication
+  instructions. Confirmed `VERSION`, `version_gen.go`, and the latest tag all
+  use the `1.2.0` / `v1.2.0` baseline.
+- Strengthened `TestVersionMetadata` so normal tests compare the generated
+  public version with the repository `VERSION` source, in addition to checking
+  its numeric components.
+- Made the generator accept only canonical `major.minor.patch` values and added
+  focused tests for malformed, prefixed, prerelease, signed, empty, and
+  leading-zero forms.
+- Added `docs/RELEASE_CHECKLIST.md`, covering accumulated-diff SemVer selection,
+  version generation, documentation and release-note preparation, local and
+  hosted gates, explicit approval, annotated tags, module-proxy smoke testing,
+  and recovery before and after publication.
+- Recorded that the audited post-`v1.2.0` diff contains backward-compatible
+  public API additions and would therefore be minor-release material if it
+  remains in the eventual candidate. No next version was selected.
+- Added `docs/V2_API_CANDIDATES.md` for breaking proposals found during the
+  naming and sentinel-error audit. The v1 API and error identities were not
+  broken.
+- Clarified three Ogg sentinel comments without changing their identities or
+  runtime behavior, including retaining the unreachable-in-normal-iteration
+  `ErrAfterEOS` sentinel as deprecated for v1 compatibility.
+- Updated the security table to support `main` and the current stable `v1.2.x`
+  line, and linked the release/v2 documents from both READMEs and the current
+  implementation snapshot.
+
+Commits:
+
+- `d5644a2` `test: harden release version validation`
+- `31aea30` `docs: define release and v2 compatibility policy`
+
+### Qualification observations
+
+- `VERSION`, `version_gen.go`, and `v1.2.0` remained unchanged; no version bump,
+  tag, push, PR, or GitHub Release was performed.
+- Existing tags were found to mix lightweight and annotated forms. The new
+  checklist leaves historical tags untouched and standardizes future tags as
+  annotated, with an explicit signing/provenance decision before creation.
+- Repository-relative links in the two READMEs and changed release/security
+  documents resolved, and English/Japanese README heading parity remained
+  intact.
+- `actionlint`, the four executable examples, the exported-documentation
+  guard, and an explicit 12/12 RFC 8251 vector run passed.
+- The release-oriented race gate passed:
+
+```text
+go test -race -count=1 ./...
+```
+
+- The Phase 4 standard PowerShell gates passed:
+
+```text
+go generate ./...
+git diff --exit-code
+go vet ./...
+go test -count=1 ./...
+go test -count=1 -tags opusref ./...
+```
+
+### Decision
+
+Adopted. Iteration 4-4 meets its acceptance criteria. Phase 4 implementation is
+locally complete. Iteration 4-3 remains locally qualified until the configured
+native hosted jobs run on a pushed PR; release version selection and every
+publication action still require explicit user approval.

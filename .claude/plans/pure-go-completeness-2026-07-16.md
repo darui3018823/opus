@@ -192,4 +192,5 @@ Repacketizer/OggParsers)。
 - [x] Phase 1: 機能ギャップ (1-1〜1-5 完了、最終レビュー修正 `85eb9bb`, 2026-07-16。optional 1-6 は承認待ちのため未着手)
 - [x] Phase 2: 堅牢性 — 2-1〜2-6 完了、PR #22 で main マージ済 (`60cb602`, 2026-07-17)
 - [x] Phase 3: 性能 — 3-1 harness + 3-2〜3-5 SILK allocation optimizations、PR #23 で main マージ済 (`80c7e26`, 2026-07-17)
-- [ ] Phase 4: v1.2 以降のリリース品質 (godoc / README / CI matrix / release hygiene)
+- [ ] Phase 4: v1.2 以降のリリース品質 — 4-1 / 4-2 / 4-4 qualified、4-3 は
+  local qualification 完了。hosted PR checks と review/merge 待ち

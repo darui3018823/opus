@@ -8,24 +8,37 @@ import (
 // Packet is a reconstructed Ogg packet. GranulePosition is meaningful only
 // for the last packet completed on a page; it is -1 for earlier packets.
 type Packet struct {
-	Data            []byte
+	// Data is a caller-owned copy of the reconstructed packet payload.
+	Data []byte
+	// GranulePosition is meaningful only for the last packet completed on a
+	// page; it is -1 for earlier packets. Reader interprets it in 48 kHz samples.
 	GranulePosition int64
 	// Duration48k is the decoded packet duration per channel at 48 kHz.
 	// PacketReader leaves it zero; Reader populates it for audio packets.
 	Duration48k int
-	// DiscardStart and DiscardEnd are decoded samples per channel to remove
-	// for Opus pre-skip, seeking, or end trimming. Reader populates them.
+	// DiscardStart is the decoded samples per channel to remove at the beginning
+	// for Opus pre-skip or seeking. Reader populates it.
 	DiscardStart int
-	DiscardEnd   int
+	// DiscardEnd is the decoded samples per channel to remove at the end for
+	// granule-position trimming. Reader populates it.
+	DiscardEnd int
 	// LinkIndex is the zero-based chained logical-stream index. PacketReader
 	// leaves it zero; Reader populates it for audio packets.
-	LinkIndex         int
-	Serial            uint32
-	PageSequence      uint32
-	BOS               bool
-	EOS               bool
+	LinkIndex int
+	// Serial identifies the packet's logical bitstream.
+	Serial uint32
+	// PageSequence is the sequence number of the page completing the packet.
+	PageSequence uint32
+	// BOS reports whether the packet begins on a BOS page.
+	BOS bool
+	// EOS reports whether the packet is the last packet completed on an EOS
+	// page. An empty EOS page produces no Packet value.
+	EOS bool
+	// FirstPacketOnPage reports whether this is the first packet completed on
+	// its page; a continued packet may have begun on an earlier page.
 	FirstPacketOnPage bool
-	LastPacketOnPage  bool
+	// LastPacketOnPage reports whether this is the final packet completed on its page.
+	LastPacketOnPage bool
 }
 
 // PacketReader reconstructs packets from a single logical Ogg bitstream.
@@ -44,6 +57,8 @@ type PacketReader struct {
 	haveEOS     bool
 }
 
+// NewPacketReader returns a stateful packet reader that borrows r. It accepts
+// one logical bitstream and enforces its serial number and page sequence.
 func NewPacketReader(r io.Reader) *PacketReader {
 	return &PacketReader{r: r}
 }
@@ -58,10 +73,16 @@ func newPacketReaderAt(r io.Reader, serial, sequence uint32, allowOrphan bool) *
 	}
 }
 
+// Serial returns the logical-stream serial and whether a page has established it.
 func (r *PacketReader) Serial() (uint32, bool) { return r.serial, r.haveSerial }
-func (r *PacketReader) EOS() bool              { return r.eos }
 
-// Next returns the next complete packet.
+// EOS reports whether an EOS page has been read. Queued packets from that page
+// may still remain to be returned by Next.
+func (r *PacketReader) EOS() bool { return r.eos }
+
+// Next returns the next complete packet with caller-owned Data. It validates
+// page CRCs, serial numbers, sequences, and continuation. After queued EOS
+// packets are returned, it returns io.EOF.
 func (r *PacketReader) Next() (Packet, error) {
 	for len(r.queue) == 0 {
 		if r.terminalErr != nil {
@@ -183,14 +204,21 @@ func (r *PacketReader) readPage() error {
 
 // PacketWriteOptions controls page metadata for a packet.
 type PacketWriteOptions struct {
+	// GranulePosition becomes the page granule when this packet is the last
+	// packet completed on that page. Only non-negativity is validated.
 	GranulePosition int64
-	Flush           bool
-	EOS             bool
+	// Flush finishes the current page after adding the packet.
+	Flush bool
+	// EOS finishes an EOS page and closes the PacketWriter. It takes precedence
+	// over Flush.
+	EOS bool
 }
 
 // PacketWriter writes packets into a single logical Ogg bitstream. It packs
 // packets into pages until Flush is requested or the 255-segment page limit is
-// reached. The first page is marked BOS automatically.
+// reached. The first page is marked BOS automatically. It borrows its output
+// writer, copies packet bytes during WritePacket, and is not safe for
+// concurrent use.
 type PacketWriter struct {
 	w                   io.Writer
 	serial              uint32
@@ -206,6 +234,7 @@ type PacketWriter struct {
 	closed              bool
 }
 
+// NewPacketWriter returns a packet writer with page sequence zero for serial.
 func NewPacketWriter(w io.Writer, serial uint32) *PacketWriter {
 	return &PacketWriter{
 		w:           w,
@@ -215,11 +244,16 @@ func NewPacketWriter(w io.Writer, serial uint32) *PacketWriter {
 	}
 }
 
-func (w *PacketWriter) Serial() uint32   { return w.serial }
+// Serial returns the logical-stream serial number.
+func (w *PacketWriter) Serial() uint32 { return w.serial }
+
+// Sequence returns the sequence number of the next page to be written.
 func (w *PacketWriter) Sequence() uint32 { return w.sequence }
 
-// WritePacket adds one packet. GranulePosition is the total 48 kHz sample
-// count through this packet for Ogg Opus streams.
+// WritePacket adds one packet. For Ogg Opus, callers normally supply the total
+// decoded 48 kHz samples per channel through the packet. This low-level writer
+// accepts zero-length packets and checks neither Opus framing nor timing; it
+// only requires a non-negative granule position.
 func (w *PacketWriter) WritePacket(data []byte, options PacketWriteOptions) error {
 	if w.closed {
 		return ErrWriterClosed
@@ -274,7 +308,9 @@ func (w *PacketWriter) addSegment(data []byte, lace byte, continued bool) error 
 	return nil
 }
 
-// Flush finishes the current page without ending the logical stream.
+// Flush finishes the current page without ending the logical stream. It is a
+// no-op when no segments are buffered and does not flush or close the
+// underlying writer.
 func (w *PacketWriter) Flush() error {
 	if w.closed {
 		return ErrWriterClosed
@@ -283,7 +319,8 @@ func (w *PacketWriter) Flush() error {
 }
 
 // Close writes an EOS page. If the final packet was already flushed, Close
-// emits an empty EOS page carrying the final granule position.
+// emits an empty EOS page carrying the final granule position. A successful
+// Close is idempotent and does not close the underlying writer.
 func (w *PacketWriter) Close() error {
 	if w.closed {
 		return nil

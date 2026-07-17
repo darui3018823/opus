@@ -11,7 +11,8 @@ import (
 	"github.com/darui3018823/opus/internal/silk"
 )
 
-// Application specifies the encoding mode (use constants from package)
+// Application selects encoder tuning for voice, general audio, or restricted
+// low-delay operation. Valid values are the Application* constants.
 type Application = int
 
 // EncoderProfile selects constructor defaults without changing the encoded
@@ -33,7 +34,7 @@ type SignalType = celt.SignalType
 
 const (
 	// SignalAuto lets the encoder derive a hint from the Application setting
-	// (VOIP → voice, Audio/RestrictedLowDelay → music). This is the default.
+	// (VOIP → voice, Audio/RestrictedLowDelay → music).
 	SignalAuto SignalType = celt.SignalUnknown
 	// SignalVoice marks speech-leaning content. The encoder uses narrower
 	// bandwidth tiers (matching ApplicationVOIP) and switches to short blocks
@@ -142,11 +143,11 @@ func isValidApplication(application Application) bool {
 	return false
 }
 
-// NewEncoder creates a new Opus encoder
+// NewEncoder creates a stateful Opus encoder using the legacy compatibility
+// defaults: 64 kbit/s, complexity 5, and CBR.
 //
-// sampleRate must be one of: 8000, 12000, 16000, 24000, 48000 Hz
-// channels must be 1 (mono) or 2 (stereo)
-// application specifies the encoding mode
+// sampleRate must be 8000, 12000, 16000, 24000, or 48000 Hz; channels must be
+// one or two. Invalid arguments return an error wrapping ErrBadArg.
 func NewEncoder(sampleRate, channels int, application Application) (*Encoder, error) {
 	// Validate parameters
 	if !isValidOpusRate(sampleRate) {
@@ -230,6 +231,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 
 // NewEncoderWithProfile creates an encoder with an explicit defaults profile.
 // NewEncoder remains equivalent to EncoderProfileLegacy for compatibility.
+// The sample-rate and channel constraints are the same as NewEncoder.
 func NewEncoderWithProfile(sampleRate, channels int, application Application, profile EncoderProfile) (*Encoder, error) {
 	if profile != EncoderProfileLegacy && profile != EncoderProfileLibopus {
 		return nil, fmt.Errorf("%w: unsupported encoder profile %d", ErrBadArg, profile)
@@ -291,7 +293,9 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
-// The nominal input range is [-8388608, 8388607].
+// The nominal input range is [-8388608, 8388607]. frameSize is samples per
+// channel, and pcm must contain at least frameSize*Channels() values unless a
+// fixed expert duration selects a smaller prefix.
 func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
 	selectedFrameSize, err := e.selectEncodeFrameSize(frameSize)
 	if err != nil {
@@ -1453,7 +1457,9 @@ func (e *Encoder) SetForceChannels(channels int) error {
 // ForceChannels returns the configured forced stream channel count.
 func (e *Encoder) ForceChannels() int { return e.forceChannels }
 
-// SetLSBDepth sets the input precision hint in bits per sample.
+// SetLSBDepth sets the retained input precision hint in bits per sample. The
+// current encoder exposes this for CTL parity but does not use it in codec
+// decisions.
 func (e *Encoder) SetLSBDepth(depth int) error {
 	if depth < LSBDepthMin || depth > LSBDepthMax {
 		return fmt.Errorf("%w: invalid LSB depth %d", ErrBadArg, depth)
@@ -1475,6 +1481,8 @@ func (e *Encoder) SetPredictionDisabled(disabled bool) {
 func (e *Encoder) PredictionDisabled() bool { return e.predictionDisabled }
 
 // SetPhaseInversionDisabled disables CELT intensity-stereo phase inversion.
+// This is intended for compatibility with downmixing pipelines; disabling it
+// is not compliant with the Opus specification.
 func (e *Encoder) SetPhaseInversionDisabled(disabled bool) {
 	e.phaseInversionDisabled = disabled
 	for _, enc := range e.celtEncoders {
@@ -1536,7 +1544,8 @@ func (e *Encoder) monoEncoder() (*Encoder, error) {
 	return m, nil
 }
 
-// SetBitrate sets the target bitrate in bits per second
+// SetBitrate sets the target bitrate in bits per second. It accepts numeric
+// rates from 6000 through 510000, BitrateAuto, or BitrateMax.
 func (e *Encoder) SetBitrate(bitrate int) error {
 	if bitrate != BitrateAuto && bitrate != BitrateMax && (bitrate < 6000 || bitrate > 510000) {
 		return fmt.Errorf("%w: invalid bitrate %d (must be between 6000 and 510000)", ErrBadArg, bitrate)
@@ -1635,9 +1644,10 @@ func (e *Encoder) syncSILKRateMode() {
 // emitted packet (RFC 6716 §3.2.5). When n > 0, every packet is encoded as a
 // code-3 packet with the padding flag set and n zero bytes appended at the end;
 // the padding does not affect the decoded audio (the decoder strips it). This is
-// useful for keeping a constant on-the-wire packet size or for obscuring the true
-// payload length. n <= 0 disables padding (the default), restoring the compact
-// code-0/1/2/3 selection.
+// useful for increasing or obscuring the payload length; because the encoded
+// audio size may vary, a fixed n does not guarantee a fixed total packet size.
+// Use PacketPad when an already encoded packet must reach an exact total size.
+// n <= 0 disables padding (the default), restoring compact framing selection.
 func (e *Encoder) SetPacketPadding(n int) {
 	if n < 0 {
 		n = 0
@@ -1674,9 +1684,9 @@ func (e *Encoder) SetInbandFEC(enabled bool) {
 // InbandFEC reports whether inband FEC is enabled.
 func (e *Encoder) InbandFEC() bool { return e.useInbandFEC }
 
-// SetPacketLossPerc sets the expected packet-loss percentage (0..100) used to
-// tune the FEC redundancy (higher loss → smaller, more frequent LBRR frames).
-// With FEC enabled, a value of 0 disables LBRR emission.
+// SetPacketLossPerc sets the expected packet-loss percentage used to tune FEC
+// redundancy (higher loss → smaller, more frequent LBRR frames). Values are
+// clamped to 0 through 100. With FEC enabled, zero disables LBRR emission.
 func (e *Encoder) SetPacketLossPerc(perc int) {
 	if perc < 0 {
 		perc = 0
@@ -1758,8 +1768,9 @@ func (e *Encoder) SetBandwidth(bw int) error {
 	return nil
 }
 
-// Bandwidth reports the coded bandwidth the encoder would currently use, as a
-// public Bandwidth* constant.
+// Bandwidth reports the policy-selected bandwidth before PCM content analysis,
+// as a public Bandwidth* constant. Automatic encoding may narrow an individual
+// packet further; use PacketGetBandwidth on the emitted packet to observe it.
 func (e *Encoder) Bandwidth() int {
 	if e.shouldEncodeSILKOnly() {
 		bw, _ := nativeSilkFramingBandwidth(e.silkSampleRate)
@@ -1918,7 +1929,8 @@ func celtEndBandForFramingBW(bw int) int {
 	}
 }
 
-// Reset resets the encoder state
+// Reset clears codec history and last-packet observations while retaining
+// encoder configuration such as bitrate, application, and controls.
 func (e *Encoder) Reset() error {
 	// Preserve the configured content hint. The active encoder may be a
 	// short-frame instance carrying a SetSignalType/SetApplication update that the
@@ -2071,10 +2083,11 @@ func celtConfigLMIdx(config int) int {
 	return config & 3
 }
 
-// NewDecoder creates a new Opus decoder
+// NewDecoder creates a stateful Opus decoder.
 //
-// sampleRate must be one of: 8000, 12000, 16000, 24000, 48000 Hz
-// channels must be 1 (mono) or 2 (stereo)
+// sampleRate is the requested output rate and must be 8000, 12000, 16000,
+// 24000, or 48000 Hz. channels must be one or two. Invalid arguments return an
+// error wrapping ErrBadArg.
 func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 	// Validate parameters
 	if !isValidOpusRate(sampleRate) {
@@ -2169,11 +2182,9 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 	return dec, nil
 }
 
-// Decode decodes an Opus packet to PCM samples
-//
-// data is the compressed Opus packet
-// pcm is the output buffer for 16-bit PCM samples
-// Returns the number of samples per channel decoded.
+// Decode decodes an Opus packet into interleaved int16 PCM and returns the
+// number of samples per channel. pcm must have room for the packet duration
+// times Channels() values; a short buffer returns ErrBufferTooSmall.
 func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 	required, err := d.packetOutputSamples(data)
 	if err != nil {
@@ -2207,7 +2218,9 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 }
 
 // Decode24 decodes an Opus packet to interleaved signed 24-bit PCM stored in
-// int32 values. Output is saturated to [-8388608, 8388607].
+// int32 values. Output is saturated to [-8388608, 8388607]. pcm must have room
+// for the packet duration times Channels() values; the return value is samples
+// per channel, and a short buffer returns ErrBufferTooSmall.
 func (d *Decoder) Decode24(data []byte, pcm []int32) (int, error) {
 	required, err := d.packetOutputSamples(data)
 	if err != nil {
@@ -2696,10 +2709,11 @@ func is10msConfig(config int) bool {
 	return silkConfigFrameMs(config) == 10
 }
 
-// DecodeFloat decodes an Opus packet to floating-point PCM samples
+// DecodeFloat decodes an Opus packet to caller-owned interleaved float64 PCM.
 //
-// data is the compressed Opus packet
-// Returns float64 samples in range [-1.0, 1.0]
+// Samples use the conventional normalized scale where -1 and +1 correspond to
+// full-scale input. Positive decoder gain can produce values outside that
+// nominal range.
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 	info, err := inspectPacket(data, d.sampleRate)
 	if err != nil {
@@ -2816,7 +2830,8 @@ func (d *Decoder) applyGain(pcm []float64) {
 	}
 }
 
-// DecodeFloat32 decodes an Opus packet to interleaved float32 PCM samples.
+// DecodeFloat32 decodes an Opus packet to caller-owned interleaved float32 PCM.
+// Positive decoder gain can produce values outside the nominal [-1, 1] scale.
 func (d *Decoder) DecodeFloat32(data []byte) ([]float32, error) {
 	pcm, err := d.DecodeFloat(data)
 	if err != nil {
@@ -3603,8 +3618,10 @@ func isValidPacketFrameSize(frameSize, sampleRate int) bool {
 }
 
 // DecodeFEC decodes SILK in-band forward-error-correction data from the packet
-// following a loss. The recovered duration is inferred from the packet.
-// SILK-only and hybrid packets are supported; CELT-only packets have no LBRR.
+// following a loss. The recovered duration is inferred from the packet and
+// returned in samples per channel; pcm must hold that duration times Channels()
+// values or ErrBufferTooSmall is returned. SILK-only and hybrid packets are
+// supported; CELT-only packets have no LBRR.
 func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 	info, err := inspectPacket(data, d.sampleRate)
 	if err != nil {
@@ -3716,7 +3733,8 @@ func (d *Decoder) validateFECState(data []byte) error {
 	return nil
 }
 
-// Reset resets the decoder state
+// Reset clears codec history and last-packet range, pitch, and bandwidth while
+// retaining decoder configuration such as output gain and phase inversion.
 func (d *Decoder) Reset() error {
 	for bw := range d.celtDecoders {
 		for lm := range d.celtDecoders[bw] {
@@ -3767,7 +3785,9 @@ func (d *Decoder) Reset() error {
 	return nil
 }
 
-// GetLastPacketDuration returns the duration of the last decoded packet in samples
+// GetLastPacketDuration returns the most recent decode, PLC, or FEC duration in
+// samples per channel at the decoder output rate. Before decoding and after
+// Reset, it reports the constructor's 20 ms default.
 func (d *Decoder) GetLastPacketDuration() int {
 	if d.lastPacketDuration > 0 {
 		return d.lastPacketDuration

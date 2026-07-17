@@ -8,37 +8,59 @@ import (
 )
 
 const (
+	// CapturePattern is the four-byte signature at the start of every Ogg page.
 	CapturePattern = "OggS"
-	StreamVersion  = 0
-	MaxSegments    = 255
-	MaxPageData    = 255 * 255
+	// StreamVersion is the supported Ogg page format version.
+	StreamVersion = 0
+	// MaxSegments is the maximum number of lacing values on one Ogg page.
+	MaxSegments = 255
+	// MaxPageData is the maximum payload size represented by one lacing table.
+	MaxPageData = 255 * 255
 )
 
 // HeaderType contains the Ogg page header flags.
 type HeaderType byte
 
 const (
+	// HeaderContinued marks a page beginning with a continued packet.
 	HeaderContinued HeaderType = 0x01
-	HeaderBOS       HeaderType = 0x02
-	HeaderEOS       HeaderType = 0x04
+	// HeaderBOS marks the first page of a logical bitstream.
+	HeaderBOS HeaderType = 0x02
+	// HeaderEOS marks the final page of a logical bitstream.
+	HeaderEOS HeaderType = 0x04
 )
 
 // Page is one complete Ogg page. Segments contains its lacing values and Data
 // contains the concatenated segment payload.
 type Page struct {
-	Version         byte
-	HeaderType      HeaderType
+	// Version is the Ogg page format version and must equal StreamVersion.
+	Version byte
+	// HeaderType contains the continued, BOS, and EOS flags.
+	HeaderType HeaderType
+	// GranulePosition is the codec-defined position for the page, or -1 when no
+	// completed packet on the page establishes one. Ogg Opus uses 48 kHz samples.
 	GranulePosition int64
-	Serial          uint32
-	Sequence        uint32
-	Checksum        uint32
-	Segments        []byte
-	Data            []byte
+	// Serial identifies the logical bitstream.
+	Serial uint32
+	// Sequence is the zero-based page sequence number within the bitstream.
+	Sequence uint32
+	// Checksum is populated by ParsePage. MarshalBinary ignores this value and
+	// computes the checksum from the other fields.
+	Checksum uint32
+	// Segments contains the lacing values whose sum must equal len(Data).
+	Segments []byte
+	// Data contains the concatenated segment payload.
+	Data []byte
 }
 
+// Continued reports whether the page begins with a continued packet.
 func (p Page) Continued() bool { return p.HeaderType&HeaderContinued != 0 }
-func (p Page) BOS() bool       { return p.HeaderType&HeaderBOS != 0 }
-func (p Page) EOS() bool       { return p.HeaderType&HeaderEOS != 0 }
+
+// BOS reports whether this is the first page of a logical bitstream.
+func (p Page) BOS() bool { return p.HeaderType&HeaderBOS != 0 }
+
+// EOS reports whether this is the final page of a logical bitstream.
+func (p Page) EOS() bool { return p.HeaderType&HeaderEOS != 0 }
 
 // Validate checks the page fields and lacing table, but does not compare a
 // checksum because a Page does not retain its original encoded bytes.
@@ -81,7 +103,8 @@ func (p Page) MarshalBinary() ([]byte, error) {
 	return out, nil
 }
 
-// WritePage encodes and writes one page.
+// WritePage encodes and writes one page, recalculating its checksum. It does
+// not close w.
 func WritePage(w io.Writer, p Page) error {
 	data, err := p.MarshalBinary()
 	if err != nil {
@@ -92,7 +115,9 @@ func WritePage(w io.Writer, p Page) error {
 
 // ParsePage parses exactly the first page in data and returns the number of
 // bytes consumed. It verifies the capture pattern, version, flags, length,
-// lacing table, and CRC.
+// lacing table, and CRC. Trailing data is left unconsumed, and returned lacing
+// and payload slices are caller-owned copies. Truncation returns
+// io.ErrUnexpectedEOF.
 func ParsePage(data []byte) (Page, int, error) {
 	if len(data) < 27 {
 		return Page{}, 0, io.ErrUnexpectedEOF
@@ -134,7 +159,8 @@ func ParsePage(data []byte) (Page, int, error) {
 	return p, pageLen, nil
 }
 
-// ReadPage reads and verifies one page from r.
+// ReadPage reads and CRC-verifies exactly one page from r. It returns io.EOF
+// when no page bytes are available and io.ErrUnexpectedEOF for a partial page.
 func ReadPage(r io.Reader) (Page, error) {
 	header := make([]byte, 27)
 	n, err := io.ReadFull(r, header)

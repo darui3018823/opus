@@ -16,7 +16,9 @@ type MappingMatrix struct {
 	data []int16
 }
 
-// NewMappingMatrix validates and copies a Q15, column-major matrix.
+// NewMappingMatrix validates and copies a Q15, column-major matrix. rows and
+// cols must each be 1 through 255, their product must fit the RFC 8486 matrix
+// limit, and len(data) must equal rows*cols; invalid input returns ErrBadArg.
 func NewMappingMatrix(rows, cols, gain int, data []int16) (*MappingMatrix, error) {
 	if rows < 1 || rows > 255 || cols < 1 || cols > 255 ||
 		rows*cols > maxMappingMatrixBytes/2 || len(data) != rows*cols {
@@ -31,7 +33,9 @@ func NewMappingMatrix(rows, cols, gain int, data []int16) (*MappingMatrix, error
 }
 
 // NewMappingMatrixFromBytes decodes little-endian Q15 coefficients in the
-// format stored by RFC 8486 and returned by libopus' projection encoder.
+// format stored by RFC 8486 and returned by libopus' projection encoder. It
+// applies NewMappingMatrix's dimensions and exact-length checks and does not
+// retain data.
 func NewMappingMatrixFromBytes(rows, cols, gain int, data []byte) (*MappingMatrix, error) {
 	if len(data)%2 != 0 {
 		return nil, fmt.Errorf("%w: odd mapping matrix byte length %d", ErrBadArg, len(data))
@@ -43,8 +47,13 @@ func NewMappingMatrixFromBytes(rows, cols, gain int, data []byte) (*MappingMatri
 	return NewMappingMatrix(rows, cols, gain, coefficients)
 }
 
+// Rows returns the number of output rows.
 func (m *MappingMatrix) Rows() int { return m.rows }
+
+// Cols returns the number of input columns.
 func (m *MappingMatrix) Cols() int { return m.cols }
+
+// Gain returns the matrix gain in signed Q8 dB (S7.8).
 func (m *MappingMatrix) Gain() int { return m.gain }
 
 // Coefficients returns a copy of the column-major Q15 coefficients.
@@ -61,7 +70,8 @@ func (m *MappingMatrix) Bytes() []byte {
 	return out
 }
 
-// At returns the coefficient at row, col.
+// At returns the coefficient at zero-based row, col. An out-of-range index
+// returns ErrBadArg.
 func (m *MappingMatrix) At(row, col int) (int16, error) {
 	if row < 0 || row >= m.rows || col < 0 || col >= m.cols {
 		return 0, fmt.Errorf("%w: matrix index (%d,%d) outside %dx%d", ErrBadArg, row, col, m.rows, m.cols)

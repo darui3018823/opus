@@ -2,7 +2,8 @@ package opus
 
 import "errors"
 
-// Common Opus errors
+// Common Opus sentinel errors. Public methods may wrap these with additional
+// context; use errors.Is rather than direct equality when inspecting errors.
 var (
 	// ErrBadArg indicates that one or more arguments are invalid
 	ErrBadArg = errors.New("opus: bad argument")
@@ -10,7 +11,7 @@ var (
 	// ErrBufferTooSmall indicates that the provided buffer is too small
 	ErrBufferTooSmall = errors.New("opus: buffer too small")
 
-	// ErrInternalError indicates an internal error occurred
+	// ErrInternalError is reserved for libopus-compatible internal failures.
 	ErrInternalError = errors.New("opus: internal error")
 
 	// ErrInvalidPacket indicates the packet is invalid or corrupted
@@ -22,7 +23,7 @@ var (
 	// ErrInvalidState indicates the encoder/decoder is in an invalid state
 	ErrInvalidState = errors.New("opus: invalid state")
 
-	// ErrAllocFail indicates memory allocation failed
+	// ErrAllocFail is reserved for libopus-compatible allocation failures.
 	ErrAllocFail = errors.New("opus: allocation failed")
 
 	// ErrUnsupportedSampleRate indicates the sample rate is not supported

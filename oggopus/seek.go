@@ -9,9 +9,17 @@ import (
 
 const seekPreRoll48k = 3840
 
-// SeekPCM positions the reader for playback sample at 48 kHz in the current
-// logical stream. NextPacket returns decoder pre-roll packets first and marks
+// SeekPCM positions the reader for a playable sample in the current logical
+// stream, measured per channel at 48 kHz after pre-skip. The valid range is
+// zero through the link's playable length, inclusive. It performs the RFC 7845
+// 80 ms decoder pre-roll: NextPacket may return earlier packets first and marks
 // all samples before the target in DiscardStart.
+//
+// SeekPCM returns ErrNotSeekable unless the source passed to NewReader
+// implements io.ReadSeeker, and ErrSeekOutOfRange for an invalid sample. A
+// target at the playable length positions the reader at the link boundary, so
+// the next call may advance to a chained stream. Seeking mutates reader and
+// source state and must not run concurrently with other Reader operations.
 func (r *Reader) SeekPCM(sample int64) (err error) {
 	if r.seeker == nil {
 		return ErrNotSeekable

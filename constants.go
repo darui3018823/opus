@@ -1,11 +1,22 @@
-// Package opus provides a Pure Go implementation of the Opus audio codec.
-// This implementation is based on the official libopus reference implementation
-// and aims for complete compatibility without using CGO.
+// Package opus provides a stateful, Pure Go implementation of the Opus audio
+// codec, including single-stream, multistream, surround, projection, packet
+// transformation, packet inspection, PLC, and in-band FEC APIs.
+//
+// Encoder and decoder instances represent one logical stream and are not safe
+// for concurrent use. Callers must process packets in order and serialize all
+// operations on an instance, including getters, controls, and Reset. Distinct
+// instances may be used concurrently. Instances must not be copied after first
+// use.
+//
+// Methods borrow caller-provided PCM, packet, and destination slices only for
+// the duration of a call. Returned packet and PCM slices are owned by the
+// caller. The codec implementation has no runtime CGO dependency; optional
+// reference-comparison tests use libopus only under the opusref build tag.
 package opus
 
 //go:generate go run ./internal/cmd/genversion -version VERSION -out version_gen.go
 
-// Sample rates supported by Opus
+// Sample rates supported by the public encoder and decoder constructors.
 const (
 	SampleRate8kHz  = 8000
 	SampleRate12kHz = 12000
@@ -14,7 +25,8 @@ const (
 	SampleRate48kHz = 48000
 )
 
-// Frame sizes in samples (at 48kHz)
+// Frame sizes in samples per channel at 48 kHz. At other sample rates, use the
+// proportionally scaled sample count for the same duration.
 const (
 	FrameSize2_5ms = 120  // 2.5ms at 48kHz
 	FrameSize5ms   = 240  // 5ms at 48kHz
@@ -31,27 +43,35 @@ const (
 // the default behavior of deriving the duration from Encode's frameSize.
 type ExpertFrameDuration int
 
+// Expert frame-duration control values.
 const (
+	// ExpertFrameDurationArgument derives packet duration from each Encode
+	// call's frameSize argument.
 	ExpertFrameDurationArgument ExpertFrameDuration = 5000
-	ExpertFrameDuration2_5ms    ExpertFrameDuration = 5001
-	ExpertFrameDuration5ms      ExpertFrameDuration = 5002
-	ExpertFrameDuration10ms     ExpertFrameDuration = 5003
-	ExpertFrameDuration20ms     ExpertFrameDuration = 5004
-	ExpertFrameDuration40ms     ExpertFrameDuration = 5005
-	ExpertFrameDuration60ms     ExpertFrameDuration = 5006
-	ExpertFrameDuration80ms     ExpertFrameDuration = 5007
-	ExpertFrameDuration100ms    ExpertFrameDuration = 5008
-	ExpertFrameDuration120ms    ExpertFrameDuration = 5009
+	// The remaining values select the named fixed packet duration.
+	ExpertFrameDuration2_5ms ExpertFrameDuration = 5001
+	ExpertFrameDuration5ms   ExpertFrameDuration = 5002
+	ExpertFrameDuration10ms  ExpertFrameDuration = 5003
+	ExpertFrameDuration20ms  ExpertFrameDuration = 5004
+	ExpertFrameDuration40ms  ExpertFrameDuration = 5005
+	ExpertFrameDuration60ms  ExpertFrameDuration = 5006
+	ExpertFrameDuration80ms  ExpertFrameDuration = 5007
+	ExpertFrameDuration100ms ExpertFrameDuration = 5008
+	ExpertFrameDuration120ms ExpertFrameDuration = 5009
 )
 
-// Application types
+// Encoder application modes.
 const (
-	ApplicationVOIP               = 2048 // Voice over IP
-	ApplicationAudio              = 2049 // General audio
-	ApplicationRestrictedLowDelay = 2051 // Lowest latency
+	// ApplicationVOIP tunes for speech and permits SILK and hybrid routing.
+	ApplicationVOIP = 2048
+	// ApplicationAudio tunes for general audio.
+	ApplicationAudio = 2049
+	// ApplicationRestrictedLowDelay keeps encoding on the low-delay CELT path.
+	ApplicationRestrictedLowDelay = 2051
 )
 
-// Bandwidth types
+// Coded bandwidth selections. BandwidthAuto is accepted by SetBandwidth to
+// restore automatic selection; SetMaxBandwidth requires an explicit tier.
 const (
 	BandwidthAuto          = -1000 // automatic selection (default)
 	BandwidthNarrowband    = 1101  // 4kHz
@@ -61,7 +81,8 @@ const (
 	BandwidthFullband      = 1105  // 20kHz
 )
 
-// Channel modes
+// Stream channel selections. ChannelsAuto is accepted by SetForceChannels;
+// constructors require an explicit mono or stereo channel count.
 const (
 	ChannelsAuto   = -1000
 	ChannelsMono   = 1
@@ -74,21 +95,24 @@ const (
 	GainQ8Max = 32767
 )
 
-// Encoder input precision hints accepted by SetLSBDepth.
+// Encoder input precision hints accepted by SetLSBDepth. The current encoder
+// retains this setting for CTL parity but does not use it in codec decisions.
 const (
 	LSBDepthMin     = 8
 	LSBDepthMax     = 24
 	LSBDepthDefault = 24
 )
 
-// Opus modes (internal)
+// Packet coding modes returned by PacketGetMode.
 const (
 	ModeSILKOnly = 1000
 	ModeHybrid   = 1001
 	ModeCELTOnly = 1002
 )
 
-// Bitrate constants
+// Bitrate policy sentinels and libopus-compatible nominal CTL limits.
+// Encoder.SetBitrate currently accepts numeric rates from 6000 through 510000
+// bits per second; multistream wrappers apply their documented aggregate bounds.
 const (
 	BitrateAuto   = -1000
 	BitrateMax    = -1
@@ -96,7 +120,9 @@ const (
 	BitrateMaxVal = 512000 // 512 kbps
 )
 
-// Encoder/Decoder control codes (CTL)
+// Libopus-compatible numeric CTL request constants. This package exposes typed
+// control methods rather than a generic request API; these values are provided
+// for parity and protocol integration, not as method arguments.
 const (
 	SetBitrateRequest                = 4002
 	GetBitrateRequest                = 4003
@@ -132,7 +158,8 @@ const (
 	ResetStateRequest                = 4028
 )
 
-// Complexity (0-10)
+// Complexity bounds and the EncoderProfileLibopus default. NewEncoder's legacy
+// profile uses complexity 5.
 const (
 	ComplexityMin     = 0
 	ComplexityMax     = 10

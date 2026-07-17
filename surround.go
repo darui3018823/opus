@@ -39,7 +39,8 @@ type SurroundEncoder struct {
 
 // NewSurroundEncoder creates an encoder for mapping family 0, 1, or 255.
 // Mapping family 1 uses the standard Vorbis channel order for 1 through 8
-// channels. Mapping family 255 creates one uncoupled stream per channel.
+// channels. Family 0 accepts mono or stereo. Mapping family 255 creates one
+// uncoupled stream per channel.
 func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application Application) (*SurroundEncoder, error) {
 	layout, err := surroundLayoutFor(channels, mappingFamily)
 	if err != nil {
@@ -79,6 +80,7 @@ func (e *SurroundEncoder) SetBitrate(bitrate int) error {
 // Bitrate returns the configured aggregate surround bitrate policy.
 func (e *SurroundEncoder) Bitrate() int { return e.bitrate }
 
+// Encode encodes frameSize samples per channel of interleaved int16 PCM.
 func (e *SurroundEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	if err := e.prepareFrame(frameSize); err != nil {
 		return nil, err
@@ -86,6 +88,7 @@ func (e *SurroundEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	return e.MultistreamEncoder.Encode(pcm, frameSize)
 }
 
+// Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
 func (e *SurroundEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
 	if err := e.prepareFrame(frameSize); err != nil {
 		return nil, err
@@ -93,6 +96,7 @@ func (e *SurroundEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
 	return e.MultistreamEncoder.Encode24(pcm, frameSize)
 }
 
+// EncodeFloat32 encodes frameSize samples per channel of interleaved float32 PCM.
 func (e *SurroundEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
 	if err := e.prepareFrame(frameSize); err != nil {
 		return nil, err
@@ -100,6 +104,7 @@ func (e *SurroundEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, e
 	return e.MultistreamEncoder.EncodeFloat32(pcm, frameSize)
 }
 
+// EncodeFloat encodes frameSize samples per channel of interleaved float64 PCM.
 func (e *SurroundEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	if err := e.prepareFrame(frameSize); err != nil {
 		return nil, err
@@ -246,7 +251,9 @@ type SurroundDecoder struct {
 	lfeStream     int
 }
 
-// NewSurroundDecoder creates a decoder for mapping family 0, 1, or 255.
+// NewSurroundDecoder creates a decoder for mapping family 0, 1, or 255. Family
+// 0 accepts mono or stereo, family 1 accepts 1 through 8 channels in Vorbis
+// order, and family 255 treats every channel as a discrete uncoupled stream.
 func NewSurroundDecoder(sampleRate, channels, mappingFamily int) (*SurroundDecoder, error) {
 	layout, err := surroundLayoutFor(channels, mappingFamily)
 	if err != nil {
@@ -263,8 +270,12 @@ func NewSurroundDecoder(sampleRate, channels, mappingFamily int) (*SurroundDecod
 	}, nil
 }
 
+// MappingFamily returns the configured Ogg Opus channel mapping family.
 func (d *SurroundDecoder) MappingFamily() int { return d.mappingFamily }
-func (d *SurroundDecoder) LFEStream() int     { return d.lfeStream }
+
+// LFEStream returns the elementary stream carrying the LFE channel, or -1
+// when the selected layout has no LFE channel.
+func (d *SurroundDecoder) LFEStream() int { return d.lfeStream }
 
 func surroundLayoutFor(channels, mappingFamily int) (surroundLayout, error) {
 	switch mappingFamily {

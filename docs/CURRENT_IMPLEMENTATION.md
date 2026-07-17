@@ -18,7 +18,10 @@ The `oggopus` subpackage implements Ogg page and Ogg Opus container APIs.
 Constants are in `constants.go` and package-level error values in `errors.go`.
 Public version constants are generated into `version_gen.go` from the
 repository-level `VERSION` file; `go generate ./...` refreshes them and CI
-rejects generated-file drift.
+rejects generated-file drift. The current released baseline is `v1.2.0`.
+Release preparation follows [`docs/RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
+and compatibility-breaking cleanup is recorded separately in
+[`docs/V2_API_CANDIDATES.md`](V2_API_CANDIDATES.md).
 
 Public size constants distinguish separate limits:
 
@@ -96,8 +99,10 @@ Public packet inspection entry points:
 - `PacketExtensionsParse(packet []byte) ([]PacketExtension, error)`
 - `PacketExtensionsGenerate(packet []byte, extensions []PacketExtension, paddingBytes int) ([]byte, error)`
 
-These helpers validate the complete RFC 6716 packet framing and return
-`ErrInvalidPacket` for malformed or over-duration packets.
+All packet inspection helpers validate complete RFC 6716 framing and per-frame
+byte limits. The two duration helpers that accept a sample rate also reject
+packets longer than 120 ms; the TOC/configuration helpers do not perform that
+duration check.
 The repacketizer combines matching single-stream frames without transcoding,
 enforces the 120 ms limit, and supports canonical padding removal. Packet
 extensions are parsed and generated in code-3 padding with repeat expansion.
@@ -159,8 +164,9 @@ The `oggopus` subpackage provides:
 - lacing and continued-packet reconstruction through `PacketReader`
 - packet-to-page output through `PacketWriter`
 - `OpusHead` and `OpusTags` parsing and marshaling
-- Ogg Opus `Reader` and `Writer` APIs, including automatic chained logical
-  stream continuation with per-link headers, tags, serials, and packet indices
+- Ogg Opus `Reader` and `Writer` APIs; Reader automatically continues across
+  chained logical streams with per-link headers, tags, serials, and packet
+  indices, while each Writer emits one logical stream
 - validated 48 kHz packet timing with pre-skip/end-trim discard metadata
 - `(*Reader).SeekPCM(sample int64)` for granule-position bisection seeking on
   `io.ReadSeeker` sources with RFC 7845 80 ms decoder pre-roll

@@ -8,7 +8,9 @@ import (
 )
 
 // MultistreamEncoder encodes several elementary Opus streams into one RFC 7845
-// multistream packet. Coupled streams precede mono streams.
+// multistream packet. Coupled streams precede mono streams. It owns its
+// elementary encoders; all parent and child operations must be serialized.
+// Encode frame sizes are samples per channel and PCM is interleaved.
 type MultistreamEncoder struct {
 	sampleRate     int
 	channels       int
@@ -19,8 +21,11 @@ type MultistreamEncoder struct {
 	bitrate        int
 }
 
-// NewMultistreamEncoder creates a multistream encoder. mapping maps each input
-// channel to a coded channel index, or 255 to omit that channel.
+// NewMultistreamEncoder creates a multistream encoder. channels and streams
+// must be 1 through 255, coupledStreams must be between zero and streams, and
+// mapping must contain one entry per input channel. Entries select one of the
+// streams+coupledStreams coded channels or 255 to omit an input; every coded
+// channel must be referenced at least once. The mapping is copied.
 func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, mapping []byte, application Application) (*MultistreamEncoder, error) {
 	if err := validateMultistreamLayout(channels, streams, coupledStreams, mapping, true); err != nil {
 		return nil, err
@@ -65,7 +70,9 @@ func (e *MultistreamEncoder) Mapping() []byte {
 	return append([]byte(nil), e.mapping...)
 }
 
-// StreamEncoder returns the elementary encoder for stream.
+// StreamEncoder returns the parent-owned elementary encoder for stream. Direct
+// controls affect future multistream packets; calls must be serialized with all
+// other parent and child operations.
 func (e *MultistreamEncoder) StreamEncoder(stream int) (*Encoder, error) {
 	if stream < 0 || stream >= len(e.encoders) {
 		return nil, fmt.Errorf("%w: stream index %d", ErrBadArg, stream)
@@ -297,7 +304,10 @@ func (e *MultistreamEncoder) FinalRange() uint32 {
 	return final
 }
 
-// MultistreamDecoder decodes RFC 7845 multistream packets.
+// MultistreamDecoder decodes RFC 7845 multistream packets. It owns its
+// elementary decoders; all parent and child operations must be serialized.
+// Integer decode destinations need packetDuration*Channels() interleaved
+// values, and integer decode methods return samples per channel.
 type MultistreamDecoder struct {
 	sampleRate     int
 	channels       int
@@ -307,7 +317,11 @@ type MultistreamDecoder struct {
 	decoders       []*Decoder
 }
 
-// NewMultistreamDecoder creates a multistream decoder.
+// NewMultistreamDecoder creates a multistream decoder. channels and streams
+// must be 1 through 255, coupledStreams must be between zero and streams, and
+// mapping must contain one entry per output channel. Entries select one of the
+// streams+coupledStreams coded channels or 255 for a silent output. The mapping
+// is copied.
 func NewMultistreamDecoder(sampleRate, channels, streams, coupledStreams int, mapping []byte) (*MultistreamDecoder, error) {
 	if err := validateMultistreamLayout(channels, streams, coupledStreams, mapping, false); err != nil {
 		return nil, err
@@ -334,16 +348,25 @@ func NewMultistreamDecoder(sampleRate, channels, streams, coupledStreams int, ma
 	}, nil
 }
 
-func (d *MultistreamDecoder) Streams() int        { return d.streams }
-func (d *MultistreamDecoder) CoupledStreams() int { return d.coupledStreams }
-func (d *MultistreamDecoder) Channels() int       { return d.channels }
-func (d *MultistreamDecoder) SampleRate() int     { return d.sampleRate }
+// Streams returns the number of elementary Opus streams.
+func (d *MultistreamDecoder) Streams() int { return d.streams }
 
+// CoupledStreams returns the number of stereo elementary streams.
+func (d *MultistreamDecoder) CoupledStreams() int { return d.coupledStreams }
+
+// Channels returns the number of interleaved output channels.
+func (d *MultistreamDecoder) Channels() int { return d.channels }
+
+// SampleRate returns the decoder output sample rate in Hz.
+func (d *MultistreamDecoder) SampleRate() int { return d.sampleRate }
+
+// Mapping returns a copy of the output channel mapping.
 func (d *MultistreamDecoder) Mapping() []byte {
 	return append([]byte(nil), d.mapping...)
 }
 
-// StreamDecoder returns the elementary decoder for stream.
+// StreamDecoder returns the parent-owned elementary decoder for stream. Calls
+// must be serialized with all other parent and child operations.
 func (d *MultistreamDecoder) StreamDecoder(stream int) (*Decoder, error) {
 	if stream < 0 || stream >= len(d.decoders) {
 		return nil, fmt.Errorf("%w: stream index %d", ErrBadArg, stream)

@@ -8,24 +8,37 @@ import (
 )
 
 const (
+	// OpusHeadSignature identifies an Ogg Opus identification header.
 	OpusHeadSignature = "OpusHead"
+	// OpusTagsSignature identifies an Ogg Opus comment header.
 	OpusTagsSignature = "OpusTags"
 )
 
 // Head is the Ogg Opus identification header. PreSkip and granule positions
 // are measured at 48 kHz. OutputGain is signed Q7.8 dB.
 type Head struct {
-	Version         uint8
-	Channels        uint8
-	PreSkip         uint16
+	// Version is the OpusHead version. Values 1 through 15 are accepted.
+	Version uint8
+	// Channels is the decoded output channel count.
+	Channels uint8
+	// PreSkip is the number of decoded samples per channel to discard at 48 kHz.
+	PreSkip uint16
+	// InputSampleRate is an informational source-rate hint in Hz.
 	InputSampleRate uint32
-	OutputGain      int16
-	MappingFamily   uint8
-	StreamCount     uint8
-	CoupledCount    uint8
-	ChannelMapping  []uint8
+	// OutputGain is the playback gain in signed Q7.8 dB.
+	OutputGain int16
+	// MappingFamily selects the channel mapping semantics.
+	MappingFamily uint8
+	// StreamCount is the number of elementary Opus streams for nonzero families.
+	StreamCount uint8
+	// CoupledCount is the number of stereo elementary streams.
+	CoupledCount uint8
+	// ChannelMapping maps output channels to coded channels. A value of 255
+	// means silence. Family 0 requires this slice to be empty.
+	ChannelMapping []uint8
 }
 
+// Validate checks the OpusHead version, channel counts, and mapping fields.
 func (h Head) Validate() error {
 	if h.Version == 0 || h.Version > 15 {
 		return fmt.Errorf("%w: version %d", ErrInvalidOpusHead, h.Version)
@@ -60,6 +73,8 @@ func (h Head) Validate() error {
 	return nil
 }
 
+// MarshalBinary validates h and returns a new encoded OpusHead packet. Fields
+// unknown to this implementation cannot be represented for future versions.
 func (h Head) MarshalBinary() ([]byte, error) {
 	if err := h.Validate(); err != nil {
 		return nil, err
@@ -84,6 +99,9 @@ func (h Head) MarshalBinary() ([]byte, error) {
 	return out, nil
 }
 
+// ParseHead validates and parses an OpusHead packet. ChannelMapping is copied.
+// Version 1 requires the exact defined length; trailing fields accepted for
+// versions 2 through 15 are not preserved.
 func ParseHead(packet []byte) (Head, error) {
 	if len(packet) < 19 || !bytes.Equal(packet[:8], []byte(OpusHeadSignature)) {
 		return Head{}, ErrInvalidOpusHead
@@ -115,14 +133,19 @@ func ParseHead(packet []byte) (Head, error) {
 	return h, nil
 }
 
-// Tags is an Ogg Opus comment header. Comments use Vorbis NAME=value syntax.
-// Extra preserves optional trailing binary data.
+// Tags is an Ogg Opus comment header. Vendor and Comments must be UTF-8.
+// Comment field-name syntax is not otherwise enforced. Extra preserves
+// optional trailing binary data.
 type Tags struct {
-	Vendor   string
+	// Vendor identifies the producing application.
+	Vendor string
+	// Comments contains UTF-8 comment entries, conventionally NAME=value.
 	Comments []string
-	Extra    []byte
+	// Extra is optional trailing binary data preserved during parsing and marshaling.
+	Extra []byte
 }
 
+// Validate checks that Vendor and every Comments entry are valid UTF-8.
 func (t Tags) Validate() error {
 	if !utf8.ValidString(t.Vendor) {
 		return fmt.Errorf("%w: vendor is not UTF-8", ErrInvalidOpusTags)
@@ -135,6 +158,7 @@ func (t Tags) Validate() error {
 	return nil
 }
 
+// MarshalBinary validates t and returns a new encoded OpusTags packet.
 func (t Tags) MarshalBinary() ([]byte, error) {
 	if err := t.Validate(); err != nil {
 		return nil, err
@@ -162,6 +186,8 @@ func (t Tags) MarshalBinary() ([]byte, error) {
 	return out, nil
 }
 
+// ParseTags validates and parses an OpusTags packet. Extra and the returned
+// strings do not alias packet.
 func ParseTags(packet []byte) (Tags, error) {
 	if len(packet) < 16 || !bytes.Equal(packet[:8], []byte(OpusTagsSignature)) {
 		return Tags{}, ErrInvalidOpusTags

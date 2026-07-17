@@ -193,6 +193,72 @@ func TestSurroundMaskTrimImprovesCenterAtIdenticalBytes(t *testing.T) {
 	}
 }
 
+func TestSurroundPhase5DuplicateAndSilentDecodeMapping(t *testing.T) {
+	const (
+		rate      = 48000
+		frameSize = 960
+	)
+	enc, err := NewSurroundEncoder(rate, 6, MappingFamilyVorbis, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := enc.EncodeFloat32(surroundPhase5Fixture(surroundFixtureRoleRich, 6, 0, frameSize, rate), frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := NewMultistreamDecoder(rate, 8, enc.Streams(), enc.CoupledStreams(), []byte{0, 4, 1, 2, 3, 5, 2, 255})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := dec.DecodeFloat32(packet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < frameSize; i++ {
+		if out[i*8+3] != out[i*8+6] {
+			t.Fatalf("sample %d duplicate outputs differ: %g != %g", i, out[i*8+3], out[i*8+6])
+		}
+		if out[i*8+7] != 0 {
+			t.Fatalf("sample %d silent mapping=%g", i, out[i*8+7])
+		}
+	}
+}
+
+func TestSurroundAnalyzerResetRestoresFirstPacket(t *testing.T) {
+	const (
+		rate      = 48000
+		channels  = 8
+		frameSize = 960
+	)
+	enc, err := NewSurroundEncoder(rate, channels, MappingFamilyVorbis, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc.SetVBR(true)
+	enc.SetVBRConstraint(true)
+	if err := enc.SetBitrate(320000); err != nil {
+		t.Fatal(err)
+	}
+	firstPCM := surroundPhase5Fixture(surroundFixtureRoleRich, channels, 0, frameSize, rate)
+	first, err := enc.EncodeFloat32(firstPCM, frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enc.EncodeFloat32(surroundPhase5Fixture(surroundFixtureRoleRich, channels, frameSize, frameSize, rate), frameSize); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	afterReset, err := enc.EncodeFloat32(firstPCM, frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(afterReset) {
+		t.Fatal("first surround packet changed after Reset")
+	}
+}
+
 func surroundFixtureChannelRMS(pcm []float32, channels, channel int) float64 {
 	var energy float64
 	for i := channel; i < len(pcm); i += channels {

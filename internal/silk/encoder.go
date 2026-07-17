@@ -49,6 +49,7 @@ type Encoder struct {
 	lpcState       []int32   // Encoder-side LPC synthesis state, Q14
 	ltpState       []int32   // Encoder-side LTP output history, Q0
 	nsq            silkNSQState
+	nsqDelDec      [4]nsqDelayedDecision
 	nsqSeed        int32 // winning del-dec seed (silk_NSQ_del_dec writes this back to the bitstream)
 	lastFinalRange uint32
 	// useTrellisNSQ enables the FLP noise-shape analysis + delayed-decision

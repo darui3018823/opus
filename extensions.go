@@ -27,7 +27,8 @@ const (
 // PacketExtension is an opaque Opus packet extension associated with one
 // zero-based frame. Data is copied on both input and output.
 type PacketExtension struct {
-	// ID is the extension identifier encoded in the packet.
+	// ID is the extension identifier encoded in the packet. Generation accepts
+	// IDs 3 through 127; IDs below 32 carry at most one data byte.
 	ID int
 	// Frame is the zero-based Opus frame index, or ExtensionFrameAll when
 	// generating an extension for every frame.
@@ -78,7 +79,8 @@ func PacketExtensionsParse(packet []byte) ([]PacketExtension, error) {
 // paddingBytes is the exact size of the trailing extension/padding area. Zero
 // selects the minimal size. A positive value smaller than the encoded
 // extension stream returns ErrBufferTooSmall. Existing packet padding and
-// extensions are replaced.
+// extensions are replaced. Invalid IDs, payload sizes, or frame indices return
+// ErrBadArg.
 func PacketExtensionsGenerate(packet []byte, extensions []PacketExtension, paddingBytes int) ([]byte, error) {
 	frames, _, frameCount, err := packetExtensionLayout(packet)
 	if err != nil {

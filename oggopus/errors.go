@@ -13,7 +13,8 @@
 // copied after first use, and are not safe for concurrent use. They borrow
 // their io.Reader or io.Writer for their lifetime but do not close it. Parsed
 // packet and metadata byte slices are caller-owned copies. This package
-// validates and transports Opus packets; it does not decode PCM.
+// validates and transports Opus packets; it does not decode PCM. Public
+// operations may wrap the sentinel errors below; use errors.Is to test them.
 package oggopus
 
 import "errors"

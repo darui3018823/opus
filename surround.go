@@ -39,7 +39,8 @@ type SurroundEncoder struct {
 
 // NewSurroundEncoder creates an encoder for mapping family 0, 1, or 255.
 // Mapping family 1 uses the standard Vorbis channel order for 1 through 8
-// channels. Mapping family 255 creates one uncoupled stream per channel.
+// channels. Family 0 accepts mono or stereo. Mapping family 255 creates one
+// uncoupled stream per channel.
 func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application Application) (*SurroundEncoder, error) {
 	layout, err := surroundLayoutFor(channels, mappingFamily)
 	if err != nil {
@@ -250,7 +251,9 @@ type SurroundDecoder struct {
 	lfeStream     int
 }
 
-// NewSurroundDecoder creates a decoder for mapping family 0, 1, or 255.
+// NewSurroundDecoder creates a decoder for mapping family 0, 1, or 255. Family
+// 0 accepts mono or stereo, family 1 accepts 1 through 8 channels in Vorbis
+// order, and family 255 treats every channel as a discrete uncoupled stream.
 func NewSurroundDecoder(sampleRate, channels, mappingFamily int) (*SurroundDecoder, error) {
 	layout, err := surroundLayoutFor(channels, mappingFamily)
 	if err != nil {

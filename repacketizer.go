@@ -3,7 +3,8 @@ package opus
 import "fmt"
 
 // Repacketizer combines Opus frames with matching TOC configurations without
-// decoding and re-encoding their audio.
+// decoding and re-encoding their audio. It is mutable, must not be copied after
+// first use, and is not safe for concurrent use. Cat copies accumulated frames.
 type Repacketizer struct {
 	toc             byte
 	frames          [][]byte
@@ -64,12 +65,14 @@ func parseTOCForRepacketizer(toc byte) (config int, stereo bool, code int) {
 	return
 }
 
-// Out returns one packet containing every accumulated frame.
+// Out returns a caller-owned packet containing every accumulated frame without
+// clearing the repacketizer. An empty repacketizer returns ErrBadArg.
 func (r *Repacketizer) Out() ([]byte, error) {
 	return r.OutRange(0, len(r.frames))
 }
 
-// OutRange returns one packet containing frames [begin,end).
+// OutRange returns a caller-owned packet containing frames [begin,end) without
+// clearing the repacketizer. Invalid or empty ranges return ErrBadArg.
 func (r *Repacketizer) OutRange(begin, end int) ([]byte, error) {
 	if begin < 0 || end <= begin || end > len(r.frames) {
 		return nil, fmt.Errorf("%w: invalid repacketizer range [%d,%d)", ErrBadArg, begin, end)
@@ -85,7 +88,9 @@ func (r *Repacketizer) OutRange(begin, end int) ([]byte, error) {
 }
 
 // PacketPad returns packet padded to exactly newLen bytes using RFC 6716 code-3
-// packet padding. The encoded Opus frames are not modified.
+// packet padding. The encoded Opus frames are not modified and the returned
+// slice is caller-owned. newLen must be at least len(packet) and large enough
+// to represent the required code-3 framing overhead.
 func PacketPad(packet []byte, newLen int) ([]byte, error) {
 	if newLen < len(packet) {
 		return nil, fmt.Errorf("%w: padded length %d is smaller than packet length %d", ErrBadArg, newLen, len(packet))
@@ -137,7 +142,8 @@ func PacketUnpad(packet []byte) ([]byte, error) {
 
 // MultistreamPacketPad returns an RFC 7845 multistream packet padded to exactly
 // newLen bytes. Padding is applied to the final elementary Opus packet; earlier
-// self-delimited stream lengths are regenerated canonically.
+// self-delimited stream lengths are regenerated canonically. The returned slice
+// is caller-owned, and newLen must accommodate any regenerated framing overhead.
 func MultistreamPacketPad(packet []byte, streams, newLen int) ([]byte, error) {
 	if newLen < len(packet) {
 		return nil, fmt.Errorf("%w: padded length %d is smaller than packet length %d", ErrBadArg, newLen, len(packet))

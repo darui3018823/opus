@@ -16,7 +16,7 @@ package opus
 
 //go:generate go run ./internal/cmd/genversion -version VERSION -out version_gen.go
 
-// Sample rates supported by Opus
+// Sample rates supported by the public encoder and decoder constructors.
 const (
 	SampleRate8kHz  = 8000
 	SampleRate12kHz = 12000
@@ -25,7 +25,8 @@ const (
 	SampleRate48kHz = 48000
 )
 
-// Frame sizes in samples (at 48kHz)
+// Frame sizes in samples per channel at 48 kHz. At other sample rates, use the
+// proportionally scaled sample count for the same duration.
 const (
 	FrameSize2_5ms = 120  // 2.5ms at 48kHz
 	FrameSize5ms   = 240  // 5ms at 48kHz
@@ -59,14 +60,18 @@ const (
 	ExpertFrameDuration120ms ExpertFrameDuration = 5009
 )
 
-// Application types
+// Encoder application modes.
 const (
-	ApplicationVOIP               = 2048 // Voice over IP
-	ApplicationAudio              = 2049 // General audio
-	ApplicationRestrictedLowDelay = 2051 // Lowest latency
+	// ApplicationVOIP tunes for speech and permits SILK and hybrid routing.
+	ApplicationVOIP = 2048
+	// ApplicationAudio tunes for general audio.
+	ApplicationAudio = 2049
+	// ApplicationRestrictedLowDelay keeps encoding on the low-delay CELT path.
+	ApplicationRestrictedLowDelay = 2051
 )
 
-// Bandwidth types
+// Coded bandwidth selections. BandwidthAuto is accepted by SetBandwidth to
+// restore automatic selection; SetMaxBandwidth requires an explicit tier.
 const (
 	BandwidthAuto          = -1000 // automatic selection (default)
 	BandwidthNarrowband    = 1101  // 4kHz
@@ -76,7 +81,8 @@ const (
 	BandwidthFullband      = 1105  // 20kHz
 )
 
-// Channel modes
+// Stream channel selections. ChannelsAuto is accepted by SetForceChannels;
+// constructors require an explicit mono or stereo channel count.
 const (
 	ChannelsAuto   = -1000
 	ChannelsMono   = 1
@@ -89,14 +95,15 @@ const (
 	GainQ8Max = 32767
 )
 
-// Encoder input precision hints accepted by SetLSBDepth.
+// Encoder input precision hints accepted by SetLSBDepth. The current encoder
+// retains this setting for CTL parity but does not use it in codec decisions.
 const (
 	LSBDepthMin     = 8
 	LSBDepthMax     = 24
 	LSBDepthDefault = 24
 )
 
-// Opus modes (internal)
+// Packet coding modes returned by PacketGetMode.
 const (
 	ModeSILKOnly = 1000
 	ModeHybrid   = 1001
@@ -113,7 +120,9 @@ const (
 	BitrateMaxVal = 512000 // 512 kbps
 )
 
-// Encoder/Decoder control codes (CTL)
+// Libopus-compatible numeric CTL request constants. This package exposes typed
+// control methods rather than a generic request API; these values are provided
+// for parity and protocol integration, not as method arguments.
 const (
 	SetBitrateRequest                = 4002
 	GetBitrateRequest                = 4003
@@ -149,7 +158,8 @@ const (
 	ResetStateRequest                = 4028
 )
 
-// Complexity (0-10)
+// Complexity bounds and the EncoderProfileLibopus default. NewEncoder's legacy
+// profile uses complexity 5.
 const (
 	ComplexityMin     = 0
 	ComplexityMax     = 10

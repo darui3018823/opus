@@ -73,7 +73,9 @@ func PacketGetNumFrames(data []byte) (int, error) {
 }
 
 // PacketGetSamplesPerFrame returns the number of samples per channel in each
-// Opus frame when decoded at sampleRate.
+// Opus frame when decoded at sampleRate. sampleRate must be a supported Opus
+// rate. Malformed or over-120 ms packets return ErrInvalidPacket; an invalid
+// rate returns an error wrapping ErrBadArg and ErrUnsupportedSampleRate.
 func PacketGetSamplesPerFrame(data []byte, sampleRate int) (int, error) {
 	info, err := inspectPacket(data, sampleRate)
 	if err != nil {
@@ -83,7 +85,9 @@ func PacketGetSamplesPerFrame(data []byte, sampleRate int) (int, error) {
 }
 
 // PacketGetNumSamples returns the packet duration in samples per channel when
-// decoded at sampleRate.
+// decoded at sampleRate. sampleRate must be a supported Opus rate. Malformed or
+// over-120 ms packets return ErrInvalidPacket; an invalid rate returns an error
+// wrapping ErrBadArg and ErrUnsupportedSampleRate.
 func PacketGetNumSamples(data []byte, sampleRate int) (int, error) {
 	info, err := inspectPacket(data, sampleRate)
 	if err != nil {

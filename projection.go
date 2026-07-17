@@ -14,7 +14,8 @@ const (
 // ProjectionEncoder encodes RFC 8486 mapping family 2 or 3 Ambisonics.
 // The packet payload is an ordinary Opus multistream packet; family, stream
 // counts, mapping, demixing matrix, and matrix gain belong in container or
-// signalling metadata.
+// signalling metadata. It is stateful and owns its elementary encoders; calls
+// through StreamEncoder must be serialized with parent operations.
 type ProjectionEncoder struct {
 	sampleRate     int
 	channels       int
@@ -293,7 +294,8 @@ func (e *ProjectionEncoder) setEqualStreamRates(total int) error {
 }
 
 // ProjectionDecoder decodes a multistream packet and applies an RFC 8486
-// family-3 demixing matrix.
+// family-3 demixing matrix. It is stateful and owns its elementary decoders;
+// calls through StreamDecoder must be serialized with parent operations.
 type ProjectionDecoder struct {
 	sampleRate     int
 	channels       int

@@ -43,8 +43,13 @@ func NewMappingMatrixFromBytes(rows, cols, gain int, data []byte) (*MappingMatri
 	return NewMappingMatrix(rows, cols, gain, coefficients)
 }
 
+// Rows returns the number of output rows.
 func (m *MappingMatrix) Rows() int { return m.rows }
+
+// Cols returns the number of input columns.
 func (m *MappingMatrix) Cols() int { return m.cols }
+
+// Gain returns the matrix gain in signed Q8 dB (S7.8).
 func (m *MappingMatrix) Gain() int { return m.gain }
 
 // Coefficients returns a copy of the column-major Q15 coefficients.

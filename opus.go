@@ -11,7 +11,8 @@ import (
 	"github.com/darui3018823/opus/internal/silk"
 )
 
-// Application specifies the encoding mode (use constants from package)
+// Application selects encoder tuning for voice, general audio, or restricted
+// low-delay operation. Valid values are the Application* constants.
 type Application = int
 
 // EncoderProfile selects constructor defaults without changing the encoded
@@ -142,11 +143,11 @@ func isValidApplication(application Application) bool {
 	return false
 }
 
-// NewEncoder creates a new Opus encoder
+// NewEncoder creates a stateful Opus encoder using the legacy compatibility
+// defaults: 64 kbit/s, complexity 5, and CBR.
 //
-// sampleRate must be one of: 8000, 12000, 16000, 24000, 48000 Hz
-// channels must be 1 (mono) or 2 (stereo)
-// application specifies the encoding mode
+// sampleRate must be 8000, 12000, 16000, 24000, or 48000 Hz; channels must be
+// one or two. Invalid arguments return an error wrapping ErrBadArg.
 func NewEncoder(sampleRate, channels int, application Application) (*Encoder, error) {
 	// Validate parameters
 	if !isValidOpusRate(sampleRate) {
@@ -230,6 +231,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 
 // NewEncoderWithProfile creates an encoder with an explicit defaults profile.
 // NewEncoder remains equivalent to EncoderProfileLegacy for compatibility.
+// The sample-rate and channel constraints are the same as NewEncoder.
 func NewEncoderWithProfile(sampleRate, channels int, application Application, profile EncoderProfile) (*Encoder, error) {
 	if profile != EncoderProfileLegacy && profile != EncoderProfileLibopus {
 		return nil, fmt.Errorf("%w: unsupported encoder profile %d", ErrBadArg, profile)
@@ -2071,10 +2073,11 @@ func celtConfigLMIdx(config int) int {
 	return config & 3
 }
 
-// NewDecoder creates a new Opus decoder
+// NewDecoder creates a stateful Opus decoder.
 //
-// sampleRate must be one of: 8000, 12000, 16000, 24000, 48000 Hz
-// channels must be 1 (mono) or 2 (stereo)
+// sampleRate is the requested output rate and must be 8000, 12000, 16000,
+// 24000, or 48000 Hz. channels must be one or two. Invalid arguments return an
+// error wrapping ErrBadArg.
 func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 	// Validate parameters
 	if !isValidOpusRate(sampleRate) {

@@ -79,6 +79,7 @@ func (e *SurroundEncoder) SetBitrate(bitrate int) error {
 // Bitrate returns the configured aggregate surround bitrate policy.
 func (e *SurroundEncoder) Bitrate() int { return e.bitrate }
 
+// Encode encodes frameSize samples per channel of interleaved int16 PCM.
 func (e *SurroundEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	if err := e.prepareFrame(frameSize); err != nil {
 		return nil, err
@@ -86,6 +87,7 @@ func (e *SurroundEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	return e.MultistreamEncoder.Encode(pcm, frameSize)
 }
 
+// Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
 func (e *SurroundEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
 	if err := e.prepareFrame(frameSize); err != nil {
 		return nil, err
@@ -93,6 +95,7 @@ func (e *SurroundEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
 	return e.MultistreamEncoder.Encode24(pcm, frameSize)
 }
 
+// EncodeFloat32 encodes frameSize samples per channel of interleaved float32 PCM.
 func (e *SurroundEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
 	if err := e.prepareFrame(frameSize); err != nil {
 		return nil, err
@@ -100,6 +103,7 @@ func (e *SurroundEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, e
 	return e.MultistreamEncoder.EncodeFloat32(pcm, frameSize)
 }
 
+// EncodeFloat encodes frameSize samples per channel of interleaved float64 PCM.
 func (e *SurroundEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	if err := e.prepareFrame(frameSize); err != nil {
 		return nil, err
@@ -263,8 +267,12 @@ func NewSurroundDecoder(sampleRate, channels, mappingFamily int) (*SurroundDecod
 	}, nil
 }
 
+// MappingFamily returns the configured Ogg Opus channel mapping family.
 func (d *SurroundDecoder) MappingFamily() int { return d.mappingFamily }
-func (d *SurroundDecoder) LFEStream() int     { return d.lfeStream }
+
+// LFEStream returns the elementary stream carrying the LFE channel, or -1
+// when the selected layout has no LFE channel.
+func (d *SurroundDecoder) LFEStream() int { return d.lfeStream }
 
 func surroundLayoutFor(channels, mappingFamily int) (surroundLayout, error) {
 	switch mappingFamily {

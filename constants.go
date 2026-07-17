@@ -1,6 +1,17 @@
-// Package opus provides a Pure Go implementation of the Opus audio codec.
-// This implementation is based on the official libopus reference implementation
-// and aims for complete compatibility without using CGO.
+// Package opus provides a stateful, Pure Go implementation of the Opus audio
+// codec, including single-stream, multistream, surround, projection, packet
+// transformation, packet inspection, PLC, and in-band FEC APIs.
+//
+// Encoder and decoder instances represent one logical stream and are not safe
+// for concurrent use. Callers must process packets in order and serialize all
+// operations on an instance, including getters, controls, and Reset. Distinct
+// instances may be used concurrently. Instances must not be copied after first
+// use.
+//
+// Methods borrow caller-provided PCM, packet, and destination slices only for
+// the duration of a call. Returned packet and PCM slices are owned by the
+// caller. The codec implementation has no runtime CGO dependency; optional
+// reference-comparison tests use libopus only under the opusref build tag.
 package opus
 
 //go:generate go run ./internal/cmd/genversion -version VERSION -out version_gen.go
@@ -31,17 +42,21 @@ const (
 // the default behavior of deriving the duration from Encode's frameSize.
 type ExpertFrameDuration int
 
+// Expert frame-duration control values.
 const (
+	// ExpertFrameDurationArgument derives packet duration from each Encode
+	// call's frameSize argument.
 	ExpertFrameDurationArgument ExpertFrameDuration = 5000
-	ExpertFrameDuration2_5ms    ExpertFrameDuration = 5001
-	ExpertFrameDuration5ms      ExpertFrameDuration = 5002
-	ExpertFrameDuration10ms     ExpertFrameDuration = 5003
-	ExpertFrameDuration20ms     ExpertFrameDuration = 5004
-	ExpertFrameDuration40ms     ExpertFrameDuration = 5005
-	ExpertFrameDuration60ms     ExpertFrameDuration = 5006
-	ExpertFrameDuration80ms     ExpertFrameDuration = 5007
-	ExpertFrameDuration100ms    ExpertFrameDuration = 5008
-	ExpertFrameDuration120ms    ExpertFrameDuration = 5009
+	// The remaining values select the named fixed packet duration.
+	ExpertFrameDuration2_5ms ExpertFrameDuration = 5001
+	ExpertFrameDuration5ms   ExpertFrameDuration = 5002
+	ExpertFrameDuration10ms  ExpertFrameDuration = 5003
+	ExpertFrameDuration20ms  ExpertFrameDuration = 5004
+	ExpertFrameDuration40ms  ExpertFrameDuration = 5005
+	ExpertFrameDuration60ms  ExpertFrameDuration = 5006
+	ExpertFrameDuration80ms  ExpertFrameDuration = 5007
+	ExpertFrameDuration100ms ExpertFrameDuration = 5008
+	ExpertFrameDuration120ms ExpertFrameDuration = 5009
 )
 
 // Application types

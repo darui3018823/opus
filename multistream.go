@@ -334,11 +334,19 @@ func NewMultistreamDecoder(sampleRate, channels, streams, coupledStreams int, ma
 	}, nil
 }
 
-func (d *MultistreamDecoder) Streams() int        { return d.streams }
-func (d *MultistreamDecoder) CoupledStreams() int { return d.coupledStreams }
-func (d *MultistreamDecoder) Channels() int       { return d.channels }
-func (d *MultistreamDecoder) SampleRate() int     { return d.sampleRate }
+// Streams returns the number of elementary Opus streams.
+func (d *MultistreamDecoder) Streams() int { return d.streams }
 
+// CoupledStreams returns the number of stereo elementary streams.
+func (d *MultistreamDecoder) CoupledStreams() int { return d.coupledStreams }
+
+// Channels returns the number of interleaved output channels.
+func (d *MultistreamDecoder) Channels() int { return d.channels }
+
+// SampleRate returns the decoder output sample rate in Hz.
+func (d *MultistreamDecoder) SampleRate() int { return d.sampleRate }
+
+// Mapping returns a copy of the output channel mapping.
 func (d *MultistreamDecoder) Mapping() []byte {
 	return append([]byte(nil), d.mapping...)
 }

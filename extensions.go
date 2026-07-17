@@ -27,9 +27,13 @@ const (
 // PacketExtension is an opaque Opus packet extension associated with one
 // zero-based frame. Data is copied on both input and output.
 type PacketExtension struct {
-	ID    int
+	// ID is the extension identifier encoded in the packet.
+	ID int
+	// Frame is the zero-based Opus frame index, or ExtensionFrameAll when
+	// generating an extension for every frame.
 	Frame int
-	Data  []byte
+	// Data is the opaque extension payload.
+	Data []byte
 }
 
 // PacketExtensionsCount validates packet framing and its padding extension

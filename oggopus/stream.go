@@ -8,7 +8,9 @@ import (
 	opus "github.com/darui3018823/opus"
 )
 
-// Reader parses an Ogg Opus physical stream, including chained logical streams.
+// Reader parses an Ogg Opus physical stream, including chained logical
+// streams. It borrows its source, is stateful, and is not safe for concurrent
+// use. It does not demultiplex interleaved logical streams.
 type Reader struct {
 	source              io.Reader
 	packets             *PacketReader
@@ -30,11 +32,17 @@ type Reader struct {
 	physicalEOF         bool
 	terminalErr         error
 	seenSerials         map[uint32]struct{}
-	Head                Head
-	Tags                Tags
+	// Head is the current logical stream's identification header. It is updated
+	// when NextPacket advances to a chained stream.
+	Head Head
+	// Tags is the current logical stream's comment header. It is updated when
+	// NextPacket advances to a chained stream.
+	Tags Tags
 }
 
-// NewReader reads and validates the mandatory OpusHead and OpusTags packets.
+// NewReader synchronously reads and validates the first logical stream's
+// mandatory OpusHead and OpusTags packets. SeekPCM is available only when r
+// also implements io.ReadSeeker.
 func NewReader(r io.Reader) (*Reader, error) {
 	seeker, _ := r.(io.ReadSeeker)
 	packets := NewPacketReader(r)
@@ -93,6 +101,8 @@ func readLinkHeaders(packets *PacketReader) (Packet, Head, Tags, error) {
 	return headPacket, head, tags, nil
 }
 
+// Serial returns the current logical stream's serial number. NextPacket may
+// change it when advancing to a chained stream.
 func (r *Reader) Serial() uint32 {
 	return r.serial
 }
@@ -100,9 +110,15 @@ func (r *Reader) Serial() uint32 {
 // Link returns the zero-based index of the current chained logical stream.
 func (r *Reader) Link() int { return r.linkIndex }
 
+// EOS reports whether an EOS page for the current link has been read. Pending
+// packets or another chained logical stream may still remain.
 func (r *Reader) EOS() bool { return r.atEnd || r.packets.EOS() }
 
-// NextPacket returns the next Opus audio packet and its Ogg metadata.
+// NextPacket returns the next duration-validated Opus audio packet and its Ogg
+// timing metadata. DiscardStart and DiscardEnd tell a decoder how many samples
+// per channel to omit. At a logical-stream boundary it advances automatically
+// and updates Head, Tags, Serial, and Link; io.EOF means the physical stream is
+// exhausted. A terminal format error is returned again on later calls.
 func (r *Reader) NextPacket() (Packet, error) {
 	if r.terminalErr != nil {
 		return Packet{}, r.terminalErr
@@ -319,7 +335,10 @@ func (r *Reader) packetDuration(data []byte) (int, error) {
 	return opus.MultistreamPacketGetNumSamples(data, int(r.Head.StreamCount), opus.SampleRate48kHz)
 }
 
-// Writer writes one complete Ogg Opus logical bitstream.
+// Writer writes one complete Ogg Opus logical bitstream. It is stateful, is not
+// safe for concurrent use, and borrows but does not close its destination. To
+// create a chained stream, finish one Writer and create another on the same
+// destination with a different serial number.
 type Writer struct {
 	packets *PacketWriter
 }
@@ -345,10 +364,12 @@ func NewWriter(w io.Writer, serial uint32, head Head, tags Tags) (*Writer, error
 	return &Writer{packets: packets}, nil
 }
 
+// Serial returns the logical stream's serial number.
 func (w *Writer) Serial() uint32 { return w.packets.Serial() }
 
-// WritePacket writes one Opus audio packet. Set EOS on the final packet to
-// end the stream on the same page; otherwise Close emits an empty EOS page.
+// WritePacket writes one non-empty packet. Set EOS on the final packet to end
+// the stream on the same page; otherwise Close emits an empty EOS page. This
+// method does not validate Opus framing, duration, or granule timing.
 func (w *Writer) WritePacket(data []byte, options PacketWriteOptions) error {
 	if len(data) == 0 {
 		return fmt.Errorf("%w: zero-length audio packet", ErrInvalidOpusStream)
@@ -356,5 +377,9 @@ func (w *Writer) WritePacket(data []byte, options PacketWriteOptions) error {
 	return w.packets.WritePacket(data, options)
 }
 
+// Flush finishes the buffered audio page without ending the logical stream.
 func (w *Writer) Flush() error { return w.packets.Flush() }
+
+// Close writes an EOS page when needed. It is idempotent after success and
+// does not close the underlying writer.
 func (w *Writer) Close() error { return w.packets.Close() }

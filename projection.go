@@ -87,13 +87,27 @@ func NewAmbisonicsEncoder(sampleRate, channels, mappingFamily int, application A
 	return NewProjectionEncoder(sampleRate, channels, mappingFamily, application)
 }
 
-func (e *ProjectionEncoder) SampleRate() int     { return e.sampleRate }
-func (e *ProjectionEncoder) Channels() int       { return e.channels }
-func (e *ProjectionEncoder) MappingFamily() int  { return e.mappingFamily }
-func (e *ProjectionEncoder) Streams() int        { return e.streams }
+// SampleRate returns the encoder input sample rate in Hz.
+func (e *ProjectionEncoder) SampleRate() int { return e.sampleRate }
+
+// Channels returns the number of interleaved Ambisonics input channels.
+func (e *ProjectionEncoder) Channels() int { return e.channels }
+
+// MappingFamily returns the configured RFC 8486 mapping family.
+func (e *ProjectionEncoder) MappingFamily() int { return e.mappingFamily }
+
+// Streams returns the number of elementary Opus streams.
+func (e *ProjectionEncoder) Streams() int { return e.streams }
+
+// CoupledStreams returns the number of stereo elementary streams.
 func (e *ProjectionEncoder) CoupledStreams() int { return e.coupledStreams }
-func (e *ProjectionEncoder) Bitrate() int        { return e.bitrate }
-func (e *ProjectionEncoder) FinalRange() uint32  { return e.multistream.FinalRange() }
+
+// Bitrate returns the configured aggregate bitrate or policy sentinel.
+func (e *ProjectionEncoder) Bitrate() int { return e.bitrate }
+
+// FinalRange returns the XOR of all elementary stream final ranges for the
+// most recently encoded packet.
+func (e *ProjectionEncoder) FinalRange() uint32 { return e.multistream.FinalRange() }
 
 // Mapping returns the RFC 8486 family-2 channel mapping. Family 3 uses a
 // demixing matrix instead of a channel mapping table and returns nil.
@@ -130,6 +144,8 @@ func (e *ProjectionEncoder) DemixingMatrixGain() int {
 	return e.demixing.gain
 }
 
+// StreamEncoder returns the stateful elementary encoder at stream. Calls made
+// through the returned encoder affect subsequent projection packets.
 func (e *ProjectionEncoder) StreamEncoder(stream int) (*Encoder, error) {
 	return e.multistream.StreamEncoder(stream)
 }
@@ -145,14 +161,17 @@ func (e *ProjectionEncoder) SetBitrate(bitrate int) error {
 	return nil
 }
 
+// SetVBR applies the VBR setting to every elementary stream.
 func (e *ProjectionEncoder) SetVBR(enabled bool) {
 	e.multistream.SetVBR(enabled)
 }
 
+// SetVBRConstraint applies constrained VBR to every elementary stream.
 func (e *ProjectionEncoder) SetVBRConstraint(enabled bool) {
 	e.multistream.SetVBRConstraint(enabled)
 }
 
+// SetComplexity applies a complexity setting to every elementary stream.
 func (e *ProjectionEncoder) SetComplexity(complexity int) error {
 	return e.multistream.SetComplexity(complexity)
 }
@@ -168,6 +187,7 @@ func (e *ProjectionEncoder) ExpertFrameDuration() ExpertFrameDuration {
 	return e.multistream.ExpertFrameDuration()
 }
 
+// Encode encodes frameSize samples per channel of interleaved int16 PCM.
 func (e *ProjectionEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	required := frameSize * e.channels
 	if len(pcm) < required {
@@ -180,6 +200,7 @@ func (e *ProjectionEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	return e.EncodeFloat(floatPCM, frameSize)
 }
 
+// Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
 func (e *ProjectionEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
 	required := frameSize * e.channels
 	if len(pcm) < required {
@@ -192,6 +213,7 @@ func (e *ProjectionEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error)
 	return e.EncodeFloat(floatPCM, frameSize)
 }
 
+// EncodeFloat32 encodes frameSize samples per channel of interleaved float32 PCM.
 func (e *ProjectionEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
 	required := frameSize * e.channels
 	if len(pcm) < required {
@@ -204,6 +226,7 @@ func (e *ProjectionEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte,
 	return e.EncodeFloat(floatPCM, frameSize)
 }
 
+// EncodeFloat encodes frameSize samples per channel of interleaved float64 PCM.
 func (e *ProjectionEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	required := frameSize * e.channels
 	if len(pcm) < required {
@@ -230,6 +253,7 @@ func (e *ProjectionEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, e
 	return e.multistream.EncodeFloat(mixed, frameSize)
 }
 
+// Reset clears all elementary encoder state while retaining configuration.
 func (e *ProjectionEncoder) Reset() error {
 	return e.multistream.Reset()
 }
@@ -303,16 +327,28 @@ func NewProjectionDecoder(sampleRate, channels, streams, coupledStreams int, dem
 	}, nil
 }
 
-func (d *ProjectionDecoder) SampleRate() int     { return d.sampleRate }
-func (d *ProjectionDecoder) Channels() int       { return d.channels }
-func (d *ProjectionDecoder) Streams() int        { return d.streams }
-func (d *ProjectionDecoder) CoupledStreams() int { return d.coupledStreams }
-func (d *ProjectionDecoder) FinalRange() uint32  { return d.multistream.FinalRange() }
+// SampleRate returns the decoder output sample rate in Hz.
+func (d *ProjectionDecoder) SampleRate() int { return d.sampleRate }
 
+// Channels returns the number of interleaved demixed output channels.
+func (d *ProjectionDecoder) Channels() int { return d.channels }
+
+// Streams returns the number of elementary Opus streams.
+func (d *ProjectionDecoder) Streams() int { return d.streams }
+
+// CoupledStreams returns the number of stereo elementary streams.
+func (d *ProjectionDecoder) CoupledStreams() int { return d.coupledStreams }
+
+// FinalRange returns the XOR of all elementary stream final ranges for the
+// most recently decoded packet.
+func (d *ProjectionDecoder) FinalRange() uint32 { return d.multistream.FinalRange() }
+
+// StreamDecoder returns the stateful elementary decoder at stream.
 func (d *ProjectionDecoder) StreamDecoder(stream int) (*Decoder, error) {
 	return d.multistream.StreamDecoder(stream)
 }
 
+// DecodeFloat decodes and demixes a packet to caller-owned interleaved float64 PCM.
 func (d *ProjectionDecoder) DecodeFloat(data []byte) ([]float64, error) {
 	coded, err := d.multistream.DecodeFloat(data)
 	if err != nil {
@@ -322,6 +358,7 @@ func (d *ProjectionDecoder) DecodeFloat(data []byte) ([]float64, error) {
 	return d.demixing.multiplyFloat64(coded, frames, d.demixing.cols)
 }
 
+// DecodeFloat32 decodes and demixes a packet to caller-owned interleaved float32 PCM.
 func (d *ProjectionDecoder) DecodeFloat32(data []byte) ([]float32, error) {
 	pcm, err := d.DecodeFloat(data)
 	if err != nil {
@@ -334,6 +371,7 @@ func (d *ProjectionDecoder) DecodeFloat32(data []byte) ([]float32, error) {
 	return out, nil
 }
 
+// Decode decodes and demixes a packet into pcm and returns samples per channel.
 func (d *ProjectionDecoder) Decode(data []byte, pcm []int16) (int, error) {
 	duration, err := multistreamPacketDuration(data, d.streams, d.sampleRate)
 	if err != nil {
@@ -353,6 +391,7 @@ func (d *ProjectionDecoder) Decode(data []byte, pcm []int16) (int, error) {
 	return duration, nil
 }
 
+// Decode24 decodes and demixes a packet to signed 24-bit PCM stored in int32.
 func (d *ProjectionDecoder) Decode24(data []byte, pcm []int32) (int, error) {
 	duration, err := multistreamPacketDuration(data, d.streams, d.sampleRate)
 	if err != nil {
@@ -372,6 +411,7 @@ func (d *ProjectionDecoder) Decode24(data []byte, pcm []int32) (int, error) {
 	return duration, nil
 }
 
+// Reset clears all elementary decoder state while retaining configuration.
 func (d *ProjectionDecoder) Reset() error {
 	return d.multistream.Reset()
 }
@@ -411,8 +451,10 @@ func NewAmbisonicsDecoder(sampleRate, channels, mappingFamily, streams, coupledS
 	}
 }
 
+// MappingFamily returns the configured RFC 8486 mapping family.
 func (d *AmbisonicsDecoder) MappingFamily() int { return d.mappingFamily }
 
+// DecodeFloat decodes a packet to caller-owned interleaved float64 PCM.
 func (d *AmbisonicsDecoder) DecodeFloat(data []byte) ([]float64, error) {
 	if d.family3 != nil {
 		return d.family3.DecodeFloat(data)
@@ -420,6 +462,7 @@ func (d *AmbisonicsDecoder) DecodeFloat(data []byte) ([]float64, error) {
 	return d.family2.DecodeFloat(data)
 }
 
+// DecodeFloat32 decodes a packet to caller-owned interleaved float32 PCM.
 func (d *AmbisonicsDecoder) DecodeFloat32(data []byte) ([]float32, error) {
 	if d.family3 != nil {
 		return d.family3.DecodeFloat32(data)
@@ -427,6 +470,7 @@ func (d *AmbisonicsDecoder) DecodeFloat32(data []byte) ([]float32, error) {
 	return d.family2.DecodeFloat32(data)
 }
 
+// Decode decodes a packet into pcm and returns samples per channel.
 func (d *AmbisonicsDecoder) Decode(data []byte, pcm []int16) (int, error) {
 	if d.family3 != nil {
 		return d.family3.Decode(data, pcm)
@@ -434,6 +478,7 @@ func (d *AmbisonicsDecoder) Decode(data []byte, pcm []int16) (int, error) {
 	return d.family2.Decode(data, pcm)
 }
 
+// Decode24 decodes a packet to signed 24-bit PCM stored in int32.
 func (d *AmbisonicsDecoder) Decode24(data []byte, pcm []int32) (int, error) {
 	if d.family3 != nil {
 		return d.family3.Decode24(data, pcm)
@@ -441,6 +486,7 @@ func (d *AmbisonicsDecoder) Decode24(data []byte, pcm []int32) (int, error) {
 	return d.family2.Decode24(data, pcm)
 }
 
+// Reset clears decoder state while retaining configuration.
 func (d *AmbisonicsDecoder) Reset() error {
 	if d.family3 != nil {
 		return d.family3.Reset()
@@ -448,6 +494,8 @@ func (d *AmbisonicsDecoder) Reset() error {
 	return d.family2.Reset()
 }
 
+// FinalRange returns the XOR of all elementary stream final ranges for the
+// most recently decoded packet.
 func (d *AmbisonicsDecoder) FinalRange() uint32 {
 	if d.family3 != nil {
 		return d.family3.FinalRange()

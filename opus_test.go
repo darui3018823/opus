@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -11,6 +13,13 @@ func TestVersionMetadata(t *testing.T) {
 	want := fmt.Sprintf("%d.%d.%d", VersionMajor, VersionMinor, VersionPatch)
 	if Version != want {
 		t.Fatalf("Version = %q, components produce %q", Version, want)
+	}
+	raw, err := os.ReadFile("VERSION")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source := strings.TrimSpace(string(raw)); Version != source {
+		t.Fatalf("Version = %q, VERSION contains %q; run go generate ./...", Version, source)
 	}
 }
 

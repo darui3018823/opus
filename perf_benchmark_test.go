@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"runtime"
 	"testing"
 )
 
@@ -12,6 +13,7 @@ const (
 	perfSampleRate = 48000
 	perfFrameSize  = perfSampleRate * 20 / 1000
 	perfFrames     = 64
+	perfLongFrames = 256
 )
 
 type perfWorkload struct {
@@ -40,6 +42,57 @@ func BenchmarkPerf(b *testing.B) {
 			benchmarkPerfDecode(b, wl)
 		})
 	}
+}
+
+func BenchmarkPerfLongStream(b *testing.B) {
+	for _, wl := range perfWorkloads() {
+		wl := wl
+		if wl.wantMode == "celt" {
+			continue
+		}
+		b.Run("encode/"+wl.name, func(b *testing.B) {
+			benchmarkPerfLongEncode(b, wl)
+		})
+	}
+}
+
+func benchmarkPerfLongEncode(b *testing.B, wl perfWorkload) {
+	enc := newPerfEncoder(b, wl)
+	frames := perfInputFrames(wl)
+	if err := validatePerfPacket(enc, wl, frames[0]); err != nil {
+		b.Fatal(err)
+	}
+	perfPacketSink = []byte{0}
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	totalFrames := b.N * perfLongFrames
+	totalBytes := 0
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < totalFrames; i++ {
+		pkt, err := enc.EncodeFloat(frames[(i+1)%len(frames)], perfFrameSize)
+		if err != nil {
+			b.Fatal(err)
+		}
+		totalBytes += len(pkt)
+		perfPacketSink = pkt
+		perfRangeSink = enc.FinalRange()
+	}
+	b.StopTimer()
+	elapsed := b.Elapsed()
+
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(enc)
+	runtime.KeepAlive(frames)
+
+	b.ReportMetric(float64(totalBytes)/float64(totalFrames), "packet-B/frame")
+	b.ReportMetric(float64(totalFrames)/elapsed.Seconds(), "frames/s")
+	b.ReportMetric(float64(int64(after.HeapAlloc)-int64(before.HeapAlloc)), "retained-B")
 }
 
 func TestPerfPredictivePacketRegression(t *testing.T) {

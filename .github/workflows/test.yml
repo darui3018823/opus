@@ -118,5 +118,8 @@ jobs:
           fi
           test -f testdata/opus_newvectors/testvector01.bit
 
-      - name: Run all official decoder vectors
+      - name: Run all vector-backed package tests
+        run: go test -count=1 ./...
+
+      - name: Run all official decoder vectors (verbose)
         run: go test -count=1 -v -run '^TestOfficialVectors$' .

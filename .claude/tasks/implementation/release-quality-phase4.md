@@ -8,7 +8,7 @@ Status authority: `docs/CURRENT_IMPLEMENTATION.md`.
 
 Integration branch: `codex/phase4-release-quality`.
 
-Status: iteration 4-1 qualified; iteration 4-2 is next.
+Status: iterations 4-1 and 4-2 qualified; iteration 4-3 is next.
 
 ## Objective
 

@@ -59,3 +59,48 @@ packet, range-coder, or public API behavior was changed.
 
 Adopted. Iteration 4-1 meets its acceptance criteria and is ready for Phase 4-2
 (English and Japanese README refresh).
+
+## Iteration 4-2: English and Japanese README refresh (Qualified)
+
+### Implemented locally
+
+- Replaced the stale, hand-maintained API dumps with matching English and
+  Japanese structures centered on a code-derived support matrix.
+- Added a copyable in-memory encode/decode example with correct interleaved
+  buffer sizing and error handling.
+- Documented the 12/12 RFC 8251 result and separated normal conformance tests
+  from optional CGO/libopus `opusref` comparisons.
+- Added explicit state ownership, concurrency, slice lifetime, child-stream,
+  and codec `Reset` contracts.
+- Added the bounded malformed-input/no-panic guarantee, current fuzz coverage,
+  and its CPU, memory, quality, and denial-of-service limits.
+- Listed deliberate limitations and out-of-scope work without overstating
+  libopus encoder parity.
+- Added direct links to root and Ogg API documentation, CTL parity, performance,
+  current status, security reporting, and contribution guidance.
+
+Commits:
+
+- `8bed349` `docs: refresh English and Japanese READMEs`
+- `332aba9` `docs: tighten README parity and contracts`
+
+### Qualification observations
+
+- Every repository-relative Markdown link in both READMEs resolved locally.
+- English and Japanese headings and support-table row counts matched.
+- The documented commands and linked files were checked against the current
+  repository and `docs/CURRENT_IMPLEMENTATION.md`.
+- The standard PowerShell gates passed:
+
+```text
+go generate ./...
+git diff --exit-code
+go vet ./...
+go test -count=1 ./...
+go test -count=1 -tags opusref ./...
+```
+
+### Decision
+
+Adopted. Iteration 4-2 meets its acceptance criteria and is ready for Phase 4-3
+(CI operating-system and architecture coverage).

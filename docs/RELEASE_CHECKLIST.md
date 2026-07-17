@@ -1,7 +1,7 @@
 # Release Checklist
 
 This checklist is the repeatable release path for the module. The current
-released baseline is `v1.2.0`; do not infer the next version from that fact.
+released baseline is `v1.3.0`; do not infer the next version from that fact.
 Choose the version from the accumulated changes, and obtain explicit user
 approval before changing `VERSION`, creating or pushing a tag, or publishing a
 GitHub Release.
@@ -27,8 +27,8 @@ release to describe later `main` behavior.
   observable behavior changes, fixes, documentation, CI, and security work:
 
   ```powershell
-  git log --first-parent --oneline v1.2.0..HEAD
-  git diff --stat v1.2.0..HEAD
+  git log --first-parent --oneline v1.3.0..HEAD
+  git diff --stat v1.3.0..HEAD
   go doc -all .
   go doc -all ./oggopus
   ```
@@ -42,12 +42,10 @@ release to describe later `main` behavior.
 - Do not select patch merely because each individual change looks small. The
   version reflects the complete diff from the last release.
 
-The 2026-07-17 audit found backward-compatible public additions after
-`v1.2.0`, including expert-frame-duration controls, multistream FEC/PLC,
-packet helpers, and Ogg seeking/chaining. If that accumulated diff remains in
-the candidate, it requires a minor rather than patch release. Re-run the
-inventory instead of treating this observation as a permanently chosen next
-version.
+The `v1.3.0` release included backward-compatible public additions such as
+expert-frame-duration controls, multistream FEC/PLC, packet helpers, and Ogg
+seeking/chaining. Re-run the inventory for every later release instead of
+inferring a patch or minor version from that historical classification.
 
 ## 2. Update version and documentation
 

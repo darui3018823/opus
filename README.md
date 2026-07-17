@@ -12,8 +12,8 @@
 no runtime CGO dependency. It provides single-stream, multistream, surround,
 projection/Ambisonics, packet transformation, and Ogg Opus APIs.
 
-The decoder passes all 12 official RFC 8251 vectors at the repository's RMSE
-threshold and is cross-checked against libopus 1.6.1. The encoder produces
+The decoder passes all 12 official RFC 8251 vectors with RMSE below 0.001 and
+is cross-checked against libopus 1.6.1. The encoder produces
 standards-compatible CELT, SILK-only, and hybrid packets, but is not bit-exact
 with libopus and does not reproduce every libopus mode/rate/quality decision.
 The authoritative implementation snapshot is
@@ -71,8 +71,8 @@ func main() {
 }
 ```
 
-Executable examples for encode, decode, multistream, and Ogg Opus are included
-in the [package documentation](https://pkg.go.dev/github.com/darui3018823/opus).
+Executable examples are included in the [root package documentation](https://pkg.go.dev/github.com/darui3018823/opus)
+and [Ogg Opus package documentation](https://pkg.go.dev/github.com/darui3018823/opus/oggopus).
 
 ## Support matrix
 
@@ -81,7 +81,8 @@ in the [package documentation](https://pkg.go.dev/github.com/darui3018823/opus).
 | Sample rates | 8, 12, 16, 24, and 48 kHz |
 | Single-stream channels | Mono and stereo |
 | PCM APIs | Interleaved int16, signed 24-bit-in-int32, float32, and float64 |
-| Packet durations | CELT 2.5/5/10 ms; exact 20 ms multiples through 120 ms |
+| Encoder packet durations | CELT 2.5/5/10 ms; exact 20 ms multiples through 120 ms |
+| Decoder packet durations | Valid Opus packets up to 120 ms |
 | Coding modes | CELT encode/decode; voice-oriented SILK-only and hybrid encode; SILK/hybrid decode |
 | Loss handling | CELT/SILK/hybrid PLC; SILK LBRR in-band FEC encode/decode |
 | Multistream/surround | RFC self-delimited framing; families 0, 1 (through 7.1), and 255; PLC/FEC |
@@ -104,15 +105,16 @@ operation on an instance, including getters, controls, child stream access,
 seeking, and `Reset`. Distinct instances may run concurrently. Do not copy an
 instance after first use.
 
-Caller-provided PCM, packet, mapping, matrix, and destination slices are
-borrowed only as documented. Codec methods borrow per-call input; returned
-packet and PCM slices are caller-owned. Ogg readers and writers borrow their
-`io.Reader`/`io.Writer` for the instance lifetime and do not close it.
+Codec methods borrow per-call PCM, packet, and destination slices only until
+the call returns. Constructors copy mappings and matrices. Returned packet,
+PCM, mapping, and matrix slices are caller-owned copies. Ogg readers and writers
+borrow their `io.Reader`/`io.Writer` for the instance lifetime and do not close
+it.
 
-`Reset` clears codec history and last-packet observations while retaining
-configuration such as bitrate, application, output gain, and phase-inversion
-controls. Reuse an instance after `Reset` only for a new stream with the same
-configuration, or apply new controls explicitly.
+Where a codec type exposes `Reset`, it clears codec history and last-packet
+observations while retaining configuration such as bitrate, application,
+output gain, and phase-inversion controls. Reuse an instance after `Reset` only
+for a new stream with the same configuration, or apply new controls explicitly.
 
 ## Conformance and reference testing
 
@@ -189,10 +191,11 @@ on Ubuntu with libopus. See the workflow files for the exact current matrix.
 ## Documentation
 
 - [Go API reference](https://pkg.go.dev/github.com/darui3018823/opus)
+- [Ogg Opus API reference](https://pkg.go.dev/github.com/darui3018823/opus/oggopus)
 - [Current implementation snapshot](docs/CURRENT_IMPLEMENTATION.md)
 - [CTL and helper parity](docs/CTL_PARITY.md)
 - [Performance baseline and benchmark method](docs/PERF_BASELINE.md)
-- [Architecture](docs/ARCHITECTURE.md)
+- [Historical architecture and design background](docs/ARCHITECTURE.md)
 - [Mode/rate policy differences](docs/MODE_RATE_POLICY_DIFF.md)
 - [Real-corpus scoreboard](docs/REAL_CORPUS_SCOREBOARD.md)
 - [Developer guide](docs/DEVELOPER.md)

@@ -123,6 +123,7 @@ type Encoder struct {
 	lsbDepth               int
 	predictionDisabled     bool
 	phaseInversionDisabled bool
+	surroundEnergyMask     []float64
 	forcedMono             *Encoder
 }
 
@@ -1321,12 +1322,22 @@ func (e *Encoder) selectCELTEncoder(frameSize int) error {
 	next.SetDTX(e.dtx)
 	next.SetPhaseInversionDisabled(e.phaseInversionDisabled)
 	next.SetSignalType(e.celtEncoder.SignalTypeHint())
+	next.SetEnergyMask(e.surroundEnergyMask)
 	if next != e.celtEncoder {
 		next.CopyStateFrom(e.celtEncoder)
 		e.celtEncoder = next
 	}
 	e.internalFrameSize = internalSize
 	return nil
+}
+
+func (e *Encoder) setSurroundEnergyMask(mask []float64) {
+	e.surroundEnergyMask = append(e.surroundEnergyMask[:0], mask...)
+	for _, enc := range e.celtEncoders {
+		if enc != nil {
+			enc.SetEnergyMask(e.surroundEnergyMask)
+		}
+	}
 }
 
 func celtEncoderIndex(frameSize int) int {

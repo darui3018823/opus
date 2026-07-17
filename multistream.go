@@ -10,13 +10,15 @@ import (
 // elementary encoders; all parent and child operations must be serialized.
 // Encode frame sizes are samples per channel and PCM is interleaved.
 type MultistreamEncoder struct {
-	sampleRate     int
-	channels       int
-	streams        int
-	coupledStreams int
-	mapping        []byte
-	encoders       []*Encoder
-	bitrate        int
+	sampleRate        int
+	channels          int
+	streams           int
+	coupledStreams    int
+	mapping           []byte
+	encoders          []*Encoder
+	bitrate           int
+	beforeEncodeFloat func(pcm []float64, frameSize int) (commit func(), err error)
+	resetPolicy       func()
 }
 
 // NewMultistreamEncoder creates a multistream encoder. channels and streams
@@ -257,6 +259,14 @@ func (e *MultistreamEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, 
 }
 
 func (e *MultistreamEncoder) encodeFloatSelected(pcm []float64, selectedFrameSize int) ([]byte, error) {
+	var commitPolicy func()
+	if e.beforeEncodeFloat != nil {
+		var err error
+		commitPolicy, err = e.beforeEncodeFloat(pcm, selectedFrameSize)
+		if err != nil {
+			return nil, err
+		}
+	}
 	packets := make([][]byte, e.streams)
 	for stream, enc := range e.encoders {
 		streamChannels := enc.Channels()
@@ -280,7 +290,14 @@ func (e *MultistreamEncoder) encodeFloatSelected(pcm []float64, selectedFrameSiz
 		}
 		packets[stream] = packet
 	}
-	return joinMultistreamPackets(packets)
+	packet, err := joinMultistreamPackets(packets)
+	if err != nil {
+		return nil, err
+	}
+	if commitPolicy != nil {
+		commitPolicy()
+	}
+	return packet, nil
 }
 
 // Reset resets every elementary encoder while retaining configuration.
@@ -289,6 +306,9 @@ func (e *MultistreamEncoder) Reset() error {
 		if err := enc.Reset(); err != nil {
 			return err
 		}
+	}
+	if e.resetPolicy != nil {
+		e.resetPolicy()
 	}
 	return nil
 }

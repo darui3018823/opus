@@ -110,6 +110,11 @@ type Encoder struct {
 	// st->intensity), kept across frames so the hysteresis decision is stable.
 	// Zeroed by Reset, matching libopus OPUS_RESET_STATE.
 	intensity int
+	// energyMask is a per-frame, channel-major surround SMR supplied by the
+	// multistream surround analyzer. The first bounded consumer is allocation
+	// trim; later decisions deliberately remain independent.
+	energyMask     []float64
+	lastCodedBands int
 
 	// CVBR reservoir: accumulated bit surplus/deficit in Q8 bits. Positive means
 	// the encoder has used fewer bits than the target and can afford to spend
@@ -207,6 +212,12 @@ func (e *Encoder) targetBytes() int {
 func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	_, out, err := e.encodeRange(samples, nil, e.targetBytes(), 0, -1, false)
 	return out, err
+}
+
+// SetEnergyMask sets the transient per-frame surround SMR. It is internal to
+// the parent surround encoder and is copied so callers may reuse their buffer.
+func (e *Encoder) SetEnergyMask(mask []float64) {
+	e.energyMask = append(e.energyMask[:0], mask...)
 }
 
 // EncodeRedundant encodes a standalone fullband CELT frame of exactly nbytes,
@@ -647,7 +658,15 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	etr(enc, "dynalloc")
 
 	// Allocation trim (spectral tilt + stereo correlation).
-	allocTrim := allocTrimAnalysis(X, logE, numBands, end, lm, ch, frameLen, end, e.bitrate)
+	surroundTrim := 0.0
+	if len(e.energyMask) >= ch*numBands && start == 0 {
+		maskEnd := max(2, e.lastCodedBands)
+		if maskEnd > end {
+			maskEnd = end
+		}
+		surroundTrim = surroundMaskTrim(e.energyMask, ch, numBands, maskEnd)
+	}
+	allocTrim := allocTrimAnalysis(X, logE, numBands, end, lm, ch, frameLen, end, surroundTrim, e.bitrate)
 	if enc.ECTell()+6 <= totalBits {
 		enc.EncodeIcdf(allocTrim, TrimICDF[:], 7)
 	}
@@ -756,6 +775,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	pulses, eBits, finePriority, balance, intensity, codedBands, dualStereo :=
 		computeAllocationEncode(enc, encIntensity, encDualStereo,
 			numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets)
+	e.lastCodedBands = codedBands
 
 	if encDebug && e.frameCount == 10 {
 		fmt.Fprintf(os.Stderr, "[ENC] bitsQ3=%d codedBands=%d\n", bitsQ3, codedBands)
@@ -1004,6 +1024,7 @@ func (e *Encoder) Reset() {
 	e.lastSpread = spreadNormal
 	e.consecTransient = 0
 	e.intensity = 0
+	e.lastCodedBands = 0
 	e.vbrOffset = 0
 	e.vbrCount = 0
 	e.vbrDriftComp = 0
@@ -1092,6 +1113,7 @@ func (e *Encoder) CopyStateFrom(src *Encoder) {
 	e.lastSpread = src.lastSpread
 	e.consecTransient = src.consecTransient
 	e.intensity = src.intensity
+	e.lastCodedBands = src.lastCodedBands
 }
 
 // SetBitrate sets the target bitrate.

@@ -96,6 +96,103 @@ func TestSurroundPhase5FixturesCoverChannelRoles(t *testing.T) {
 	}
 }
 
+func TestSurroundMaskTrimImprovesCenterAtIdenticalBytes(t *testing.T) {
+	const (
+		rate      = 48000
+		channels  = 6
+		frameSize = 960
+		frames    = 18
+		bitrate   = 256000
+	)
+	withMask, err := NewSurroundEncoder(rate, channels, MappingFamilyVorbis, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutMask, err := NewSurroundEncoder(rate, channels, MappingFamilyVorbis, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Package-private baseline used only to isolate the trim decision. Production
+	// family-1 encoders always retain the analyzer callback.
+	withoutMask.beforeEncodeFloat = nil
+	for _, enc := range []*SurroundEncoder{withMask, withoutMask} {
+		enc.SetVBR(true)
+		enc.SetVBRConstraint(true)
+		if err := enc.SetBitrate(bitrate); err != nil {
+			t.Fatal(err)
+		}
+	}
+	withDec, err := NewSurroundDecoder(rate, channels, MappingFamilyVorbis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutDec, err := NewSurroundDecoder(rate, channels, MappingFamilyVorbis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var input, withOutput, withoutOutput []float64
+	for frame := 0; frame < frames; frame++ {
+		pcm := surroundPhase5Fixture(surroundFixtureRoleRich, channels, frame*frameSize, frameSize, rate)
+		for _, sample := range pcm {
+			input = append(input, float64(sample))
+		}
+		withPacket, err := withMask.EncodeFloat32(pcm, frameSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		withoutPacket, err := withoutMask.EncodeFloat32(pcm, frameSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		withChildren, _, err := splitMultistreamPackets(withPacket, withMask.Streams(), rate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		withoutChildren, _, err := splitMultistreamPackets(withoutPacket, withoutMask.Streams(), rate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for stream := range withChildren {
+			if len(withChildren[stream]) != len(withoutChildren[stream]) {
+				t.Fatalf("frame %d stream %d bytes=%d, baseline=%d", frame, stream, len(withChildren[stream]), len(withoutChildren[stream]))
+			}
+		}
+		withFrame, err := withDec.DecodeFloat32(withPacket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if withMask.FinalRange() != withDec.FinalRange() {
+			t.Fatalf("frame %d masked final range encoder=%08x decoder=%08x", frame, withMask.FinalRange(), withDec.FinalRange())
+		}
+		withoutFrame, err := withoutDec.DecodeFloat32(withoutPacket)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if withoutMask.FinalRange() != withoutDec.FinalRange() {
+			t.Fatalf("frame %d baseline final range encoder=%08x decoder=%08x", frame, withoutMask.FinalRange(), withoutDec.FinalRange())
+		}
+		for _, sample := range withFrame {
+			withOutput = append(withOutput, float64(sample))
+		}
+		for _, sample := range withoutFrame {
+			withoutOutput = append(withoutOutput, float64(sample))
+		}
+	}
+	withSNR := surroundChannelSNRs(input, withOutput, channels, frameSize)
+	withoutSNR := surroundChannelSNRs(input, withoutOutput, channels, frameSize)
+	if withSNR[1] < withoutSNR[1]+5 {
+		t.Fatalf("center SNR %.2f dB, baseline %.2f dB", withSNR[1], withoutSNR[1])
+	}
+	for _, channel := range []int{0, 2, 3, 4} {
+		if withSNR[channel] < withoutSNR[channel]-0.3 {
+			t.Fatalf("channel %d SNR regressed %.2f -> %.2f dB", channel, withoutSNR[channel], withSNR[channel])
+		}
+	}
+	if math.Abs(withSNR[5]-withoutSNR[5]) > 1e-9 {
+		t.Fatalf("LFE SNR changed %.6f -> %.6f dB", withoutSNR[5], withSNR[5])
+	}
+}
+
 func surroundFixtureChannelRMS(pcm []float32, channels, channel int) float64 {
 	var energy float64
 	for i := channel; i < len(pcm); i += channels {
@@ -103,4 +200,56 @@ func surroundFixtureChannelRMS(pcm []float32, channels, channel int) float64 {
 		energy += v * v
 	}
 	return math.Sqrt(energy / float64(len(pcm)/channels))
+}
+
+func surroundChannelSNRs(input, output []float64, channels, maxDelay int) []float64 {
+	result := make([]float64, channels)
+	for channel := 0; channel < channels; channel++ {
+		in := make([]float64, len(input)/channels)
+		out := make([]float64, len(output)/channels)
+		for i := range in {
+			in[i] = input[i*channels+channel]
+			out[i] = output[i*channels+channel]
+		}
+		result[channel] = surroundAlignedSNR(in, out, maxDelay)
+	}
+	return result
+}
+
+func surroundAlignedSNR(input, output []float64, maxDelay int) float64 {
+	best := math.Inf(1)
+	for delay := 0; delay <= maxDelay; delay++ {
+		n := min(len(input), len(output)-delay)
+		if n <= 2*maxDelay {
+			continue
+		}
+		lo, hi := maxDelay, n-maxDelay
+		var xy, yy float64
+		for i := lo; i < hi; i++ {
+			x, y := input[i], output[i+delay]
+			xy += x * y
+			yy += y * y
+		}
+		scale := 0.0
+		if yy > 0 {
+			scale = xy / yy
+		}
+		var signal, err float64
+		for i := lo; i < hi; i++ {
+			x := input[i]
+			delta := x - scale*output[i+delay]
+			signal += x * x
+			err += delta * delta
+		}
+		if signal > 0 && err < best {
+			best = err / signal
+		}
+	}
+	if math.IsInf(best, 1) {
+		return 0
+	}
+	if best == 0 {
+		return 300
+	}
+	return -10 * math.Log10(best)
 }

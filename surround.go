@@ -1,6 +1,10 @@
 package opus
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/darui3018823/opus/internal/celt"
+)
 
 // Opus channel mapping families used by Ogg Opus and the libopus surround API.
 const (
@@ -35,6 +39,7 @@ type SurroundEncoder struct {
 	mappingFamily int
 	lfeStream     int
 	bitrate       int
+	analyzer      *celt.SurroundAnalyzer
 }
 
 // NewSurroundEncoder creates an encoder for mapping family 0, 1, or 255.
@@ -57,6 +62,14 @@ func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application App
 		bitrate:            BitrateAuto,
 	}
 	s.configureSurroundStreams()
+	if mappingFamily == MappingFamilyVorbis && channels > 2 {
+		s.analyzer, err = celt.NewSurroundAnalyzer(sampleRate, channels)
+		if err != nil {
+			return nil, err
+		}
+		ms.beforeEncodeFloat = s.analyzeSurroundFrame
+		ms.resetPolicy = func() { s.analyzer.Reset() }
+	}
 	return s, nil
 }
 
@@ -141,6 +154,32 @@ func (e *SurroundEncoder) prepareFrame(frameSize int) error {
 		e.applySurroundBandwidth(selectedFrameSize)
 	}
 	return nil
+}
+
+func (e *SurroundEncoder) analyzeSurroundFrame(pcm []float64, frameSize int) (func(), error) {
+	next := e.analyzer.Clone()
+	masks, err := next.Analyze(pcm, frameSize)
+	if err != nil {
+		return nil, err
+	}
+	const bands = celt.NumBands48000
+	for stream, enc := range e.encoders {
+		streamChannels := enc.Channels()
+		streamMask := make([]float64, streamChannels*bands)
+		for codedChannel := 0; codedChannel < streamChannels; codedChannel++ {
+			mapped := stream*2 + codedChannel
+			if stream >= e.coupledStreams {
+				mapped = stream + e.coupledStreams
+			}
+			inputChannel := findMappedChannel(e.mapping, byte(mapped))
+			if inputChannel < 0 {
+				return nil, fmt.Errorf("%w: coded channel %d is unmapped", ErrInvalidState, mapped)
+			}
+			copy(streamMask[codedChannel*bands:], masks[inputChannel*bands:(inputChannel+1)*bands])
+		}
+		enc.setSurroundEnergyMask(streamMask)
+	}
+	return func() { e.analyzer = next }, nil
 }
 
 func (e *SurroundEncoder) allocateRates(frameSize int) []int {

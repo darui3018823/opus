@@ -3,7 +3,6 @@
 package opus
 
 import (
-	"math"
 	"testing"
 
 	"github.com/darui3018823/opus/internal/cgoref"
@@ -120,58 +119,6 @@ func accumulateSurroundStreamBytes(t *testing.T, packet []byte, streams int, tot
 	for stream := range children {
 		totals[stream] += len(children[stream])
 	}
-}
-
-func surroundChannelSNRs(input, output []float64, channels, maxDelay int) []float64 {
-	result := make([]float64, channels)
-	for channel := 0; channel < channels; channel++ {
-		in := make([]float64, len(input)/channels)
-		out := make([]float64, len(output)/channels)
-		for i := range in {
-			in[i] = input[i*channels+channel]
-			out[i] = output[i*channels+channel]
-		}
-		result[channel] = surroundAlignedSNR(in, out, maxDelay)
-	}
-	return result
-}
-
-func surroundAlignedSNR(input, output []float64, maxDelay int) float64 {
-	best := math.Inf(1)
-	for delay := 0; delay <= maxDelay; delay++ {
-		n := min(len(input), len(output)-delay)
-		if n <= 2*maxDelay {
-			continue
-		}
-		lo, hi := maxDelay, n-maxDelay
-		var xy, yy float64
-		for i := lo; i < hi; i++ {
-			x, y := input[i], output[i+delay]
-			xy += x * y
-			yy += y * y
-		}
-		scale := 0.0
-		if yy > 0 {
-			scale = xy / yy
-		}
-		var signal, err float64
-		for i := lo; i < hi; i++ {
-			x := input[i]
-			delta := x - scale*output[i+delay]
-			signal += x * x
-			err += delta * delta
-		}
-		if signal > 0 && err < best {
-			best = err / signal
-		}
-	}
-	if math.IsInf(best, 1) {
-		return 0
-	}
-	if best == 0 {
-		return 300
-	}
-	return -10 * math.Log10(best)
 }
 
 func surroundWeightedSNR(snr []float64, lfe int) float64 {

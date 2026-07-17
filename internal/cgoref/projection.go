@@ -30,6 +30,14 @@ static int go_projection_set_vbr(OpusProjectionEncoder *enc, int enabled) {
 static int go_ambisonics_ms_set_bitrate(OpusMSEncoder *enc, opus_int32 bitrate) {
 	return opus_multistream_encoder_ctl(enc, OPUS_SET_BITRATE(bitrate));
 }
+
+static int go_ambisonics_ms_set_vbr(OpusMSEncoder *enc, int enabled) {
+	return opus_multistream_encoder_ctl(enc, OPUS_SET_VBR(enabled));
+}
+
+static int go_ambisonics_ms_set_vbr_constraint(OpusMSEncoder *enc, int enabled) {
+	return opus_multistream_encoder_ctl(enc, OPUS_SET_VBR_CONSTRAINT(enabled));
+}
 */
 import "C"
 
@@ -194,6 +202,22 @@ func (e *AmbisonicsMultistreamEncoder) SetBitrate(bitrate int) error {
 	code := C.go_ambisonics_ms_set_bitrate(e.enc, C.opus_int32(bitrate))
 	if code != 0 {
 		return fmt.Errorf("ambisonics OPUS_SET_BITRATE: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
+func (e *AmbisonicsMultistreamEncoder) SetVBR(enabled bool) error {
+	code := C.go_ambisonics_ms_set_vbr(e.enc, boolToCInt(enabled))
+	if code != 0 {
+		return fmt.Errorf("ambisonics OPUS_SET_VBR: %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
+func (e *AmbisonicsMultistreamEncoder) SetVBRConstraint(enabled bool) error {
+	code := C.go_ambisonics_ms_set_vbr_constraint(e.enc, boolToCInt(enabled))
+	if code != 0 {
+		return fmt.Errorf("ambisonics OPUS_SET_VBR_CONSTRAINT: %s", C.GoString(C.opus_strerror(code)))
 	}
 	return nil
 }

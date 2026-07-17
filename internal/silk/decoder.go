@@ -1731,7 +1731,8 @@ func silkLPCInversePredGainQ12(aQ12 []int16, order int) int32 {
 	if order <= 0 || order > len(aQ12) {
 		return 0
 	}
-	aQA := make([]int32, order)
+	var aQABuf [silkMaxLPCOrder]int32
+	aQA := aQABuf[:order]
 	dcResp := int32(0)
 	for k := 0; k < order; k++ {
 		dcResp += int32(aQ12[k])

@@ -104,3 +104,57 @@ go test -count=1 -tags opusref ./...
 
 Adopted. Iteration 4-2 meets its acceptance criteria and is ready for Phase 4-3
 (CI operating-system and architecture coverage).
+
+## Iteration 4-3: CI operating-system and architecture coverage (Locally qualified)
+
+### Implemented locally
+
+- Expanded normal tests to six native GitHub-hosted cells:
+  - Linux amd64 and arm64;
+  - macOS Intel/amd64 and Apple Silicon/arm64;
+  - Windows amd64 and Windows 11 arm64 (public preview).
+- Split generated-file drift and `go vet` into one Ubuntu static-analysis job.
+- Kept the downloaded 12/12 RFC 8251 vector run explicit in one Ubuntu job
+  instead of repeating the download across the native matrix.
+- Kept CGO/libopus reference checks in the existing Ubuntu-only `opusref`
+  workflow.
+- Corrected every workflow from the nonexistent `actions/checkout@v7` reference
+  to the current `actions/checkout@v6`. Retained current
+  `actions/setup-go@v6` and `actions/upload-artifact@v7` references.
+- Updated both READMEs to distinguish native test coverage and the Windows
+  arm64 preview status.
+
+Commit:
+
+- `d5d34a2` `ci: expand native OS and architecture coverage`
+
+### Qualification observations
+
+- GitHub's current hosted-runner reference was checked for all six labels.
+- Official action repositories were checked for current major versions.
+- `actionlint` accepted every workflow:
+
+```text
+go run github.com/rhysd/actionlint/cmd/actionlint@latest -color
+```
+
+- Supplemental `CGO_ENABLED=0 go build ./...` checks passed for
+  `linux/{amd64,arm64}`, `darwin/{amd64,arm64}`, and
+  `windows/{amd64,arm64}`. These local builds are not presented as test
+  coverage; the workflow cells are explicitly native tests.
+- The standard PowerShell gates passed:
+
+```text
+go generate ./...
+git diff --exit-code
+go vet ./...
+go test -count=1 ./...
+go test -count=1 -tags opusref ./...
+```
+
+### Decision
+
+Adopted for local integration. The workflow syntax, local gates, and all target
+cross-builds pass. Final qualification still requires the configured hosted
+jobs to run on a pushed PR; no push or PR was performed without user approval.
+Iteration 4-4 may proceed independently.

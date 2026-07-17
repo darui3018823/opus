@@ -1,9 +1,10 @@
 # Pure Go Opus 完成度ロードマップ (2026-07-16)
 
 > **Status update (2026-07-17):** Phase 0–2 are complete and merged into
-> `main` by PR #22 (`60cb602`). Phase 3-1, the unified performance benchmark
-> harness and recorded baseline, is complete locally on
-> `codex/phase3-perf-harness`.
+> `main` by PR #22 (`60cb602`). Phase 3-1 through 3-5 are complete and merged
+> into `main` by PR #23 (`80c7e26`). The repository is already released at
+> `v1.2.0`; Phase 4 therefore targets post-v1.2 release quality and DX rather
+> than preparation for an initial v1.0 release.
 
 前プラン: `.claude/plans/post-audit-2026-07-15.md` (A/B/C/D-1 + D-2 iter0 完了・main マージ済)。
 本プランはその後継。**目標の再定義**: libopus の完全代替 (bit-exact / 全 CTL / 全品質 parity) は
@@ -121,6 +122,12 @@ Repacketizer/OggParsers)。
 
 ## Phase 3: 性能 (測定駆動の最適化)
 
+> **Status: complete.** The unified benchmark harness and four qualified,
+> behavior-preserving SILK allocation optimizations were merged by PR #23
+> (`80c7e26`) on 2026-07-17. Detailed measurements remain in
+> `.claude/memory/iterations/performance-phase3.md` and
+> `docs/PERF_BASELINE.md`.
+
 計器を先に固定してから 1 hotspot = 1 iteration。**benchstat なしの「速くなったはず」は禁止**。
 
 - **3-1. ベンチ harness 統一** — 代表 workload のベンチを 1 箇所に整備:
@@ -137,19 +144,24 @@ Repacketizer/OggParsers)。
 - 停止条件: プロファイル上位の hotspot を消化し、追加 iteration の期待改善が
   5% を切ったら終了。
 
-## Phase 4: リリース品質 / DX (v1.0 への整地)
+## Phase 4: リリース品質 / DX (v1.2 以降の整備)
 
 - **4-1. godoc 総点検** — 全公開 API に使用可能な doc comment、package doc、
   `example_test.go` (Encode/Decode/Ogg read-write/multistream の 4 本)。
 - **4-2. README 刷新** — 現状 (`docs/CURRENT_IMPLEMENTATION.md`) と矛盾しない
-  対応表・制限事項・保証 (conformance 12/12、fuzz 保証、並行性契約) を明記。
-- **4-3. CI matrix 拡充** — linux/mac/windows x amd64/arm64 の通常 suite
-  (opusref は既存 Ubuntu workflow のまま)。
-- **4-4. semver / v1.0.0 タグ** — 公開 API の凍結宣言。破壊的変更が要るなら
-  このタイミングで最後に整理 (エラー値・命名の一貫性チェックを 1 iteration で)。
+  対応表・制限事項・保証 (conformance 12/12、fuzz 保証、並行性契約) を
+  英語版と日本語版の両方に明記。
+- **4-3. CI matrix 拡充** — Linux/macOS/Windows と amd64/arm64 のカバレッジを
+  現行の GitHub-hosted runner で実行可能な組み合わせに拡張。実機実行できない
+  組み合わせは cross-build で補完し、opusref は既存 Ubuntu workflow に限定。
+- **4-4. リリース運用 / semver 点検** — 現行 `v1.2.0` を基準に、
+  `VERSION` / 生成定数 / 対応バージョン表 / リリースノート導線を監査し、
+  次版向けチェックリストを整備。v1 系の互換性を保ち、破壊的 API 変更は
+  v2 候補として別に記録する。
 
 判定基準: 機械的に検証できるものはツールで (`go vet`, lint, link check)。
-v1.0 タグ発行は**ユーザーの明示承認必須**。
+バージョン更新、tag、push、GitHub Release 発行は Phase 4 の自動的な完了条件にせず、
+実行する場合は**ユーザーの明示承認必須**。
 
 ---
 
@@ -179,5 +191,5 @@ v1.0 タグ発行は**ユーザーの明示承認必須**。
 - [x] Phase 0: D-2 クローズアウト — iter2 採用・D-2 終結 (`0f17758`, 2026-07-16)
 - [x] Phase 1: 機能ギャップ (1-1〜1-5 完了、最終レビュー修正 `85eb9bb`, 2026-07-16。optional 1-6 は承認待ちのため未着手)
 - [x] Phase 2: 堅牢性 — 2-1〜2-6 完了、PR #22 で main マージ済 (`60cb602`, 2026-07-17)
-- [ ] Phase 3: 性能 (3-1 harness and 3-2〜3-5 low-risk SILK allocation optimizations qualified locally)
-- [ ] Phase 4: リリース品質 (godoc / README / CI matrix / v1.0)
+- [x] Phase 3: 性能 — 3-1 harness + 3-2〜3-5 SILK allocation optimizations、PR #23 で main マージ済 (`80c7e26`, 2026-07-17)
+- [ ] Phase 4: v1.2 以降のリリース品質 (godoc / README / CI matrix / release hygiene)

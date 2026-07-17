@@ -34,6 +34,7 @@ go.work.sum
 .claude/scheduled_tasks.lock
 .claude/webhooks.local.json
 .claude/rules/webhook-rules.md
+.claude/rules/user-preferences.md
 
 # Testdata
 testdata/

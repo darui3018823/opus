@@ -12,11 +12,15 @@ precedence over older roadmaps, task notes, and README text when they disagree.
 Repository-specific operational rules live under `.claude/rules/`. Read every
 rule applicable to the work before starting:
 
+- `.claude/rules/index.md` — rule inventory and tracking status; read this
+  first.
 - `.claude/rules/documentation-rules.md` — status authority, classification,
   naming, tracking, and lifecycle of documents under `.claude/`.
 - `.claude/rules/webhook-rules.md` — local notification integration. This file
   and its local configuration are intentionally ignored; consult them only when
   sending a notification.
+- `.claude/rules/user-preferences.md` — local user workflow preferences. This
+  file is intentionally ignored but applies to normal repository work.
 
 Task briefs, plans, specifications, and historical working notes are organized
 under `.claude/`. Use them as task context, not as proof of the current

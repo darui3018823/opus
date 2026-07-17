@@ -48,6 +48,25 @@ class GeminiReviewTest(unittest.TestCase):
  keep
 """
         self.assertEqual(gemini_pr_review.changed_right_lines(diff), {"a.go": {2, 3}})
+        self.assertEqual(gemini_pr_review.changed_files_from_diff(diff), ["a.go"])
+
+    def test_extract_file_diff(self):
+        diff = """diff --git a/a.go b/a.go
+--- a/a.go
++++ b/a.go
+@@ -1 +1 @@
+-old
++new
+diff --git a/b.go b/b.go
+--- a/b.go
++++ b/b.go
+@@ -1 +1 @@
+-old
++new
+"""
+        file_diff = gemini_pr_review.extract_file_diff(diff, "b.go")
+        self.assertIn("diff --git a/b.go b/b.go", file_diff)
+        self.assertNotIn("diff --git a/a.go b/a.go", file_diff)
 
     def test_invalid_inline_anchor_is_unposted(self):
         comments = [
@@ -80,7 +99,27 @@ class GeminiReviewTest(unittest.TestCase):
         )
         self.assertIn("style, readability, maintainability", prompt)
         self.assertIn("other concrete suggestions", prompt)
+        self.assertIn("zero-comment review should be rare", prompt)
+        self.assertIn("list_changed_files", prompt)
+        self.assertIn("run_readonly_command", prompt)
         self.assertNotIn("Ignore style", prompt)
+
+    def test_format_review_body_prefixes_model(self):
+        self.assertEqual(
+            gemini_pr_review.format_review_body("body"),
+            "Gemini 3.1 Pro:\n\nbody",
+        )
+
+    def test_execute_tool_rejects_unlisted_file_diff(self):
+        ctx = gemini_pr_review.ToolContext(
+            repo="owner/repo",
+            pr_number=1,
+            pr={"headRefOid": "head", "baseRefName": "main"},
+            diff="",
+            changed_files=["a.go"],
+        )
+        result = gemini_pr_review.execute_tool(ctx, "get_diff_for_file", {"path": "b.go"})
+        self.assertIn("error", result)
 
 
 if __name__ == "__main__":

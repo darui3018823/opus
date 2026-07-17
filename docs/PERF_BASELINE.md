@@ -1,6 +1,6 @@
 # Performance Baseline
 
-Last measured: 2026-07-17
+Last measured: 2026-07-18
 
 This baseline records the Phase 3-1 public benchmark harness. Future Phase 3
 optimization iterations should compare against this file with `benchstat` or an
@@ -220,3 +220,67 @@ Median comparison against parent `bbd2cb7`:
 |---|---:|---:|---:|---:|---:|---:|
 | `BenchmarkPerf/encode/silk/stereo/48k/20ms-16` | 18943641 | 18238496 | -3.7% | 2776087 | 2639102 | -7.6% |
 | `BenchmarkPerf/encode/hybrid/stereo/48k/20ms-16` | 11984445 | 11935686 | -0.4% | 2093298 | 2032371 | -4.2% |
+
+## Post-Audit Phase 4: SILK/Hybrid Allocation and Runtime
+
+The post-audit phase used the same public workloads with a stricter top-level
+benchmark match:
+
+```text
+go test -run '^$' -bench '^BenchmarkPerf$/encode/(silk|hybrid)/(mono|stereo)/48k/20ms$' -benchtime=1s -count=5 -benchmem .
+```
+
+An exact regression test hashes packet lengths, all packet bytes, and encoder
+final ranges across 64 deterministic frames for every predictive workload.
+All three adopted iterations preserve those four digests.
+
+### Fresh Phase Baseline and Final Allocation
+
+Time measurements varied with machine load, so adoption used same-window
+immediate-parent comparisons. Allocation measurements were stable enough for a
+cumulative phase comparison:
+
+| Workload | Baseline B/op | Final B/op | Change | Baseline allocs/op | Final allocs/op | Change |
+|---|---:|---:|---:|---:|---:|---:|
+| `encode/silk/mono/48k/20ms` | 672231 | 285942 | -57.5% | 8541 | 2239 | -73.8% |
+| `encode/silk/stereo/48k/20ms` | 2102575 | 1413062 | -32.8% | 10973 | 5416 | -50.6% |
+| `encode/hybrid/mono/48k/20ms` | 585975 | 388481 | -33.7% | 4409 | 1290 | -70.7% |
+| `encode/hybrid/stereo/48k/20ms` | 1793724 | 1311290 | -26.9% | 9457 | 4035 | -57.3% |
+
+### Adopted Iterations
+
+1. `silkLPCInversePredGainQ12` now uses fixed maximum-order scratch. Against
+   the fresh phase baseline, SILK mono improved 8.7% in time and 40.5% in
+   bytes/op; hybrid mono improved 22.8% in bytes/op. All four allocation counts
+   fell by 29-50%.
+2. `nlsfToLPCLibopus` now uses fixed scratch for its cosine, polynomial, and
+   coefficient workspaces. Against its immediate parent, bytes/op fell by
+   6.8-28.8% and allocation counts by 29-48% across all four workloads.
+3. Each SILK encoder now reuses its maximum four delayed-decision NSQ candidate
+   states. In a detached-parent same-window comparison, SILK stereo bytes/op
+   fell 20.3% and hybrid stereo 10.7%; target time improved 2.7% and 0.4%.
+   Mono time stayed within 3.1% of the parent.
+
+### Long-Running Stream Benchmark
+
+`BenchmarkPerfLongStream` continuously encodes 256 frames (5.12 seconds of
+audio) per operation and reports throughput, packet bytes, and live-heap growth
+after a warm-up frame and forced GC.
+
+```text
+go test -run '^$' -bench '^BenchmarkPerfLongStream$/encode/(silk|hybrid)/(mono|stereo)/48k/20ms$' -benchtime=1x -count=5 -benchmem .
+```
+
+Final medians:
+
+| Workload | ns/op | frames/s | packet B/frame | B/op | allocs/op | retained B |
+|---|---:|---:|---:|---:|---:|---:|
+| `encode/silk/mono/48k/20ms` | 1214496700 | 210.8 | 96.16 | 72940048 | 570119 | 432 |
+| `encode/silk/stereo/48k/20ms` | 4278088000 | 59.84 | 171.8 | 367526120 | 1407096 | 4608 |
+| `encode/hybrid/mono/48k/20ms` | 744996600 | 343.6 | 161.0 | 99566128 | 330784 | 384 |
+| `encode/hybrid/stereo/48k/20ms` | 2825355700 | 90.61 | 241.0 | 337954136 | 1044052 | 4992 |
+
+The retained live heap remains bounded after the stream; it does not scale
+with the 256 encoded frames. Residual profiles rank NLSF reconstruction/LPC
+result buffers first for allocation count, with delayed-decision quantizer and
+CELT transform working storage remaining significant for stereo and hybrid.

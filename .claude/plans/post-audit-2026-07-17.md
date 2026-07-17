@@ -1,8 +1,8 @@
 # Post-Audit Completion Plan (2026-07-17)
 
-Status: **Active; Phases 1 and 2 adopted, Phase 3 completed without adoption**
+Status: **Active; Phases 1, 2, and 4 adopted, Phase 3 completed without adoption**
 
-Last updated: 2026-07-17
+Last updated: 2026-07-18
 
 Basis: `.claude/memory/audits/libopus-completeness-2026-07-17.md`
 
@@ -295,6 +295,20 @@ Acceptance criteria for each iteration:
 Add a long-running stream benchmark before declaring Phase 4 complete so GC
 and buffer-retention behavior is measured beyond isolated 20 ms calls.
 
+**Decision (2026-07-18): Adopted.** CPU and allocation profiles for all four
+SILK/hybrid mono/stereo workloads identified three bounded allocation
+hotspots. The adopted iterations stack-allocate inverse-prediction-gain
+scratch, stack-allocate NLSF-to-LPC conversion scratch, and reuse the maximum
+four delayed-decision NSQ candidate states on each encoder. Against the fresh
+pre-phase baseline, median allocation fell by 27-58% in bytes/op and 51-74% in
+allocs/op across the four workloads. Each iteration met its immediate-parent
+5% adoption gate on at least one target metric without a material neighboring
+regression. A 64-frame packet/final-range digest guard proves byte identity,
+and the new 256-frame long-stream benchmark found only 432-4,992 bytes of
+median live-heap growth after warm-up. Common verification, opusref, and all 12
+official vectors passed. Evidence is in
+`.claude/memory/iterations/silk-hybrid-runtime-phase4-2026-07-18.md`.
+
 ---
 
 ## Phase 5: Surround Psychoacoustic Parity
@@ -338,7 +352,7 @@ multiplexed demux; those remain separate optional features.
   - [x] Slice 1-5: adoption decision and baseline update
 - [x] Phase 2: PLC/FEC semantic parity — adopted 2026-07-17
 - [x] Phase 3: SILK/hybrid mode-rate-quality policy — stopped after two rejected gates 2026-07-17
-- [ ] Phase 4: SILK/hybrid encoder allocation and runtime cost
+- [x] Phase 4: SILK/hybrid encoder allocation and runtime cost — adopted 2026-07-18
 - [ ] Phase 5: surround psychoacoustic parity
 
 ## Completion Definition

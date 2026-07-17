@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-07-17
+Last reviewed: 2026-07-18
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -322,6 +322,19 @@ under the same 1s parent-worktree benchmark, it further reduces SILK stereo
 encode allocation to 2.78 MB and hybrid stereo encode allocation to 2.09 MB.
 The next small pass stack-allocates warped-autocorrelation scratch, reducing
 SILK stereo allocation count by approximately 8% against its parent iteration.
+
+Post-audit Phase 4 adds an exact 64-frame packet/final-range digest guard and a
+256-frame predictive long-stream benchmark. Three adopted SILK allocation
+passes stack-allocate inverse-prediction-gain and NLSF-to-LPC conversion
+scratch and reuse the delayed-decision NSQ candidate states on the encoder.
+Against the fresh pre-phase local medians, allocation fell from 672 KB/8,541
+allocations to 286 KB/2,239 for SILK mono, from 2.10 MB/10,973 to
+1.41 MB/5,416 for SILK stereo, from 586 KB/4,409 to 388 KB/1,290 for hybrid
+mono, and from 1.79 MB/9,457 to 1.31 MB/4,035 for hybrid stereo. The final
+long-stream measurement retained only 432-4,992 bytes of median live heap
+after warm-up, rather than frame-proportional state. Absolute predictive
+encode cost remains higher than CELT; the largest remaining allocation families
+are NLSF reconstruction/LPC output buffers and stereo trellis working storage.
 
 ### Phase 2: Production CELT Encoder (In Progress)
 

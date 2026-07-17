@@ -179,9 +179,10 @@ go test -race -count=1 ./...
 go test -run='^$' -bench '^BenchmarkPerf/' -benchmem .
 ```
 
-通常 CI は Linux amd64 と native Linux arm64 で test します。`opusref` workflow は
-libopus を利用する Ubuntu に限定しています。正確な現行 matrix は workflow file
-を参照してください。
+通常 CI は Linux、macOS、Windows の amd64 / arm64 で native test を実行します。
+Windows arm64 runner は現在 GitHub の public-preview image です。生成物 drift、vet、
+公式 vector は独立した Ubuntu job とし、`opusref` workflow も libopus を利用する
+Ubuntu に限定しています。正確な現行 matrix は workflow file を参照してください。
 
 ## ドキュメント
 

@@ -15,30 +15,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: test (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-latest
-          - arch: arm64
-            runner: ubuntu-24.04-arm
+  static:
+    name: generated files and vet
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v6
 
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Report toolchain / arch
-        run: |
-          go version
-          go env GOARCH GOOS
 
       - name: Verify generated files
         run: |
@@ -47,6 +35,72 @@ jobs:
 
       - name: go vet
         run: go vet ./...
+
+  native-test:
+    name: native test (${{ matrix.os }}/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            setup-arch: x64
+            runner: ubuntu-latest
+          - os: linux
+            arch: arm64
+            setup-arch: arm64
+            runner: ubuntu-24.04-arm
+          - os: macos
+            arch: amd64
+            setup-arch: x64
+            runner: macos-15-intel
+          - os: macos
+            arch: arm64
+            setup-arch: arm64
+            runner: macos-15
+          - os: windows
+            arch: amd64
+            setup-arch: x64
+            runner: windows-latest
+          # windows-11-arm is a standard GitHub-hosted runner in public
+          # preview. This cell runs the tests natively; it is not a cross-build.
+          - os: windows
+            arch: arm64
+            setup-arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up native Go toolchain
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          architecture: ${{ matrix.setup-arch }}
+          cache: true
+
+      - name: Report native toolchain
+        run: |
+          go version
+          go env GOOS GOARCH GOHOSTOS GOHOSTARCH
+
+      - name: go test (native)
+        run: go test -count=1 ./...
+
+  official-vectors:
+    name: official RFC 8251 vectors (12/12)
+    needs: static
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
 
       - name: Download RFC 8251 test vectors
         run: |
@@ -62,10 +116,7 @@ jobs:
               cp "$(dirname "$src")"/* testdata/opus_newvectors/
             fi
           fi
-          ls testdata/opus_newvectors | head
+          test -f testdata/opus_newvectors/testvector01.bit
 
-      - name: go test
-        run: go test -count=1 ./...
-
-      - name: Official RFC 8251 vectors (verbose)
-        run: go test -count=1 -v -run TestOfficialVectors .
+      - name: Run all official decoder vectors
+        run: go test -count=1 -v -run '^TestOfficialVectors$' .

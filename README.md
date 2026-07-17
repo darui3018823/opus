@@ -185,8 +185,11 @@ go test -race -count=1 ./...
 go test -run='^$' -bench '^BenchmarkPerf/' -benchmem .
 ```
 
-Normal CI tests Linux amd64 and native Linux arm64. The `opusref` workflow stays
-on Ubuntu with libopus. See the workflow files for the exact current matrix.
+Normal CI runs native tests on Linux, macOS, and Windows for both amd64 and
+arm64. The Windows arm64 runner is currently a GitHub public-preview image.
+Generated-file drift, vet, and official vectors are separate Ubuntu jobs, and
+the `opusref` workflow stays on Ubuntu with libopus. See the workflow files for
+the exact current matrix.
 
 ## Documentation
 

@@ -100,4 +100,60 @@ func TestCGODecodeLossSemantics(t *testing.T) {
 	if goDec.FinalRange() != refRange {
 		t.Fatalf("SILK FEC range: Go=%08x ref=%08x", goDec.FinalRange(), refRange)
 	}
+
+	t.Run("hybrid-final-range", func(t *testing.T) {
+		const hybridRate = 48000
+		hybridFrameSize := hybridRate / 50
+		hybridEnc, err := opus.NewEncoder(hybridRate, 1, opus.ApplicationVOIP)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := hybridEnc.SetBitrate(64000); err != nil {
+			t.Fatal(err)
+		}
+		hybridEnc.SetInbandFEC(true)
+		hybridEnc.SetPacketLossPerc(20)
+		hybridPackets := make([][]byte, 8)
+		for p := range hybridPackets {
+			pcm := make([]float64, hybridFrameSize)
+			for i := range pcm {
+				at := float64(p*hybridFrameSize+i) / hybridRate
+				pcm[i] = .5*math.Sin(2*math.Pi*180*at) + .16*math.Sin(2*math.Pi*6200*at)
+			}
+			hybridPackets[p], err = hybridEnc.EncodeFloat(pcm, hybridFrameSize)
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if mode, err := opus.PacketGetMode(hybridPackets[5]); err != nil || mode != opus.ModeHybrid {
+			t.Fatalf("carrier mode=(%d,%v), want hybrid", mode, err)
+		}
+		goHybrid, _ := opus.NewDecoder(hybridRate, 1)
+		refHybrid, err := cgoref.NewDecoder(hybridRate, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer refHybrid.Close()
+		for p := 0; p < lost; p++ {
+			if _, err := goHybrid.DecodeFloat(hybridPackets[p]); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := refHybrid.DecodeFloat(hybridPackets[p], hybridFrameSize); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := goHybrid.DecodeFECFloat(hybridPackets[lost+1], hybridFrameSize); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := refHybrid.DecodeFloatFEC(hybridPackets[lost+1], hybridFrameSize); err != nil {
+			t.Fatal(err)
+		}
+		refHybridRange, err := refHybrid.FinalRange()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if goHybrid.FinalRange() != refHybridRange {
+			t.Fatalf("hybrid FEC range: Go=%08x ref=%08x", goHybrid.FinalRange(), refHybridRange)
+		}
+	})
 }

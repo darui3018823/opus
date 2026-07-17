@@ -201,6 +201,14 @@ func (s *Resampler) Reset() {
 	_ = s.init()
 }
 
+// CopyStateFrom copies the complete configured and streaming state from src.
+func (s *Resampler) CopyStateFrom(src *Resampler) {
+	if src == nil || src == s {
+		return
+	}
+	*s = *src
+}
+
 // Process resamples the int16 input and returns the int16 output, mirroring
 // silk_resampler() including the input-delay buffering across calls.
 func (s *Resampler) Process(in []int16) []int16 {

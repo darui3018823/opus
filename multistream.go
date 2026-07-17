@@ -559,13 +559,21 @@ func (d *MultistreamDecoder) DecodeFECFloat(data []byte, frameSize int) ([]float
 		}
 	}
 
+	staged := make([]*Decoder, len(d.decoders))
 	out := make([]float64, frameSize*d.channels)
 	for stream, packet := range packets {
-		streamPCM, err := d.decoders[stream].DecodeFECFloat(packet, frameSize)
+		staged[stream], err = d.decoders[stream].cloneState()
+		if err != nil {
+			return nil, fmt.Errorf("stream %d: %w", stream, err)
+		}
+		streamPCM, err := staged[stream].DecodeFECFloat(packet, frameSize)
 		if err != nil {
 			return nil, fmt.Errorf("stream %d: %w", stream, err)
 		}
 		d.mapStreamFloat(out, streamPCM, stream, frameSize)
+	}
+	for stream := range staged {
+		*d.decoders[stream] = *staged[stream]
 	}
 	return out, nil
 }

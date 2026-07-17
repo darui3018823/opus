@@ -3784,13 +3784,18 @@ func (d *Decoder) DecodeFECFloat(data []byte, frameSize int) ([]float64, error) 
 	if err := d.validateFECState(data, frameSize); err != nil {
 		return nil, err
 	}
-	pcm, finalRange, err := d.decodeFECFloat(data, frameSize)
+	staged, err := d.cloneState()
 	if err != nil {
 		return nil, err
 	}
-	d.applyGain(pcm)
-	d.lastPacketDuration = frameSize
-	d.lastFinalRange = finalRange
+	pcm, finalRange, err := staged.decodeFECFloat(data, frameSize)
+	if err != nil {
+		return nil, err
+	}
+	staged.applyGain(pcm)
+	staged.lastPacketDuration = frameSize
+	staged.lastFinalRange = finalRange
+	*d = *staged
 	return pcm, nil
 }
 
@@ -3868,7 +3873,7 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	finalRange := infoDec.dec.LastFinalRange()
 	if info.mode == ModeHybrid {
 		// CELT carries no in-band FEC. Its high band advances through PLC and,
-		// as in libopus, makes the combined final range zero.
+		// as in libopus, supplies the combined final range.
 		if d.lastCeltDec != nil {
 			celtPCM, err := d.decodeCELTPLCFrame(packetFrameSize)
 			if err != nil {
@@ -3883,8 +3888,10 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 				}
 				silkPCM[i] = v
 			}
+			finalRange = d.lastCeltDec.LastFinalRange()
+		} else {
+			finalRange = 0
 		}
-		finalRange = 0
 	}
 	out = append(out, silkPCM...)
 
@@ -3929,6 +3936,80 @@ func (d *Decoder) validateFECState(data []byte, frameSize int) error {
 		return fmt.Errorf("%w: SILK decoder for %d kHz", ErrInvalidState, rateKHz)
 	}
 	return nil
+}
+
+func (d *Decoder) cloneState() (*Decoder, error) {
+	clone, err := NewDecoder(d.sampleRate, d.channels)
+	if err != nil {
+		return nil, err
+	}
+	clone.frameSize = d.frameSize
+	clone.internalFrameSize = d.internalFrameSize
+	clone.prevMode = d.prevMode
+	clone.lastPacketDuration = d.lastPacketDuration
+	clone.lastPacketConfig = d.lastPacketConfig
+	clone.lastPacketChannels = d.lastPacketChannels
+	clone.lastFinalRange = d.lastFinalRange
+	clone.lastPitch = d.lastPitch
+	clone.gainQ8 = d.gainQ8
+	clone.phaseInversionDisabled = d.phaseInversionDisabled
+	clone.prevSilkInternalCh = d.prevSilkInternalCh
+	clone.silkRSInKHz = d.silkRSInKHz
+	clone.silkSMid = d.silkSMid
+
+	for bw := range d.celtDecoders {
+		for lm := range d.celtDecoders[bw] {
+			for ch := range d.celtDecoders[bw][lm] {
+				src := d.celtDecoders[bw][lm][ch]
+				dst := clone.celtDecoders[bw][lm][ch]
+				if src != nil && dst != nil {
+					dst.CopyAllStateFrom(src)
+				}
+				if src == d.lastCeltDec {
+					clone.lastCeltDec = dst
+				}
+			}
+		}
+	}
+	for ri := range d.silkDecoders {
+		for ci := range d.silkDecoders[ri] {
+			src := d.silkDecoders[ri][ci]
+			dst := clone.silkDecoders[ri][ci]
+			if src == nil || dst == nil {
+				continue
+			}
+			dst.dec.CopyAllStateFrom(src.dec)
+			dst.sMid = src.sMid
+			if src.resampler != nil && dst.resampler != nil {
+				dst.resampler.CopyStateFrom(src.resampler)
+			} else if src.resampler == nil {
+				dst.resampler = nil
+			}
+			copySilkResampler := func(srcRS *silk.Resampler) *silk.Resampler {
+				if srcRS == nil {
+					return nil
+				}
+				dstRS := new(silk.Resampler)
+				dstRS.CopyStateFrom(srcRS)
+				return dstRS
+			}
+			dst.silkResampler = copySilkResampler(src.silkResampler)
+			dst.silkResamplerL = copySilkResampler(src.silkResamplerL)
+			dst.silkResamplerR = copySilkResampler(src.silkResamplerR)
+		}
+	}
+	for ch, src := range d.silkRS {
+		if src != nil {
+			clone.silkRS[ch] = new(silk.Resampler)
+			clone.silkRS[ch].CopyStateFrom(src)
+		} else {
+			clone.silkRS[ch] = nil
+		}
+	}
+	if d.celtResampler != nil && clone.celtResampler != nil {
+		clone.celtResampler.CopyStateFrom(d.celtResampler)
+	}
+	return clone, nil
 }
 
 // Reset clears codec history and last-packet range, pitch, and bandwidth while

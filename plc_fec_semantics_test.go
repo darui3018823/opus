@@ -179,6 +179,57 @@ func TestDecodeFECExplicitDurationPrependsPLC(t *testing.T) {
 	}
 }
 
+func TestDecodeFECPackedErrorPreservesState(t *testing.T) {
+	const (
+		rate      = 16000
+		frameSize = 320
+		lost      = 4
+	)
+	packets := makeFECPackets(t, rate, frameSize, 8)
+	rp := NewRepacketizer()
+	if err := rp.Cat(packets[lost+1]); err != nil {
+		t.Fatal(err)
+	}
+	if err := rp.Cat(packets[lost+2]); err != nil {
+		t.Fatal(err)
+	}
+	packed, err := rp.Out()
+	if err != nil {
+		t.Fatal(err)
+	}
+	corrupt := append([]byte(nil), packed[:len(packed)-1]...)
+
+	candidate := primedLossDecoder(t, rate, packets[:lost])
+	control := primedLossDecoder(t, rate, packets[:lost])
+	dst := make([]int16, 2*frameSize)
+	for i := range dst {
+		dst[i] = 1234
+	}
+	if _, err := candidate.DecodeFECWithDuration(corrupt, dst, 2*frameSize); err == nil {
+		t.Fatal("corrupt packed FEC unexpectedly succeeded")
+	}
+	for i, sample := range dst {
+		if sample != 1234 {
+			t.Fatalf("error modified destination[%d]=%d", i, sample)
+		}
+	}
+	got, err := candidate.DecodePLCFloat(frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := control.DecodePLCFloat(frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatal("corrupt packed FEC advanced decoder state")
+	}
+	if candidate.FinalRange() != control.FinalRange() || candidate.Pitch() != control.Pitch() ||
+		candidate.Bandwidth() != control.Bandwidth() || candidate.GetLastPacketDuration() != control.GetLastPacketDuration() {
+		t.Fatal("corrupt packed FEC changed observable decoder state")
+	}
+}
+
 func makeFECPackets(t *testing.T, rate, frameSize, count int) [][]byte {
 	t.Helper()
 	enc, err := NewEncoder(rate, 1, ApplicationVOIP)

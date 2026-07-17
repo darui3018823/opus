@@ -2486,6 +2486,54 @@ func (d *Decoder) CopyPrimaryStateFrom(src *Decoder) {
 	copy(d.prevOutput, src.prevOutput)
 }
 
+// CopyAllStateFrom copies the complete decoder configuration and streaming
+// state from src, including stereo side-channel and diagnostic trace state.
+func (d *Decoder) CopyAllStateFrom(src *Decoder) {
+	if src == nil || src == d {
+		return
+	}
+	dstSide := d.side
+	*d = *src
+	d.prevNLSFQ15 = append([]int16(nil), src.prevNLSFQ15...)
+	d.lpcState = append([]int32(nil), src.lpcState...)
+	d.ltpState = append([]int32(nil), src.ltpState...)
+	d.prevLPCQ12 = append([]int16(nil), src.prevLPCQ12...)
+	d.prevOutput = append([]int32(nil), src.prevOutput...)
+	if src.side != nil {
+		if dstSide == nil {
+			dstSide = &Decoder{}
+		}
+		dstSide.CopyAllStateFrom(src.side)
+		d.side = dstSide
+	} else {
+		d.side = nil
+	}
+	if src.trace != nil {
+		trace := &decodeTrace{LBRRFlags: append([]uint32(nil), src.trace.LBRRFlags...)}
+		trace.VADFlags = make([][]uint32, len(src.trace.VADFlags))
+		for i := range src.trace.VADFlags {
+			trace.VADFlags[i] = append([]uint32(nil), src.trace.VADFlags[i]...)
+		}
+		trace.Frames = make([]frameTrace, len(src.trace.Frames))
+		for i, frame := range src.trace.Frames {
+			trace.Frames[i] = frame
+			trace.Frames[i].RawGainIndices = append([]int(nil), frame.RawGainIndices...)
+			trace.Frames[i].AbsGainIndices = append([]int(nil), frame.AbsGainIndices...)
+			trace.Frames[i].GainsQ16 = append([]int32(nil), frame.GainsQ16...)
+			trace.Frames[i].NLSFIndices = append([]int(nil), frame.NLSFIndices...)
+			trace.Frames[i].NLSFQ15 = append([]int16(nil), frame.NLSFQ15...)
+			trace.Frames[i].PredCoef0Q12 = append([]int16(nil), frame.PredCoef0Q12...)
+			trace.Frames[i].PredCoef1Q12 = append([]int16(nil), frame.PredCoef1Q12...)
+			trace.Frames[i].PitchLags = append([]int(nil), frame.PitchLags...)
+			trace.Frames[i].LTPCoefQ14 = append([]int16(nil), frame.LTPCoefQ14...)
+			trace.Frames[i].SumPulses = append([]int(nil), frame.SumPulses...)
+			trace.Frames[i].Pulses = append([]int16(nil), frame.Pulses...)
+			trace.Frames[i].ExcQ14 = append([]int32(nil), frame.ExcQ14...)
+		}
+		d.trace = trace
+	}
+}
+
 // DequantizeSubframeGains dequantizes subframe gain indices (API compatibility).
 func DequantizeSubframeGains(indices []int) []float64 {
 	gains := make([]float64, len(indices))

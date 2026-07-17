@@ -142,7 +142,11 @@ packets. Surround
 mapping-family 1 uses the libopus/Vorbis
 stream layouts, identifies the LFE stream for 5.1/6.1/7.1, applies
 frame-duration-dependent stream bitrate allocation, and keeps coupled streams
-on stereo CELT to preserve the spatial image.
+on stereo CELT to preserve the spatial image. For layouts above stereo, a
+stateful libopus-style 21-band analysis combines per-channel energies according
+to left, center, right, and LFE roles. Its signal-to-mask slope feeds CELT
+allocation trim for each elementary stream; analyzer history is reset with the
+parent and committed only after successful packet assembly.
 
 Public projection and Ambisonics entry points:
 
@@ -1046,6 +1050,17 @@ were unchanged in every class, the five speech-oriented classes kept the same
 code-generated reproducer also requires encoder, Go decoder, and libopus
 decoder final-range equality on every packet.
 
+Post-audit surround Phase 5 verification on 2026-07-18: adopted the
+channel-role energy-mask allocation-trim slice after `go vet ./...`,
+`go test -count=1 ./...`, `go test -count=1 -tags opusref ./...`, all 12
+official vectors, and the full 140-cell real-corpus scoreboard passed. The
+deterministic 5.1/7.1 guard kept every elementary packet length identical to
+the no-mask baseline. Weighted SNR improved from 3.337 to 8.368 dB on the 5.1
+role-rich fixture and from 2.531 to 6.023 dB on 7.1 role-rich; active-channel
+regression stayed below 0.04 dB and LFE was unchanged. Bidirectional libopus
+multistream decoding, surround PLC/FEC, expert duration, duplicate/silent
+mapping, analyzer Reset, and per-packet encoder/decoder final ranges also pass.
+
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.
 `TestCGOMultistreamInteroperability` verifies both Go-encoded packets decoded
@@ -1134,8 +1149,10 @@ reference comparison.
   sample-accurate per-link seek metadata, but does not provide multiplexed-stream
   demux.
 - Multistream/surround provide core encode/decode, mapping, aggregate bitrate,
-  and per-stream state access, but do not yet mirror every libopus multistream
-  CTL or its full surround psychoacoustic energy-mask analysis.
+  per-stream state access, and channel-role energy-mask analysis for CELT
+  allocation trim. They do not yet mirror every libopus multistream CTL or the
+  remaining surround-mask consumers: per-band dynalloc, mask-aware VBR and
+  SILK/hybrid rate offsets, and full LFE-special CELT policy.
 - Public PLC covers CELT-only, SILK-only, and hybrid streams for mono, stereo,
   multistream, and surround output.
 - Top-level SILK/hybrid encoder selection is voice-oriented and now accounts

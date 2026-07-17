@@ -1,6 +1,6 @@
 # Post-Audit Completion Plan (2026-07-17)
 
-Status: **Active; Phases 1, 2, and 4 adopted, Phase 3 completed without adoption**
+Status: **Completed; Phases 1, 2, 4, and 5 adopted, Phase 3 completed without adoption**
 
 Last updated: 2026-07-18
 
@@ -340,6 +340,18 @@ Acceptance criteria:
 Phase 5 does not include arbitrary projection encoder matrix generation or Ogg
 multiplexed demux; those remain separate optional features.
 
+**Decision (2026-07-18): Adopted.** A deterministic 5.1/7.1 fixture and
+libopus surround-family scoreboard isolated the first psychoacoustic decision.
+The adopted stateful 21-band channel-role analysis feeds only CELT allocation
+trim, leaving nominal stream rates, VBR targets, per-band dynalloc, bandwidth,
+and LFE-special coding unchanged. Elementary bytes were identical to baseline
+in all four target cells; weighted SNR improved by 5.03 dB for 5.1 role-rich
+and 3.49 dB for 7.1 role-rich, active-channel regression stayed below 0.04 dB,
+and LFE was unchanged. Common verification, 12/12 official vectors, the full
+140-cell corpus scoreboard, bidirectional libopus interoperability, PLC/FEC,
+and expert duration passed. Evidence and remaining independent mask consumers
+are in `.claude/memory/iterations/surround-psychoacoustic-phase5-2026-07-18.md`.
+
 ---
 
 ## Status
@@ -353,7 +365,7 @@ multiplexed demux; those remain separate optional features.
 - [x] Phase 2: PLC/FEC semantic parity — adopted 2026-07-17
 - [x] Phase 3: SILK/hybrid mode-rate-quality policy — stopped after two rejected gates 2026-07-17
 - [x] Phase 4: SILK/hybrid encoder allocation and runtime cost — adopted 2026-07-18
-- [ ] Phase 5: surround psychoacoustic parity
+- [x] Phase 5: surround psychoacoustic parity — adopted 2026-07-18
 
 ## Completion Definition
 

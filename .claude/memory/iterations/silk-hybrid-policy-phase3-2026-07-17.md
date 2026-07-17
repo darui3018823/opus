@@ -89,5 +89,9 @@ $env:OPUS_REAL_CORPUS_OUT = "testdata/phase3_broadband_exit.csv"
 go test -count=1 -tags opusref -run '^TestOpusRealCorpusMatchedBitrateScoreboard$' -v .
 ```
 
-The final production tree contains neither rejected candidate. Common
-verification results are recorded in the Phase 3 closeout commit.
+The final production tree contains neither rejected candidate. Final results:
+
+- `go vet ./...` — pass
+- `go test -count=1 ./...` — pass
+- `go test -count=1 -tags opusref ./...` — pass
+- `go test -count=1 -run '^TestOfficialVectors$' -v .` — 12/12 pass

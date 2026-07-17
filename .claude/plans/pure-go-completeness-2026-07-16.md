@@ -2,7 +2,8 @@
 
 > **Status update (2026-07-17):** Phase 0–2 are complete and merged into
 > `main` by PR #22 (`60cb602`). Phase 3-1, the unified performance benchmark
-> harness and recorded baseline, is the next planned task.
+> harness and recorded baseline, is complete locally on
+> `codex/phase3-perf-harness`.
 
 前プラン: `.claude/plans/post-audit-2026-07-15.md` (A/B/C/D-1 + D-2 iter0 完了・main マージ済)。
 本プランはその後継。**目標の再定義**: libopus の完全代替 (bit-exact / 全 CTL / 全品質 parity) は
@@ -178,5 +179,5 @@ v1.0 タグ発行は**ユーザーの明示承認必須**。
 - [x] Phase 0: D-2 クローズアウト — iter2 採用・D-2 終結 (`0f17758`, 2026-07-16)
 - [x] Phase 1: 機能ギャップ (1-1〜1-5 完了、最終レビュー修正 `85eb9bb`, 2026-07-16。optional 1-6 は承認待ちのため未着手)
 - [x] Phase 2: 堅牢性 — 2-1〜2-6 完了、PR #22 で main マージ済 (`60cb602`, 2026-07-17)
-- [ ] Phase 3: 性能 (3-1 harness → hotspot iterations)
+- [ ] Phase 3: 性能 (3-1 harness and 3-2〜3-5 low-risk SILK allocation optimizations qualified locally)
 - [ ] Phase 4: リリース品質 (godoc / README / CI matrix / v1.0)

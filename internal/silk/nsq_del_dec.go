@@ -57,6 +57,34 @@ func (s silkNSQState) clone() silkNSQState {
 	return c
 }
 
+func (s *silkNSQState) copyFrom(src silkNSQState) {
+	xq := s.xq
+	sLTPShpQ14 := s.sLTPShpQ14
+	*s = src
+	if len(src.xq) == 0 {
+		s.xq = nil
+	} else {
+		if cap(xq) < len(src.xq) {
+			xq = make([]int16, len(src.xq))
+		} else {
+			xq = xq[:len(src.xq)]
+		}
+		copy(xq, src.xq)
+		s.xq = xq
+	}
+	if len(src.sLTPShpQ14) == 0 {
+		s.sLTPShpQ14 = nil
+	} else {
+		if cap(sLTPShpQ14) < len(src.sLTPShpQ14) {
+			sLTPShpQ14 = make([]int32, len(src.sLTPShpQ14))
+		} else {
+			sLTPShpQ14 = sLTPShpQ14[:len(src.sLTPShpQ14)]
+		}
+		copy(sLTPShpQ14, src.sLTPShpQ14)
+		s.sLTPShpQ14 = sLTPShpQ14
+	}
+}
+
 func silkRAND(seed int32) int32 {
 	return int32(uint32(907633515) + uint32(seed)*uint32(196314165))
 }

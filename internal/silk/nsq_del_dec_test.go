@@ -19,3 +19,38 @@ func TestNSQScaleBoundaryXQUsesFullGainPrecision(t *testing.T) {
 		t.Fatalf("boundary scaling collapsed to old Q10-gain path: got=%d", got)
 	}
 }
+
+func TestNSQStateCopyFromDoesNotAliasHistory(t *testing.T) {
+	src := newSilkNSQState(4, 3)
+	for i := range src.xq {
+		src.xq[i] = int16(i + 1)
+		src.sLTPShpQ14[i] = int32(100 + i)
+	}
+	src.sLPCQ14[0] = 11
+	src.sAR2Q14[0] = 22
+	src.sLFARShpQ14 = 33
+	src.sDiffShpQ14 = 44
+	src.lagPrev = 55
+	src.sLTPBufIdx = 66
+	src.sLTPShpBufIdx = 77
+	src.prevGainQ16 = 88
+	src.rewhiteFlag = true
+
+	dst := newSilkNSQState(4, 3)
+	dst.copyFrom(src)
+	src.xq[0] = 999
+	src.sLTPShpQ14[0] = 999
+	if dst.xq[0] == src.xq[0] {
+		t.Fatal("copyFrom aliased xq history")
+	}
+	if dst.sLTPShpQ14[0] == src.sLTPShpQ14[0] {
+		t.Fatal("copyFrom aliased shaped LTP history")
+	}
+	if dst.sLPCQ14[0] != 11 || dst.sAR2Q14[0] != 22 ||
+		dst.sLFARShpQ14 != 33 || dst.sDiffShpQ14 != 44 ||
+		dst.lagPrev != 55 || dst.sLTPBufIdx != 66 ||
+		dst.sLTPShpBufIdx != 77 || dst.prevGainQ16 != 88 ||
+		!dst.rewhiteFlag {
+		t.Fatalf("copyFrom did not copy scalar state: %+v", dst)
+	}
+}

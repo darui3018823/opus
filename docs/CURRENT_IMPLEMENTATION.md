@@ -292,6 +292,29 @@ convolution FFTs in place. On the Windows amd64 audit machine this reduced the
 to 192 KB/33 allocations for decode. `TestCoreAllocationRegression` guards the
 allocation counts after plan warm-up.
 
+Phase 3 performance work now has a unified public benchmark harness:
+`BenchmarkPerf` covers encode and decode for 48 kHz / 20 ms CELT, SILK-only,
+and hybrid packets across mono and stereo, with `-benchmem` allocation
+reporting. The first local baseline is recorded in `docs/PERF_BASELINE.md`;
+future optimization iterations are expected to compare against it with
+benchstat-style before/after data and preserve packet/PCM behavior.
+The first SILK encoder optimization reuses NSQ history buffers during
+speculative rate-control state restoration while keeping snapshots immutable,
+reducing the measured SILK stereo encode baseline from 20.14 ms to 18.47 ms
+and hybrid stereo encode allocation from 3.23 MB to 2.96 MB on the local
+Windows amd64 machine.
+The next allocation pass hoists per-subframe noise-shape scratch buffers inside
+`analyzeNoiseShapeFLP`; measured against the previous optimization under the
+same 1s benchmark command, it reduces SILK stereo encode allocation from
+4.77 MB to 3.16 MB and hybrid stereo encode allocation from 2.98 MB to
+2.26 MB.
+The following pass reuses the noise-shape analysis input buffer on the SILK
+encoder, preserving the zero-filled prefix semantics for short pitch history;
+under the same 1s parent-worktree benchmark, it further reduces SILK stereo
+encode allocation to 2.78 MB and hybrid stereo encode allocation to 2.09 MB.
+The next small pass stack-allocates warped-autocorrelation scratch, reducing
+SILK stereo allocation count by approximately 8% against its parent iteration.
+
 ### Phase 2: Production CELT Encoder (In Progress)
 
 #### Slice 2-1: VBR/CVBR Rate Control (Complete)
@@ -937,6 +960,39 @@ Phase 6 unvoiced-scope verification on 2026-06-29: passing
 "TestOpusSILKStereoABAgainstLibopusEncoder|TestOpusSILKHybridABAgainstLibopusEncoder" -v .`,
 and `go test -count=1 -tags opusref -run
 "TestCGOEncodeRefSILKFEC|TestCGOEncodeRefSILKOnly|TestCGOEncodeRefHybrid" -v .`).
+
+Phase 3-1 performance-harness verification on 2026-07-17: passing
+(`go test -run '^$' -bench '^BenchmarkPerf/' -benchtime=1x -benchmem .`,
+`go test -run '^$' -bench '^BenchmarkPerf/' -benchtime=200ms -count=5
+-benchmem .`, `go vet ./...`, `go test -count=1 ./...`, and
+`go test -count=1 -tags opusref ./...`).
+
+Phase 3-2 NSQ restore-buffer reuse verification on 2026-07-17: passing
+targeted SILK/hybrid state, quality, final-range, and opusref tests plus
+`go vet ./...`, `go test -count=1 ./...`, and
+`go test -count=1 -tags opusref ./...`. The measured 48 kHz / 20 ms public
+benchmarks improved the SILK mono/stereo encode medians by approximately 8%
+and reduced hybrid stereo encode allocation by approximately 8%.
+
+Phase 3-3 noise-shape scratch reuse verification on 2026-07-17: passing
+targeted SILK trellis/quality tests plus `go vet ./...`,
+`go test -count=1 ./...`, and `go test -count=1 -tags opusref ./...`.
+The same-condition parent-worktree benchmark reduced SILK stereo encode
+allocation by approximately 34% and hybrid stereo encode allocation by
+approximately 24%.
+
+Phase 3-4 noise-shape input-buffer reuse verification on 2026-07-17: passing
+targeted SILK trellis/quality tests plus `go vet ./...`,
+`go test -count=1 ./...`, and `go test -count=1 -tags opusref ./...`.
+The same-condition parent-worktree benchmark reduced SILK stereo encode
+allocation by approximately 12% and hybrid stereo encode allocation by
+approximately 8%.
+
+Phase 3-5 warped-autocorrelation stack-scratch verification on 2026-07-17:
+passing targeted SILK trellis/quality tests plus `go vet ./...`,
+`go test -count=1 ./...`, and `go test -count=1 -tags opusref ./...`.
+The same-condition parent-worktree benchmark reduced SILK stereo allocation
+count by approximately 8% and kept hybrid stereo effectively neutral.
 
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.

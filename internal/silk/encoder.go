@@ -74,6 +74,7 @@ type Encoder struct {
 	hybridMode      bool
 	shapeHarmSmooth float64
 	shapeTiltSmooth float64
+	noiseShapeBuf   []float64
 	side            *Encoder // side-channel encoder for stereo packets
 	stereoState     stereoPredState
 	prevOnlyMiddle  bool // previous stereo frame omitted the side channel
@@ -677,7 +678,7 @@ func (e *Encoder) restoreFrameState(st encoderFrameState) {
 	if len(st.ltpState) == len(e.ltpState) {
 		copy(e.ltpState, st.ltpState)
 	}
-	e.nsq = st.nsq.clone()
+	e.nsq.copyFrom(st.nsq)
 	e.shapeHarmSmooth = st.shapeHarmSmooth
 	e.shapeTiltSmooth = st.shapeTiltSmooth
 	e.ltpSumLogGainQ7 = st.ltpSumLogGainQ7

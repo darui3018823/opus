@@ -6,6 +6,7 @@ const (
 	silkMaxNBSubframes       = 4
 	silkSubframeLengthMS     = 5
 	silkMaxShapeLPCOrder     = 24
+	silkMaxShapeWinLength    = 360
 	silkHarmShapeFIRTaps     = 3
 	silkDecisionDelay        = 40
 	silkQuantLevelAdjustQ10  = 80
@@ -155,8 +156,10 @@ func silkQ15UnitFloat(x float64) float64 {
 }
 
 func silkWarpedAutocorrelationFLP(corr, input []float64, warping float64, length, order int) {
-	state := make([]float64, order+1)
-	acc := make([]float64, order+1)
+	var stateBuf [silkMaxShapeLPCOrder + 1]float64
+	var accBuf [silkMaxShapeLPCOrder + 1]float64
+	state := stateBuf[:order+1]
+	acc := accBuf[:order+1]
 	for n := 0; n < length && n < len(input); n++ {
 		tmp1 := input[n]
 		for i := 0; i < order; i += 2 {
@@ -331,12 +334,20 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 	warping := float64(cfg.warpingQ16)/65536.0 + 0.01*out.CodingQuality
 
 	analysisBuf := e.noiseShapeAnalysisBuffer(signal, cfg.laShape)
+	var windowedBuf [silkMaxShapeWinLength]float64
+	var windowInBuf [silkMaxShapeWinLength]float64
+	var autoCorrBuf [silkMaxShapeLPCOrder + 1]float64
+	var rcBuf [silkMaxShapeLPCOrder + 1]float64
+	var arBuf [silkMaxShapeLPCOrder]float64
+	windowed := windowedBuf[:shapeWinLength]
+	windowIn := windowInBuf[:shapeWinLength]
+	autoCorr := autoCorrBuf[:cfg.shapingLPCOrder+1]
+	rc := rcBuf[:cfg.shapingLPCOrder+1]
+	ar := arBuf[:cfg.shapingLPCOrder]
 	for sf := 0; sf < e.nSubframes; sf++ {
 		xPtr := sf * subframeLen
-		windowed := make([]float64, shapeWinLength)
 		flatPart := fsKHz * 3
 		slopePart := (shapeWinLength - flatPart) / 2
-		windowIn := make([]float64, shapeWinLength)
 		for i := range windowIn {
 			idx := xPtr + i
 			if idx >= len(analysisBuf) {
@@ -351,16 +362,14 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 		copy(windowed[slopePart:slopePart+flatPart], windowIn[slopePart:slopePart+flatPart])
 		silkApplySineWindowFLP(windowed[slopePart+flatPart:], windowIn[slopePart+flatPart:], 2, slopePart)
 
-		autoCorr := make([]float64, cfg.shapingLPCOrder+1)
 		if cfg.warpingQ16 > 0 {
 			silkWarpedAutocorrelationFLP(autoCorr, windowed, warping, shapeWinLength, cfg.shapingLPCOrder)
 		} else {
 			silkAutocorrelationFLP(autoCorr, windowed, shapeWinLength, cfg.shapingLPCOrder+1)
 		}
 		autoCorr[0] += autoCorr[0]*shapeWhiteNoiseFraction + 1.0
-		rc := make([]float64, cfg.shapingLPCOrder+1)
 		nrg := silkSchurFLP(rc, autoCorr, cfg.shapingLPCOrder)
-		ar := make([]float64, cfg.shapingLPCOrder)
+		clear(ar)
 		silkK2aFLP(ar, rc, cfg.shapingLPCOrder)
 		gain := math.Sqrt(math.Max(nrg, 1e-12))
 		if cfg.warpingQ16 > 0 {
@@ -442,12 +451,18 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 }
 
 func (e *Encoder) noiseShapeAnalysisBuffer(signal []float64, laShape int) []float64 {
-	buf := make([]float64, laShape+len(signal))
+	n := laShape + len(signal)
+	if cap(e.noiseShapeBuf) < n {
+		e.noiseShapeBuf = make([]float64, n)
+	}
+	buf := e.noiseShapeBuf[:n]
 	pastStart := len(e.pitchHist) - laShape
 	if pastStart < 0 {
 		pastStart = 0
 	}
-	copy(buf[laShape-(len(e.pitchHist)-pastStart):laShape], e.pitchHist[pastStart:])
+	pastLen := len(e.pitchHist) - pastStart
+	clear(buf[:laShape-pastLen])
+	copy(buf[laShape-pastLen:laShape], e.pitchHist[pastStart:])
 	copy(buf[laShape:], signal)
 	return buf
 }

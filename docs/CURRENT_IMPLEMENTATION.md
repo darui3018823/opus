@@ -354,6 +354,12 @@ SILK stereo allocation count by approximately 8% against its parent iteration.
   decoder).
 - Added top-level code-3 packet padding: `encodePaddingCount`,
   `packOpusFramesPadded`, and `(*Encoder).SetPacketPadding(n)`.
+- Post-audit CELT/music Phase 1 adds libopus-style constrained-VBR damping to
+  the activity-derived target. Quiet tonal streams no longer begin at one
+  quarter of the nominal budget and recover only after several damaged frames;
+  the existing reservoir keeps one-second byte totals unchanged. The permanent
+  stereo-chords regression checks 24/48/64 kbps matched-byte quality,
+  deterministic packets, libopus cross-decode, and per-packet final ranges.
 
 #### Slice 2-4: Silence Detection / DTX (Complete)
 - **Status:** Complete
@@ -424,9 +430,8 @@ SILK stereo allocation count by approximately 8% against its parent iteration.
   blocks cut pre-echo ~1.8× vs forced long blocks on an impulse-in-silence).
 - 12/12 official vectors unchanged; steady-sine aligned SNR unchanged (steady
   tones don't trigger detection).
-- Not yet done at 2-5b (see 2-5c below for the stereo decisions): real
-  `tf_analysis` (per-band tf_res RDO is still flat 0) and the complexity≥8 second
-  long-block MDCT for `bandLogE2`.
+- Later CELT slices added both per-band `tf_analysis` and the complexity≥8
+  second long-block MDCT for `bandLogE2`.
 
 #### Slice 2-5c: Stereo Decisions (intensity / dual_stereo) (Complete)
 - **Status:** Complete
@@ -453,8 +458,8 @@ SILK stereo allocation count by approximately 8% against its parent iteration.
   boundary), and `TestCeltStereoDecisionRoundTrip` (correlated/anti-correlated/
   decorrelated stereo all decode with matching final range).
 - 12/12 official vectors unchanged; `go build/vet/test ./...` green.
-- Not yet done (future quality work): real `tf_analysis` (per-band tf_res RDO is
-  still flat 0) and the complexity≥8 second long-block MDCT for `bandLogE2`.
+- Later CELT slices completed per-band `tf_analysis` and the complexity≥8
+  second long-block MDCT for `bandLogE2`.
 
 #### Slice 2-6: Bandwidth Selection (Phase 4 lite) (Complete)
 - **Status:** Complete
@@ -1000,6 +1005,16 @@ passing targeted SILK trellis/quality tests plus `go vet ./...`,
 The same-condition parent-worktree benchmark reduced SILK stereo allocation
 count by approximately 8% and kept hybrid stereo effectively neutral.
 
+Post-audit CELT/music Phase 1 verification on 2026-07-17: adopted the
+constrained-VBR target damping after `go vet ./...`, `go test -count=1 ./...`,
+`go test -count=1 -tags opusref ./...`, and all 12 official vectors passed.
+The full real-corpus scoreboard encoded 140/140 cells. Loss-0 own-byte totals
+were unchanged in every class, the five speech-oriented classes kept the same
+-0.0463 dB aggregate matched gap, the stereo-chords worst fell from +9.69 to
++5.68 dB, and the mixed worst fell from +5.64 to +1.71 dB. The permanent
+code-generated reproducer also requires encoder, Go decoder, and libopus
+decoder final-range equality on every packet.
+
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.
 `TestCGOMultistreamInteroperability` verifies both Go-encoded packets decoded
@@ -1102,6 +1117,10 @@ reference comparison.
   FEC recovery.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
   to full libopus-compatible mode/rate-control behavior.
+- The post-audit CVBR fix substantially reduces the deterministic CELT/music
+  worst case without increasing its byte total, but the 24/32 kbps
+  stereo-chords cells still trail libopus by approximately 5.7/5.2 dB. The
+  measured next candidate area is dynamic allocation and allocation trim.
 - Decoder parity is achieved on the official vectors and the libopus reference;
   the open correctness work is now on the encoder side (bit-exact CELT and the
   broader SILK/hybrid encoder paths).

@@ -2,7 +2,7 @@
 
 Date: 2026-07-17
 
-Status: **Investigation complete; CVBR candidate selected for adoption gates**
+Status: **Complete; CVBR candidate adopted**
 
 ## Objective
 
@@ -11,10 +11,10 @@ stereo-chords cell without routing it away from CELT or hiding a rate increase.
 
 ## Scope and Acceptance
 
-This iteration covers post-audit Phase 1 slices 1-1 through 1-3: preserve a
-code-generated reproducer, rank the four requested decision areas, and select
-one root-cause fix. Adoption still requires the complete conformance, opusref,
-official-vector, and 140-cell scoreboard gates.
+This iteration covers post-audit Phase 1 slices 1-1 through 1-5: preserve a
+code-generated reproducer, rank the four requested decision areas, select one
+root-cause fix, prove broad non-regression, and make an explicit adoption
+decision.
 
 The candidate must reduce the focused gap by at least 2 dB or 25%, keep packet
 bytes within 5%, preserve CELT mode and final-range agreement, avoid adjacent
@@ -83,7 +83,7 @@ Applying the equivalent two-thirds blend to the Go byte target is one bounded
 rate-target correction. It does not change range-coder symbol order, mode,
 bandwidth, TF, allocation, or stereo decisions.
 
-## Short Scoreboard Gate
+## Scoreboard Gates
 
 The selected blend was run over every local class with each clip limited to one
 second. All 140 cells encoded. Loss-0 own-byte totals were exactly unchanged in
@@ -91,6 +91,12 @@ every class. The five speech-oriented class averages were unchanged to the
 reported 0.01 dB precision. The music worst cell fell from 9.69 to 5.68 dB;
 the mixed worst fell from 5.64 to 1.71 dB. No new music or mixed worst cell was
 created.
+
+The final default-length run also encoded 140/140 cells. Relative to the D-2
+Iteration 0 REDO full baseline, loss-0 own-byte totals were exactly unchanged
+in all seven classes and the five speech-oriented aggregate gap was unchanged
+at -0.0463 dB. Music's worst cell fell from +9.69 to +5.68 dB and mixed's from
++5.64 to +1.71 dB.
 
 Focused WAV loss-0 results:
 
@@ -106,9 +112,16 @@ The 24 and 32 kbps cells remain the largest CELT/music gaps. Dynamic allocation
 and trim are the next measured cause if a later phase revisits them; they are
 not combined with the CVBR fix in this iteration.
 
+## Adoption Decision
+
+**Adopted** in production commit `278cc8a` (`fix(celt): damp constrained VBR
+target`). The change is limited to CELT-only constrained-VBR target damping;
+temporary ablation gates were removed. The reproducer commit is `e155c54` and
+the full investigation checkpoint is `0b367fc`.
+
 ## Verification Commands
 
-Completed investigation commands:
+Completed commands:
 
 ```powershell
 go test -count=1 -tags opusref -run TestCELTMusicChordsMatchedBitrateReproducer -v .
@@ -118,8 +131,6 @@ $env:OPUS_REAL_CORPUS_MAX_SECONDS = "1"
 go test -count=1 -tags opusref -run TestOpusRealCorpusMatchedBitrateScoreboard -v .
 ```
 
-Pending adoption gates:
-
 ```powershell
 go vet ./...
 go test -count=1 ./...
@@ -128,3 +139,9 @@ go test -count=1 -run '^TestOfficialVectors$' -v .
 $env:OPUS_REAL_CORPUS = "1"
 go test -count=1 -tags opusref -run TestOpusRealCorpusMatchedBitrateScoreboard -v .
 ```
+
+All commands passed on 2026-07-17. `TestOfficialVectors` passed 12/12 with a
+maximum RMSE of 0.000809. The focused reproducer also passed at 24/48/64 kbps,
+including fresh-encoder byte determinism, libopus cross-decode above 93 dB, and
+encoder/Go-decoder/libopus-decoder final-range equality for all 50 packets per
+cell.

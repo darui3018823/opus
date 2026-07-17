@@ -1,6 +1,6 @@
 # Real Corpus Matched-Bitrate Scoreboard
 
-Last reviewed: 2026-07-15
+Last reviewed: 2026-07-17
 
 This diagnostic harness measures the Go encoder against libopus on local WAV
 corpus clips at matched bitrate. It is intentionally opt-in because
@@ -143,3 +143,63 @@ Across the five speech-oriented classes, own bytes are 692,384 versus 689,344
 in the prior run (ratio 1.004), and average matched gap moves from -0.058 dB to
 -0.046 dB. This is the same rate/quality level; the change removes the entropy
 allocation mismatch rather than trading materially more bytes for quality.
+
+## Post-Audit Phase 1: CELT CVBR Startup Damping (2026-07-17)
+
+Phase 1 preserved the synthetic stereo-chords cell as the code-generated
+`TestCELTMusicChordsMatchedBitrateReproducer`, then ranked TF/block,
+dynamic-allocation/trim, stereo, and bandwidth/rate-target decisions. The
+dominant cause was the simplified CELT CVBR target: a quiet tonal stream could
+start at one quarter of its nominal packet target and take several frames to
+refill its reservoir. Forced fullband slightly reduced quality, confirming that
+the config 19 versus config 31 TOC difference was not the cause.
+
+The adopted change applies libopus `compute_vbr`'s constrained-VBR damping in
+the byte domain, approximately `base + 0.67*(target-base)`. It changes the
+temporal distribution of the existing budget without changing CELT mode,
+bandwidth, range-coder symbol order, or the one-second byte totals. The focused
+test checks fresh-encoder packet determinism, first/subsequent TOCs, matched
+bytes, Go/libopus cross-decode, and encoder/Go-decoder/libopus-decoder final
+range equality on every packet.
+
+The libopus scoreboard wrapper now sets `OPUS_SIGNAL_MUSIC` for music/mixed
+classes, matching the Go `SignalMusic` hint. Older published rows left libopus
+at signal `AUTO`; the focused 24-64 kbps reference TOCs and byte totals were
+unchanged, but the comparison-condition correction is recorded explicitly.
+
+Full local run:
+
+```powershell
+$env:OPUS_REAL_CORPUS = "1"
+$env:OPUS_REAL_CORPUS_OUT = "testdata/phase1_adopt_full.csv"
+go test -count=1 -tags opusref -run TestOpusRealCorpusMatchedBitrateScoreboard -v .
+```
+
+Result: 140/140 cells `status=ok`. Against the D-2 Iteration 0 REDO full
+baseline, every class's loss-0 own-byte total is exactly unchanged. The five
+speech-oriented classes keep the same aggregate matched gap, -0.0463 dB.
+
+| class | n | avg gap | min | max | loss-0 byte ratio |
+|---|---:|---:|---:|---:|---:|
+| clean_speech | 20 | +0.08 | 0.00 | +1.50 | 1.000 |
+| noisy_speech | 20 | -0.21 | -1.46 | +0.25 | 1.000 |
+| stereo_speech | 20 | +0.02 | -0.00 | +0.38 | 1.000 |
+| onset_plosive | 20 | -0.02 | -2.00 | +3.50 | 1.000 |
+| source | 20 | -0.10 | -1.28 | +1.30 | 1.000 |
+| mixed | 20 | -1.08 | -1.80 | +1.71 | 1.000 |
+| music | 20 | -2.67 | -4.88 | +5.68 | 1.000 |
+
+Stereo-chords loss-0 cells at matched bytes:
+
+| bitrate | baseline gap | adopted gap | reduction | matched-byte ratio |
+|---:|---:|---:|---:|---:|
+| 16 kbps | +1.82 | -1.35 | 3.16 dB | 0.994 |
+| 24 kbps | +9.18 | +5.68 | 3.50 dB | 0.987 |
+| 32 kbps | +8.07 | +5.21 | 2.86 dB | 0.994 |
+| 48 kbps | +9.69 | +0.94 | 8.75 dB | 0.995 |
+| 64 kbps | +7.70 | -1.42 | 9.12 dB | 0.995 |
+
+The prior music worst falls from +9.69 to +5.68 dB and the mixed worst from
++5.64 to +1.71 dB; no new music or mixed worst cell is created. The remaining
+24/32 kbps chord gap is now the next measured CELT allocation/trim opportunity,
+not evidence that the adopted CVBR correction should be expanded further.

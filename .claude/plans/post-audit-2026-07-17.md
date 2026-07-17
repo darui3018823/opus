@@ -1,6 +1,6 @@
 # Post-Audit Completion Plan (2026-07-17)
 
-Status: **Approved; not started**
+Status: **Active; Phase 1 completed and adopted**
 
 Last updated: 2026-07-17
 
@@ -170,6 +170,14 @@ If rejected:
 Phase 1 is complete only after an explicit adopt/reject decision. Completing an
 experiment is not the same as adopting its code.
 
+**Decision (2026-07-17): Adopted.** The permanent generated reproducer ranked
+the dominant cause as over-aggressive CELT constrained-VBR startup targeting.
+The adopted libopus-style two-thirds damping keeps focused and corpus byte
+totals unchanged while reducing the stereo-chords matched gap by 2.86–9.12 dB
+at 24–64 kbps. All common verification commands, all 12 official vectors, and
+the full 140-cell scoreboard passed. The evidence and rejected ablations are in
+`.claude/memory/iterations/celt-music-phase1-2026-07-17.md`.
+
 ---
 
 ## Phase 2: PLC/FEC Semantic Parity
@@ -304,12 +312,12 @@ multiplexed demux; those remain separate optional features.
 
 ## Status
 
-- [ ] Phase 1: CELT/music worst-case quality gap
-  - [ ] Slice 1-1: preserve a small reproducer
-  - [ ] Slice 1-2: isolate the dominant decision
-  - [ ] Slice 1-3: implement one root-cause fix
-  - [ ] Slice 1-4: prove broad non-regression
-  - [ ] Slice 1-5: adoption decision and baseline update
+- [x] Phase 1: CELT/music worst-case quality gap — adopted 2026-07-17
+  - [x] Slice 1-1: preserve a small reproducer
+  - [x] Slice 1-2: isolate the dominant decision
+  - [x] Slice 1-3: implement one root-cause fix
+  - [x] Slice 1-4: prove broad non-regression
+  - [x] Slice 1-5: adoption decision and baseline update
 - [ ] Phase 2: PLC/FEC semantic parity
 - [ ] Phase 3: SILK/hybrid mode-rate-quality policy
 - [ ] Phase 4: SILK/hybrid encoder allocation and runtime cost

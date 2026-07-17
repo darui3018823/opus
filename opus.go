@@ -34,7 +34,7 @@ type SignalType = celt.SignalType
 
 const (
 	// SignalAuto lets the encoder derive a hint from the Application setting
-	// (VOIP → voice, Audio/RestrictedLowDelay → music). This is the default.
+	// (VOIP → voice, Audio/RestrictedLowDelay → music).
 	SignalAuto SignalType = celt.SignalUnknown
 	// SignalVoice marks speech-leaning content. The encoder uses narrower
 	// bandwidth tiers (matching ApplicationVOIP) and switches to short blocks
@@ -1538,7 +1538,8 @@ func (e *Encoder) monoEncoder() (*Encoder, error) {
 	return m, nil
 }
 
-// SetBitrate sets the target bitrate in bits per second
+// SetBitrate sets the target bitrate in bits per second. It accepts numeric
+// rates from 6000 through 510000, BitrateAuto, or BitrateMax.
 func (e *Encoder) SetBitrate(bitrate int) error {
 	if bitrate != BitrateAuto && bitrate != BitrateMax && (bitrate < 6000 || bitrate > 510000) {
 		return fmt.Errorf("%w: invalid bitrate %d (must be between 6000 and 510000)", ErrBadArg, bitrate)
@@ -1637,9 +1638,9 @@ func (e *Encoder) syncSILKRateMode() {
 // emitted packet (RFC 6716 §3.2.5). When n > 0, every packet is encoded as a
 // code-3 packet with the padding flag set and n zero bytes appended at the end;
 // the padding does not affect the decoded audio (the decoder strips it). This is
-// useful for keeping a constant on-the-wire packet size or for obscuring the true
-// payload length. n <= 0 disables padding (the default), restoring the compact
-// code-0/1/2/3 selection.
+// useful for increasing or obscuring the payload length; because the encoded
+// audio size may vary, a fixed n does not guarantee a fixed total packet size.
+// n <= 0 disables padding (the default), restoring compact framing selection.
 func (e *Encoder) SetPacketPadding(n int) {
 	if n < 0 {
 		n = 0
@@ -2699,10 +2700,11 @@ func is10msConfig(config int) bool {
 	return silkConfigFrameMs(config) == 10
 }
 
-// DecodeFloat decodes an Opus packet to floating-point PCM samples
+// DecodeFloat decodes an Opus packet to caller-owned interleaved float64 PCM.
 //
-// data is the compressed Opus packet
-// Returns float64 samples in range [-1.0, 1.0]
+// Samples use the conventional normalized scale where -1 and +1 correspond to
+// full-scale input. Positive decoder gain can produce values outside that
+// nominal range.
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 	info, err := inspectPacket(data, d.sampleRate)
 	if err != nil {

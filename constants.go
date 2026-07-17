@@ -103,7 +103,9 @@ const (
 	ModeCELTOnly = 1002
 )
 
-// Bitrate constants
+// Bitrate policy sentinels and libopus-compatible nominal CTL limits.
+// Encoder.SetBitrate currently accepts numeric rates from 6000 through 510000
+// bits per second; multistream wrappers apply their documented aggregate bounds.
 const (
 	BitrateAuto   = -1000
 	BitrateMax    = -1

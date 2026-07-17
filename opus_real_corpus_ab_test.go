@@ -66,7 +66,11 @@ func TestOpusRealCorpusMatchedBitrateScoreboard(t *testing.T) {
 	}
 
 	maxSeconds := envInt("OPUS_REAL_CORPUS_MAX_SECONDS", 6)
-	bitrates := []int{16000, 24000, 32000, 48000, 64000}
+	bitrates, err := realCorpusBitrates(os.Getenv("OPUS_REAL_CORPUS_BITRATES"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	classes := realCorpusClasses(os.Getenv("OPUS_REAL_CORPUS_CLASSES"))
 	losses := []int{0, 5, 10, 20}
 	for _, path := range files {
 		clip, err := readCorpusWAV(path)
@@ -85,6 +89,9 @@ func TestOpusRealCorpusMatchedBitrateScoreboard(t *testing.T) {
 		}
 		clip.pcm = clip.pcm[:frames*frameSize*clip.channels]
 		kind := corpusClass(path)
+		if len(classes) > 0 && !classes[kind] {
+			continue
+		}
 		for _, bitrate := range bitrates {
 			ownPackets, ownBytes, ownCfg, err := encodeRealCorpusOwn(clip, kind, bitrate)
 			if err != nil {
@@ -151,10 +158,64 @@ func encodeRealCorpusOwn(clip corpusClip, kind string, bitrate int) (packets [][
 	enc.SetVBR(true)
 	enc.SetVBRConstraint(true)
 	enc.SetSignalType(signal)
+	forcedBandwidth, err := realCorpusForcedBandwidth(os.Getenv("OPUS_REAL_CORPUS_FORCE_BANDWIDTH"))
+	if err != nil {
+		return nil, 0, 0, err
+	}
+	if forcedBandwidth != BandwidthAuto {
+		if err := enc.SetBandwidth(forcedBandwidth); err != nil {
+			return nil, 0, 0, err
+		}
+	}
 	frameSize := clip.rate * 20 / 1000
 	return encodeRealCorpusPackets(clip, frameSize, func(pcm []float64) ([]byte, error) {
 		return enc.EncodeFloat(pcm, frameSize)
 	})
+}
+
+func realCorpusBitrates(value string) ([]int, error) {
+	if strings.TrimSpace(value) == "" {
+		return []int{16000, 24000, 32000, 48000, 64000}, nil
+	}
+	parts := strings.Split(value, ",")
+	bitrates := make([]int, 0, len(parts))
+	for _, part := range parts {
+		bitrate, err := strconv.Atoi(strings.TrimSpace(part))
+		if err != nil || bitrate < 6000 || bitrate > 510000 {
+			return nil, fmt.Errorf("invalid OPUS_REAL_CORPUS_BITRATES value %q", part)
+		}
+		bitrates = append(bitrates, bitrate)
+	}
+	return bitrates, nil
+}
+
+func realCorpusClasses(value string) map[string]bool {
+	classes := make(map[string]bool)
+	for _, class := range strings.Split(value, ",") {
+		if class = strings.TrimSpace(class); class != "" {
+			classes[class] = true
+		}
+	}
+	return classes
+}
+
+func realCorpusForcedBandwidth(value string) (int, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "auto":
+		return BandwidthAuto, nil
+	case "narrowband", "nb":
+		return BandwidthNarrowband, nil
+	case "mediumband", "mb":
+		return BandwidthMediumband, nil
+	case "wideband", "wb":
+		return BandwidthWideband, nil
+	case "superwideband", "swb":
+		return BandwidthSuperWideband, nil
+	case "fullband", "fb":
+		return BandwidthFullband, nil
+	default:
+		return 0, fmt.Errorf("invalid OPUS_REAL_CORPUS_FORCE_BANDWIDTH value %q", value)
+	}
 }
 
 func encodeRealCorpusRef(t *testing.T, clip corpusClip, kind string, bitrate int) (packets [][]byte, totalBytes, firstConfig int, err error) {

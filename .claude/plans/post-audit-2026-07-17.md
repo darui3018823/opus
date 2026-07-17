@@ -1,6 +1,6 @@
 # Post-Audit Completion Plan (2026-07-17)
 
-Status: **Active; Phases 1 and 2 completed and adopted**
+Status: **Active; Phases 1 and 2 adopted, Phase 3 completed without adoption**
 
 Last updated: 2026-07-17
 
@@ -256,6 +256,15 @@ Phase 3 stops when two consecutive well-motivated gate candidates fail to
 produce a net per-bit win, unless a standards-interoperability defect requires
 continued work.
 
+**Decision (2026-07-17): Stopped without adoption.** The prior
+libopus-style predictive-family threshold candidate left target clean/noisy
+speech unchanged while increasing stereo-speech bytes by 63.3%. A fresh
+active-broadband predictive-exit candidate then regressed the target onset and
+source matched gaps by 0.11/0.09 dB while increasing their loss-0 bytes by
+2%/1%. Both production candidates were removed. This is the plan's explicit
+two-consecutive-failure stopping condition; the evidence is in
+`.claude/memory/iterations/silk-hybrid-policy-phase3-2026-07-17.md`.
+
 ---
 
 ## Phase 4: SILK/Hybrid Encoder Allocation and Runtime Cost
@@ -328,7 +337,7 @@ multiplexed demux; those remain separate optional features.
   - [x] Slice 1-4: prove broad non-regression
   - [x] Slice 1-5: adoption decision and baseline update
 - [x] Phase 2: PLC/FEC semantic parity — adopted 2026-07-17
-- [ ] Phase 3: SILK/hybrid mode-rate-quality policy
+- [x] Phase 3: SILK/hybrid mode-rate-quality policy — stopped after two rejected gates 2026-07-17
 - [ ] Phase 4: SILK/hybrid encoder allocation and runtime cost
 - [ ] Phase 5: surround psychoacoustic parity
 

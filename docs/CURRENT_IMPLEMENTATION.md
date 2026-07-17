@@ -113,8 +113,9 @@ The opt-in real-corpus matched-bitrate scoreboard is documented in
 `docs/REAL_CORPUS_SCOREBOARD.md` and implemented as an `opusref` diagnostic test
 guarded by `OPUS_REAL_CORPUS=1`.
 The SILK/hybrid mode-rate-quality policy diff is tracked in
-`docs/MODE_RATE_POLICY_DIFF.md`; future policy-gate changes are expected to use
-the real-corpus scoreboard first.
+`docs/MODE_RATE_POLICY_DIFF.md`. Post-audit Phase 3 stopped without adopting a
+new gate after two consecutive candidates failed to produce a net per-bit win;
+future policy changes still require a concrete scoreboard target first.
 
 Public multistream and surround entry points:
 
@@ -1127,7 +1128,9 @@ reference comparison.
 - Top-level SILK/hybrid encoder selection is voice-oriented and now accounts
   for rate, channels, bandwidth, CVBR, and active FEC, but it is not yet a full
   libopus-equivalent mode/rate/quality policy. See
-  `docs/MODE_RATE_POLICY_DIFF.md` for the current gap map.
+  `docs/MODE_RATE_POLICY_DIFF.md` for the current gap map. The post-audit policy
+  phase intentionally retained these gaps after two measured gate candidates
+  failed its per-bit adoption criteria.
 - SILK-only and hybrid LBRR/FEC encoding and decoding are available for mono,
   stereo, multistream, and surround output. Hybrid FEC reconstructs the
   redundant SILK low band; CELT elementary streams use PLC during multistream

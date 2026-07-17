@@ -38,6 +38,14 @@ Optional environment variables:
 - `OPUS_REAL_CORPUS_OUT`: CSV output path. Default:
   `testdata/real_corpus_scoreboard.csv`.
 - `OPUS_REAL_CORPUS_MAX_SECONDS`: max seconds read from each clip. Default: `6`.
+- `OPUS_REAL_CORPUS_CLASSES`: comma-separated corpus classes to include. Empty
+  runs every discovered class.
+- `OPUS_REAL_CORPUS_BITRATES`: comma-separated bitrates in bit/s. Default:
+  `16000,24000,32000,48000,64000`.
+- `OPUS_REAL_CORPUS_FORCE_BANDWIDTH`: force the Go encoder to `nb`, `mb`, `wb`,
+  `swb`, or `fb` while leaving libopus automatic. Empty or `auto` preserves the
+  normal comparison. This is an ablation control, not a fair default scoreboard
+  condition.
 
 The CSV columns include:
 
@@ -203,3 +211,22 @@ The prior music worst falls from +9.69 to +5.68 dB and the mixed worst from
 +5.64 to +1.71 dB; no new music or mixed worst cell is created. The remaining
 24/32 kbps chord gap is now the next measured CELT allocation/trim opportunity,
 not evidence that the adopted CVBR correction should be expanded further.
+
+## Post-Audit Phase 3: SILK/Hybrid Policy Gates (2026-07-17)
+
+Phase 3 stopped without adopting a production policy change. A previously
+measured libopus-style unified predictive threshold left target clean/noisy
+speech unchanged and increased stereo-speech bytes by 63.3%. A new targeted
+active-broadband exit from low-rate SILK to CELT completed 100/100 selected
+speech cells but regressed onset/source average matched gaps by 0.11/0.09 dB
+while increasing loss-0 bytes by 2%/1%.
+
+The latter experiment followed a forced-fullband ablation. Blanket fullband
+was not eligible for adoption because clean/stereo byte totals increased by
+1.59x/2.63x. The narrower automatic gate removed those non-target byte
+regressions but lost the apparent onset/source gain through additional mode
+transitions. Both candidate implementations were removed; the diagnostic
+class, bitrate, and bandwidth controls remain in the scoreboard harness.
+
+See `.claude/memory/iterations/silk-hybrid-policy-phase3-2026-07-17.md` for the
+decision table and exact command.

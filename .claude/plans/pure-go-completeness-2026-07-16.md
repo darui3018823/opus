@@ -1,5 +1,11 @@
 # Pure Go Opus 完成度ロードマップ (2026-07-16)
 
+> **Superseded on 2026-07-17.** This plan's required phases were completed and
+> merged. The next approved work sequence is
+> `.claude/plans/post-audit-2026-07-17.md`. Keep this file as the historical
+> decision and qualification record for the completed Pure Go completeness
+> phases.
+
 > **Status update (2026-07-17):** Phase 0–2 are complete and merged into
 > `main` by PR #22 (`60cb602`). Phase 3-1 through 3-5 are complete and merged
 > into `main` by PR #23 (`80c7e26`). The repository is already released at

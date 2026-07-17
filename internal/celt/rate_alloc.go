@@ -860,10 +860,11 @@ func computeAllocationShared(
 
 // celtBits2PulsesQ3 converts a Q3 bit budget to a pulse count for band j at LM=lm.
 // Matches libopus bits2pulses (rate.h) exactly:
-//   LM++; cache = CacheBits50+CacheIndex50[(LM)*nbEBands+band];
-//   lo=0; hi=cache[0]; bits--;
-//   for i in 0..LOG_MAX_PSEUDO-1: mid=(lo+hi+1)>>1; if cache[mid]>=bits: hi=mid else lo=mid
-//   if bits-cache[lo] <= cache[hi]-bits: return lo else return hi
+//
+//	LM++; cache = CacheBits50+CacheIndex50[(LM)*nbEBands+band];
+//	lo=0; hi=cache[0]; bits--;
+//	for i in 0..LOG_MAX_PSEUDO-1: mid=(lo+hi+1)>>1; if cache[mid]>=bits: hi=mid else lo=mid
+//	if bits-cache[lo] <= cache[hi]-bits: return lo else return hi
 func celtBits2PulsesQ3(bandIdx, lm, bitsQ3 int) int {
 	if bitsQ3 <= 0 {
 		return 0

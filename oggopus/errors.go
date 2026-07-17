@@ -22,7 +22,8 @@ import "errors"
 var (
 	// ErrInvalidCapture indicates that an Ogg page does not start with "OggS".
 	ErrInvalidCapture = errors.New("oggopus: invalid Ogg capture pattern")
-	// ErrUnsupportedVersion indicates an unsupported Ogg or OpusHead version.
+	// ErrUnsupportedVersion indicates an unsupported Ogg page version.
+	// Unsupported OpusHead versions are reported as ErrInvalidOpusHead.
 	ErrUnsupportedVersion = errors.New("oggopus: unsupported version")
 	// ErrInvalidHeaderType indicates that an Ogg page uses reserved flags.
 	ErrInvalidHeaderType = errors.New("oggopus: invalid page header type")
@@ -41,6 +42,10 @@ var (
 	// ErrTruncatedPacket indicates an unfinished packet at logical stream end.
 	ErrTruncatedPacket = errors.New("oggopus: truncated packet")
 	// ErrAfterEOS indicates page data encountered after an EOS page.
+	//
+	// Deprecated: PacketReader.Next returns io.EOF after draining its EOS page,
+	// so normal public iteration does not expose data after EOS. The sentinel is
+	// retained for v1 compatibility.
 	ErrAfterEOS = errors.New("oggopus: data after end-of-stream page")
 	// ErrInvalidOpusHead indicates a malformed or inconsistent OpusHead packet.
 	ErrInvalidOpusHead = errors.New("oggopus: invalid OpusHead packet")
@@ -50,7 +55,8 @@ var (
 	ErrInvalidOpusStream = errors.New("oggopus: invalid Ogg Opus stream")
 	// ErrWriterClosed indicates an operation on a finalized writer.
 	ErrWriterClosed = errors.New("oggopus: writer is closed")
-	// ErrInvalidGranule indicates an invalid packet granule position.
+	// ErrInvalidGranule indicates an invalid packet granule position or an
+	// attempt to close a PacketWriter before any complete packet was written.
 	ErrInvalidGranule = errors.New("oggopus: invalid granule position")
 	// ErrNotSeekable indicates that Reader.SeekPCM has no io.ReadSeeker source.
 	ErrNotSeekable = errors.New("oggopus: source is not seekable")

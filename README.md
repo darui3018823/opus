@@ -202,6 +202,8 @@ the exact current matrix.
 - [Mode/rate policy differences](docs/MODE_RATE_POLICY_DIFF.md)
 - [Real-corpus scoreboard](docs/REAL_CORPUS_SCOREBOARD.md)
 - [Developer guide](docs/DEVELOPER.md)
+- [Release checklist](docs/RELEASE_CHECKLIST.md)
+- [Possible v2 API changes](docs/V2_API_CANDIDATES.md)
 - [Security policy](SECURITY.md)
 - [Contributing guide](CONTRIBUTING.md)
 

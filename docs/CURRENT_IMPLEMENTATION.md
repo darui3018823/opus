@@ -18,7 +18,10 @@ The `oggopus` subpackage implements Ogg page and Ogg Opus container APIs.
 Constants are in `constants.go` and package-level error values in `errors.go`.
 Public version constants are generated into `version_gen.go` from the
 repository-level `VERSION` file; `go generate ./...` refreshes them and CI
-rejects generated-file drift.
+rejects generated-file drift. The current released baseline is `v1.2.0`.
+Release preparation follows [`docs/RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
+and compatibility-breaking cleanup is recorded separately in
+[`docs/V2_API_CANDIDATES.md`](V2_API_CANDIDATES.md).
 
 Public size constants distinguish separate limits:
 

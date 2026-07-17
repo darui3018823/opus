@@ -121,8 +121,9 @@ Public multistream and surround entry points:
 - `NewMultistreamEncoder(...) (*MultistreamEncoder, error)`
 - `NewMultistreamDecoder(...) (*MultistreamDecoder, error)`
 - int16, signed-24-bit-in-int32, float32, and float64 encode/decode methods
-- multistream/surround int16 PLC and in-band FEC decode, including per-stream
-  CELT PLC fallback during FEC recovery
+- multistream/surround int16, signed-24-bit-in-int32, float32, and float64 PLC
+  and in-band FEC decode, including explicit lost-duration control, packed
+  elementary packets, and per-stream CELT PLC fallback during FEC recovery
 - per-stream encoder/decoder access, aggregate bitrate and expert frame-duration
   control, reset, mapping, stream-count, coupled-stream-count, and final-range
   getters
@@ -546,7 +547,14 @@ Implemented public entry points:
 - `(*Decoder).DecodeFloat(data []byte) ([]float64, error)`
 - `(*Decoder).DecodeFloat32(data []byte) ([]float32, error)`
 - `(*Decoder).DecodePLC(pcm []int16, frameSize int) (int, error)`
+- `(*Decoder).DecodePLC24(pcm []int32, frameSize int) (int, error)`
+- `(*Decoder).DecodePLCFloat(frameSize int) ([]float64, error)`
+- `(*Decoder).DecodePLCFloat32(frameSize int) ([]float32, error)`
 - `(*Decoder).DecodeFEC(data []byte, pcm []int16) (int, error)`
+- `(*Decoder).DecodeFECWithDuration(data []byte, pcm []int16, frameSize int) (int, error)`
+- `(*Decoder).DecodeFEC24(data []byte, pcm []int32, frameSize int) (int, error)`
+- `(*Decoder).DecodeFECFloat(data []byte, frameSize int) ([]float64, error)`
+- `(*Decoder).DecodeFECFloat32(data []byte, frameSize int) ([]float32, error)`
 - `(*Decoder).Reset() error`
 - `(*Decoder).GetLastPacketDuration() int`
 - `(*Decoder).Bandwidth() int` / `(*Decoder).GetBandwidth() int`
@@ -571,15 +579,24 @@ Packets whose decoded duration exceeds 120 ms are rejected as invalid.
 
 Current decoder behavior and limitations:
 
-- `DecodePLC` supports CELT-only, SILK-only, and hybrid streams after a
-  successful packet decode. Hybrid concealment sums the independently concealed
-  SILK low band and CELT high band through the normal resampler/channel paths.
-  The requested duration must be a valid Opus duration, an integer multiple of
-  the active CELT or SILK frame duration, and no more than 120 ms. SILK PLC is
-  stateful and interoperable but is not bit-exact with libopus PLC.
-- `DecodeFEC` extracts SILK LBRR for mono/stereo SILK-only and hybrid packets.
-  Hybrid recovery reconstructs the redundant SILK low band; CELT-only packets
-  do not carry SILK LBRR.
+- `DecodePLC` supports CELT-only, SILK-only, and hybrid streams. Before the
+  first successful packet and after reset it returns zero concealment, matching
+  libopus. The requested duration may be any positive 2.5 ms multiple through
+  120 ms. Hybrid concealment sums the independently concealed SILK low band and
+  CELT high band through the normal resampler/channel paths. Successful PLC sets
+  `FinalRange` to zero. SILK PLC is stateful and interoperable but is not
+  bit-exact with libopus PLC.
+- `DecodeFECWithDuration` takes the exact missing duration. It decodes LBRR from
+  only the first Opus frame in a SILK-only or hybrid carrier, prefixes PLC when
+  the loss is longer than that frame, and falls back to PLC when FEC cannot be
+  present. Packed count-code 1/2/3 carriers are supported. The original
+  `DecodeFEC` remains a compatibility wrapper that infers the missing duration
+  from the carrier's total duration and retains its CELT-only error contract.
+  FEC decoding is transactional: a returned error leaves decoder state and the
+  caller's destination unchanged.
+- PLC and explicit-duration FEC expose int16, signed-24-bit-in-int32, float32,
+  and float64 variants. Multistream exposes the same variants and duration
+  contract; surround inherits them from `MultistreamDecoder`.
 - Both float32 and float64 PCM decoding APIs are available.
 - `GetLastPacketDuration` reports the duration in output samples per channel of
   the last successfully decoded packet; before any decode it reports the default

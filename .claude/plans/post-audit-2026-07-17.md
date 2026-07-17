@@ -1,6 +1,6 @@
 # Post-Audit Completion Plan (2026-07-17)
 
-Status: **Active; Phase 1 completed and adopted**
+Status: **Active; Phases 1 and 2 completed and adopted**
 
 Last updated: 2026-07-17
 
@@ -210,6 +210,15 @@ Acceptance criteria:
   exactly;
 - common verification passes.
 
+**Decision (2026-07-17): Adopted.** Explicit lost-duration FEC is an additive
+v1 API; the existing inferred-duration `DecodeFEC` signature remains intact.
+Initial zero PLC, all positive 2.5 ms multiples through 120 ms, packed
+first-frame FEC, PLC/FEC final-range updates, transactional recovery, and
+int16/24/float32/float64 variants are implemented consistently across
+single-stream, multistream, and surround decoders. Focused normal and libopus
+1.6.1 semantic comparisons pass. The API classification and evidence are in
+`.claude/memory/iterations/plc-fec-phase2-2026-07-17.md`.
+
 ---
 
 ## Phase 3: SILK/Hybrid Mode-Rate-Quality Policy
@@ -318,7 +327,7 @@ multiplexed demux; those remain separate optional features.
   - [x] Slice 1-3: implement one root-cause fix
   - [x] Slice 1-4: prove broad non-regression
   - [x] Slice 1-5: adoption decision and baseline update
-- [ ] Phase 2: PLC/FEC semantic parity
+- [x] Phase 2: PLC/FEC semantic parity — adopted 2026-07-17
 - [ ] Phase 3: SILK/hybrid mode-rate-quality policy
 - [ ] Phase 4: SILK/hybrid encoder allocation and runtime cost
 - [ ] Phase 5: surround psychoacoustic parity

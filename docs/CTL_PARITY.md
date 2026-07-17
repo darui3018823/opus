@@ -61,10 +61,19 @@ Status values:
 | `OPUS_SET_GAIN` / `OPUS_GET_GAIN` | Supported | `SetGain`, `Gain` |
 | `OPUS_GET_LAST_PACKET_DURATION` | Supported | `GetLastPacketDuration` |
 | `OPUS_GET_PITCH` | Supported | `Pitch` |
-| `OPUS_GET_FINAL_RANGE` | Supported | `FinalRange` |
+| `OPUS_GET_FINAL_RANGE` | Supported | `FinalRange`; PLC reports zero, SILK FEC reports the recovered first-frame entropy range, hybrid FEC reports the CELT PLC RNG state, and multistream/surround XOR elementary ranges |
 | `OPUS_GET_BANDWIDTH` | Supported | `Bandwidth`, `GetBandwidth`; returns `BandwidthAuto` before first successful decode or after reset |
 | `OPUS_SET_PHASE_INVERSION_DISABLED` / `OPUS_GET_PHASE_INVERSION_DISABLED` | Supported | `SetPhaseInversionDisabled`, `PhaseInversionDisabled` |
 | DRED decoder CTLs | Out of scope | DRED neural PLC/FEC is not implemented |
+
+## Decoder Loss-Recovery Calls
+
+| libopus behavior | Status | Go API / note |
+|---|---:|---|
+| PLC with explicit missing duration | Supported | `DecodePLC`, `DecodePLC24`, `DecodePLCFloat`, `DecodePLCFloat32`; accepts every positive 2.5 ms multiple through 120 ms and returns zero concealment before the first packet |
+| FEC with explicit missing duration | Supported | `DecodeFECWithDuration`, `DecodeFEC24`, `DecodeFECFloat`, `DecodeFECFloat32`; packed carriers use only their first Opus frame and PLC fills any prefix or unavailable-FEC case |
+| Multistream/surround PLC and FEC | Supported | Matching methods on `MultistreamDecoder`; `SurroundDecoder` inherits them. Recovery uses one shared missing duration and commits elementary states atomically |
+| Legacy inferred-duration FEC | Supported | `DecodeFEC` retains the v1 signature, infers the carrier's total duration, and retains the CELT-only error contract |
 
 ## Packet, Repacketizer, and PCM Helpers
 

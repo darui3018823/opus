@@ -64,6 +64,24 @@ class GeminiReviewTest(unittest.TestCase):
         )
         self.assertEqual(parsed["summary"], "ok")
 
+    def test_prompt_allows_style_feedback(self):
+        prompt = gemini_pr_review.build_prompt(
+            {
+                "number": 1,
+                "title": "test",
+                "url": "https://example.com/pull/1",
+                "author": {"login": "owner"},
+                "baseRefName": "main",
+                "headRefName": "topic",
+                "headRefOid": "abc123",
+            },
+            "diff --git a/a.go b/a.go\n",
+            False,
+        )
+        self.assertIn("style, readability, maintainability", prompt)
+        self.assertIn("other concrete suggestions", prompt)
+        self.assertNotIn("Ignore style", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

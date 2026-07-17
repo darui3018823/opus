@@ -181,20 +181,23 @@ def build_prompt(pr: dict[str, Any], diff: str, truncated: bool) -> str:
         Head SHA: {pr.get("headRefOid", "")}
         {truncated_note}
 
-        Focus only on:
+        Review for useful PR feedback, including:
         - correctness bugs
         - behavioral regressions
         - missing tests for changed behavior
         - security or reliability risks
         - performance regressions when performance is relevant
+        - style, readability, maintainability, documentation, or API-design issues
+        - other concrete suggestions that would improve the change
 
-        Ignore style, naming, formatting, broad refactors, and subjective design
-        preferences unless they hide a concrete bug.
+        Keep comments high-signal and actionable. It is acceptable to include
+        style or nit-level feedback, but avoid broad rewrites or subjective
+        preferences unless the improvement is concrete.
 
         Return JSON only. Inline comments must use a path and line from changed
         right-side lines in the diff. Use single-line right-side comments only.
         If there are no actionable findings, return an empty comments array and
-        a concise summary saying no blocking findings were found.
+        a concise summary saying no findings or suggestions were found.
 
         Unified diff:
         ```diff
@@ -238,8 +241,9 @@ def call_gemini(prompt: str) -> dict[str, Any]:
             "parts": [
                 {
                     "text": (
-                        "You are a strict code reviewer. Return concise, actionable JSON. "
-                        "Do not include praise, general summaries, or style-only comments."
+                        "You are a practical code reviewer. Return concise, actionable JSON. "
+                        "Include correctness, reliability, test, documentation, maintainability, "
+                        "style, nit, and other useful PR feedback when it is concrete."
                     )
                 }
             ]
@@ -310,7 +314,7 @@ def normalize_review(result: dict[str, Any]) -> tuple[str, list[ReviewComment]]:
         severity = str(item.get("severity") or "finding").strip() or "finding"
         comments.append(ReviewComment(path=path, line=line, body=body, severity=severity))
     if not summary:
-        summary = "No blocking findings were found." if not comments else "Gemini review findings."
+        summary = "No findings or suggestions were found." if not comments else "Gemini review findings."
     return summary, comments
 
 

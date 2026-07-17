@@ -1600,7 +1600,8 @@ func nlsfToLPCLibopus(nlsfQ15 []int16, order int) []int16 {
 		ordering = nlsf2AOrdering10[:]
 	}
 
-	cLSF := make([]int32, order)
+	var cLSFBuf [silkMaxLPCOrder]int32
+	cLSF := cLSFBuf[:order]
 	for i := 0; i < order; i++ {
 		n := int32(nlsfQ15[i])
 		if n < 0 {
@@ -1624,13 +1625,15 @@ func nlsfToLPCLibopus(nlsfQ15 []int16, order int) []int16 {
 	}
 
 	halfOrder := order / 2
-	P := make([]int32, halfOrder+1)
-	Q := make([]int32, halfOrder+1)
+	var pBuf, qBuf [silkMaxLPCOrder/2 + 1]int32
+	P := pBuf[:halfOrder+1]
+	Q := qBuf[:halfOrder+1]
 
 	nlsf2APolyFindPoly(P, cLSF, halfOrder)
 	nlsf2APolyFindPoly(Q, cLSF[1:], halfOrder)
 
-	a32QA1 := make([]int32, order)
+	var a32QA1Buf [silkMaxLPCOrder]int32
+	a32QA1 := a32QA1Buf[:order]
 	for k := 0; k < halfOrder; k++ {
 		Ptmp := P[k+1] + P[k]
 		Qtmp := Q[k+1] - Q[k]

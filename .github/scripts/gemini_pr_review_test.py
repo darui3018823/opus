@@ -68,6 +68,36 @@ diff --git a/b.go b/b.go
         self.assertIn("diff --git a/b.go b/b.go", file_diff)
         self.assertNotIn("diff --git a/a.go b/a.go", file_diff)
 
+    def test_filter_review_diff_excludes_github_changes(self):
+        diff = """diff --git a/.github/workflows/test.yml b/.github/workflows/test.yml
+--- a/.github/workflows/test.yml
++++ b/.github/workflows/test.yml
+@@ -1 +1 @@
+-old
++new
+diff --git a/a.go b/a.go
+--- a/a.go
++++ b/a.go
+@@ -1 +1 @@
+-old
++new
+"""
+        filtered = gemini_pr_review.filter_review_diff(diff)
+        self.assertNotIn(".github/workflows/test.yml", filtered)
+        self.assertIn("diff --git a/a.go b/a.go", filtered)
+        self.assertEqual(gemini_pr_review.changed_files_from_diff(filtered), ["a.go"])
+        self.assertEqual(gemini_pr_review.changed_right_lines(filtered), {"a.go": {1}})
+
+    def test_filter_review_diff_skips_github_only_diff(self):
+        diff = """diff --git a/.github/scripts/review.py b/.github/scripts/review.py
+--- a/.github/scripts/review.py
++++ b/.github/scripts/review.py
+@@ -1 +1 @@
+-old
++new
+"""
+        self.assertEqual(gemini_pr_review.filter_review_diff(diff), "")
+
     def test_invalid_inline_anchor_is_unposted(self):
         comments = [
             gemini_pr_review.ReviewComment("a.go", 3, "ok", "P2"),

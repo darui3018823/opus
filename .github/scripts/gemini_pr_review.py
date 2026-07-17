@@ -29,6 +29,7 @@ DEFAULT_MAX_DIFF_CHARS = 850_000
 MAX_TOOL_ROUNDS = 8
 MAX_TOOL_RESPONSE_CHARS = 120_000
 MAX_FILE_CHARS = 100_000
+EXCLUDED_REVIEW_PATH_PREFIXES = (".github/",)
 GEMINI_ENDPOINT = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     f"{MODEL}:generateContent"
@@ -133,17 +134,49 @@ def fetch_diff(repo: str, pr_number: int) -> str:
     return run_gh(["pr", "diff", str(pr_number), "--repo", repo, "--patch"])
 
 
+def normalize_patch_path(raw_path: str) -> str | None:
+    path = raw_path.strip()
+    if path == "/dev/null":
+        return None
+    if path.startswith(("a/", "b/")):
+        path = path[2:]
+    return path or None
+
+
+def is_reviewable_path(path: str) -> bool:
+    return not any(
+        path == prefix.rstrip("/") or path.startswith(prefix)
+        for prefix in EXCLUDED_REVIEW_PATH_PREFIXES
+    )
+
+
+def filter_review_diff(diff: str) -> str:
+    reviewable_sections: list[str] = []
+    for section in re.split(r"(?=^diff --git )", diff, flags=re.MULTILINE):
+        paths: list[str] = []
+        for raw_line in section.splitlines():
+            if raw_line.startswith("@@ "):
+                break
+            if not raw_line.startswith(("--- ", "+++ ")):
+                continue
+            path = normalize_patch_path(raw_line[4:])
+            if path is not None:
+                paths.append(path)
+        if paths and any(not is_reviewable_path(path) for path in paths):
+            continue
+        reviewable_sections.append(section)
+    return "".join(reviewable_sections)
+
+
 def changed_files_from_diff(diff: str) -> list[str]:
     files: list[str] = []
     seen: set[str] = set()
     for raw_line in diff.splitlines():
         if not raw_line.startswith("+++ "):
             continue
-        path = raw_line[4:].strip()
-        if path == "/dev/null":
+        path = normalize_patch_path(raw_line[4:])
+        if path is None:
             continue
-        if path.startswith("b/"):
-            path = path[2:]
         if path and path not in seen:
             files.append(path)
             seen.add(path)
@@ -774,7 +807,10 @@ def main() -> int:
         return 0
 
     pr = fetch_pr(repo, pr_number)
-    diff = fetch_diff(repo, pr_number)
+    diff = filter_review_diff(fetch_diff(repo, pr_number))
+    if not diff.strip():
+        print("Gemini review skipped: no reviewable changes after path filters.")
+        return 0
     changed_files = changed_files_from_diff(diff)
     valid_lines = changed_right_lines(diff)
     review_diff, truncated = truncate_diff(diff)

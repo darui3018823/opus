@@ -1,8 +1,11 @@
 package opus
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"math"
+	"runtime"
 	"testing"
 )
 
@@ -10,6 +13,7 @@ const (
 	perfSampleRate = 48000
 	perfFrameSize  = perfSampleRate * 20 / 1000
 	perfFrames     = 64
+	perfLongFrames = 256
 )
 
 type perfWorkload struct {
@@ -37,6 +41,91 @@ func BenchmarkPerf(b *testing.B) {
 		b.Run("decode/"+wl.name, func(b *testing.B) {
 			benchmarkPerfDecode(b, wl)
 		})
+	}
+}
+
+func BenchmarkPerfLongStream(b *testing.B) {
+	for _, wl := range perfWorkloads() {
+		wl := wl
+		if wl.wantMode == "celt" {
+			continue
+		}
+		b.Run("encode/"+wl.name, func(b *testing.B) {
+			benchmarkPerfLongEncode(b, wl)
+		})
+	}
+}
+
+func benchmarkPerfLongEncode(b *testing.B, wl perfWorkload) {
+	enc := newPerfEncoder(b, wl)
+	frames := perfInputFrames(wl)
+	if err := validatePerfPacket(enc, wl, frames[0]); err != nil {
+		b.Fatal(err)
+	}
+	perfPacketSink = []byte{0}
+
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	totalFrames := b.N * perfLongFrames
+	totalBytes := 0
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < totalFrames; i++ {
+		pkt, err := enc.EncodeFloat(frames[(i+1)%len(frames)], perfFrameSize)
+		if err != nil {
+			b.Fatal(err)
+		}
+		totalBytes += len(pkt)
+		perfPacketSink = pkt
+		perfRangeSink = enc.FinalRange()
+	}
+	b.StopTimer()
+	elapsed := b.Elapsed()
+
+	runtime.GC()
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(enc)
+	runtime.KeepAlive(frames)
+
+	b.ReportMetric(float64(totalBytes)/float64(totalFrames), "packet-B/frame")
+	b.ReportMetric(float64(totalFrames)/elapsed.Seconds(), "frames/s")
+	b.ReportMetric(float64(int64(after.HeapAlloc)-int64(before.HeapAlloc)), "retained-B")
+}
+
+func TestPerfPredictivePacketRegression(t *testing.T) {
+	want := map[string]string{
+		"silk/mono/48k/20ms":     "9283a266eb02e57c13033cdcf88f00bf15a4ce720d42a97db0b92e63f5ba22f4",
+		"silk/stereo/48k/20ms":   "b549162a152534ca8f20485fe4f6daa59086a2a97648fa55fb57096224b58ff6",
+		"hybrid/mono/48k/20ms":   "ac302b15835713697d453237ce0ae6e34b72927baff54f40a63ae5ebf85e139f",
+		"hybrid/stereo/48k/20ms": "ea2513c3685530f438660e63d2163fa67c12de34fd2e015327267ef394ef2bf4",
+	}
+	for _, wl := range perfWorkloads() {
+		wantDigest, ok := want[wl.name]
+		if !ok {
+			continue
+		}
+		enc := newPerfEncoder(t, wl)
+		frames := perfInputFrames(wl)
+		h := sha256.New()
+		var word [4]byte
+		for i, frame := range frames {
+			pkt, err := enc.EncodeFloat(frame, perfFrameSize)
+			if err != nil {
+				t.Fatalf("%s frame %d: EncodeFloat: %v", wl.name, i, err)
+			}
+			binary.LittleEndian.PutUint32(word[:], uint32(len(pkt)))
+			h.Write(word[:])
+			h.Write(pkt)
+			binary.LittleEndian.PutUint32(word[:], enc.FinalRange())
+			h.Write(word[:])
+		}
+		got := fmt.Sprintf("%x", h.Sum(nil))
+		if got != wantDigest {
+			t.Errorf("%s digest = %s, want %s", wl.name, got, wantDigest)
+		}
 	}
 }
 

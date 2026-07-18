@@ -340,6 +340,21 @@ func (r *Resampler) Reset() {
 	}
 }
 
+// CopyStateFrom copies the complete configured and streaming state from src.
+func (r *Resampler) CopyStateFrom(src *Resampler) {
+	if src == nil || src == r {
+		return
+	}
+	*r = *src
+	r.coeffs = append([]float64(nil), src.coeffs...)
+	r.mem = make([][]float64, len(src.mem))
+	for ch := range src.mem {
+		r.mem[ch] = append([]float64(nil), src.mem[ch]...)
+	}
+	r.lastSample = append([]int(nil), src.lastSample...)
+	r.sampFracNum = append([]uint32(nil), src.sampFracNum...)
+}
+
 // Helper functions
 
 func isValidRate(rate int) bool {

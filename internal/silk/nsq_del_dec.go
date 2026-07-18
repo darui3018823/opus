@@ -176,9 +176,10 @@ func (e *Encoder) silkNSQDelDec(
 		nStates = 4
 	}
 
-	delDec := make([]nsqDelayedDecision, nStates)
+	delDec := e.nsqDelDec[:nStates]
 	for k := 0; k < nStates; k++ {
 		dd := &delDec[k]
+		*dd = nsqDelayedDecision{}
 		dd.seed = int32((k + int(seed)) & 3)
 		dd.seedInit = dd.seed
 		dd.lfARQ14 = e.nsq.sLFARShpQ14

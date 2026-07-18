@@ -682,11 +682,12 @@ func tfAnalysis(end int, isTransient bool, tfRes []int, lambda int, X []float64,
 
 // allocTrimAnalysis is the float port of libopus alloc_trim_analysis. It returns
 // the allocation trim index (0..10) from the spectral tilt and, for stereo, the
-// inter-channel correlation at low frequencies. tf_estimate and surround_trim
-// are taken as zero (no transient/surround analysis yet). equivRate is the
+// inter-channel correlation at low frequencies. surroundTrim is derived by the
+// multistream channel-role masking analysis.
+// equivRate is the
 // per-stream bitrate in bps. X is the normalised spectrum, logE the band log
 // energies (channel-major), frameLen the per-channel coefficient count.
-func allocTrimAnalysis(X, logE []float64, numBands, end, lm, C, frameLen, intensity, equivRate int) int {
+func allocTrimAnalysis(X, logE []float64, numBands, end, lm, C, frameLen, intensity int, tfEstimate, surroundTrim float64, equivRate int) int {
 	M := 1 << uint(lm)
 	trim := 5.0
 	switch {
@@ -728,6 +729,8 @@ func allocTrimAnalysis(X, logE []float64, numBands, end, lm, C, frameLen, intens
 	}
 	diff /= float64(C * (end - 1))
 	trim -= math.Max(-2.0, math.Min(2.0, (diff+1.0)/6.0))
+	trim -= 2 * tfEstimate
+	trim -= surroundTrim
 
 	trimIndex := int(math.Floor(trim + 0.5))
 	if trimIndex < 0 {
@@ -737,4 +740,54 @@ func allocTrimAnalysis(X, logE []float64, numBands, end, lm, C, frameLen, intens
 		trimIndex = 10
 	}
 	return trimIndex
+}
+
+// surroundMaskTrim isolates libopus' mask-slope contribution to allocation
+// trim. The per-band dynalloc and VBR consumers are intentionally left for
+// separate measured decisions.
+func surroundMaskTrim(mask []float64, channels, numBands, maskEnd int) float64 {
+	if channels < 1 || maskEnd < 2 || len(mask) < channels*numBands {
+		return 0
+	}
+	var maskAverage, slope float64
+	count := 0
+	for channel := 0; channel < channels; channel++ {
+		for band := 0; band < maskEnd; band++ {
+			value := math.Max(-2, math.Min(0.25, mask[channel*numBands+band]))
+			if value > 0 {
+				value *= 0.5
+			}
+			width := int(EBands48000[band+1] - EBands48000[band])
+			maskAverage += value * float64(width)
+			count += width
+			slope += value * float64(1+2*band-maskEnd)
+		}
+	}
+	if count == 0 {
+		return 0
+	}
+	maskAverage = maskAverage/float64(count) + 0.2
+	slope *= 6 / float64(channels*(maskEnd-1)*(maskEnd+1)*maskEnd)
+	slope *= 0.5
+	slope = math.Max(-0.031, math.Min(0.031, slope))
+
+	middleBand := 0
+	for middleBand+1 < maskEnd && EBands48000[middleBand+1] < EBands48000[maskEnd]/2 {
+		middleBand++
+	}
+	unmaskedBands := 0
+	for band := 0; band < maskEnd; band++ {
+		unmask := mask[band]
+		for channel := 1; channel < channels; channel++ {
+			unmask = math.Max(unmask, mask[channel*numBands+band])
+		}
+		unmask = math.Min(unmask, 0) - (maskAverage + slope*float64(band-middleBand))
+		if unmask > 0.25 {
+			unmaskedBands++
+		}
+	}
+	if unmaskedBands >= 3 && maskAverage+0.25 > 0 {
+		return 0
+	}
+	return 64 * slope
 }

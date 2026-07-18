@@ -24,16 +24,11 @@ func PacketHasLBRR(packet []byte) (bool, error) {
 		return false, fmt.Errorf("%w: %v", ErrInvalidPacket, err)
 	}
 	nSilkFrames := silkSubframesPerOpusFrame(config)
-	for _, stream := range streams {
-		has, err := silkStreamHasLBRR(stream, nSilkFrames, info.channels)
-		if err != nil {
-			return false, err
-		}
-		if has {
-			return true, nil
-		}
-	}
-	return false, nil
+	// libopus and DecodeFEC use only the first Opus frame of a packed
+	// packet as the carrier for the immediately preceding loss. LBRR in a
+	// later frame is not recoverable through that API and must not make this
+	// helper report true.
+	return silkStreamHasLBRR(streams[0], nSilkFrames, info.channels)
 }
 
 func silkStreamHasLBRR(stream []byte, nFrames, channels int) (bool, error) {

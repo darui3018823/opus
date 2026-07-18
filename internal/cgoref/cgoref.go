@@ -34,6 +34,10 @@ static int go_opus_encoder_set_voice(OpusEncoder *enc) {
 	return opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
 }
 
+static int go_opus_encoder_set_music(OpusEncoder *enc) {
+	return opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+}
+
 static int go_opus_encoder_set_inband_fec(OpusEncoder *enc, int enabled) {
 	return opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(enabled));
 }
@@ -251,6 +255,15 @@ func (e *Encoder) SetVoiceMode() error {
 	code := C.go_opus_encoder_set_voice(e.enc)
 	if code != 0 {
 		return fmt.Errorf("OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE): %s", C.GoString(C.opus_strerror(code)))
+	}
+	return nil
+}
+
+// SetMusicMode biases libopus toward its music/general-audio decisions.
+func (e *Encoder) SetMusicMode() error {
+	code := C.go_opus_encoder_set_music(e.enc)
+	if code != 0 {
+		return fmt.Errorf("OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC): %s", C.GoString(C.opus_strerror(code)))
 	}
 	return nil
 }

@@ -3,8 +3,6 @@ package opus
 import (
 	"fmt"
 	"math"
-
-	framing "github.com/darui3018823/opus/internal"
 )
 
 // MultistreamEncoder encodes several elementary Opus streams into one RFC 7845
@@ -12,13 +10,15 @@ import (
 // elementary encoders; all parent and child operations must be serialized.
 // Encode frame sizes are samples per channel and PCM is interleaved.
 type MultistreamEncoder struct {
-	sampleRate     int
-	channels       int
-	streams        int
-	coupledStreams int
-	mapping        []byte
-	encoders       []*Encoder
-	bitrate        int
+	sampleRate        int
+	channels          int
+	streams           int
+	coupledStreams    int
+	mapping           []byte
+	encoders          []*Encoder
+	bitrate           int
+	beforeEncodeFloat func(pcm []float64, frameSize int) (commit func(), err error)
+	resetPolicy       func()
 }
 
 // NewMultistreamEncoder creates a multistream encoder. channels and streams
@@ -259,6 +259,14 @@ func (e *MultistreamEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, 
 }
 
 func (e *MultistreamEncoder) encodeFloatSelected(pcm []float64, selectedFrameSize int) ([]byte, error) {
+	var commitPolicy func()
+	if e.beforeEncodeFloat != nil {
+		var err error
+		commitPolicy, err = e.beforeEncodeFloat(pcm, selectedFrameSize)
+		if err != nil {
+			return nil, err
+		}
+	}
 	packets := make([][]byte, e.streams)
 	for stream, enc := range e.encoders {
 		streamChannels := enc.Channels()
@@ -282,7 +290,14 @@ func (e *MultistreamEncoder) encodeFloatSelected(pcm []float64, selectedFrameSiz
 		}
 		packets[stream] = packet
 	}
-	return joinMultistreamPackets(packets)
+	packet, err := joinMultistreamPackets(packets)
+	if err != nil {
+		return nil, err
+	}
+	if commitPolicy != nil {
+		commitPolicy()
+	}
+	return packet, nil
 }
 
 // Reset resets every elementary encoder while retaining configuration.
@@ -291,6 +306,9 @@ func (e *MultistreamEncoder) Reset() error {
 		if err := enc.Reset(); err != nil {
 			return err
 		}
+	}
+	if e.resetPolicy != nil {
+		e.resetPolicy()
 	}
 	return nil
 }
@@ -445,7 +463,7 @@ func (d *MultistreamDecoder) Decode(data []byte, pcm []int16) (int, error) {
 // DecodePLC performs packet-loss concealment for frameSize samples per channel
 // on every elementary stream.
 func (d *MultistreamDecoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
-	if !isValidPacketFrameSize(frameSize, d.sampleRate) {
+	if !isValidLossFrameSize(frameSize, d.sampleRate) {
 		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	required := frameSize * d.channels
@@ -453,39 +471,63 @@ func (d *MultistreamDecoder) DecodePLC(pcm []int16, frameSize int) (int, error) 
 		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
 	}
 
-	// Keep caller-owned PCM untouched unless every elementary stream succeeds.
+	floatPCM, err := d.DecodePLCFloat(frameSize)
+	if err != nil {
+		return 0, err
+	}
+	floatToInt16(pcm[:required], floatPCM)
+	return frameSize, nil
+}
+
+// DecodePLCFloat performs packet-loss concealment on every elementary stream
+// and returns interleaved float64 PCM.
+func (d *MultistreamDecoder) DecodePLCFloat(frameSize int) ([]float64, error) {
+	if !isValidLossFrameSize(frameSize, d.sampleRate) {
+		return nil, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+	}
 	for stream, dec := range d.decoders {
 		if err := dec.validatePLCState(frameSize); err != nil {
-			return 0, fmt.Errorf("stream %d: %w", stream, err)
+			return nil, fmt.Errorf("stream %d: %w", stream, err)
 		}
 	}
-	out := make([]int16, required)
+	out := make([]float64, frameSize*d.channels)
 	for stream, dec := range d.decoders {
-		streamChannels := dec.Channels()
-		streamPCM := make([]int16, frameSize*streamChannels)
-		decoded, err := dec.DecodePLC(streamPCM, frameSize)
+		streamPCM, err := dec.DecodePLCFloat(frameSize)
 		if err != nil {
-			return 0, fmt.Errorf("stream %d: %w", stream, err)
+			return nil, fmt.Errorf("stream %d: %w", stream, err)
 		}
-		if decoded != frameSize {
-			return 0, fmt.Errorf("%w: stream %d decoded %d samples, want %d", ErrInvalidState, stream, decoded, frameSize)
-		}
-
-		for outputChannel, mapped := range d.mapping {
-			if mapped == 255 {
-				continue
-			}
-			sourceStream, sourceChannel := codedChannelLocation(int(mapped), d.coupledStreams)
-			if sourceStream != stream || sourceChannel >= streamChannels {
-				continue
-			}
-			for i := 0; i < frameSize; i++ {
-				out[i*d.channels+outputChannel] = streamPCM[i*streamChannels+sourceChannel]
-			}
-		}
+		d.mapStreamFloat(out, streamPCM, stream, frameSize)
 	}
+	return out, nil
+}
 
-	copy(pcm[:required], out)
+// DecodePLCFloat32 is DecodePLCFloat with float32 output.
+func (d *MultistreamDecoder) DecodePLCFloat32(frameSize int) ([]float32, error) {
+	pcm, err := d.DecodePLCFloat(frameSize)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]float32, len(pcm))
+	for i := range out {
+		out[i] = float32(pcm[i])
+	}
+	return out, nil
+}
+
+// DecodePLC24 performs packet-loss concealment to signed 24-bit PCM in int32.
+func (d *MultistreamDecoder) DecodePLC24(pcm []int32, frameSize int) (int, error) {
+	if !isValidLossFrameSize(frameSize, d.sampleRate) {
+		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+	}
+	required := frameSize * d.channels
+	if len(pcm) < required {
+		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
+	}
+	floatPCM, err := d.DecodePLCFloat(frameSize)
+	if err != nil {
+		return 0, err
+	}
+	floatToInt24(pcm[:required], floatPCM)
 	return frameSize, nil
 }
 
@@ -497,64 +539,109 @@ func (d *MultistreamDecoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	required := duration * d.channels
+	_ = packets
+	return d.DecodeFECWithDuration(data, pcm, duration)
+}
+
+// DecodeFECWithDuration decodes recovery data for exactly frameSize lost
+// samples per channel on every elementary stream.
+func (d *MultistreamDecoder) DecodeFECWithDuration(data []byte, pcm []int16, frameSize int) (int, error) {
+	if !isValidLossFrameSize(frameSize, d.sampleRate) {
+		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+	}
+	required := frameSize * d.channels
 	if len(pcm) < required {
 		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
 	}
+	floatPCM, err := d.DecodeFECFloat(data, frameSize)
+	if err != nil {
+		return 0, err
+	}
+	floatToInt16(pcm[:required], floatPCM)
+	return frameSize, nil
+}
+
+// DecodeFECFloat decodes recovery data for exactly frameSize lost samples per
+// channel and returns interleaved float64 PCM.
+func (d *MultistreamDecoder) DecodeFECFloat(data []byte, frameSize int) ([]float64, error) {
+	if !isValidLossFrameSize(frameSize, d.sampleRate) {
+		return nil, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+	}
+	packets, _, err := splitMultistreamPackets(data, d.streams, d.sampleRate)
+	if err != nil {
+		return nil, err
+	}
 
 	// Preflight every child before any decoder state advances.
-	usePLC := make([]bool, len(packets))
 	for stream, packet := range packets {
-		info, err := inspectPacket(packet, d.sampleRate)
-		if err != nil {
-			return 0, fmt.Errorf("stream %d: %w", stream, err)
-		}
-		usePLC[stream] = info.mode == ModeCELTOnly || d.decoders[stream].prevMode == framing.ModeCELTOnly
-		if usePLC[stream] {
-			err = d.decoders[stream].validatePLCState(duration)
-		} else {
-			err = d.decoders[stream].validateFECState(packet)
-		}
-		if err != nil {
-			return 0, fmt.Errorf("stream %d: %w", stream, err)
+		if err := d.decoders[stream].validateFECState(packet, frameSize); err != nil {
+			return nil, fmt.Errorf("stream %d: %w", stream, err)
 		}
 	}
 
-	// Keep caller-owned PCM untouched unless every elementary stream succeeds.
-	out := make([]int16, required)
+	staged := make([]*Decoder, len(d.decoders))
+	out := make([]float64, frameSize*d.channels)
 	for stream, packet := range packets {
-		streamChannels := d.decoders[stream].Channels()
-		streamPCM := make([]int16, duration*streamChannels)
-
-		var decoded int
-		if usePLC[stream] {
-			decoded, err = d.decoders[stream].DecodePLC(streamPCM, duration)
-		} else {
-			decoded, err = d.decoders[stream].DecodeFEC(packet, streamPCM)
-		}
+		staged[stream], err = d.decoders[stream].cloneState()
 		if err != nil {
-			return 0, fmt.Errorf("stream %d: %w", stream, err)
+			return nil, fmt.Errorf("stream %d: %w", stream, err)
 		}
-		if decoded != duration {
-			return 0, fmt.Errorf("%w: stream %d decoded %d samples, want %d", ErrInvalidState, stream, decoded, duration)
+		streamPCM, err := staged[stream].DecodeFECFloat(packet, frameSize)
+		if err != nil {
+			return nil, fmt.Errorf("stream %d: %w", stream, err)
 		}
+		d.mapStreamFloat(out, streamPCM, stream, frameSize)
+	}
+	for stream := range staged {
+		*d.decoders[stream] = *staged[stream]
+	}
+	return out, nil
+}
 
-		for outputChannel, mapped := range d.mapping {
-			if mapped == 255 {
-				continue
-			}
-			sourceStream, sourceChannel := codedChannelLocation(int(mapped), d.coupledStreams)
-			if sourceStream != stream || sourceChannel >= streamChannels {
-				continue
-			}
-			for i := 0; i < duration; i++ {
-				out[i*d.channels+outputChannel] = streamPCM[i*streamChannels+sourceChannel]
-			}
+// DecodeFECFloat32 is DecodeFECFloat with float32 output.
+func (d *MultistreamDecoder) DecodeFECFloat32(data []byte, frameSize int) ([]float32, error) {
+	pcm, err := d.DecodeFECFloat(data, frameSize)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]float32, len(pcm))
+	for i := range out {
+		out[i] = float32(pcm[i])
+	}
+	return out, nil
+}
+
+// DecodeFEC24 decodes recovery data to signed 24-bit PCM stored in int32.
+func (d *MultistreamDecoder) DecodeFEC24(data []byte, pcm []int32, frameSize int) (int, error) {
+	if !isValidLossFrameSize(frameSize, d.sampleRate) {
+		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+	}
+	required := frameSize * d.channels
+	if len(pcm) < required {
+		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
+	}
+	floatPCM, err := d.DecodeFECFloat(data, frameSize)
+	if err != nil {
+		return 0, err
+	}
+	floatToInt24(pcm[:required], floatPCM)
+	return frameSize, nil
+}
+
+func (d *MultistreamDecoder) mapStreamFloat(out, streamPCM []float64, stream, duration int) {
+	streamChannels := d.decoders[stream].Channels()
+	for outputChannel, mapped := range d.mapping {
+		if mapped == 255 {
+			continue
+		}
+		sourceStream, sourceChannel := codedChannelLocation(int(mapped), d.coupledStreams)
+		if sourceStream != stream || sourceChannel >= streamChannels {
+			continue
+		}
+		for i := 0; i < duration; i++ {
+			out[i*d.channels+outputChannel] = streamPCM[i*streamChannels+sourceChannel]
 		}
 	}
-
-	copy(pcm[:required], out)
-	return duration, nil
 }
 
 // Decode24 decodes a multistream packet to signed 24-bit PCM in int32 values.

@@ -461,14 +461,18 @@ func (d *Decoder) DecodeFEC(packet []byte, nFrames int) ([]float64, error) {
 		nFrames = 1
 	}
 	if len(packet) < 2 {
+		d.lastFinalRange = 0
 		return d.concealFECFrames(nFrames)
 	}
 	dec := entcode.NewDecoder(packet)
 	if dec.Error() != nil {
+		d.lastFinalRange = 0
 		return d.concealFECFrames(nFrames)
 	}
 	if d.channels == 2 {
-		return d.decodeFECStereo(dec, nFrames)
+		pcm, err := d.decodeFECStereo(dec, nFrames)
+		d.lastFinalRange = dec.GetRng()
+		return pcm, err
 	}
 
 	// Regular-frame VAD flags precede the packet-level LBRR flag.
@@ -477,7 +481,9 @@ func (d *Decoder) DecodeFEC(packet []byte, nFrames int) ([]float64, error) {
 	}
 	lbrrFlag := dec.DecodeBitLogp(1)
 	if !lbrrFlag {
-		return d.concealFECFrames(nFrames)
+		pcm, err := d.concealFECFrames(nFrames)
+		d.lastFinalRange = dec.GetRng()
+		return pcm, err
 	}
 	mask := 1
 	if nFrames == 2 {
@@ -486,7 +492,9 @@ func (d *Decoder) DecodeFEC(packet []byte, nFrames int) ([]float64, error) {
 		mask = dec.DecodeIcdf(silkLBRRFlags3ICDF[:], 8) + 1
 	}
 
-	return d.decodeFECChannel(dec, nFrames, mask)
+	pcm, err := d.decodeFECChannel(dec, nFrames, mask)
+	d.lastFinalRange = dec.GetRng()
+	return pcm, err
 }
 
 // DecodePLC conceals nFrames consecutive lost SILK frames using the current
@@ -1592,7 +1600,8 @@ func nlsfToLPCLibopus(nlsfQ15 []int16, order int) []int16 {
 		ordering = nlsf2AOrdering10[:]
 	}
 
-	cLSF := make([]int32, order)
+	var cLSFBuf [silkMaxLPCOrder]int32
+	cLSF := cLSFBuf[:order]
 	for i := 0; i < order; i++ {
 		n := int32(nlsfQ15[i])
 		if n < 0 {
@@ -1616,13 +1625,15 @@ func nlsfToLPCLibopus(nlsfQ15 []int16, order int) []int16 {
 	}
 
 	halfOrder := order / 2
-	P := make([]int32, halfOrder+1)
-	Q := make([]int32, halfOrder+1)
+	var pBuf, qBuf [silkMaxLPCOrder/2 + 1]int32
+	P := pBuf[:halfOrder+1]
+	Q := qBuf[:halfOrder+1]
 
 	nlsf2APolyFindPoly(P, cLSF, halfOrder)
 	nlsf2APolyFindPoly(Q, cLSF[1:], halfOrder)
 
-	a32QA1 := make([]int32, order)
+	var a32QA1Buf [silkMaxLPCOrder]int32
+	a32QA1 := a32QA1Buf[:order]
 	for k := 0; k < halfOrder; k++ {
 		Ptmp := P[k+1] + P[k]
 		Qtmp := Q[k+1] - Q[k]
@@ -1723,7 +1734,8 @@ func silkLPCInversePredGainQ12(aQ12 []int16, order int) int32 {
 	if order <= 0 || order > len(aQ12) {
 		return 0
 	}
-	aQA := make([]int32, order)
+	var aQABuf [silkMaxLPCOrder]int32
+	aQA := aQABuf[:order]
 	dcResp := int32(0)
 	for k := 0; k < order; k++ {
 		dcResp += int32(aQ12[k])
@@ -2476,6 +2488,54 @@ func (d *Decoder) CopyPrimaryStateFrom(src *Decoder) {
 	d.lastFrameSilent = src.lastFrameSilent
 	copy(d.prevLPCQ12, src.prevLPCQ12)
 	copy(d.prevOutput, src.prevOutput)
+}
+
+// CopyAllStateFrom copies the complete decoder configuration and streaming
+// state from src, including stereo side-channel and diagnostic trace state.
+func (d *Decoder) CopyAllStateFrom(src *Decoder) {
+	if src == nil || src == d {
+		return
+	}
+	dstSide := d.side
+	*d = *src
+	d.prevNLSFQ15 = append([]int16(nil), src.prevNLSFQ15...)
+	d.lpcState = append([]int32(nil), src.lpcState...)
+	d.ltpState = append([]int32(nil), src.ltpState...)
+	d.prevLPCQ12 = append([]int16(nil), src.prevLPCQ12...)
+	d.prevOutput = append([]int32(nil), src.prevOutput...)
+	if src.side != nil {
+		if dstSide == nil {
+			dstSide = &Decoder{}
+		}
+		dstSide.CopyAllStateFrom(src.side)
+		d.side = dstSide
+	} else {
+		d.side = nil
+	}
+	if src.trace != nil {
+		trace := &decodeTrace{LBRRFlags: append([]uint32(nil), src.trace.LBRRFlags...)}
+		trace.VADFlags = make([][]uint32, len(src.trace.VADFlags))
+		for i := range src.trace.VADFlags {
+			trace.VADFlags[i] = append([]uint32(nil), src.trace.VADFlags[i]...)
+		}
+		trace.Frames = make([]frameTrace, len(src.trace.Frames))
+		for i, frame := range src.trace.Frames {
+			trace.Frames[i] = frame
+			trace.Frames[i].RawGainIndices = append([]int(nil), frame.RawGainIndices...)
+			trace.Frames[i].AbsGainIndices = append([]int(nil), frame.AbsGainIndices...)
+			trace.Frames[i].GainsQ16 = append([]int32(nil), frame.GainsQ16...)
+			trace.Frames[i].NLSFIndices = append([]int(nil), frame.NLSFIndices...)
+			trace.Frames[i].NLSFQ15 = append([]int16(nil), frame.NLSFQ15...)
+			trace.Frames[i].PredCoef0Q12 = append([]int16(nil), frame.PredCoef0Q12...)
+			trace.Frames[i].PredCoef1Q12 = append([]int16(nil), frame.PredCoef1Q12...)
+			trace.Frames[i].PitchLags = append([]int(nil), frame.PitchLags...)
+			trace.Frames[i].LTPCoefQ14 = append([]int16(nil), frame.LTPCoefQ14...)
+			trace.Frames[i].SumPulses = append([]int(nil), frame.SumPulses...)
+			trace.Frames[i].Pulses = append([]int16(nil), frame.Pulses...)
+			trace.Frames[i].ExcQ14 = append([]int32(nil), frame.ExcQ14...)
+		}
+		d.trace = trace
+	}
 }
 
 // DequantizeSubframeGains dequantizes subframe gain indices (API compatibility).

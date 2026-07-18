@@ -448,6 +448,77 @@ func TestEncoderHybridToCELTRedundancy(t *testing.T) {
 	decodeOK("post-transition-celt", celtPkt)
 }
 
+// TestDecoderPLCImmediatelyAfterTrailingRedundancy verifies the libopus
+// prev_redundancy contract: a lost packet immediately after a hybrid frame that
+// ended in trailing CELT redundancy must use CELT-only PLC, not hybrid PLC.
+func TestDecoderPLCImmediatelyAfterTrailingRedundancy(t *testing.T) {
+	const (
+		rate      = 48000
+		channels  = 1
+		frameSize = rate * 20 / 1000
+	)
+
+	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetBitrate(64000); err != nil {
+		t.Fatal(err)
+	}
+	dec, err := NewDecoder(rate, channels)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for frame := 0; frame < 3; frame++ {
+		packet, err := enc.EncodeFloat(strictHybridWidebandFrame(rate, channels, frame*frameSize, frameSize), frameSize)
+		if err != nil {
+			t.Fatalf("hybrid warmup %d: %v", frame, err)
+		}
+		if _, err := dec.DecodeFloat(packet); err != nil {
+			t.Fatalf("hybrid warmup decode %d: %v", frame, err)
+		}
+	}
+
+	enc.SetSignalType(SignalMusic)
+	transition, err := enc.EncodeFloat(strictHybridWidebandFrame(rate, channels, 3*frameSize, frameSize), frameSize)
+	if err != nil {
+		t.Fatalf("transition encode: %v", err)
+	}
+	if _, err := dec.DecodeFloat(transition); err != nil {
+		t.Fatalf("transition decode: %v", err)
+	}
+	if dec.prevMode != framing.ModeHybrid || !dec.prevRedundancy {
+		t.Fatalf("transition state mode=%d redundancy=%v, want hybrid+trailing redundancy", dec.prevMode, dec.prevRedundancy)
+	}
+
+	expectedState, err := dec.cloneState()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedState.prevMode = framing.ModeCELTOnly
+	expectedState.prevRedundancy = false
+	want, err := expectedState.decodePLCFloat(frameSize)
+	if err != nil {
+		t.Fatalf("CELT-only oracle PLC: %v", err)
+	}
+	got, err := dec.DecodePLCFloat(frameSize)
+	if err != nil {
+		t.Fatalf("post-redundancy PLC: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("PLC length=%d, want %d", len(got), len(want))
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("PLC sample %d=%g, want CELT-only %g", i, got[i], want[i])
+		}
+	}
+	if dec.prevMode != framing.ModeCELTOnly || dec.prevRedundancy {
+		t.Fatalf("post-PLC state mode=%d redundancy=%v, want CELT-only without redundancy", dec.prevMode, dec.prevRedundancy)
+	}
+}
+
 func TestEncoderHybridToCELTWithoutRedundancyKeepsHybridState(t *testing.T) {
 	const (
 		rate      = 48000

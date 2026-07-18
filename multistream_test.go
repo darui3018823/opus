@@ -355,21 +355,14 @@ func TestMultistreamDecodeFECUsesPLCForCELT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	untouched := make([]int16, frameSize*2)
-	for i := range untouched {
-		untouched[i] = 1234
+	initial := make([]int16, frameSize*2)
+	if n, err := fresh.DecodeFEC(packets[lost+1], initial); err != nil || n != frameSize {
+		t.Fatalf("DecodeFEC without CELT history = (%d, %v), want (%d, nil)", n, err, frameSize)
 	}
-	if _, err := fresh.DecodeFEC(packets[lost+1], untouched); err == nil {
-		t.Fatal("DecodeFEC without CELT history succeeded")
-	}
-	for i, sample := range untouched {
-		if sample != 1234 {
-			t.Fatalf("DecodeFEC modified output[%d] on error: %d", i, sample)
+	for i := 0; i < frameSize; i++ {
+		if initial[2*i+1] != 0 {
+			t.Fatalf("initial CELT concealment sample %d = %d, want zero", i, initial[2*i+1])
 		}
-	}
-	firstFresh, _ := fresh.StreamDecoder(0)
-	if _, err := firstFresh.DecodePLC(make([]int16, frameSize), frameSize); !errors.Is(err, ErrInvalidState) {
-		t.Fatalf("later CELT failure advanced earlier SILK stream: %v", err)
 	}
 }
 
@@ -679,38 +672,13 @@ func TestMultistreamDecodePLCValidationPreservesOutputAndState(t *testing.T) {
 	if _, err := first.Decode(packet, make([]int16, frameSize)); err != nil {
 		t.Fatal(err)
 	}
-	untouched := make([]int16, frameSize*2)
-	for i := range untouched {
-		untouched[i] = 3456
+	concealed := make([]int16, frameSize*2)
+	if n, err := partial.DecodePLC(concealed, frameSize); err != nil || n != frameSize {
+		t.Fatalf("partially primed DecodePLC = (%d, %v), want (%d, nil)", n, err, frameSize)
 	}
-	if _, err := partial.DecodePLC(untouched, frameSize); !errors.Is(err, ErrInvalidState) {
-		t.Fatalf("partially primed error = %v, want ErrInvalidState", err)
-	}
-	for i, sample := range untouched {
-		if sample != 3456 {
-			t.Fatalf("child failure modified output[%d]: %d", i, sample)
-		}
-	}
-
-	partialControl, err := NewMultistreamDecoder(rate, 2, 2, 0, []byte{0, 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	controlFirst, _ := partialControl.StreamDecoder(0)
-	if _, err := controlFirst.Decode(packet, make([]int16, frameSize)); err != nil {
-		t.Fatal(err)
-	}
-	gotAfterFailure := make([]int16, frameSize)
-	wantAfterFailure := make([]int16, frameSize)
-	if _, err := first.DecodePLC(gotAfterFailure, frameSize); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controlFirst.DecodePLC(wantAfterFailure, frameSize); err != nil {
-		t.Fatal(err)
-	}
-	for i := range gotAfterFailure {
-		if gotAfterFailure[i] != wantAfterFailure[i] {
-			t.Fatalf("child failure advanced stream 0 at sample %d: got %d want %d", i, gotAfterFailure[i], wantAfterFailure[i])
+	for i := 0; i < frameSize; i++ {
+		if concealed[2*i+1] != 0 {
+			t.Fatalf("unprimed stream sample %d = %d, want zero", i, concealed[2*i+1])
 		}
 	}
 }

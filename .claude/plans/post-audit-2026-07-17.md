@@ -1,8 +1,8 @@
 # Post-Audit Completion Plan (2026-07-17)
 
-Status: **Approved; not started**
+Status: **Completed; Phases 1, 2, 4, and 5 adopted, Phase 3 completed without adoption**
 
-Last updated: 2026-07-17
+Last updated: 2026-07-18
 
 Basis: `.claude/memory/audits/libopus-completeness-2026-07-17.md`
 
@@ -170,6 +170,14 @@ If rejected:
 Phase 1 is complete only after an explicit adopt/reject decision. Completing an
 experiment is not the same as adopting its code.
 
+**Decision (2026-07-17): Adopted.** The permanent generated reproducer ranked
+the dominant cause as over-aggressive CELT constrained-VBR startup targeting.
+The adopted libopus-style two-thirds damping keeps focused and corpus byte
+totals unchanged while reducing the stereo-chords matched gap by 2.86–9.12 dB
+at 24–64 kbps. All common verification commands, all 12 official vectors, and
+the full 140-cell scoreboard passed. The evidence and rejected ablations are in
+`.claude/memory/iterations/celt-music-phase1-2026-07-17.md`.
+
 ---
 
 ## Phase 2: PLC/FEC Semantic Parity
@@ -201,6 +209,15 @@ Acceptance criteria:
 - public comments and `docs/CTL_PARITY.md` describe remaining differences
   exactly;
 - common verification passes.
+
+**Decision (2026-07-17): Adopted.** Explicit lost-duration FEC is an additive
+v1 API; the existing inferred-duration `DecodeFEC` signature remains intact.
+Initial zero PLC, all positive 2.5 ms multiples through 120 ms, packed
+first-frame FEC, PLC/FEC final-range updates, transactional recovery, and
+int16/24/float32/float64 variants are implemented consistently across
+single-stream, multistream, and surround decoders. Focused normal and libopus
+1.6.1 semantic comparisons pass. The API classification and evidence are in
+`.claude/memory/iterations/plc-fec-phase2-2026-07-17.md`.
 
 ---
 
@@ -239,6 +256,15 @@ Phase 3 stops when two consecutive well-motivated gate candidates fail to
 produce a net per-bit win, unless a standards-interoperability defect requires
 continued work.
 
+**Decision (2026-07-17): Stopped without adoption.** The prior
+libopus-style predictive-family threshold candidate left target clean/noisy
+speech unchanged while increasing stereo-speech bytes by 63.3%. A fresh
+active-broadband predictive-exit candidate then regressed the target onset and
+source matched gaps by 0.11/0.09 dB while increasing their loss-0 bytes by
+2%/1%. Both production candidates were removed. This is the plan's explicit
+two-consecutive-failure stopping condition; the evidence is in
+`.claude/memory/iterations/silk-hybrid-policy-phase3-2026-07-17.md`.
+
 ---
 
 ## Phase 4: SILK/Hybrid Encoder Allocation and Runtime Cost
@@ -268,6 +294,20 @@ Acceptance criteria for each iteration:
 
 Add a long-running stream benchmark before declaring Phase 4 complete so GC
 and buffer-retention behavior is measured beyond isolated 20 ms calls.
+
+**Decision (2026-07-18): Adopted.** CPU and allocation profiles for all four
+SILK/hybrid mono/stereo workloads identified three bounded allocation
+hotspots. The adopted iterations stack-allocate inverse-prediction-gain
+scratch, stack-allocate NLSF-to-LPC conversion scratch, and reuse the maximum
+four delayed-decision NSQ candidate states on each encoder. Against the fresh
+pre-phase baseline, median allocation fell by 27-58% in bytes/op and 51-74% in
+allocs/op across the four workloads. Each iteration met its immediate-parent
+5% adoption gate on at least one target metric without a material neighboring
+regression. A 64-frame packet/final-range digest guard proves byte identity,
+and the new 256-frame long-stream benchmark found only 432-4,992 bytes of
+median live-heap growth after warm-up. Common verification, opusref, and all 12
+official vectors passed. Evidence is in
+`.claude/memory/iterations/silk-hybrid-runtime-phase4-2026-07-18.md`.
 
 ---
 
@@ -300,20 +340,32 @@ Acceptance criteria:
 Phase 5 does not include arbitrary projection encoder matrix generation or Ogg
 multiplexed demux; those remain separate optional features.
 
+**Decision (2026-07-18): Adopted.** A deterministic 5.1/7.1 fixture and
+libopus surround-family scoreboard isolated the first psychoacoustic decision.
+The adopted stateful 21-band channel-role analysis feeds only CELT allocation
+trim, leaving nominal stream rates, VBR targets, per-band dynalloc, bandwidth,
+and LFE-special coding unchanged. Elementary bytes were identical to baseline
+in all four target cells; weighted SNR improved by 5.03 dB for 5.1 role-rich
+and 3.49 dB for 7.1 role-rich, active-channel regression stayed below 0.04 dB,
+and LFE was unchanged. Common verification, 12/12 official vectors, the full
+140-cell corpus scoreboard, bidirectional libopus interoperability, PLC/FEC,
+and expert duration passed. Evidence and remaining independent mask consumers
+are in `.claude/memory/iterations/surround-psychoacoustic-phase5-2026-07-18.md`.
+
 ---
 
 ## Status
 
-- [ ] Phase 1: CELT/music worst-case quality gap
-  - [ ] Slice 1-1: preserve a small reproducer
-  - [ ] Slice 1-2: isolate the dominant decision
-  - [ ] Slice 1-3: implement one root-cause fix
-  - [ ] Slice 1-4: prove broad non-regression
-  - [ ] Slice 1-5: adoption decision and baseline update
-- [ ] Phase 2: PLC/FEC semantic parity
-- [ ] Phase 3: SILK/hybrid mode-rate-quality policy
-- [ ] Phase 4: SILK/hybrid encoder allocation and runtime cost
-- [ ] Phase 5: surround psychoacoustic parity
+- [x] Phase 1: CELT/music worst-case quality gap — adopted 2026-07-17
+  - [x] Slice 1-1: preserve a small reproducer
+  - [x] Slice 1-2: isolate the dominant decision
+  - [x] Slice 1-3: implement one root-cause fix
+  - [x] Slice 1-4: prove broad non-regression
+  - [x] Slice 1-5: adoption decision and baseline update
+- [x] Phase 2: PLC/FEC semantic parity — adopted 2026-07-17
+- [x] Phase 3: SILK/hybrid mode-rate-quality policy — stopped after two rejected gates 2026-07-17
+- [x] Phase 4: SILK/hybrid encoder allocation and runtime cost — adopted 2026-07-18
+- [x] Phase 5: surround psychoacoustic parity — adopted 2026-07-18
 
 ## Completion Definition
 

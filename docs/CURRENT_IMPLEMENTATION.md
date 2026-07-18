@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-07-17
+Last reviewed: 2026-07-18
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -113,16 +113,18 @@ The opt-in real-corpus matched-bitrate scoreboard is documented in
 `docs/REAL_CORPUS_SCOREBOARD.md` and implemented as an `opusref` diagnostic test
 guarded by `OPUS_REAL_CORPUS=1`.
 The SILK/hybrid mode-rate-quality policy diff is tracked in
-`docs/MODE_RATE_POLICY_DIFF.md`; future policy-gate changes are expected to use
-the real-corpus scoreboard first.
+`docs/MODE_RATE_POLICY_DIFF.md`. Post-audit Phase 3 stopped without adopting a
+new gate after two consecutive candidates failed to produce a net per-bit win;
+future policy changes still require a concrete scoreboard target first.
 
 Public multistream and surround entry points:
 
 - `NewMultistreamEncoder(...) (*MultistreamEncoder, error)`
 - `NewMultistreamDecoder(...) (*MultistreamDecoder, error)`
 - int16, signed-24-bit-in-int32, float32, and float64 encode/decode methods
-- multistream/surround int16 PLC and in-band FEC decode, including per-stream
-  CELT PLC fallback during FEC recovery
+- multistream/surround int16, signed-24-bit-in-int32, float32, and float64 PLC
+  and in-band FEC decode, including explicit lost-duration control, packed
+  elementary packets, and per-stream CELT PLC fallback during FEC recovery
 - per-stream encoder/decoder access, aggregate bitrate and expert frame-duration
   control, reset, mapping, stream-count, coupled-stream-count, and final-range
   getters
@@ -140,7 +142,11 @@ packets. Surround
 mapping-family 1 uses the libopus/Vorbis
 stream layouts, identifies the LFE stream for 5.1/6.1/7.1, applies
 frame-duration-dependent stream bitrate allocation, and keeps coupled streams
-on stereo CELT to preserve the spatial image.
+on stereo CELT to preserve the spatial image. For layouts above stereo, a
+stateful libopus-style 21-band analysis combines per-channel energies according
+to left, center, right, and LFE roles. Its signal-to-mask slope feeds CELT
+allocation trim for each elementary stream; analyzer history is reset with the
+parent and committed only after successful packet assembly.
 
 Public projection and Ambisonics entry points:
 
@@ -187,11 +193,15 @@ hybrid routing, keeping the stream on CELT.
 Accepted sample rates are `8000`, `12000`, `16000`, `24000`, and `48000`.
 Accepted channel counts are mono and stereo.
 
-`SetBitrate` accepts numeric rates from 6000 through 510000 bit/s as well as
-`BitrateAuto` and `BitrateMax`. `Bitrate` returns the configured value or
-policy sentinel; `EffectiveBitrate` returns the numeric rate currently applied.
-The automatic policy follows libopus' frame-size/sample-rate/channel formula,
-and the maximum policy is bounded by the RFC per-frame byte limit.
+`SetBitrate` accepts numeric rates of at least 6000 bit/s as well as
+`BitrateAuto` and `BitrateMax`. Numeric requests above 750 kbit/s per channel
+are accepted and clamped at the CTL boundary; `EffectiveBitrate` then applies
+the same RFC 1275-byte per-frame ceiling as `BitrateMax` (510 kbit/s for 20 ms
+and longer constituent frames, 1.02 Mbit/s for 10 ms). `Bitrate` returns the
+configured/clamped request or policy sentinel. The automatic policy follows
+libopus' frame-size/sample-rate/channel formula. For requests longer than
+20 ms, the maximum policy applies the byte limit to each constituent 20 ms
+Opus frame rather than dividing one frame budget across the whole packet.
 
 `NewEncoder` preserves the historical defaults (64 kbit/s, complexity 5, CBR).
 `NewEncoderWithProfile(..., EncoderProfileLibopus)` selects automatic bitrate,
@@ -235,7 +245,10 @@ the packet out of the supported SILK-only path. In CBR mode, undersized
 SILK-only streams are padded up to the nominal per-stream bitrate target; VBR
 and CVBR keep compact stream sizes, and digital-silence SILK streams use the
 minimal one-byte SILK silence payload unless explicit packet padding is
-requested.
+requested or the stream must carry LBRR retained from the preceding active
+packet. Such a silent carrier runs the SILK state once, reports non-DTX,
+includes its entropy range in `FinalRange`, and expires any inactive LBRR it
+would otherwise leave for a later packet.
 
 As of SILK Encoder slice 13, high-bitrate 24/48 kHz voice input can emit hybrid
 packets. The encoder writes a 16 kHz SILK low band and CELT high band into one
@@ -250,8 +263,10 @@ Opus frames, optionally packed as standard multi-frame packets for longer public
 frame sizes. For non-redundant VBR/CVBR hybrid frames, CELT now selects the
 final shared payload size internally after coarse energy, TF, spreading,
 dynamic allocation, and allocation trim, then shrinks the shared entropy coder
-before pulse allocation. The target uses the actual SILK prefix rate plus the
-existing high-band activity calibration and is clamped to libopus-style
+before pulse allocation. Allocation trim includes the frame's TF estimate,
+matching the corresponding libopus analysis term. The target uses the actual
+SILK prefix rate plus the existing high-band activity calibration and is
+clamped to libopus-style
 `min_allowed`; hard onsets may therefore exceed the nominal rate target without
 changing the decoder's allocation basis. A six-frame final-range regression
 requires every encoder range to match the Go decoder, and an `opusref` test
@@ -321,6 +336,24 @@ encode allocation to 2.78 MB and hybrid stereo encode allocation to 2.09 MB.
 The next small pass stack-allocates warped-autocorrelation scratch, reducing
 SILK stereo allocation count by approximately 8% against its parent iteration.
 
+Post-audit Phase 4 adds an exact 64-frame packet/final-range digest guard and a
+256-frame predictive long-stream benchmark. Three adopted SILK allocation
+passes stack-allocate inverse-prediction-gain and NLSF-to-LPC conversion
+scratch and reuse the delayed-decision NSQ candidate states on the encoder.
+Against the fresh pre-phase local medians, allocation fell from 672 KB/8,541
+allocations to 286 KB/2,239 for SILK mono, from 2.10 MB/10,973 to
+1.41 MB/5,416 for SILK stereo, from 586 KB/4,409 to 388 KB/1,290 for hybrid
+mono, and from 1.79 MB/9,457 to 1.31 MB/4,035 for hybrid stereo. The final
+long-stream measurement retained only 432-4,992 bytes of median live heap
+after warm-up, rather than frame-proportional state. Absolute predictive
+encode cost remains higher than CELT; the largest remaining allocation families
+are NLSF reconstruction/LPC output buffers and stereo trellis working storage.
+The post-audit Medium pass additionally stack-allocates the bounded predictor
+and residual scratch inside `reconstructNLSFQ15`, without changing the returned
+NLSF buffer's ownership. The same-condition SILK-mono benchmark reduced median
+allocation from approximately 282 KB/2,221 allocations to 252 KB/1,711; the
+four predictive packet/final-range digests remain deterministic.
+
 ### Phase 2: Production CELT Encoder (In Progress)
 
 #### Slice 2-1: VBR/CVBR Rate Control (Complete)
@@ -354,6 +387,12 @@ SILK stereo allocation count by approximately 8% against its parent iteration.
   decoder).
 - Added top-level code-3 packet padding: `encodePaddingCount`,
   `packOpusFramesPadded`, and `(*Encoder).SetPacketPadding(n)`.
+- Post-audit CELT/music Phase 1 adds libopus-style constrained-VBR damping to
+  the activity-derived target. Quiet tonal streams no longer begin at one
+  quarter of the nominal budget and recover only after several damaged frames;
+  the existing reservoir keeps one-second byte totals unchanged. The permanent
+  stereo-chords regression checks 24/48/64 kbps matched-byte quality,
+  deterministic packets, libopus cross-decode, and per-packet final ranges.
 
 #### Slice 2-4: Silence Detection / DTX (Complete)
 - **Status:** Complete
@@ -424,9 +463,8 @@ SILK stereo allocation count by approximately 8% against its parent iteration.
   blocks cut pre-echo ~1.8× vs forced long blocks on an impulse-in-silence).
 - 12/12 official vectors unchanged; steady-sine aligned SNR unchanged (steady
   tones don't trigger detection).
-- Not yet done at 2-5b (see 2-5c below for the stereo decisions): real
-  `tf_analysis` (per-band tf_res RDO is still flat 0) and the complexity≥8 second
-  long-block MDCT for `bandLogE2`.
+- Later CELT slices added both per-band `tf_analysis` and the complexity≥8
+  second long-block MDCT for `bandLogE2`.
 
 #### Slice 2-5c: Stereo Decisions (intensity / dual_stereo) (Complete)
 - **Status:** Complete
@@ -453,8 +491,8 @@ SILK stereo allocation count by approximately 8% against its parent iteration.
   boundary), and `TestCeltStereoDecisionRoundTrip` (correlated/anti-correlated/
   decorrelated stereo all decode with matching final range).
 - 12/12 official vectors unchanged; `go build/vet/test ./...` green.
-- Not yet done (future quality work): real `tf_analysis` (per-band tf_res RDO is
-  still flat 0) and the complexity≥8 second long-block MDCT for `bandLogE2`.
+- Later CELT slices completed per-band `tf_analysis` and the complexity≥8
+  second long-block MDCT for `bandLogE2`.
 
 #### Slice 2-6: Bandwidth Selection (Phase 4 lite) (Complete)
 - **Status:** Complete
@@ -493,7 +531,10 @@ SILK stereo allocation count by approximately 8% against its parent iteration.
 - `ApplicationVOIP` and `SignalVoice` use voice-oriented bitrate thresholds;
   `ApplicationAudio`, `ApplicationRestrictedLowDelay`, and `SignalMusic` use
   music/general thresholds. Public `SetSignalType` / `SignalType` expose this
-  content hint independently of `SetApplication`.
+  content hint independently of `SetApplication`. The requested signal state
+  defaults to `SignalAuto`; only Auto derives its effective internal hint from
+  the application, while explicit Voice/Music survives application changes,
+  short-frame encoder selection, forced mono, and reset.
 - The same automatic bandwidth narrowing is applied before hybrid selection, so
   low-bandwidth 24/48 kHz voice input does not enter hybrid solely because the
   sample rate and target bitrate would otherwise allow it. Hybrid selection
@@ -541,7 +582,14 @@ Implemented public entry points:
 - `(*Decoder).DecodeFloat(data []byte) ([]float64, error)`
 - `(*Decoder).DecodeFloat32(data []byte) ([]float32, error)`
 - `(*Decoder).DecodePLC(pcm []int16, frameSize int) (int, error)`
+- `(*Decoder).DecodePLC24(pcm []int32, frameSize int) (int, error)`
+- `(*Decoder).DecodePLCFloat(frameSize int) ([]float64, error)`
+- `(*Decoder).DecodePLCFloat32(frameSize int) ([]float32, error)`
 - `(*Decoder).DecodeFEC(data []byte, pcm []int16) (int, error)`
+- `(*Decoder).DecodeFECWithDuration(data []byte, pcm []int16, frameSize int) (int, error)`
+- `(*Decoder).DecodeFEC24(data []byte, pcm []int32, frameSize int) (int, error)`
+- `(*Decoder).DecodeFECFloat(data []byte, frameSize int) ([]float64, error)`
+- `(*Decoder).DecodeFECFloat32(data []byte, frameSize int) ([]float32, error)`
 - `(*Decoder).Reset() error`
 - `(*Decoder).GetLastPacketDuration() int`
 - `(*Decoder).Bandwidth() int` / `(*Decoder).GetBandwidth() int`
@@ -566,15 +614,30 @@ Packets whose decoded duration exceeds 120 ms are rejected as invalid.
 
 Current decoder behavior and limitations:
 
-- `DecodePLC` supports CELT-only, SILK-only, and hybrid streams after a
-  successful packet decode. Hybrid concealment sums the independently concealed
-  SILK low band and CELT high band through the normal resampler/channel paths.
-  The requested duration must be a valid Opus duration, an integer multiple of
-  the active CELT or SILK frame duration, and no more than 120 ms. SILK PLC is
-  stateful and interoperable but is not bit-exact with libopus PLC.
-- `DecodeFEC` extracts SILK LBRR for mono/stereo SILK-only and hybrid packets.
-  Hybrid recovery reconstructs the redundant SILK low band; CELT-only packets
-  do not carry SILK LBRR.
+- `DecodePLC` supports CELT-only, SILK-only, and hybrid streams. Before the
+  first successful packet and after reset it returns zero concealment, matching
+  libopus. The requested duration may be any positive 2.5 ms multiple through
+  120 ms. Hybrid concealment sums the independently concealed SILK low band and
+  CELT high band through the normal resampler/channel paths. Successful PLC sets
+  `FinalRange` to zero. SILK PLC is stateful and interoperable but is not
+  bit-exact with libopus PLC. A hybrid packet ending in trailing SILK-to-CELT
+  redundancy marks the next loss for CELT-only concealment, matching libopus'
+  independent `prev_redundancy` state; FEC eligibility continues to use the
+  last received packet's framing mode.
+- `DecodeFECWithDuration` takes the exact missing duration. It decodes LBRR from
+  only the first Opus frame in a SILK-only or hybrid carrier, prefixes PLC when
+  the loss is longer than that frame, and falls back to PLC when FEC cannot be
+  present. Packed count-code 1/2/3 carriers are supported. The original
+  `DecodeFEC` remains a compatibility wrapper that infers the missing duration
+  from the carrier's total duration and retains its CELT-only error contract.
+  FEC decoding is transactional: a returned error leaves decoder state and the
+  caller's destination unchanged.
+- `PacketHasLBRR` follows libopus helper semantics for packed packets and
+  inspects only the first Opus frame, which is the only frame recoverable by the
+  FEC API.
+- PLC and explicit-duration FEC expose int16, signed-24-bit-in-int32, float32,
+  and float64 variants. Multistream exposes the same variants and duration
+  contract; surround inherits them from `MultistreamDecoder`.
 - Both float32 and float64 PCM decoding APIs are available.
 - `GetLastPacketDuration` reports the duration in output samples per channel of
   the last successfully decoded packet; before any decode it reports the default
@@ -828,7 +891,10 @@ SILK encoding supports standards-compliant one-packet-delayed LBRR/in-band FEC
 when `SetInbandFEC(true)` is combined with a non-zero `SetPacketLossPerc`.
 Mono, stereo mid/side, and hybrid SILK layers buffer redundant channel bodies,
 write the per-channel 1/2/3-frame flag grammar before regular frames, and keep
-normal decode entropy alignment. `DecodeFEC` reconstructs SILK-only and hybrid
+normal decode entropy alignment. A digital-silence packet carries compatible
+pending LBRR before returning to the minimal silence shortcut, while a duration
+change expires pending data that cannot be represented by the new frame-count
+grammar. `DecodeFEC` reconstructs SILK-only and hybrid
 packets; hybrid recovery uses the redundant SILK low band because LBRR does not
 carry a separate CELT high-band copy. Stereo LBRR is written and decoded in the
 libopus frame-major order: stereo predictor and optional mid-only flag, then
@@ -1000,6 +1066,51 @@ passing targeted SILK trellis/quality tests plus `go vet ./...`,
 The same-condition parent-worktree benchmark reduced SILK stereo allocation
 count by approximately 8% and kept hybrid stereo effectively neutral.
 
+Post-audit CELT/music Phase 1 verification on 2026-07-17: adopted the
+constrained-VBR target damping after `go vet ./...`, `go test -count=1 ./...`,
+`go test -count=1 -tags opusref ./...`, and all 12 official vectors passed.
+The full real-corpus scoreboard encoded 140/140 cells. Loss-0 own-byte totals
+were unchanged in every class, the five speech-oriented classes kept the same
+-0.0463 dB aggregate matched gap, the stereo-chords worst fell from +9.69 to
++5.68 dB, and the mixed worst fell from +5.64 to +1.71 dB. The permanent
+code-generated reproducer also requires encoder, Go decoder, and libopus
+decoder final-range equality on every packet.
+
+Post-audit surround Phase 5 verification on 2026-07-18: adopted the
+channel-role energy-mask allocation-trim slice after `go vet ./...`,
+`go test -count=1 ./...`, `go test -count=1 -tags opusref ./...`, all 12
+official vectors, and the full 140-cell real-corpus scoreboard passed. The
+deterministic 5.1/7.1 guard kept every elementary packet length identical to
+the no-mask baseline. Weighted SNR improved from 3.337 to 8.368 dB on the 5.1
+role-rich fixture and from 2.531 to 6.023 dB on 7.1 role-rich; active-channel
+regression stayed below 0.04 dB and LFE was unchanged. Bidirectional libopus
+multistream decoding, surround PLC/FEC, expert duration, duplicate/silent
+mapping, analyzer Reset, and per-packet encoder/decoder final ranges also pass.
+
+Post-audit Medium verification on 2026-07-18 evaluated ten isolated candidates
+against libopus 1.6.1 and retained five:
+
+- packed-packet `PacketHasLBRR` now examines only the recoverable first frame;
+- signal CTL request state is independent from application state and defaults
+  to Auto;
+- high numeric bitrate requests are accepted and clamped at the CTL and
+  per-frame payload ceilings;
+- CELT allocation trim consumes the already-computed TF estimate; and
+- bounded NLSF reconstruction predictor/residual scratch is stack allocated.
+
+Five candidates were measured and fully removed. Numeric requests below
+6000 bit/s produced 127-byte packets where libopus produced 1-15 bytes. A
+legacy `DecodeFEC` CELT fallback broke the retained v1 error contract. A partial
+DTX hangover broke the existing immediate compact-silence contract and did not
+implement the matching SILK state machine. Forcing only the LFE stream to CELT
+reduced the focused LFE SNR from 9.314 to 1.713 dB without the rest of libopus'
+LFE shaping. Finally, surround per-band dynalloc left child bytes and range
+interoperability unchanged but reduced weighted SNR in all four fixtures by
+0.001-0.013 dB, so the existing allocation-trim-only mask consumer remains.
+The retained set passes `go vet ./...`, the full normal and `opusref` suites,
+the full race suite, and all 12 official vectors (maximum RMSE 0.000809); the
+opt-in real-corpus scoreboard completed 140/140 cells.
+
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.
 `TestCGOMultistreamInteroperability` verifies both Go-encoded packets decoded
@@ -1088,20 +1199,30 @@ reference comparison.
   sample-accurate per-link seek metadata, but does not provide multiplexed-stream
   demux.
 - Multistream/surround provide core encode/decode, mapping, aggregate bitrate,
-  and per-stream state access, but do not yet mirror every libopus multistream
-  CTL or its full surround psychoacoustic energy-mask analysis.
+  per-stream state access, and channel-role energy-mask analysis for CELT
+  allocation trim. They do not yet mirror every libopus multistream CTL or the
+  remaining surround-mask consumers: per-band dynalloc, mask-aware VBR and
+  SILK/hybrid rate offsets, and full LFE-special CELT policy.
 - Public PLC covers CELT-only, SILK-only, and hybrid streams for mono, stereo,
   multistream, and surround output.
 - Top-level SILK/hybrid encoder selection is voice-oriented and now accounts
   for rate, channels, bandwidth, CVBR, and active FEC, but it is not yet a full
   libopus-equivalent mode/rate/quality policy. See
-  `docs/MODE_RATE_POLICY_DIFF.md` for the current gap map.
+  `docs/MODE_RATE_POLICY_DIFF.md` for the current gap map. The post-audit policy
+  phase intentionally retained these gaps after two measured gate candidates
+  failed its per-bit adoption criteria.
 - SILK-only and hybrid LBRR/FEC encoding and decoding are available for mono,
   stereo, multistream, and surround output. Hybrid FEC reconstructs the
   redundant SILK low band; CELT elementary streams use PLC during multistream
   FEC recovery.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
   to full libopus-compatible mode/rate-control behavior.
+- The post-audit CVBR fix substantially reduces the deterministic CELT/music
+  worst case without increasing its byte total, but the 24/32 kbps
+  stereo-chords cells still trail libopus by approximately 5.7/5.2 dB. The
+  TF-estimate allocation-trim term improves the remaining focused cells only
+  slightly; tonality slope, stereo saving, and broader dynamic-allocation
+  parity remain future measured candidates.
 - Decoder parity is achieved on the official vectors and the libopus reference;
   the open correctness work is now on the encoder side (bit-exact CELT and the
   broader SILK/hybrid encoder paths).

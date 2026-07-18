@@ -49,6 +49,11 @@ func (e *Encoder) SetVoiceMode() error {
 	return fmt.Errorf("cgoref encoder requires -tags opusref")
 }
 
+// SetMusicMode is unavailable in non-opusref builds.
+func (e *Encoder) SetMusicMode() error {
+	return fmt.Errorf("cgoref encoder requires -tags opusref")
+}
+
 // SetExpertFrameDuration is unavailable in non-opusref builds.
 func (e *Encoder) SetExpertFrameDuration(duration int) error {
 	return fmt.Errorf("cgoref encoder requires -tags opusref")

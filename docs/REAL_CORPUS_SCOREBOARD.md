@@ -1,6 +1,6 @@
 # Real Corpus Matched-Bitrate Scoreboard
 
-Last reviewed: 2026-07-15
+Last reviewed: 2026-07-17
 
 This diagnostic harness measures the Go encoder against libopus on local WAV
 corpus clips at matched bitrate. It is intentionally opt-in because
@@ -38,6 +38,14 @@ Optional environment variables:
 - `OPUS_REAL_CORPUS_OUT`: CSV output path. Default:
   `testdata/real_corpus_scoreboard.csv`.
 - `OPUS_REAL_CORPUS_MAX_SECONDS`: max seconds read from each clip. Default: `6`.
+- `OPUS_REAL_CORPUS_CLASSES`: comma-separated corpus classes to include. Empty
+  runs every discovered class.
+- `OPUS_REAL_CORPUS_BITRATES`: comma-separated bitrates in bit/s. Default:
+  `16000,24000,32000,48000,64000`.
+- `OPUS_REAL_CORPUS_FORCE_BANDWIDTH`: force the Go encoder to `nb`, `mb`, `wb`,
+  `swb`, or `fb` while leaving libopus automatic. Empty or `auto` preserves the
+  normal comparison. This is an ablation control, not a fair default scoreboard
+  condition.
 
 The CSV columns include:
 
@@ -143,3 +151,96 @@ Across the five speech-oriented classes, own bytes are 692,384 versus 689,344
 in the prior run (ratio 1.004), and average matched gap moves from -0.058 dB to
 -0.046 dB. This is the same rate/quality level; the change removes the entropy
 allocation mismatch rather than trading materially more bytes for quality.
+
+## Post-Audit Phase 1: CELT CVBR Startup Damping (2026-07-17)
+
+Phase 1 preserved the synthetic stereo-chords cell as the code-generated
+`TestCELTMusicChordsMatchedBitrateReproducer`, then ranked TF/block,
+dynamic-allocation/trim, stereo, and bandwidth/rate-target decisions. The
+dominant cause was the simplified CELT CVBR target: a quiet tonal stream could
+start at one quarter of its nominal packet target and take several frames to
+refill its reservoir. Forced fullband slightly reduced quality, confirming that
+the config 19 versus config 31 TOC difference was not the cause.
+
+The adopted change applies libopus `compute_vbr`'s constrained-VBR damping in
+the byte domain, approximately `base + 0.67*(target-base)`. It changes the
+temporal distribution of the existing budget without changing CELT mode,
+bandwidth, range-coder symbol order, or the one-second byte totals. The focused
+test checks fresh-encoder packet determinism, first/subsequent TOCs, matched
+bytes, Go/libopus cross-decode, and encoder/Go-decoder/libopus-decoder final
+range equality on every packet.
+
+The libopus scoreboard wrapper now sets `OPUS_SIGNAL_MUSIC` for music/mixed
+classes, matching the Go `SignalMusic` hint. Older published rows left libopus
+at signal `AUTO`; the focused 24-64 kbps reference TOCs and byte totals were
+unchanged, but the comparison-condition correction is recorded explicitly.
+
+Full local run:
+
+```powershell
+$env:OPUS_REAL_CORPUS = "1"
+$env:OPUS_REAL_CORPUS_OUT = "testdata/phase1_adopt_full.csv"
+go test -count=1 -tags opusref -run TestOpusRealCorpusMatchedBitrateScoreboard -v .
+```
+
+Result: 140/140 cells `status=ok`. Against the D-2 Iteration 0 REDO full
+baseline, every class's loss-0 own-byte total is exactly unchanged. The five
+speech-oriented classes keep the same aggregate matched gap, -0.0463 dB.
+
+| class | n | avg gap | min | max | loss-0 byte ratio |
+|---|---:|---:|---:|---:|---:|
+| clean_speech | 20 | +0.08 | 0.00 | +1.50 | 1.000 |
+| noisy_speech | 20 | -0.21 | -1.46 | +0.25 | 1.000 |
+| stereo_speech | 20 | +0.02 | -0.00 | +0.38 | 1.000 |
+| onset_plosive | 20 | -0.02 | -2.00 | +3.50 | 1.000 |
+| source | 20 | -0.10 | -1.28 | +1.30 | 1.000 |
+| mixed | 20 | -1.08 | -1.80 | +1.71 | 1.000 |
+| music | 20 | -2.67 | -4.88 | +5.68 | 1.000 |
+
+Stereo-chords loss-0 cells at matched bytes:
+
+| bitrate | baseline gap | adopted gap | reduction | matched-byte ratio |
+|---:|---:|---:|---:|---:|
+| 16 kbps | +1.82 | -1.35 | 3.16 dB | 0.994 |
+| 24 kbps | +9.18 | +5.68 | 3.50 dB | 0.987 |
+| 32 kbps | +8.07 | +5.21 | 2.86 dB | 0.994 |
+| 48 kbps | +9.69 | +0.94 | 8.75 dB | 0.995 |
+| 64 kbps | +7.70 | -1.42 | 9.12 dB | 0.995 |
+
+The prior music worst falls from +9.69 to +5.68 dB and the mixed worst from
++5.64 to +1.71 dB; no new music or mixed worst cell is created. The remaining
+24/32 kbps chord gap is now the next measured CELT allocation/trim opportunity,
+not evidence that the adopted CVBR correction should be expanded further.
+
+## Post-Audit Medium: CELT TF-Estimate Trim (2026-07-18)
+
+The isolated Medium trial adds the already-computed CELT `tfEstimate` to
+allocation-trim analysis (`trim -= 2*tfEstimate` before quantization). The
+focused 24 kbps stereo-chords matched gap moved from approximately +6.026 to
++5.886 dB. The full opt-in corpus completed 140/140 cells with all loss-0 own
+byte totals unchanged and no class regression above the 0.3 dB gate.
+
+The speech-oriented class summaries remained effectively unchanged. Mixed
+average/worst gaps moved from -1.08/+1.71 to -1.07/+1.64 dB; music moved from
+-2.67/+5.68 to -2.64/+5.61 dB. This is a small allocation-quality correction,
+not a rate increase. Tonality slope and stateful stereo-saving inputs were not
+combined into this trial.
+
+## Post-Audit Phase 3: SILK/Hybrid Policy Gates (2026-07-17)
+
+Phase 3 stopped without adopting a production policy change. A previously
+measured libopus-style unified predictive threshold left target clean/noisy
+speech unchanged and increased stereo-speech bytes by 63.3%. A new targeted
+active-broadband exit from low-rate SILK to CELT completed 100/100 selected
+speech cells but regressed onset/source average matched gaps by 0.11/0.09 dB
+while increasing loss-0 bytes by 2%/1%.
+
+The latter experiment followed a forced-fullband ablation. Blanket fullband
+was not eligible for adoption because clean/stereo byte totals increased by
+1.59x/2.63x. The narrower automatic gate removed those non-target byte
+regressions but lost the apparent onset/source gain through additional mode
+transitions. Both candidate implementations were removed; the diagnostic
+class, bitrate, and bandwidth controls remain in the scoreboard harness.
+
+See `.claude/memory/iterations/silk-hybrid-policy-phase3-2026-07-17.md` for the
+decision table and exact command.

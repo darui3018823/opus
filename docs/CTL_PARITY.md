@@ -1,6 +1,6 @@
 # CTL and Helper Parity Matrix
 
-Last reviewed: 2026-07-17
+Last reviewed: 2026-07-18
 
 Baseline: libopus 1.6.1 public headers:
 
@@ -33,17 +33,17 @@ Status values:
 | libopus CTL | Status | Go API / note |
 |---|---:|---|
 | `OPUS_SET_APPLICATION` / `OPUS_GET_APPLICATION` | Partial | `SetApplication`, `Application`; API/state is exposed, but mode policy is narrower than libopus |
-| `OPUS_SET_BITRATE` / `OPUS_GET_BITRATE` | Partial | `SetBitrate`, `Bitrate`, `EffectiveBitrate`; accepted numeric range is 6000–510000 bit/s plus auto/max sentinels |
+| `OPUS_SET_BITRATE` / `OPUS_GET_BITRATE` | Partial | `SetBitrate`, `Bitrate`, `EffectiveBitrate`; numeric requests >=6000 bit/s plus auto/max sentinels are accepted. High requests clamp to 750000 bit/s per channel at the CTL boundary and to the 1275-byte limit per constituent frame when applied. Positive requests below 6000 remain unsupported because the predictive encoder cannot yet reproduce libopus' compact low-rate packets |
 | `OPUS_SET_MAX_BANDWIDTH` / `OPUS_GET_MAX_BANDWIDTH` | Supported | `SetMaxBandwidth`, `MaxBandwidth` |
 | `OPUS_SET_BANDWIDTH` / `OPUS_GET_BANDWIDTH` | Supported | `SetBandwidth`, `Bandwidth`, `GetBandwidth` |
 | `OPUS_SET_COMPLEXITY` / `OPUS_GET_COMPLEXITY` | Supported | `SetComplexity`, `Complexity` |
-| `OPUS_SET_INBAND_FEC` / `OPUS_GET_INBAND_FEC` | Supported | `SetInbandFEC`, `InbandFEC`; LBRR is SILK/hybrid only |
+| `OPUS_SET_INBAND_FEC` / `OPUS_GET_INBAND_FEC` | Supported | `SetInbandFEC`, `InbandFEC`; LBRR is SILK/hybrid only, and pending LBRR is carried through a following digital-silence packet |
 | `OPUS_SET_PACKET_LOSS_PERC` / `OPUS_GET_PACKET_LOSS_PERC` | Supported | `SetPacketLossPerc`, `PacketLossPerc` |
 | `OPUS_SET_DTX` / `OPUS_GET_DTX` | Supported | `SetDTX`, `DTX` |
 | `OPUS_SET_VBR` / `OPUS_GET_VBR` | Partial | `SetVBR`, `VBR`; CELT and non-redundant hybrid sizing are wired, while broader SILK/hybrid policy is narrower than libopus |
 | `OPUS_SET_VBR_CONSTRAINT` / `OPUS_GET_VBR_CONSTRAINT` | Partial | `SetVBRConstraint`, `VBRConstraint`; broader SILK/hybrid CVBR policy is narrower than libopus |
 | `OPUS_SET_FORCE_CHANNELS` / `OPUS_GET_FORCE_CHANNELS` | Supported | `SetForceChannels`, `ForceChannels` |
-| `OPUS_SET_SIGNAL` / `OPUS_GET_SIGNAL` | Partial | `SetSignalType`, `SignalType`; API/state is exposed, but mode and quality policy is narrower than libopus |
+| `OPUS_SET_SIGNAL` / `OPUS_GET_SIGNAL` | Partial | `SetSignalType`, `SignalType`; request state defaults to Auto and remains independent from Application, but mode and quality policy is narrower than libopus |
 | `OPUS_GET_LOOKAHEAD` | Supported | `Lookahead` |
 | `OPUS_SET_LSB_DEPTH` / `OPUS_GET_LSB_DEPTH` | Supported | `SetLSBDepth`, `LSBDepth` |
 | `OPUS_SET_EXPERT_FRAME_DURATION` / `OPUS_GET_EXPERT_FRAME_DURATION` | Supported | `SetExpertFrameDuration`, `ExpertFrameDuration`; fixed durations treat Encode's `frameSize` as available samples and consume the selected prefix |
@@ -61,10 +61,19 @@ Status values:
 | `OPUS_SET_GAIN` / `OPUS_GET_GAIN` | Supported | `SetGain`, `Gain` |
 | `OPUS_GET_LAST_PACKET_DURATION` | Supported | `GetLastPacketDuration` |
 | `OPUS_GET_PITCH` | Supported | `Pitch` |
-| `OPUS_GET_FINAL_RANGE` | Supported | `FinalRange` |
+| `OPUS_GET_FINAL_RANGE` | Supported | `FinalRange`; PLC reports zero, SILK FEC reports the recovered first-frame entropy range, hybrid FEC reports the CELT PLC RNG state, and multistream/surround XOR elementary ranges |
 | `OPUS_GET_BANDWIDTH` | Supported | `Bandwidth`, `GetBandwidth`; returns `BandwidthAuto` before first successful decode or after reset |
 | `OPUS_SET_PHASE_INVERSION_DISABLED` / `OPUS_GET_PHASE_INVERSION_DISABLED` | Supported | `SetPhaseInversionDisabled`, `PhaseInversionDisabled` |
 | DRED decoder CTLs | Out of scope | DRED neural PLC/FEC is not implemented |
+
+## Decoder Loss-Recovery Calls
+
+| libopus behavior | Status | Go API / note |
+|---|---:|---|
+| PLC with explicit missing duration | Supported | `DecodePLC`, `DecodePLC24`, `DecodePLCFloat`, `DecodePLCFloat32`; accepts every positive 2.5 ms multiple through 120 ms and returns zero concealment before the first packet |
+| FEC with explicit missing duration | Supported | `DecodeFECWithDuration`, `DecodeFEC24`, `DecodeFECFloat`, `DecodeFECFloat32`; packed carriers use only their first Opus frame and PLC fills any prefix or unavailable-FEC case |
+| Multistream/surround PLC and FEC | Supported | Matching methods on `MultistreamDecoder`; `SurroundDecoder` inherits them. Recovery uses one shared missing duration and commits elementary states atomically |
+| Legacy inferred-duration FEC | Supported | `DecodeFEC` retains the v1 signature, infers the carrier's total duration, and retains the CELT-only error contract |
 
 ## Packet, Repacketizer, and PCM Helpers
 
@@ -75,7 +84,7 @@ Status values:
 | `opus_packet_get_nb_channels` | Supported | `PacketGetNumChannels` |
 | `opus_packet_get_nb_frames` | Supported | `PacketGetNumFrames` |
 | `opus_packet_get_nb_samples` / `opus_decoder_get_nb_samples` | Supported | `PacketGetNumSamples` |
-| `opus_packet_has_lbrr` | Supported | `PacketHasLBRR` |
+| `opus_packet_has_lbrr` | Supported | `PacketHasLBRR`; packed packets inspect only the first Opus frame, matching the frame recoverable by libopus FEC |
 | `opus_pcm_soft_clip` | Supported | `SoftClipFloat32` |
 | `opus_repacketizer_*` | Supported | `NewRepacketizer`, `Cat`, `NumFrames`, `Out`, `OutRange`, `Reset` |
 | `opus_packet_pad` / `opus_packet_unpad` | Supported | `PacketPad`, `PacketUnpad` |

@@ -45,6 +45,8 @@ type Decoder struct {
 
 	// lastFinalRange is the range coder rng after the last Decode call.
 	lastFinalRange uint32
+	lastStartBand  int
+	lastEndBand    int
 	disableInv     bool
 }
 
@@ -331,6 +333,8 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	}
 
 	d.lastFinalRange = dec.GetRng()
+	d.lastStartBand = start
+	d.lastEndBand = end
 	d.frameCount++
 	return output, nil
 }
@@ -412,6 +416,47 @@ func (d *Decoder) CopyStateFrom(src *Decoder) {
 	}
 
 	d.lastFinalRange = src.lastFinalRange
+	d.lastStartBand = src.lastStartBand
+	d.lastEndBand = src.lastEndBand
+}
+
+// CopyAllStateFrom copies the complete decoder configuration and streaming
+// state from src. Unlike CopyStateFrom, this is intended for same-geometry
+// transactional snapshots rather than logical state transfer across modes.
+func (d *Decoder) CopyAllStateFrom(src *Decoder) {
+	if src == nil || src == d {
+		return
+	}
+	*d = *src
+	for ch, proc := range src.bandProcs {
+		if proc == nil {
+			d.bandProcs[ch] = nil
+			continue
+		}
+		clone := NewBandProcessor(src.mode)
+		for i, band := range proc.bands {
+			clone.bands[i].Start = band.Start
+			clone.bands[i].Size = band.Size
+			clone.bands[i].Energy = band.Energy
+			clone.bands[i].Coeffs = append([]float64(nil), band.Coeffs...)
+		}
+		d.bandProcs[ch] = clone
+	}
+	d.overlap = make([][]float64, len(src.overlap))
+	for ch := range src.overlap {
+		d.overlap[ch] = append([]float64(nil), src.overlap[ch]...)
+	}
+	d.prevEnergies = append([]float64(nil), src.prevEnergies...)
+	d.prevLogE = append([]float64(nil), src.prevLogE...)
+	d.prevLogE2 = append([]float64(nil), src.prevLogE2...)
+	d.postFilter = make([]*PostFilter, len(src.postFilter))
+	for ch, filter := range src.postFilter {
+		if filter != nil {
+			d.postFilter[ch] = NewPostFilter()
+			d.postFilter[ch].copyFrom(filter)
+		}
+	}
+	d.preemphMem = append([]float64(nil), src.preemphMem...)
 }
 
 func (d *Decoder) applyDeemphasis(ch int, samples []float64) {
@@ -628,6 +673,28 @@ func (d *Decoder) decodeLoss() []float64 {
 		d.prevLogE2[i] -= logDecay
 	}
 
+	// Hybrid CELT PLC always uses the noise path in libopus because its start
+	// band is non-zero. Advance the same LCG once per active coefficient so the
+	// public hybrid-FEC final range matches OPUS_GET_FINAL_RANGE even though this
+	// decoder's concealment waveform remains the existing lightweight fade.
+	if d.lastStartBand > 0 {
+		start := d.lastStartBand
+		end := d.lastEndBand
+		if end > d.mode.Bands.NumBands {
+			end = d.mode.Bands.NumBands
+		}
+		seed := d.lastFinalRange
+		m := 1 << d.mode.LM
+		for ch := 0; ch < d.mode.Channels; ch++ {
+			for band := start; band < end; band++ {
+				for n := 0; n < d.mode.Bands.BandSizes[band]*m; n++ {
+					seed = celtLCGRand(seed)
+				}
+			}
+		}
+		d.lastFinalRange = seed
+	}
+
 	return output
 }
 
@@ -672,6 +739,8 @@ func (d *Decoder) Reset() {
 		d.prevLogE2[i] = -28.0
 	}
 	d.lastFinalRange = 0
+	d.lastStartBand = 0
+	d.lastEndBand = 0
 
 	// Reset post-filters
 	for _, pf := range d.postFilter {

@@ -1,6 +1,6 @@
 # SILK/Hybrid Mode-Rate-Quality Policy Diff
 
-Last reviewed: 2026-07-16
+Last reviewed: 2026-07-17
 
 Scope: Phase D-1 only. This document compares libopus 1.6.1 mode decision and
 rate-control policy against the current Go implementation. It deliberately does
@@ -89,6 +89,21 @@ per-bit improvement or an interoperability necessity.
 | Hybrid lower/upper bounds | Above SILK-only, up to 112 kbps mono / 192 kbps stereo. | 24/48 kHz speech and mixed corpus; D-2 Iteration 0 removed the baseline encode-size errors, so future bound changes can be judged on gap and byte deltas. |
 | Automatic bandwidth narrowing | Coarse Go thresholds plus FFT narrowing. | Compare forced bandwidth vs auto cells; track first TOC config and matched SNR. |
 | Stereo width policy | No libopus-equivalent top-level width reduction. | Stereo speech and mixed corpus; track L/R SNR, correlation, clipping, and bytes. |
+
+## Post-Audit Phase 3 Closeout (2026-07-17)
+
+Phase 3 adopted no additional production gate. The libopus-style unified
+predictive threshold candidate was rejected because target clean/noisy speech
+did not improve and stereo-speech bytes increased by 63.3%. A narrower
+active-broadband exit from low-rate SILK to CELT was also rejected: targeted
+onset/source average matched gaps regressed by 0.11/0.09 dB while loss-0 bytes
+increased by 2%/1%.
+
+These are two consecutive failures under the plan's stopping rule. The
+remaining partial/unsupported rows above continue to describe real known gaps;
+they are intentionally not hidden behind a policy gate without a measured
+per-bit win. Full evidence is in
+`.claude/memory/iterations/silk-hybrid-policy-phase3-2026-07-17.md`.
 
 ## Guardrails
 

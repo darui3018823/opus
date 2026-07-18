@@ -1,6 +1,6 @@
 # CTL and Helper Parity Matrix
 
-Last reviewed: 2026-07-18
+Last reviewed: 2026-07-19
 
 Baseline: libopus 1.6.1 public headers:
 

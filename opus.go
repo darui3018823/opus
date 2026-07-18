@@ -2030,6 +2030,11 @@ type Decoder struct {
 	celtDecoders [4][4][2]*celt.Decoder
 	lastCeltDec  *celt.Decoder
 	prevMode     int
+	// prevRedundancy records that the previous hybrid frame ended with a
+	// trailing CELT redundancy frame. libopus keeps this separately from
+	// prev_mode so the next lost frame uses CELT-only PLC while normal packet
+	// transition handling still sees the original hybrid framing mode.
+	prevRedundancy bool
 
 	// SILK decoders indexed by [rateIdx 0-2][chIdx 0=mono,1=stereo].
 	// rateIdx: 0=8kHz, 1=12kHz, 2=16kHz
@@ -2744,12 +2749,13 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 		}
 		if config >= 12 {
 			// Hybrid mode: SILK low band + CELT high band sharing one stream.
-			out, err := d.decodeHybridPacket(payload, countCode, config, pktChannels)
+			out, trailingRedundancy, err := d.decodeHybridPacket(payload, countCode, config, pktChannels)
 			if err == nil {
 				d.lastPacketDuration = duration
 				d.lastPacketConfig = config
 				d.lastPacketChannels = pktChannels
 				d.prevMode = framing.ModeHybrid
+				d.prevRedundancy = trailingRedundancy
 				d.applyGain(out)
 			}
 			return out, err
@@ -2761,6 +2767,7 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 			d.lastPacketConfig = config
 			d.lastPacketChannels = pktChannels
 			d.prevMode = framing.ModeSILKOnly
+			d.prevRedundancy = false
 			d.applyGain(out)
 		}
 		return out, err
@@ -2827,6 +2834,7 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 	d.lastPacketChannels = pktChannels
 	d.lastFinalRange = rangeFinal
 	d.prevMode = framing.ModeCELTOnly
+	d.prevRedundancy = false
 	d.applyGain(allPCM)
 	return allPCM, nil
 }
@@ -3135,7 +3143,7 @@ func (d *Decoder) decodeLeadingRedundancy(frame []byte, pktChannels, endBand int
 	return redPCM
 }
 
-func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChannels int) ([]float64, error) {
+func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChannels int) ([]float64, bool, error) {
 	const rateKHz = 16 // hybrid SILK layer is always wideband
 	ri := silkRateIdx(rateKHz)
 	ci := pktChannels - 1
@@ -3161,7 +3169,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 	}
 
 	if d.silkDecoders[ri][ci] == nil {
-		return nil, fmt.Errorf("SILK decoder not initialized for hybrid rate=%dkHz ch=%d", rateKHz, pktChannels)
+		return nil, false, fmt.Errorf("SILK decoder not initialized for hybrid rate=%dkHz ch=%d", rateKHz, pktChannels)
 	}
 	info := d.silkDecoders[ri][ci]
 	info.dec.SetFrameMs(frameDurationMs)
@@ -3196,6 +3204,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 
 	var allPCM []float64
 	var rangeFinal uint32
+	trailingRedundancy := false
 	for si, stream := range silkStreams {
 		// One shared range decoder per Opus frame: SILK reads first, CELT after.
 		dec := entcode.NewDecoder(stream)
@@ -3238,6 +3247,9 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 				dec.ShrinkStorage(redundancyBytes)
 			}
 		}
+		// Each constituent Opus frame replaces libopus' prev_redundancy state;
+		// after a packed packet only the final frame therefore remains visible.
+		trailingRedundancy = redundancy && !celtToSilk
 
 		var leadingRedundancy []float64
 		if redundancy && celtToSilk && redundancyBytes >= 2 && celtLen+redundancyBytes <= len(stream) {
@@ -3304,7 +3316,14 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		monoPeer.dec.CopyPrimaryStateFrom(info.dec)
 	}
 
-	return allPCM, nil
+	return allPCM, trailingRedundancy, nil
+}
+
+func (d *Decoder) previousLossMode() int {
+	if d.prevRedundancy {
+		return framing.ModeCELTOnly
+	}
+	return d.prevMode
 }
 
 // ensureSilkResampler makes sure physical channel ch has a bit-exact SILK
@@ -3515,17 +3534,18 @@ func (d *Decoder) validatePLCState(frameSize int) error {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
 		return fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
-	if d.prevMode == -1 {
+	lossMode := d.previousLossMode()
+	if lossMode == -1 {
 		return nil
 	}
-	if d.prevMode == framing.ModeCELTOnly {
+	if lossMode == framing.ModeCELTOnly {
 		if d.lastCeltDec == nil {
 			return fmt.Errorf("%w: missing CELT decoder history", ErrInvalidState)
 		}
 		return nil
 	}
-	if d.prevMode != framing.ModeSILKOnly && d.prevMode != framing.ModeHybrid {
-		return fmt.Errorf("%w: unsupported previous decoder mode %d", ErrInvalidState, d.prevMode)
+	if lossMode != framing.ModeSILKOnly && lossMode != framing.ModeHybrid {
+		return fmt.Errorf("%w: unsupported previous decoder mode %d", ErrInvalidState, lossMode)
 	}
 	if d.lastPacketConfig < 0 || d.lastPacketChannels < 1 {
 		return fmt.Errorf("%w: missing SILK decoder history", ErrInvalidState)
@@ -3535,7 +3555,7 @@ func (d *Decoder) validatePLCState(frameSize int) error {
 	if info == nil || info.dec == nil {
 		return fmt.Errorf("%w: SILK decoder for %d kHz and %d channels", ErrInvalidState, rateKHz, d.lastPacketChannels)
 	}
-	if d.prevMode == framing.ModeHybrid {
+	if lossMode == framing.ModeHybrid {
 		if d.lastCeltDec == nil {
 			return fmt.Errorf("%w: missing CELT history for hybrid PLC", ErrInvalidState)
 		}
@@ -3544,14 +3564,15 @@ func (d *Decoder) validatePLCState(frameSize int) error {
 }
 
 func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
-	if d.prevMode == -1 {
+	lossMode := d.previousLossMode()
+	if lossMode == -1 {
 		return make([]float64, frameSize*d.channels), nil
 	}
 
-	if d.prevMode == framing.ModeCELTOnly {
+	if lossMode == framing.ModeCELTOnly {
 		out := make([]float64, 0, frameSize*d.channels)
 		for remaining := frameSize; remaining > 0; {
-			chunk := lossDecodeChunk(remaining, d.sampleRate, d.prevMode)
+			chunk := lossDecodeChunk(remaining, d.sampleRate, lossMode)
 			frame, err := d.decodeCELTPLCFrame(chunk)
 			if err != nil {
 				return nil, err
@@ -3559,11 +3580,13 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 			out = append(out, frame...)
 			remaining -= chunk
 		}
+		d.prevMode = framing.ModeCELTOnly
+		d.prevRedundancy = false
 		return out, nil
 	}
 
-	if d.prevMode != framing.ModeSILKOnly && d.prevMode != framing.ModeHybrid {
-		return nil, fmt.Errorf("%w: unsupported previous decoder mode %d", ErrInvalidState, d.prevMode)
+	if lossMode != framing.ModeSILKOnly && lossMode != framing.ModeHybrid {
+		return nil, fmt.Errorf("%w: unsupported previous decoder mode %d", ErrInvalidState, lossMode)
 	}
 	if d.lastPacketConfig < 0 || d.lastPacketChannels < 1 {
 		return nil, fmt.Errorf("%w: missing SILK decoder history", ErrInvalidState)
@@ -3578,7 +3601,7 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 	}
 	out := make([]float64, 0, frameSize*d.channels)
 	for remaining := frameSize; remaining > 0; {
-		chunk := lossDecodeChunk(remaining, d.sampleRate, d.prevMode)
+		chunk := lossDecodeChunk(remaining, d.sampleRate, lossMode)
 		decodeSamples := chunk
 		minSILKSamples := d.sampleRate / 100 // SILK PLC produces at least 10 ms.
 		if decodeSamples < minSILKSamples {
@@ -3597,7 +3620,7 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 		frame := d.resampleSILK(silkPCM, 1, d.lastPacketChannels, false)
 		frame = padOrTrim(frame, decodeSamples*d.channels)
 		frame = frame[:chunk*d.channels]
-		if d.prevMode == framing.ModeHybrid {
+		if lossMode == framing.ModeHybrid {
 			celtPCM, err := d.decodeCELTPLCFrame(chunk)
 			if err != nil {
 				return nil, err
@@ -3838,7 +3861,7 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	// earlier part of a longer loss is concealed first. A CELT packet, a CELT
 	// predecessor, or a loss shorter than one packet frame is all-PLC.
 	packetFrameSize := info.samplesPerFrame
-	if frameSize < packetFrameSize || info.mode == ModeCELTOnly || d.prevMode == framing.ModeCELTOnly {
+	if frameSize < packetFrameSize || info.mode == ModeCELTOnly || d.previousLossMode() == framing.ModeCELTOnly {
 		pcm, err := d.decodePLCFloat(frameSize)
 		return pcm, 0, err
 	}
@@ -3920,6 +3943,7 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	} else {
 		d.prevMode = framing.ModeSILKOnly
 	}
+	d.prevRedundancy = false
 	return out, finalRange, nil
 }
 
@@ -3931,7 +3955,7 @@ func (d *Decoder) validateFECState(data []byte, frameSize int) error {
 	if err != nil {
 		return err
 	}
-	if frameSize < info.samplesPerFrame || info.mode == ModeCELTOnly || d.prevMode == framing.ModeCELTOnly {
+	if frameSize < info.samplesPerFrame || info.mode == ModeCELTOnly || d.previousLossMode() == framing.ModeCELTOnly {
 		return d.validatePLCState(frameSize)
 	}
 	config, _, _ := framing.ParseTOC(data[0])
@@ -3957,6 +3981,7 @@ func (d *Decoder) cloneState() (*Decoder, error) {
 	clone.frameSize = d.frameSize
 	clone.internalFrameSize = d.internalFrameSize
 	clone.prevMode = d.prevMode
+	clone.prevRedundancy = d.prevRedundancy
 	clone.lastPacketDuration = d.lastPacketDuration
 	clone.lastPacketConfig = d.lastPacketConfig
 	clone.lastPacketChannels = d.lastPacketChannels
@@ -4068,6 +4093,7 @@ func (d *Decoder) Reset() error {
 	}
 	d.lastCeltDec = nil
 	d.prevMode = -1
+	d.prevRedundancy = false
 	d.lastPacketConfig = -1
 	d.lastPacketChannels = 0
 	d.lastFinalRange = 0

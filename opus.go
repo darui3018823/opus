@@ -3206,6 +3206,9 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 	var rangeFinal uint32
 	trailingRedundancy := false
 	for si, stream := range silkStreams {
+		// libopus replaces prev_redundancy for every constituent frame. An
+		// unreadable final frame must therefore clear an earlier frame's value.
+		trailingRedundancy = false
 		// One shared range decoder per Opus frame: SILK reads first, CELT after.
 		dec := entcode.NewDecoder(stream)
 		if dec.Error() != nil {
@@ -3324,6 +3327,17 @@ func (d *Decoder) previousLossMode() int {
 		return framing.ModeCELTOnly
 	}
 	return d.prevMode
+}
+
+// previousPacketMode is the framing mode of the most recently received data
+// packet. Unlike previousLossMode it is not changed by PLC; libopus uses this
+// state (st->mode) when deciding whether a following packet may carry FEC.
+func (d *Decoder) previousPacketMode() int {
+	if d.lastPacketConfig < 0 {
+		return -1
+	}
+	mode, _, _ := framing.ParseTOCConfig(d.lastPacketConfig)
+	return mode
 }
 
 // ensureSilkResampler makes sure physical channel ch has a bit-exact SILK
@@ -3861,7 +3875,7 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	// earlier part of a longer loss is concealed first. A CELT packet, a CELT
 	// predecessor, or a loss shorter than one packet frame is all-PLC.
 	packetFrameSize := info.samplesPerFrame
-	if frameSize < packetFrameSize || info.mode == ModeCELTOnly || d.previousLossMode() == framing.ModeCELTOnly {
+	if frameSize < packetFrameSize || info.mode == ModeCELTOnly || d.previousPacketMode() == framing.ModeCELTOnly {
 		pcm, err := d.decodePLCFloat(frameSize)
 		return pcm, 0, err
 	}
@@ -3955,7 +3969,7 @@ func (d *Decoder) validateFECState(data []byte, frameSize int) error {
 	if err != nil {
 		return err
 	}
-	if frameSize < info.samplesPerFrame || info.mode == ModeCELTOnly || d.previousLossMode() == framing.ModeCELTOnly {
+	if frameSize < info.samplesPerFrame || info.mode == ModeCELTOnly || d.previousPacketMode() == framing.ModeCELTOnly {
 		return d.validatePLCState(frameSize)
 	}
 	config, _, _ := framing.ParseTOC(data[0])

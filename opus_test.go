@@ -438,7 +438,8 @@ func TestEncoderSetBitrate(t *testing.T) {
 		{"Automatic", BitrateAuto, false},
 		{"Maximum", BitrateMax, false},
 		{"Too low", 5000, true},
-		{"Too high", 600000, true},
+		{"High request", 600000, false},
+		{"Non-positive", 0, true},
 	}
 
 	for _, tt := range tests {

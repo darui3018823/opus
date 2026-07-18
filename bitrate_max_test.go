@@ -179,3 +179,50 @@ func TestBitrateMaxMatchesNumericAfterHybridHistory(t *testing.T) {
 		}
 	}
 }
+
+func TestNumericBitrateHighRequestsClampLikeLibopus(t *testing.T) {
+	const rate = 48000
+	for _, channels := range []int{1, 2} {
+		for _, request := range []int{510001, 600000, 750000, 1500000, 1500001} {
+			name := fmt.Sprintf("%dch/%d", channels, request)
+			t.Run(name, func(t *testing.T) {
+				enc, err := NewEncoder(rate, channels, ApplicationAudio)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := enc.SetBitrate(request); err != nil {
+					t.Fatal(err)
+				}
+				wantSetting := request
+				if ceiling := 750000 * channels; wantSetting > ceiling {
+					wantSetting = ceiling
+				}
+				if got := enc.Bitrate(); got != wantSetting {
+					t.Fatalf("Bitrate()=%d, want %d", got, wantSetting)
+				}
+				if got := enc.EffectiveBitrate(); got != 510000 {
+					t.Fatalf("20 ms EffectiveBitrate()=%d, want 510000", got)
+				}
+
+				short, err := NewEncoder(rate, channels, ApplicationAudio)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := short.SetBitrate(request); err != nil {
+					t.Fatal(err)
+				}
+				frameSize := rate / 100
+				if _, err := short.EncodeFloat(make([]float64, frameSize*channels), frameSize); err != nil {
+					t.Fatal(err)
+				}
+				wantEffective := wantSetting
+				if wantEffective > 1020000 {
+					wantEffective = 1020000
+				}
+				if got := short.EffectiveBitrate(); got != wantEffective {
+					t.Fatalf("10 ms EffectiveBitrate()=%d, want %d", got, wantEffective)
+				}
+			})
+		}
+	}
+}

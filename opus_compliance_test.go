@@ -375,8 +375,11 @@ func TestBitrateControl(t *testing.T) {
 	if err := enc.SetBitrate(5000); err == nil {
 		t.Error("SetBitrate(5000) should fail (below 6000)")
 	}
-	if err := enc.SetBitrate(600000); err == nil {
-		t.Error("SetBitrate(600000) should fail (above 510000)")
+	if err := enc.SetBitrate(600000); err != nil {
+		t.Fatalf("SetBitrate(600000) should clamp successfully: %v", err)
+	}
+	if got := enc.EffectiveBitrate(); got != 510000 {
+		t.Fatalf("SetBitrate(600000) effective=%d, want per-frame cap 510000", got)
 	}
 }
 

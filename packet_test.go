@@ -127,6 +127,27 @@ func TestPacketHasLBRR(t *testing.T) {
 	if got, err := PacketHasLBRR(second); err != nil || !got {
 		t.Fatalf("second PacketHasLBRR = %v, %v; want true, nil", got, err)
 	}
+
+	pack := func(packets ...[]byte) []byte {
+		t.Helper()
+		rp := NewRepacketizer()
+		for _, packet := range packets {
+			if err := rp.Cat(packet); err != nil {
+				t.Fatal(err)
+			}
+		}
+		packet, err := rp.Out()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return packet
+	}
+	if got, err := PacketHasLBRR(pack(first, second)); err != nil || got {
+		t.Fatalf("packed later-only LBRR = %v, %v; want false, nil", got, err)
+	}
+	if got, err := PacketHasLBRR(pack(second, first)); err != nil || !got {
+		t.Fatalf("packed first-frame LBRR = %v, %v; want true, nil", got, err)
+	}
 }
 
 func TestBandwidthGetters(t *testing.T) {

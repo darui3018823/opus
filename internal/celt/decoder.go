@@ -416,6 +416,8 @@ func (d *Decoder) CopyStateFrom(src *Decoder) {
 	}
 
 	d.lastFinalRange = src.lastFinalRange
+	d.lastStartBand = src.lastStartBand
+	d.lastEndBand = src.lastEndBand
 }
 
 // CopyAllStateFrom copies the complete decoder configuration and streaming

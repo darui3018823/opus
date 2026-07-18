@@ -128,6 +128,40 @@ func TestCeltCopyStateFrom(t *testing.T) {
 	}
 }
 
+func TestCeltDecoderCopyStateFromPreservesPLCBandBounds(t *testing.T) {
+	src, err := NewDecoder(960, 48000, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst, err := NewDecoder(480, 48000, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	src.lastFinalRange = 0x12345678
+	src.lastStartBand = 17
+	src.lastEndBand = 21
+	dst.CopyStateFrom(src)
+
+	if dst.lastStartBand != src.lastStartBand || dst.lastEndBand != src.lastEndBand {
+		t.Fatalf("PLC band bounds after CopyStateFrom = [%d,%d), want [%d,%d)",
+			dst.lastStartBand, dst.lastEndBand, src.lastStartBand, src.lastEndBand)
+	}
+
+	wantRange := src.lastFinalRange
+	for band := src.lastStartBand; band < src.lastEndBand; band++ {
+		for n := 0; n < dst.mode.Bands.BandSizes[band]*(1<<dst.mode.LM); n++ {
+			wantRange = celtLCGRand(wantRange)
+		}
+	}
+	if _, err := dst.DecodePLC(); err != nil {
+		t.Fatal(err)
+	}
+	if got := dst.LastFinalRange(); got != wantRange {
+		t.Fatalf("cross-LM hybrid PLC final range = %08x, want %08x", got, wantRange)
+	}
+}
+
 // TestCeltSilenceMinimalSize verifies that with DTX enabled, a silent frame
 // produces a minimal packet even in CBR mode, while a loud frame still fills
 // the target.

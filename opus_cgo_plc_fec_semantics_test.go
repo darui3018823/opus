@@ -3,6 +3,7 @@
 package opus_test
 
 import (
+	"fmt"
 	"math"
 	"testing"
 
@@ -128,32 +129,36 @@ func TestCGODecodeLossSemantics(t *testing.T) {
 		if mode, err := opus.PacketGetMode(hybridPackets[5]); err != nil || mode != opus.ModeHybrid {
 			t.Fatalf("carrier mode=(%d,%v), want hybrid", mode, err)
 		}
-		goHybrid, _ := opus.NewDecoder(hybridRate, 1)
-		refHybrid, err := cgoref.NewDecoder(hybridRate, 1)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer refHybrid.Close()
-		for p := 0; p < lost; p++ {
-			if _, err := goHybrid.DecodeFloat(hybridPackets[p]); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := refHybrid.DecodeFloat(hybridPackets[p], hybridFrameSize); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if _, err := goHybrid.DecodeFECFloat(hybridPackets[lost+1], hybridFrameSize); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := refHybrid.DecodeFloatFEC(hybridPackets[lost+1], hybridFrameSize); err != nil {
-			t.Fatal(err)
-		}
-		refHybridRange, err := refHybrid.FinalRange()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if goHybrid.FinalRange() != refHybridRange {
-			t.Fatalf("hybrid FEC range: Go=%08x ref=%08x", goHybrid.FinalRange(), refHybridRange)
+		for _, lossDuration := range []int{hybridFrameSize, hybridFrameSize + hybridFrameSize/2} {
+			t.Run(fmt.Sprintf("loss-%d-samples", lossDuration), func(t *testing.T) {
+				goHybrid, _ := opus.NewDecoder(hybridRate, 1)
+				refHybrid, err := cgoref.NewDecoder(hybridRate, 1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer refHybrid.Close()
+				for p := 0; p < lost; p++ {
+					if _, err := goHybrid.DecodeFloat(hybridPackets[p]); err != nil {
+						t.Fatal(err)
+					}
+					if _, err := refHybrid.DecodeFloat(hybridPackets[p], hybridFrameSize); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if _, err := goHybrid.DecodeFECFloat(hybridPackets[lost+1], lossDuration); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := refHybrid.DecodeFloatFEC(hybridPackets[lost+1], lossDuration); err != nil {
+					t.Fatal(err)
+				}
+				refHybridRange, err := refHybrid.FinalRange()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if goHybrid.FinalRange() != refHybridRange {
+					t.Fatalf("hybrid FEC range: Go=%08x ref=%08x", goHybrid.FinalRange(), refHybridRange)
+				}
+			})
 		}
 	})
 }

@@ -5,7 +5,7 @@ The current v1 API remains supported; do not make these changes in a v1
 release. Before any v2 work, validate real caller impact and provide a
 migration/deprecation path where practical.
 
-Last audited: 2026-07-17, against the post-`v1.2.0` implementation.
+Last audited: 2026-07-19, against the `v1.4.0` release candidate.
 
 ## Strong candidates
 

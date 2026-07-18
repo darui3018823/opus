@@ -94,6 +94,10 @@ type Encoder struct {
 	// automatic). Both use the public Bandwidth* constants.
 	maxBandwidth    int
 	forcedBandwidth int
+	// signalSetting is the public OPUS_SET_SIGNAL-style request. SignalAuto
+	// remains observable as Auto while the internal CELT hint is derived from
+	// application.
+	signalSetting SignalType
 
 	// lastDetectedBW is the framing bandwidth chosen by the signal-driven detector
 	// on the previous auto-selection packet (negative = no history). It seeds the
@@ -264,6 +268,25 @@ func signalTypeForApplication(application Application) celt.SignalType {
 		return celt.SignalVoice
 	default: // ApplicationAudio, ApplicationRestrictedLowDelay
 		return celt.SignalMusic
+	}
+}
+
+func (e *Encoder) effectiveSignalType() celt.SignalType {
+	if e.signalSetting == SignalAuto {
+		return signalTypeForApplication(e.application)
+	}
+	return e.signalSetting
+}
+
+func (e *Encoder) syncSignalType() {
+	hint := e.effectiveSignalType()
+	for _, enc := range e.celtEncoders {
+		if enc != nil {
+			enc.SetSignalType(hint)
+		}
+	}
+	if e.redundancyCelt != nil {
+		e.redundancyCelt.SetSignalType(hint)
 	}
 }
 
@@ -586,6 +609,7 @@ func (e *Encoder) redundancyEncoder() (*celt.Encoder, error) {
 			return nil, fmt.Errorf("failed to create redundancy CELT encoder: %w", err)
 		}
 		c.SetPhaseInversionDisabled(e.phaseInversionDisabled)
+		c.SetSignalType(e.effectiveSignalType())
 		e.redundancyCelt = c
 	}
 	return e.redundancyCelt, nil
@@ -1344,7 +1368,7 @@ func (e *Encoder) selectCELTEncoder(frameSize int) error {
 	next.SetRateMode(e.rateMode)
 	next.SetDTX(e.dtx)
 	next.SetPhaseInversionDisabled(e.phaseInversionDisabled)
-	next.SetSignalType(e.celtEncoder.SignalTypeHint())
+	next.SetSignalType(e.effectiveSignalType())
 	next.SetEnergyMask(e.surroundEnergyMask)
 	if next != e.celtEncoder {
 		next.CopyStateFrom(e.celtEncoder)
@@ -1753,31 +1777,32 @@ func (e *Encoder) syncSILKFEC() {
 	e.silkEncoder.SetInbandFEC(e.useInbandFEC && e.packetLossPerc > 0)
 }
 
-// SetApplication changes the application mode. This re-derives the CELT content
-// hint (voice for VOIP, music otherwise), which influences bandwidth selection
-// and transient sensitivity; it does not affect already-emitted packets.
+// SetApplication changes the application mode. When SignalType is Auto, this
+// re-derives the effective CELT content hint (voice for VOIP, music otherwise),
+// which influences bandwidth selection and transient sensitivity; an explicit
+// SignalVoice or SignalMusic request remains pinned.
 // Invalid application values return ErrBadArg and leave the encoder unchanged.
 func (e *Encoder) SetApplication(application Application) error {
 	if !isValidApplication(application) {
 		return fmt.Errorf("%w: unsupported application %d", ErrBadArg, application)
 	}
 	e.application = application
-	e.celtEncoder.SetSignalType(signalTypeForApplication(application))
+	e.syncSignalType()
 	return nil
 }
 
 // SetSignalType overrides the content hint used by encoder heuristics.
 // SignalAuto (the default) re-derives the hint from the current Application
 // setting (VOIP → voice, otherwise music). Calling this with SignalVoice or
-// SignalMusic pins the hint regardless of the Application value; a subsequent
-// SetApplication call will overwrite it again.
+// SignalMusic pins the hint regardless of subsequent Application changes.
 func (e *Encoder) SetSignalType(s SignalType) {
-	e.celtEncoder.SetSignalType(s)
+	e.signalSetting = s
+	e.syncSignalType()
 }
 
-// SignalType reports the current content hint.
+// SignalType reports the configured content hint, including SignalAuto.
 func (e *Encoder) SignalType() SignalType {
-	return e.celtEncoder.SignalTypeHint()
+	return e.signalSetting
 }
 
 // SetMaxBandwidth caps the automatically selected coded bandwidth. bw must be one
@@ -1973,11 +1998,9 @@ func celtEndBandForFramingBW(bw int) int {
 // Reset clears codec history and last-packet observations while retaining
 // encoder configuration such as bitrate, application, and controls.
 func (e *Encoder) Reset() error {
-	// Preserve the configured content hint. The active encoder may be a
-	// short-frame instance carrying a SetSignalType/SetApplication update that the
-	// 20 ms encoder never saw; reapply it to every encoder below so switching back
-	// to celtEncoders[3] does not revert SignalType() to a stale hint.
-	signalHint := e.celtEncoder.SignalTypeHint()
+	// Reapply the effective hint below so switching frame geometries cannot
+	// expose stale internal policy after reset.
+	signalHint := e.effectiveSignalType()
 	for _, enc := range e.celtEncoders {
 		if enc != nil {
 			enc.Reset()

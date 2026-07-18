@@ -280,8 +280,8 @@ func TestEncoderApplicationValidation(t *testing.T) {
 	if got := enc.Application(); got != ApplicationAudio {
 		t.Fatalf("application changed after rejected setter: got %d, want %d", got, ApplicationAudio)
 	}
-	if got := enc.SignalType(); got != SignalMusic {
-		t.Fatalf("signal type changed after rejected setter: got %d, want %d", got, SignalMusic)
+	if got := enc.SignalType(); got != SignalAuto {
+		t.Fatalf("signal type changed after rejected setter: got %d, want %d", got, SignalAuto)
 	}
 	for _, application := range []Application{
 		ApplicationVOIP,
@@ -294,6 +294,103 @@ func TestEncoderApplicationValidation(t *testing.T) {
 		if got := enc.Application(); got != application {
 			t.Fatalf("Application() = %d, want %d", got, application)
 		}
+	}
+}
+
+func TestEncoderSignalSettingIsIndependentOfApplication(t *testing.T) {
+	const (
+		rate      = 48000
+		frameSize = 960
+	)
+	input := strictSpeechLikeFrame(rate, 1, 0, frameSize)
+	for _, tc := range []struct {
+		application Application
+		effective   SignalType
+	}{
+		{ApplicationVOIP, SignalVoice},
+		{ApplicationAudio, SignalMusic},
+		{ApplicationRestrictedLowDelay, SignalMusic},
+	} {
+		auto, err := NewEncoder(rate, 1, tc.application)
+		if err != nil {
+			t.Fatal(err)
+		}
+		explicit, err := NewEncoder(rate, 1, tc.application)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := auto.SignalType(); got != SignalAuto {
+			t.Fatalf("application %d default SignalType=%d, want Auto", tc.application, got)
+		}
+		explicit.SetSignalType(tc.effective)
+		autoPacket, err := auto.EncodeFloat(input, frameSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		explicitPacket, err := explicit.EncodeFloat(input, frameSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(autoPacket) != string(explicitPacket) || auto.FinalRange() != explicit.FinalRange() {
+			t.Fatalf("application %d Auto changed the effective default", tc.application)
+		}
+	}
+
+	first, err := NewEncoder(rate, 1, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewEncoder(rate, 1, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.SetSignalType(SignalVoice)
+	if err := first.SetApplication(ApplicationAudio); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.SetApplication(ApplicationAudio); err != nil {
+		t.Fatal(err)
+	}
+	second.SetSignalType(SignalVoice)
+	if got := first.SignalType(); got != SignalVoice {
+		t.Fatalf("explicit signal overwritten by application: got %d", got)
+	}
+	firstPacket, err := first.EncodeFloat(input, frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPacket, err := second.EncodeFloat(input, frameSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(firstPacket) != string(secondPacket) || first.FinalRange() != second.FinalRange() {
+		t.Fatal("signal/application setter order changed output")
+	}
+
+	first.SetSignalType(SignalAuto)
+	if err := first.Reset(); err != nil {
+		t.Fatal(err)
+	}
+	if got := first.SignalType(); got != SignalAuto {
+		t.Fatalf("SignalType after Auto+Reset=%d, want Auto", got)
+	}
+
+	stereo, err := NewEncoder(rate, 2, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stereo.SetForceChannels(ChannelsMono); err != nil {
+		t.Fatal(err)
+	}
+	stereo.SetSignalType(SignalVoice)
+	if err := stereo.SetApplication(ApplicationAudio); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stereo.EncodeFloat(strictSpeechLikeFrame(rate, 2, 0, frameSize), frameSize); err != nil {
+		t.Fatal(err)
+	}
+	if stereo.forcedMono == nil || stereo.forcedMono.SignalType() != SignalVoice {
+		t.Fatal("forced-mono child did not retain explicit signal setting")
 	}
 }
 

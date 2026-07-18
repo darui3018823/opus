@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-07-18
+Last reviewed: 2026-07-19
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -18,7 +18,7 @@ The `oggopus` subpackage implements Ogg page and Ogg Opus container APIs.
 Constants are in `constants.go` and package-level error values in `errors.go`.
 Public version constants are generated into `version_gen.go` from the
 repository-level `VERSION` file; `go generate ./...` refreshes them and CI
-rejects generated-file drift. The current released baseline is `v1.3.0`.
+rejects generated-file drift. The current released baseline is `v1.4.0`.
 Release preparation follows [`docs/RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
 and compatibility-breaking cleanup is recorded separately in
 [`docs/V2_API_CANDIDATES.md`](V2_API_CANDIDATES.md).
@@ -920,6 +920,11 @@ first 2.5 ms and crossfade into the new mode over the next 2.5 ms.
 
 ## Test Status
 
+Release-preparation documentation review on 2026-07-19 used merged `main`
+commit `151d707`. Its hosted Test, `opusref`, Bench, and Race workflows all
+completed successfully. This records the pre-release-doc baseline; the exact
+`v1.4.0` release commit is qualified separately by the release checklist.
+
 Commands checked:
 
 ```bash
@@ -1154,9 +1159,9 @@ Notes:
   (about 48 dB for 440 Hz, 47 dB for 1 kHz, 39 dB for 4 kHz, and 43 dB for
   stereo 1 kHz after signal-driven bandwidth detection), and
   `TestCGOEncodeRefSilence` confirms silent input decodes to silence in libopus.
-  This shows the encoder emits genuinely standard-compliant Opus, not a stream
-  only our own decoder accepts. (Still not bit-exact against libopus's encoder,
-  which is not required.)
+  This demonstrates standards interoperability for the covered fixtures rather
+  than only self-decoding. The encoder is still not bit-exact against libopus's
+  encoder, which is not required.
 - `TestCGOEncodeRefSILKOnly` cross-checks the limited public SILK-only encoder
   path with libopus for 8/12/16 kHz mono, VOIP and explicit voice routing, and
   20/40/60 ms packet durations. It verifies SILK-only TOC configs, decoded
@@ -1223,9 +1228,10 @@ reference comparison.
   TF-estimate allocation-trim term improves the remaining focused cells only
   slightly; tonality slope, stereo saving, and broader dynamic-allocation
   parity remain future measured candidates.
-- Decoder parity is achieved on the official vectors and the libopus reference;
-  the open correctness work is now on the encoder side (bit-exact CELT and the
-  broader SILK/hybrid encoder paths).
+- Decoder conformance and reference validation passes the official vectors and
+  the covered libopus comparisons. The larger remaining compatibility and
+  quality gaps are on the encoder side (bit-exact CELT and the broader
+  SILK/hybrid encoder paths).
 
 ## Practical Use Today
 

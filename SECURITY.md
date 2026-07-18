@@ -7,9 +7,9 @@ The following versions of this project are currently supported with security upd
 | Version | Supported | Notes |
 |---------|-----------|-------|
 | latest (`main`) | ✅ Full support | Active development branch |
-| `v1.3.x` | ✅ Security fixes | Current stable release line |
-| `v1.2.x` | ✅ Security fixes | Previous stable release line |
-| `< v1.2.0` | ❌ Not supported | Upgrade to the current stable release |
+| `v1.4.x` | ✅ Security fixes | Current stable release line |
+| `v1.3.x` | ✅ Security fixes | Previous stable release line |
+| `< v1.3.0` | ❌ Not supported | Upgrade to the current stable release |
 
 ---
 

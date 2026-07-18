@@ -84,8 +84,8 @@ func main() {
 | encoder packet duration | CELT 2.5/5/10 ms、20 ms の整数倍で 120 ms まで |
 | decoder packet duration | 有効な Opus packet を 120 ms まで |
 | coding mode | CELT encode/decode、voice 向け SILK-only/hybrid encode、SILK/hybrid decode |
-| loss 対応 | CELT/SILK/hybrid PLC、SILK LBRR in-band FEC encode/decode |
-| multistream/surround | RFC self-delimited framing、family 0/1（7.1 まで）/255、PLC/FEC |
+| loss 対応 | duration を明示する CELT/SILK/hybrid PLC と SILK LBRR in-band FEC。int16、signed 24-bit-in-int32、float32、float64 に対応 |
+| multistream/surround | RFC self-delimited framing、family 0/1（7.1 まで）/255、同じ PCM variant の PLC/FEC |
 | projection/Ambisonics | RFC 8486 family 2/3、family 3 の 1st〜5th order 定義済み matrix |
 | packet 操作 | 検査、repacketize、padding、soft clip、LBRR 検出、extension |
 | Ogg Opus | CRC/lacing、header/tag、timing trim、chain 読取り、link 単位 seek、single-link 書込み |
@@ -95,6 +95,21 @@ func main() {
 `MaxFrameBytes` は圧縮済み frame の 1275-byte 上限です。`MaxPacketSize` は
 padding なし single-stream packet の保守的な上限であり、明示的な padding では
 超える場合があります。
+
+## loss recovery
+
+`DecodePLC`、`DecodePLC24`、`DecodePLCFloat32`、`DecodePLCFloat` は、明示した
+欠損 duration を補間します。duration には 2.5 ms の正の整数倍を 120 ms まで指定
+できます。最初の packet を正常に decode する前と `Reset` 後は、PLC は zero
+concealment を返します。
+
+in-band FEC では、int16 用の `DecodeFECWithDuration`、または duration を明示する
+`DecodeFEC24`、`DecodeFECFloat32`、`DecodeFECFloat` を推奨します。carrier の先頭
+Opus frame から LBRR を復元し、復元できない prefix または FEC がない場合は PLC を
+使います。従来の `DecodeFEC` は互換 wrapper として残り、carrier から欠損 duration
+を推定し、CELT-only に対する従来の error 動作も維持します。`MultistreamDecoder` は
+同じ PCM variant と duration 契約を提供し、`SurroundDecoder` はそれらを継承します。
+FEC が error を返した場合、途中までの decoder state は commit されません。
 
 ## 状態とメモリの正しい扱い
 
@@ -131,6 +146,16 @@ go test -count=1 -run TestOfficialVectors .
 ```bash
 go test -count=1 -tags opusref ./...
 ```
+
+現在の CELT constrained-VBR / TF allocation 修正は、opt-in の 140-cell corpus
+scoreboard で回帰を監視しています。測定した 1 秒間の byte total を変えず、対象の
+music/mixed worst case が改善しました。surround の channel-role masking は、各
+elementary packet の長さを変えずに、決定的な 5.1 / 7.1 fixture の weighted SNR を
+改善しました。SILK の scratch 再利用は packet/final-range digest で挙動を固定し、
+記録済み Windows amd64 benchmark では allocation を削減しました。これらは回帰用
+fixture とローカル測定であり、一般的な品質・性能保証ではありません。条件と数値は
+[real-corpus scoreboard](docs/REAL_CORPUS_SCOREBOARD.md) と
+[performance baseline](docs/PERF_BASELINE.md) を参照してください。
 
 ## 入力安全性と fuzzing
 

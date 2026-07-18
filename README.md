@@ -84,8 +84,8 @@ and [Ogg Opus package documentation](https://pkg.go.dev/github.com/darui3018823/
 | Encoder packet durations | CELT 2.5/5/10 ms; exact 20 ms multiples through 120 ms |
 | Decoder packet durations | Valid Opus packets up to 120 ms |
 | Coding modes | CELT encode/decode; voice-oriented SILK-only and hybrid encode; SILK/hybrid decode |
-| Loss handling | CELT/SILK/hybrid PLC; SILK LBRR in-band FEC encode/decode |
-| Multistream/surround | RFC self-delimited framing; families 0, 1 (through 7.1), and 255; PLC/FEC |
+| Loss handling | Explicit-duration CELT/SILK/hybrid PLC and SILK LBRR in-band FEC in int16, signed 24-bit-in-int32, float32, and float64 |
+| Multistream/surround | RFC self-delimited framing; families 0, 1 (through 7.1), and 255; matching PLC/FEC PCM variants |
 | Projection/Ambisonics | RFC 8486 families 2 and 3; predefined first- through fifth-order family-3 matrices |
 | Packet tools | Inspection, repacketizing, padding, soft clipping, LBRR detection, extensions |
 | Ogg Opus | CRC/lacing, headers/tags, timing trims, chained reading, per-link seek, single-link writing |
@@ -95,6 +95,22 @@ and [Ogg Opus package documentation](https://pkg.go.dev/github.com/darui3018823/
 `MaxFrameBytes` is the 1275-byte compressed-frame limit. `MaxPacketSize` is a
 conservative bound for an unpadded single-stream packet; explicit padding may
 exceed it.
+
+## Loss recovery
+
+`DecodePLC`, `DecodePLC24`, `DecodePLCFloat32`, and `DecodePLCFloat` conceal an
+explicit missing duration. The duration may be any positive 2.5 ms multiple
+through 120 ms. Before the first successfully decoded packet, and after
+`Reset`, PLC returns zero concealment.
+
+For in-band FEC, prefer `DecodeFECWithDuration` for int16 or the explicit-
+duration `DecodeFEC24`, `DecodeFECFloat32`, and `DecodeFECFloat` variants. They
+recover LBRR from the first Opus frame in the carrier and use PLC for an
+unrecoverable prefix or when FEC is unavailable. The original `DecodeFEC`
+remains a compatibility wrapper that infers the missing duration from the
+carrier and retains its legacy CELT-only error behavior. `MultistreamDecoder`
+provides the same PCM variants and duration contract; `SurroundDecoder`
+inherits them. A returned FEC error does not commit partial decoder state.
 
 ## Correct use of state and memory
 
@@ -135,6 +151,17 @@ checks, not runtime dependencies.
 ```bash
 go test -count=1 -tags opusref ./...
 ```
+
+The current CELT constrained-VBR and TF-allocation corrections are guarded by
+a 140-cell opt-in corpus scoreboard; the measured one-second byte totals stayed
+unchanged while the targeted music/mixed worst cases improved. Surround
+channel-role masking improved the weighted SNR of the deterministic 5.1 and
+7.1 fixtures without changing elementary packet lengths. SILK scratch reuse is
+guarded by packet/final-range digests and reduced allocations in the recorded
+Windows amd64 benchmarks. These are regression fixtures and local measurements,
+not universal quality or performance guarantees; see
+[the real-corpus scoreboard](docs/REAL_CORPUS_SCOREBOARD.md) and
+[the performance baseline](docs/PERF_BASELINE.md) for conditions and values.
 
 ## Input safety and fuzzing
 

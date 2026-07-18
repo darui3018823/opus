@@ -682,12 +682,12 @@ func tfAnalysis(end int, isTransient bool, tfRes []int, lambda int, X []float64,
 
 // allocTrimAnalysis is the float port of libopus alloc_trim_analysis. It returns
 // the allocation trim index (0..10) from the spectral tilt and, for stereo, the
-// inter-channel correlation at low frequencies. tf_estimate is taken as zero;
-// surroundTrim is derived by the multistream channel-role masking analysis.
+// inter-channel correlation at low frequencies. surroundTrim is derived by the
+// multistream channel-role masking analysis.
 // equivRate is the
 // per-stream bitrate in bps. X is the normalised spectrum, logE the band log
 // energies (channel-major), frameLen the per-channel coefficient count.
-func allocTrimAnalysis(X, logE []float64, numBands, end, lm, C, frameLen, intensity int, surroundTrim float64, equivRate int) int {
+func allocTrimAnalysis(X, logE []float64, numBands, end, lm, C, frameLen, intensity int, tfEstimate, surroundTrim float64, equivRate int) int {
 	M := 1 << uint(lm)
 	trim := 5.0
 	switch {
@@ -729,6 +729,7 @@ func allocTrimAnalysis(X, logE []float64, numBands, end, lm, C, frameLen, intens
 	}
 	diff /= float64(C * (end - 1))
 	trim -= math.Max(-2.0, math.Min(2.0, (diff+1.0)/6.0))
+	trim -= 2 * tfEstimate
 	trim -= surroundTrim
 
 	trimIndex := int(math.Floor(trim + 0.5))

@@ -107,3 +107,17 @@ func TestTFAnalysisImportanceWeights(t *testing.T) {
 		t.Fatalf("dominant importance at band %d should change its tf_res relative to the uniform case", target)
 	}
 }
+
+func TestAllocTrimAnalysisUsesTFEstimate(t *testing.T) {
+	const (
+		end      = NumBands48000
+		frameLen = FrameSize20ms
+	)
+	X := make([]float64, frameLen)
+	logE := make([]float64, NumBands48000)
+	withoutTF := allocTrimAnalysis(X, logE, NumBands48000, end, 3, 1, frameLen, end, 0, 0, 64000)
+	withTF := allocTrimAnalysis(X, logE, NumBands48000, end, 3, 1, frameLen, end, 0.8, 0, 64000)
+	if withTF >= withoutTF {
+		t.Fatalf("allocation trim with tfEstimate=0.8 is %d, without=%d; want lower", withTF, withoutTF)
+	}
+}

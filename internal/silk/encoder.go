@@ -2382,7 +2382,7 @@ func reconstructNLSFQ15(cb *nlsfCBParams, cb1Idx int, rawIdx []int) []int16 {
 	}
 
 	const nlsfQuantLevelAdjQ10 = int32(102)
-	predQ8 := make([]uint8, cb.order)
+	var predQ8 [silkMaxLPCOrder]uint8
 	ecSelBase := cb1Idx * (cb.order / 2)
 	for i := 0; i < cb.order; i += 2 {
 		entry := cb.cb2Select[ecSelBase+i/2]
@@ -2390,7 +2390,7 @@ func reconstructNLSFQ15(cb *nlsfCBParams, cb1Idx int, rawIdx []int) []int16 {
 		predQ8[i+1] = cb.predQ8[i+int((entry>>4)&1)*int(cb.order-1)+1]
 	}
 
-	resQ10 := make([]int32, cb.order)
+	var resQ10 [silkMaxLPCOrder]int32
 	outQ10 := int32(0)
 	for i := cb.order - 1; i >= 0; i-- {
 		idx := 0

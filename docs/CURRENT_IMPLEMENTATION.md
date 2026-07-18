@@ -197,7 +197,10 @@ Accepted channel counts are mono and stereo.
 `BitrateAuto` and `BitrateMax`. `Bitrate` returns the configured value or
 policy sentinel; `EffectiveBitrate` returns the numeric rate currently applied.
 The automatic policy follows libopus' frame-size/sample-rate/channel formula,
-and the maximum policy is bounded by the RFC per-frame byte limit.
+and the maximum policy is bounded by the RFC per-frame byte limit. For requests
+longer than 20 ms, `BitrateMax` applies that 1275-byte limit to each constituent
+20 ms Opus frame rather than dividing one frame budget across the whole packet;
+its effective rate is therefore 510 kbit/s for every 20–120 ms packet duration.
 
 `NewEncoder` preserves the historical defaults (64 kbit/s, complexity 5, CBR).
 `NewEncoderWithProfile(..., EncoderProfileLibopus)` selects automatic bitrate,
@@ -241,7 +244,10 @@ the packet out of the supported SILK-only path. In CBR mode, undersized
 SILK-only streams are padded up to the nominal per-stream bitrate target; VBR
 and CVBR keep compact stream sizes, and digital-silence SILK streams use the
 minimal one-byte SILK silence payload unless explicit packet padding is
-requested.
+requested or the stream must carry LBRR retained from the preceding active
+packet. Such a silent carrier runs the SILK state once, reports non-DTX,
+includes its entropy range in `FinalRange`, and expires any inactive LBRR it
+would otherwise leave for a later packet.
 
 As of SILK Encoder slice 13, high-bitrate 24/48 kHz voice input can emit hybrid
 packets. The encoder writes a 16 kHz SILK low band and CELT high band into one
@@ -603,7 +609,10 @@ Current decoder behavior and limitations:
   120 ms. Hybrid concealment sums the independently concealed SILK low band and
   CELT high band through the normal resampler/channel paths. Successful PLC sets
   `FinalRange` to zero. SILK PLC is stateful and interoperable but is not
-  bit-exact with libopus PLC.
+  bit-exact with libopus PLC. A hybrid packet ending in trailing SILK-to-CELT
+  redundancy marks the next loss for CELT-only concealment, matching libopus'
+  independent `prev_redundancy` state; FEC eligibility continues to use the
+  last received packet's framing mode.
 - `DecodeFECWithDuration` takes the exact missing duration. It decodes LBRR from
   only the first Opus frame in a SILK-only or hybrid carrier, prefixes PLC when
   the loss is longer than that frame, and falls back to PLC when FEC cannot be
@@ -868,7 +877,10 @@ SILK encoding supports standards-compliant one-packet-delayed LBRR/in-band FEC
 when `SetInbandFEC(true)` is combined with a non-zero `SetPacketLossPerc`.
 Mono, stereo mid/side, and hybrid SILK layers buffer redundant channel bodies,
 write the per-channel 1/2/3-frame flag grammar before regular frames, and keep
-normal decode entropy alignment. `DecodeFEC` reconstructs SILK-only and hybrid
+normal decode entropy alignment. A digital-silence packet carries compatible
+pending LBRR before returning to the minimal silence shortcut, while a duration
+change expires pending data that cannot be represented by the new frame-count
+grammar. `DecodeFEC` reconstructs SILK-only and hybrid
 packets; hybrid recovery uses the redundant SILK low band because LBRR does not
 carry a separate CELT high-band copy. Stereo LBRR is written and decoded in the
 libopus frame-major order: stereo predictor and optional mid-only flag, then

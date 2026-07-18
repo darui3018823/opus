@@ -1,6 +1,6 @@
 # CTL and Helper Parity Matrix
 
-Last reviewed: 2026-07-17
+Last reviewed: 2026-07-18
 
 Baseline: libopus 1.6.1 public headers:
 
@@ -33,11 +33,11 @@ Status values:
 | libopus CTL | Status | Go API / note |
 |---|---:|---|
 | `OPUS_SET_APPLICATION` / `OPUS_GET_APPLICATION` | Partial | `SetApplication`, `Application`; API/state is exposed, but mode policy is narrower than libopus |
-| `OPUS_SET_BITRATE` / `OPUS_GET_BITRATE` | Partial | `SetBitrate`, `Bitrate`, `EffectiveBitrate`; accepted numeric range is 6000–510000 bit/s plus auto/max sentinels |
+| `OPUS_SET_BITRATE` / `OPUS_GET_BITRATE` | Partial | `SetBitrate`, `Bitrate`, `EffectiveBitrate`; accepted numeric range is 6000–510000 bit/s plus auto/max sentinels. Max uses the 1275-byte limit per constituent frame, including 20 ms frames packed into 40–120 ms packets |
 | `OPUS_SET_MAX_BANDWIDTH` / `OPUS_GET_MAX_BANDWIDTH` | Supported | `SetMaxBandwidth`, `MaxBandwidth` |
 | `OPUS_SET_BANDWIDTH` / `OPUS_GET_BANDWIDTH` | Supported | `SetBandwidth`, `Bandwidth`, `GetBandwidth` |
 | `OPUS_SET_COMPLEXITY` / `OPUS_GET_COMPLEXITY` | Supported | `SetComplexity`, `Complexity` |
-| `OPUS_SET_INBAND_FEC` / `OPUS_GET_INBAND_FEC` | Supported | `SetInbandFEC`, `InbandFEC`; LBRR is SILK/hybrid only |
+| `OPUS_SET_INBAND_FEC` / `OPUS_GET_INBAND_FEC` | Supported | `SetInbandFEC`, `InbandFEC`; LBRR is SILK/hybrid only, and pending LBRR is carried through a following digital-silence packet |
 | `OPUS_SET_PACKET_LOSS_PERC` / `OPUS_GET_PACKET_LOSS_PERC` | Supported | `SetPacketLossPerc`, `PacketLossPerc` |
 | `OPUS_SET_DTX` / `OPUS_GET_DTX` | Supported | `SetDTX`, `DTX` |
 | `OPUS_SET_VBR` / `OPUS_GET_VBR` | Partial | `SetVBR`, `VBR`; CELT and non-redundant hybrid sizing are wired, while broader SILK/hybrid policy is narrower than libopus |

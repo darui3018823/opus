@@ -212,6 +212,20 @@ The prior music worst falls from +9.69 to +5.68 dB and the mixed worst from
 24/32 kbps chord gap is now the next measured CELT allocation/trim opportunity,
 not evidence that the adopted CVBR correction should be expanded further.
 
+## Post-Audit Medium: CELT TF-Estimate Trim (2026-07-18)
+
+The isolated Medium trial adds the already-computed CELT `tfEstimate` to
+allocation-trim analysis (`trim -= 2*tfEstimate` before quantization). The
+focused 24 kbps stereo-chords matched gap moved from approximately +6.026 to
++5.886 dB. The full opt-in corpus completed 140/140 cells with all loss-0 own
+byte totals unchanged and no class regression above the 0.3 dB gate.
+
+The speech-oriented class summaries remained effectively unchanged. Mixed
+average/worst gaps moved from -1.08/+1.71 to -1.07/+1.64 dB; music moved from
+-2.67/+5.68 to -2.64/+5.61 dB. This is a small allocation-quality correction,
+not a rate increase. Tonality slope and stateful stereo-saving inputs were not
+combined into this trial.
+
 ## Post-Audit Phase 3: SILK/Hybrid Policy Gates (2026-07-17)
 
 Phase 3 stopped without adopting a production policy change. A previously

@@ -33,7 +33,7 @@ Status values:
 | libopus CTL | Status | Go API / note |
 |---|---:|---|
 | `OPUS_SET_APPLICATION` / `OPUS_GET_APPLICATION` | Partial | `SetApplication`, `Application`; API/state is exposed, but mode policy is narrower than libopus |
-| `OPUS_SET_BITRATE` / `OPUS_GET_BITRATE` | Partial | `SetBitrate`, `Bitrate`, `EffectiveBitrate`; accepted numeric range is 6000–510000 bit/s plus auto/max sentinels. Max uses the 1275-byte limit per constituent frame, including 20 ms frames packed into 40–120 ms packets |
+| `OPUS_SET_BITRATE` / `OPUS_GET_BITRATE` | Partial | `SetBitrate`, `Bitrate`, `EffectiveBitrate`; numeric requests >=6000 bit/s plus auto/max sentinels are accepted. High requests clamp to 750000 bit/s per channel at the CTL boundary and to the 1275-byte limit per constituent frame when applied. Positive requests below 6000 remain unsupported because the predictive encoder cannot yet reproduce libopus' compact low-rate packets |
 | `OPUS_SET_MAX_BANDWIDTH` / `OPUS_GET_MAX_BANDWIDTH` | Supported | `SetMaxBandwidth`, `MaxBandwidth` |
 | `OPUS_SET_BANDWIDTH` / `OPUS_GET_BANDWIDTH` | Supported | `SetBandwidth`, `Bandwidth`, `GetBandwidth` |
 | `OPUS_SET_COMPLEXITY` / `OPUS_GET_COMPLEXITY` | Supported | `SetComplexity`, `Complexity` |
@@ -43,7 +43,7 @@ Status values:
 | `OPUS_SET_VBR` / `OPUS_GET_VBR` | Partial | `SetVBR`, `VBR`; CELT and non-redundant hybrid sizing are wired, while broader SILK/hybrid policy is narrower than libopus |
 | `OPUS_SET_VBR_CONSTRAINT` / `OPUS_GET_VBR_CONSTRAINT` | Partial | `SetVBRConstraint`, `VBRConstraint`; broader SILK/hybrid CVBR policy is narrower than libopus |
 | `OPUS_SET_FORCE_CHANNELS` / `OPUS_GET_FORCE_CHANNELS` | Supported | `SetForceChannels`, `ForceChannels` |
-| `OPUS_SET_SIGNAL` / `OPUS_GET_SIGNAL` | Partial | `SetSignalType`, `SignalType`; API/state is exposed, but mode and quality policy is narrower than libopus |
+| `OPUS_SET_SIGNAL` / `OPUS_GET_SIGNAL` | Partial | `SetSignalType`, `SignalType`; request state defaults to Auto and remains independent from Application, but mode and quality policy is narrower than libopus |
 | `OPUS_GET_LOOKAHEAD` | Supported | `Lookahead` |
 | `OPUS_SET_LSB_DEPTH` / `OPUS_GET_LSB_DEPTH` | Supported | `SetLSBDepth`, `LSBDepth` |
 | `OPUS_SET_EXPERT_FRAME_DURATION` / `OPUS_GET_EXPERT_FRAME_DURATION` | Supported | `SetExpertFrameDuration`, `ExpertFrameDuration`; fixed durations treat Encode's `frameSize` as available samples and consume the selected prefix |
@@ -84,7 +84,7 @@ Status values:
 | `opus_packet_get_nb_channels` | Supported | `PacketGetNumChannels` |
 | `opus_packet_get_nb_frames` | Supported | `PacketGetNumFrames` |
 | `opus_packet_get_nb_samples` / `opus_decoder_get_nb_samples` | Supported | `PacketGetNumSamples` |
-| `opus_packet_has_lbrr` | Supported | `PacketHasLBRR` |
+| `opus_packet_has_lbrr` | Supported | `PacketHasLBRR`; packed packets inspect only the first Opus frame, matching the frame recoverable by libopus FEC |
 | `opus_pcm_soft_clip` | Supported | `SoftClipFloat32` |
 | `opus_repacketizer_*` | Supported | `NewRepacketizer`, `Cat`, `NumFrames`, `Out`, `OutRange`, `Reset` |
 | `opus_packet_pad` / `opus_packet_unpad` | Supported | `PacketPad`, `PacketUnpad` |

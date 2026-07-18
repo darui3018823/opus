@@ -261,6 +261,28 @@ cumulative phase comparison:
    fell 20.3% and hybrid stereo 10.7%; target time improved 2.7% and 0.4%.
    Mono time stayed within 3.1% of the parent.
 
+### Post-Audit Medium NLSF Scratch (2026-07-18)
+
+`reconstructNLSFQ15` now keeps its maximum-order predictor and residual
+workspaces on the stack while preserving a separately owned output slice. The
+four 64-frame packet/final-range digests are unchanged by this allocation-only
+change. Under the same short-run comparison window, SILK mono fell from about
+282,492 B/op and 2,221 allocs/op to about 249,518 B/op and 1,706 allocs/op
+(11.7% and 23.2% reductions).
+
+The final five-run, one-second measurement used:
+
+```text
+go test -run '^$' -bench '^BenchmarkPerf$/^encode$/^(silk|hybrid)$' -benchtime=1s -count=5 -benchmem .
+```
+
+| Workload | median ns/op | median B/op | median allocs/op |
+|---|---:|---:|---:|
+| `encode/silk/mono/48k/20ms` | 4,843,162 | 251,941 | 1,711 |
+| `encode/silk/stereo/48k/20ms` | 16,609,720 | 1,376,153 | 4,839 |
+| `encode/hybrid/mono/48k/20ms` | 3,009,211 | 372,065 | 1,033 |
+| `encode/hybrid/stereo/48k/20ms` | 11,149,658 | 1,274,750 | 3,464 |
+
 ### Long-Running Stream Benchmark
 
 `BenchmarkPerfLongStream` continuously encodes 256 frames (5.12 seconds of

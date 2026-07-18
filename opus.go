@@ -1596,7 +1596,14 @@ func (e *Encoder) applyBitrateSetting(frameSize int) error {
 		// input sample and channel.
 		bitrate = 60*e.sampleRate/frameSize + e.sampleRate*e.channels
 	case BitrateMax:
-		bitrate = MaxFrameBytes * 8 * e.sampleRate / frameSize
+		codedFrameSize := frameSize
+		if codedFrameSize > e.frameSize {
+			// Long requests are packets of consecutive 20 ms Opus frames. The
+			// 1275-byte ceiling applies to each constituent frame, not once to
+			// the whole packet.
+			codedFrameSize = e.frameSize
+		}
+		bitrate = MaxFrameBytes * 8 * e.sampleRate / codedFrameSize
 		if bitrate > 1500000 {
 			bitrate = 1500000
 		}

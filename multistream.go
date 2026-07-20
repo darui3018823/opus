@@ -131,12 +131,20 @@ func (e *MultistreamEncoder) SetVBR(enabled bool) {
 	}
 }
 
+// VBR returns the VBR setting of the first elementary stream, matching
+// libopus multistream GET CTL semantics.
+func (e *MultistreamEncoder) VBR() bool { return e.encoders[0].VBR() }
+
 // SetVBRConstraint applies constrained VBR to every elementary stream.
 func (e *MultistreamEncoder) SetVBRConstraint(enabled bool) {
 	for _, enc := range e.encoders {
 		enc.SetVBRConstraint(enabled)
 	}
 }
+
+// VBRConstraint returns the constrained-VBR setting of the first elementary
+// stream, matching libopus multistream GET CTL semantics.
+func (e *MultistreamEncoder) VBRConstraint() bool { return e.encoders[0].VBRConstraint() }
 
 // SetComplexity applies a complexity setting to every elementary stream.
 func (e *MultistreamEncoder) SetComplexity(complexity int) error {
@@ -147,6 +155,139 @@ func (e *MultistreamEncoder) SetComplexity(complexity int) error {
 	}
 	return nil
 }
+
+// Complexity returns the complexity of the first elementary stream, matching
+// libopus multistream GET CTL semantics.
+func (e *MultistreamEncoder) Complexity() int { return e.encoders[0].Complexity() }
+
+// SetApplication applies an application mode to every elementary stream.
+func (e *MultistreamEncoder) SetApplication(application Application) error {
+	for _, enc := range e.encoders {
+		if err := enc.SetApplication(application); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Application returns the application of the first elementary stream.
+func (e *MultistreamEncoder) Application() Application { return e.encoders[0].Application() }
+
+// SetSignalType applies a signal hint to every elementary stream.
+func (e *MultistreamEncoder) SetSignalType(signal SignalType) {
+	for _, enc := range e.encoders {
+		enc.SetSignalType(signal)
+	}
+}
+
+// SignalType returns the signal hint of the first elementary stream.
+func (e *MultistreamEncoder) SignalType() SignalType { return e.encoders[0].SignalType() }
+
+// SetDTX applies discontinuous transmission to every elementary stream.
+func (e *MultistreamEncoder) SetDTX(enabled bool) {
+	for _, enc := range e.encoders {
+		enc.SetDTX(enabled)
+	}
+}
+
+// DTX returns the DTX setting of the first elementary stream.
+func (e *MultistreamEncoder) DTX() bool { return e.encoders[0].DTX() }
+
+// SetInbandFEC applies in-band FEC to every elementary stream.
+func (e *MultistreamEncoder) SetInbandFEC(enabled bool) {
+	for _, enc := range e.encoders {
+		enc.SetInbandFEC(enabled)
+	}
+}
+
+// InbandFEC returns the in-band FEC setting of the first elementary stream.
+func (e *MultistreamEncoder) InbandFEC() bool { return e.encoders[0].InbandFEC() }
+
+// SetPacketLossPerc applies the expected packet-loss percentage to every
+// elementary stream. Values retain the single-stream clamping semantics.
+func (e *MultistreamEncoder) SetPacketLossPerc(perc int) {
+	for _, enc := range e.encoders {
+		enc.SetPacketLossPerc(perc)
+	}
+}
+
+// PacketLossPerc returns the packet-loss setting of the first elementary
+// stream.
+func (e *MultistreamEncoder) PacketLossPerc() int { return e.encoders[0].PacketLossPerc() }
+
+// SetLSBDepth applies the input precision hint to every elementary stream.
+func (e *MultistreamEncoder) SetLSBDepth(depth int) error {
+	for _, enc := range e.encoders {
+		if err := enc.SetLSBDepth(depth); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// LSBDepth returns the input precision hint of the first elementary stream.
+func (e *MultistreamEncoder) LSBDepth() int { return e.encoders[0].LSBDepth() }
+
+// SetPredictionDisabled applies predictive-mode disabling to every elementary
+// stream.
+func (e *MultistreamEncoder) SetPredictionDisabled(disabled bool) {
+	for _, enc := range e.encoders {
+		enc.SetPredictionDisabled(disabled)
+	}
+}
+
+// PredictionDisabled returns the setting of the first elementary stream.
+func (e *MultistreamEncoder) PredictionDisabled() bool {
+	return e.encoders[0].PredictionDisabled()
+}
+
+// SetPhaseInversionDisabled applies intensity-stereo phase-inversion disabling
+// to every elementary stream.
+func (e *MultistreamEncoder) SetPhaseInversionDisabled(disabled bool) {
+	for _, enc := range e.encoders {
+		enc.SetPhaseInversionDisabled(disabled)
+	}
+}
+
+// PhaseInversionDisabled returns the setting of the first elementary stream.
+func (e *MultistreamEncoder) PhaseInversionDisabled() bool {
+	return e.encoders[0].PhaseInversionDisabled()
+}
+
+// SetMaxBandwidth applies the automatic-bandwidth ceiling to every elementary
+// stream.
+func (e *MultistreamEncoder) SetMaxBandwidth(bandwidth int) error {
+	for _, enc := range e.encoders {
+		if err := enc.SetMaxBandwidth(bandwidth); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MaxBandwidth returns the automatic-bandwidth ceiling of the first stream.
+func (e *MultistreamEncoder) MaxBandwidth() int { return e.encoders[0].MaxBandwidth() }
+
+// SetBandwidth applies an explicit bandwidth request to every elementary
+// stream.
+func (e *MultistreamEncoder) SetBandwidth(bandwidth int) error {
+	for _, enc := range e.encoders {
+		if err := enc.SetBandwidth(bandwidth); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Bandwidth returns the bandwidth state of the first elementary stream.
+func (e *MultistreamEncoder) Bandwidth() int { return e.encoders[0].Bandwidth() }
+
+// GetBandwidth is an alias for Bandwidth.
+func (e *MultistreamEncoder) GetBandwidth() int { return e.Bandwidth() }
+
+// Lookahead returns the lookahead of the first elementary stream, matching
+// libopus multistream GET CTL semantics.
+func (e *MultistreamEncoder) Lookahead() int { return e.encoders[0].Lookahead() }
 
 // SetExpertFrameDuration applies a fixed packet duration to every elementary
 // stream. Argument restores frameSize-selected durations.
@@ -390,6 +531,45 @@ func (d *MultistreamDecoder) StreamDecoder(stream int) (*Decoder, error) {
 		return nil, fmt.Errorf("%w: stream index %d", ErrBadArg, stream)
 	}
 	return d.decoders[stream], nil
+}
+
+// SetGain applies Q8 dB output gain to every elementary decoder.
+func (d *MultistreamDecoder) SetGain(gainQ8 int) error {
+	for _, dec := range d.decoders {
+		if err := dec.SetGain(gainQ8); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// Gain returns the gain of the first elementary decoder, matching libopus
+// multistream GET CTL semantics.
+func (d *MultistreamDecoder) Gain() int { return d.decoders[0].Gain() }
+
+// SetPhaseInversionDisabled applies intensity-stereo phase-inversion disabling
+// to every elementary decoder.
+func (d *MultistreamDecoder) SetPhaseInversionDisabled(disabled bool) {
+	for _, dec := range d.decoders {
+		dec.SetPhaseInversionDisabled(disabled)
+	}
+}
+
+// PhaseInversionDisabled returns the setting of the first elementary decoder.
+func (d *MultistreamDecoder) PhaseInversionDisabled() bool {
+	return d.decoders[0].PhaseInversionDisabled()
+}
+
+// Bandwidth returns the last decoded bandwidth of the first elementary stream.
+func (d *MultistreamDecoder) Bandwidth() int { return d.decoders[0].Bandwidth() }
+
+// GetBandwidth is an alias for Bandwidth.
+func (d *MultistreamDecoder) GetBandwidth() int { return d.Bandwidth() }
+
+// GetLastPacketDuration returns the last decoded duration of the first
+// elementary stream in output-rate samples per channel.
+func (d *MultistreamDecoder) GetLastPacketDuration() int {
+	return d.decoders[0].GetLastPacketDuration()
 }
 
 // DecodeFloat decodes a multistream packet to interleaved float64 PCM.

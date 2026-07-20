@@ -131,9 +131,11 @@ Public multistream and surround entry points:
 - multistream/surround int16, signed-24-bit-in-int32, float32, and float64 PLC
   and in-band FEC decode, including explicit lost-duration control, packed
   elementary packets, and per-stream CELT PLC fallback during FEC recovery
-- per-stream encoder/decoder access, aggregate bitrate and expert frame-duration
-  control, reset, mapping, stream-count, coupled-stream-count, and final-range
-  getters
+- per-stream encoder/decoder access; aggregate encoder application, signal,
+  bitrate, VBR/CVBR, complexity, DTX/FEC/loss, LSB-depth,
+  prediction/phase-inversion, bandwidth, and expert frame-duration controls;
+  aggregate decoder gain/phase controls; reset, mapping, stream-count,
+  coupled-stream-count, bandwidth/duration, and final-range getters
 - `NewSurroundEncoder(...) (*SurroundEncoder, error)`
 - `NewSurroundDecoder(...) (*SurroundDecoder, error)`
 - mapping families 0 (mono/stereo), 1 (Vorbis order, 1 through 8 channels), and
@@ -1145,6 +1147,11 @@ workloads reduced allocation bytes by 7-8% and allocation counts by 34-47% in
 same-window measurements. The 64-frame packet/final-range digests and targeted
 libopus trellis comparisons remain unchanged; the full normal and `opusref`
 suites pass and long-stream retained heap stays bounded.
+
+Post-audit multistream aggregate-CTL verification on 2026-07-21: public
+broadcast methods now mirror libopus's common encoder/decoder SET behavior,
+while scalar GET methods query the first elementary state. Mixed coupled/mono
+tests cover propagation, getters, and rejected-setter state preservation.
 
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.

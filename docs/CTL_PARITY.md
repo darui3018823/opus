@@ -95,7 +95,7 @@ marked `Out of scope` rather than treated as core parity.
 |---|---:|---:|---|
 | `OPUS_MULTISTREAM_GET_ENCODER_STATE` | Present | Equivalent | `StreamEncoder`; child-state and interoperability tests |
 | `OPUS_MULTISTREAM_GET_DECODER_STATE` | Present | Equivalent | `StreamDecoder`; child-state and transactional recovery tests |
-| Generic encoder/decoder CTLs on multistream states | Partial | Partial | Aggregate bitrate, expert duration, reset, final range, and per-stream access exist; not every CTL has an aggregate convenience wrapper |
+| Generic encoder/decoder CTLs on multistream states | Present | Partial | Encoder broadcasts cover application, signal, bitrate, VBR/CVBR, complexity, DTX/FEC/loss, LSB depth, prediction/phase controls, bandwidth, and expert duration. Decoder broadcasts cover gain and phase controls; scalar GETs query the first stream, bitrate is aggregate, and final range is XORed. Per-stream access covers remaining controls, but convenience is not exhaustive |
 
 ## Projection CTLs
 

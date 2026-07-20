@@ -1,7 +1,7 @@
 # libopus Core Parity Plan
 
 Last updated: 2026-07-21
-Status: Active
+Status: Complete
 
 ## Objective
 
@@ -74,3 +74,39 @@ go test -run '^$' -bench '^BenchmarkPerf(LongStream)?$/encode/(silk|hybrid)/(mon
 
 The opt-in corpus command and its required environment are documented in
 `docs/REAL_CORPUS_SCOREBOARD.md`.
+
+## Results
+
+- Published the core-libopus claim boundary and split CTL coverage into API
+  surface, semantic parity, and evidence. DRED, QEXT, OSCE, DNN processing,
+  Opus Custom, the C ABI, and bit-exact encoder output remain outside scope.
+- Added CELT-only stereo tonality-slope allocation trim. The focused 24 kbit/s
+  cell improved from 5.886 to 5.726 dB and the 32 kbit/s cell from about 5.21
+  to 4.948 dB. The full saved corpus improved from 5.61 to 5.55 dB at 24
+  kbit/s and from 5.49 to 5.40 dB at 32 kbit/s, with all loss-0 byte totals
+  unchanged.
+- Reused predictive NLSF search destinations. Same-window SILK stereo encoder
+  cost fell 7.4% in bytes/op and 34.3% in allocations; hybrid stereo fell
+  7.9% and 47.4%, respectively. Packet/final-range digests and long-stream
+  bounded-heap evidence remained unchanged.
+- Added first-stream getters and broadcast setters for aggregate multistream
+  core codec controls. Surround inherits these controls through embedding;
+  projection-specific convenience coverage remains partial.
+- Updated the code-derived snapshot and dated iteration records for each
+  adopted implementation change.
+
+## Final Validation
+
+All normal and `opusref` suites, `go vet ./...`, the packet/final-range
+regression gates, and the saved 140-cell corpus completed successfully during
+the implementation checkpoints. The final branch-wide checks also passed:
+
+```text
+go test -race -count=1 ./...                         PASS
+go test -count=1 -run '^TestOfficialVectors$' -v .  PASS (12/12)
+```
+
+The highest official-vector RMSE was 0.000809 (`testvector12`). Remaining work
+is deliberately carried forward: evidence-backed mode/rate policy, further
+CELT 24/32 kbit/s stereo quality, absolute predictive encoder cost, stereo
+savings/dynamic allocation, and projection-specific aggregate conveniences.

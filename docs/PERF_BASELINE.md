@@ -306,3 +306,22 @@ The retained live heap remains bounded after the stream; it does not scale
 with the 256 encoded frames. Residual profiles rank NLSF reconstruction/LPC
 result buffers first for allocation count, with delayed-decision quantizer and
 CELT transform working storage remaining significant for stereo and hybrid.
+
+### NLSF Destination Scratch (2026-07-21)
+
+The encoder's bounded NLSF residual search now reuses stack-backed trial,
+reconstruction, and LPC destination buffers. Existing allocating wrappers
+remain available internally for results that escape the search. All four
+64-frame packet/final-range digests are unchanged.
+
+Same-window three-run medians for the target stereo workloads:
+
+| workload | before B/op | after B/op | before allocs/op | after allocs/op |
+|---|---:|---:|---:|---:|
+| `encode/silk/stereo/48k/20ms` | 1,376,152 | 1,273,821 | 4,839 | 3,179 |
+| `encode/hybrid/stereo/48k/20ms` | 1,274,752 | 1,173,521 | 3,464 | 1,821 |
+
+The final SILK/hybrid mono medians were 161,256 B/op with 231 allocs/op and
+327,171 B/op with 298 allocs/op. The 256-frame benchmark retained only
+384-4,880 median live bytes, with unchanged packet bytes/frame, so the reduced
+temporary allocation did not become retained stream state.

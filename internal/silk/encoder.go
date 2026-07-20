@@ -2237,7 +2237,7 @@ func bestNLSFStage1(signal []float64, cb *nlsfCBParams) int {
 }
 
 func refineNLSFResidual(signal []float64, cb *nlsfCBParams, cb1Idx int) []int {
-	return refineNLSFResidualFrom(signal, cb, cb1Idx, make([]int, cb.order))
+	return refineNLSFResidualFrom(signal, cb, cb1Idx, nil)
 }
 
 func refineNLSFResidualFrom(signal []float64, cb *nlsfCBParams, cb1Idx int, seed []int) []int {
@@ -2246,7 +2246,10 @@ func refineNLSFResidualFrom(signal []float64, cb *nlsfCBParams, cb1Idx int, seed
 	for i := range rawIdx {
 		rawIdx[i] = clampInt(rawIdx[i], -3, 3)
 	}
-	bestCost := lpcResidualEnergy(signal, nlsfToLPCLibopus(reconstructNLSFQ15(cb, cb1Idx, rawIdx), cb.order))
+	var trialBuf [silkMaxLPCOrder]int
+	var nlsfBuf, lpcBuf [silkMaxLPCOrder]int16
+	trial := trialBuf[:cb.order]
+	bestCost := nlsfResidualCostWithScratch(signal, cb, cb1Idx, rawIdx, nlsfBuf[:], lpcBuf[:])
 
 	for pass := 0; pass < 3; pass++ {
 		improved := false
@@ -2256,10 +2259,9 @@ func refineNLSFResidualFrom(signal []float64, cb *nlsfCBParams, cb1Idx int, seed
 				if candidate == rawIdx[i] {
 					continue
 				}
-				trial := append([]int(nil), rawIdx...)
+				copy(trial, rawIdx)
 				trial[i] = candidate
-				nlsfQ15 := reconstructNLSFQ15(cb, cb1Idx, trial)
-				cost := lpcResidualEnergy(signal, nlsfToLPCLibopus(nlsfQ15, cb.order))
+				cost := nlsfResidualCostWithScratch(signal, cb, cb1Idx, trial, nlsfBuf[:], lpcBuf[:])
 				if cost < bestCost {
 					bestCost = cost
 					bestVal = candidate
@@ -2275,6 +2277,12 @@ func refineNLSFResidualFrom(signal []float64, cb *nlsfCBParams, cb1Idx int, seed
 		}
 	}
 	return rawIdx
+}
+
+func nlsfResidualCostWithScratch(signal []float64, cb *nlsfCBParams, cb1Idx int, rawIdx []int, nlsfBuf, lpcBuf []int16) float64 {
+	nlsfQ15 := reconstructNLSFQ15Into(nlsfBuf, cb, cb1Idx, rawIdx)
+	lpcQ12 := nlsfToLPCLibopusInto(lpcBuf, nlsfQ15, cb.order)
+	return lpcResidualEnergy(signal, lpcQ12)
 }
 
 func topNLSFCB1ByTarget(cb *nlsfCBParams, targetQ15 []int16, n int) []int {
@@ -2374,6 +2382,12 @@ func nlsfTargetDistortion(cb *nlsfCBParams, cb1Idx int, nlsfQ15, targetQ15 []int
 }
 
 func reconstructNLSFQ15(cb *nlsfCBParams, cb1Idx int, rawIdx []int) []int16 {
+	nlsfQ15 := make([]int16, cb.order)
+	return reconstructNLSFQ15Into(nlsfQ15, cb, cb1Idx, rawIdx)
+}
+
+func reconstructNLSFQ15Into(nlsfQ15 []int16, cb *nlsfCBParams, cb1Idx int, rawIdx []int) []int16 {
+	nlsfQ15 = nlsfQ15[:cb.order]
 	if cb1Idx < 0 {
 		cb1Idx = 0
 	}
@@ -2408,7 +2422,6 @@ func reconstructNLSFQ15(cb *nlsfCBParams, cb1Idx int, rawIdx []int) []int16 {
 		resQ10[i] = outQ10
 	}
 
-	nlsfQ15 := make([]int16, cb.order)
 	for i := 0; i < cb.order; i++ {
 		cb1Val := int32(cb.cb1Q8[cb1Idx*cb.order+i])
 		wghtQ9 := int32(cb.cb1WghtQ9[cb1Idx*cb.order+i])

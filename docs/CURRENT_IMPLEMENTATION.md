@@ -7,6 +7,12 @@ more conservative than the roadmap and README marketing text: when this file
 disagrees with older planning documents, treat this file as the current
 code-derived status.
 
+The compatibility target is RFC 6716 and core libopus behavior. DRED, QEXT,
+OSCE/DNN processing, Opus Custom, the libopus C ABI, and bit-exact encoder
+output are outside the compatibility claim. Opaque packet-extension transport
+does not imply extension codec support. See `docs/LIBOPUS_SCOPE.md` for the
+claim boundary.
+
 ## Public Package
 
 Module: `github.com/darui3018823/opus`

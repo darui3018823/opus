@@ -666,7 +666,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		}
 		surroundTrim = surroundMaskTrim(e.energyMask, ch, numBands, maskEnd)
 	}
-	allocTrim := allocTrimAnalysis(X, logE, numBands, end, lm, ch, frameLen, end, tfEstimate, surroundTrim, e.bitrate)
+	allocTrim := allocTrimAnalysis(X, logE, numBands, end, lm, ch, frameLen, end, tfEstimate, surroundTrim, e.bitrate, start == 0)
 	if enc.ECTell()+6 <= totalBits {
 		enc.EncodeIcdf(allocTrim, TrimICDF[:], 7)
 	}

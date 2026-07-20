@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-07-19
+Last reviewed: 2026-07-21
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -397,7 +397,7 @@ four predictive packet/final-range digests remain deterministic.
   the activity-derived target. Quiet tonal streams no longer begin at one
   quarter of the nominal budget and recover only after several damaged frames;
   the existing reservoir keeps one-second byte totals unchanged. The permanent
-  stereo-chords regression checks 24/48/64 kbps matched-byte quality,
+  stereo-chords regression checks 24/32/48/64 kbps matched-byte quality,
   deterministic packets, libopus cross-decode, and per-packet final ranges.
 
 #### Slice 2-4: Silence Detection / DTX (Complete)
@@ -1122,6 +1122,15 @@ The retained set passes `go vet ./...`, the full normal and `opusref` suites,
 the full race suite, and all 12 official vectors (maximum RMSE 0.000809); the
 opt-in real-corpus scoreboard completed 140/140 cells.
 
+Post-audit CELT stereo tonality-slope verification on 2026-07-21: allocation
+trim now consumes a bounded frequency slope estimated from active, spectrally
+concentrated stereo bands. The full 140-cell corpus kept every class's loss-0
+own-byte total unchanged. Against the saved current baseline, stereo-chords
+loss-0 gaps moved from 5.61 to 5.55 dB at 24 kbit/s and 5.49 to 5.40 dB at
+32 kbit/s; the largest changed loss cell regressed by 0.01 dB. The permanent
+code-generated reproducer reports 5.726/4.948 dB at 24/32 kbit/s and retains
+packet determinism, libopus cross-decode, and per-packet final-range checks.
+
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.
 `TestCGOMultistreamInteroperability` verifies both Go-encoded packets decoded
@@ -1229,11 +1238,11 @@ reference comparison.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
   to full libopus-compatible mode/rate-control behavior.
 - The post-audit CVBR fix substantially reduces the deterministic CELT/music
-  worst case without increasing its byte total, but the 24/32 kbps
-  stereo-chords cells still trail libopus by approximately 5.7/5.2 dB. The
-  TF-estimate allocation-trim term improves the remaining focused cells only
-  slightly; tonality slope, stereo saving, and broader dynamic-allocation
-  parity remain future measured candidates.
+  worst case without increasing its byte total. TF-estimate and stereo
+  tonality-slope allocation-trim terms further reduce the remaining 24/32 kbps
+  stereo-chords cells, but the saved full-corpus gaps are still approximately
+  5.55/5.40 dB. Stateful stereo saving and broader dynamic-allocation parity
+  remain future measured candidates.
 - Decoder conformance and reference validation passes the official vectors and
   the covered libopus comparisons. The larger remaining compatibility and
   quality gaps are on the encoder side (bit-exact CELT and the broader

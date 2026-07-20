@@ -115,8 +115,8 @@ func TestAllocTrimAnalysisUsesTFEstimate(t *testing.T) {
 	)
 	X := make([]float64, frameLen)
 	logE := make([]float64, NumBands48000)
-	withoutTF := allocTrimAnalysis(X, logE, NumBands48000, end, 3, 1, frameLen, end, 0, 0, 64000)
-	withTF := allocTrimAnalysis(X, logE, NumBands48000, end, 3, 1, frameLen, end, 0.8, 0, 64000)
+	withoutTF := allocTrimAnalysis(X, logE, NumBands48000, end, 3, 1, frameLen, end, 0, 0, 64000, true)
+	withTF := allocTrimAnalysis(X, logE, NumBands48000, end, 3, 1, frameLen, end, 0.8, 0, 64000, true)
 	if withTF >= withoutTF {
 		t.Fatalf("allocation trim with tfEstimate=0.8 is %d, without=%d; want lower", withTF, withoutTF)
 	}

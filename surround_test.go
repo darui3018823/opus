@@ -113,6 +113,54 @@ func TestSurroundLFERateAllocation(t *testing.T) {
 	}
 }
 
+func TestSurroundBandwidthControlsSurviveFramePreparation(t *testing.T) {
+	const (
+		rate      = 48000
+		channels  = 6
+		frameSize = 960
+	)
+	enc, err := NewSurroundEncoder(rate, channels, MappingFamilyVorbis, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetBitrate(256000); err != nil {
+		t.Fatal(err)
+	}
+	encodeAndCheck := func(want int) {
+		t.Helper()
+		packet, err := enc.Encode(make([]int16, frameSize*channels), frameSize)
+		if err != nil {
+			t.Fatal(err)
+		}
+		streams, _, err := splitMultistreamPackets(packet, enc.Streams(), rate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for stream, packet := range streams {
+			got, err := PacketGetBandwidth(packet)
+			if err != nil {
+				t.Fatalf("stream %d bandwidth: %v", stream, err)
+			}
+			if got != want {
+				t.Fatalf("stream %d bandwidth = %d, want %d", stream, got, want)
+			}
+		}
+	}
+
+	if err := enc.SetBandwidth(BandwidthNarrowband); err != nil {
+		t.Fatal(err)
+	}
+	encodeAndCheck(BandwidthNarrowband)
+
+	if err := enc.SetBandwidth(BandwidthAuto); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetMaxBandwidth(BandwidthWideband); err != nil {
+		t.Fatal(err)
+	}
+	encodeAndCheck(BandwidthWideband)
+}
+
 func TestSurroundMappingFamilies(t *testing.T) {
 	discrete, err := NewSurroundEncoder(48000, 12, MappingFamilyDiscrete, ApplicationAudio)
 	if err != nil {

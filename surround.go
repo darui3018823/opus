@@ -39,6 +39,7 @@ type SurroundEncoder struct {
 	mappingFamily int
 	lfeStream     int
 	bitrate       int
+	bandwidth     int
 	analyzer      *celt.SurroundAnalyzer
 }
 
@@ -60,6 +61,7 @@ func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application App
 		mappingFamily:      mappingFamily,
 		lfeStream:          layout.lfeStream,
 		bitrate:            BitrateAuto,
+		bandwidth:          BandwidthAuto,
 	}
 	s.configureSurroundStreams()
 	if mappingFamily == MappingFamilyVorbis && channels > 2 {
@@ -92,6 +94,18 @@ func (e *SurroundEncoder) SetBitrate(bitrate int) error {
 
 // Bitrate returns the configured aggregate surround bitrate policy.
 func (e *SurroundEncoder) Bitrate() int { return e.bitrate }
+
+// SetBandwidth forces a coded bandwidth on every elementary stream. Pass
+// BandwidthAuto to restore the surround bitrate-derived policy. The setting is
+// retained separately because automatic surround preparation updates the child
+// encoders immediately before every encode.
+func (e *SurroundEncoder) SetBandwidth(bandwidth int) error {
+	if err := e.MultistreamEncoder.SetBandwidth(bandwidth); err != nil {
+		return err
+	}
+	e.bandwidth = bandwidth
+	return nil
+}
 
 // Encode encodes frameSize samples per channel of interleaved int16 PCM.
 func (e *SurroundEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
@@ -259,26 +273,33 @@ func equalStreamRates(bitrate, streams, sampleRate, frameSize int) []int {
 }
 
 func (e *SurroundEncoder) applySurroundBandwidth(frameSize int) {
-	equivalentRate := e.bitrate
-	if equivalentRate == BitrateAuto {
-		equivalentRate = (e.streams + e.coupledStreams) * (e.sampleRate + 60*e.sampleRate/frameSize + 15000)
-	} else if equivalentRate == BitrateMax {
-		equivalentRate = 510000 * e.channels
-	}
-	if frameSize*50 < e.sampleRate {
-		equivalentRate -= 60 * (e.sampleRate/frameSize - 50) * e.channels
-	}
-	bandwidth := BandwidthNarrowband
-	switch {
-	case equivalentRate > 10000*e.channels:
-		bandwidth = BandwidthFullband
-	case equivalentRate > 7000*e.channels:
-		bandwidth = BandwidthSuperWideband
-	case equivalentRate > 5000*e.channels:
-		bandwidth = BandwidthWideband
+	bandwidth := e.bandwidth
+	if bandwidth == BandwidthAuto {
+		equivalentRate := e.bitrate
+		if equivalentRate == BitrateAuto {
+			equivalentRate = (e.streams + e.coupledStreams) * (e.sampleRate + 60*e.sampleRate/frameSize + 15000)
+		} else if equivalentRate == BitrateMax {
+			equivalentRate = 510000 * e.channels
+		}
+		if frameSize*50 < e.sampleRate {
+			equivalentRate -= 60 * (e.sampleRate/frameSize - 50) * e.channels
+		}
+		bandwidth = BandwidthNarrowband
+		switch {
+		case equivalentRate > 10000*e.channels:
+			bandwidth = BandwidthFullband
+		case equivalentRate > 7000*e.channels:
+			bandwidth = BandwidthSuperWideband
+		case equivalentRate > 5000*e.channels:
+			bandwidth = BandwidthWideband
+		}
 	}
 	for _, enc := range e.encoders {
-		_ = enc.SetBandwidth(bandwidth)
+		streamBandwidth := bandwidth
+		if e.bandwidth == BandwidthAuto && bandwidthRank(enc.MaxBandwidth()) < bandwidthRank(streamBandwidth) {
+			streamBandwidth = enc.MaxBandwidth()
+		}
+		_ = enc.SetBandwidth(streamBandwidth)
 	}
 }
 

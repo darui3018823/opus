@@ -1,6 +1,6 @@
 # Real Corpus Matched-Bitrate Scoreboard
 
-Last reviewed: 2026-07-17
+Last reviewed: 2026-07-21
 
 This diagnostic harness measures the Go encoder against libopus on local WAV
 corpus clips at matched bitrate. It is intentionally opt-in because
@@ -225,6 +225,27 @@ average/worst gaps moved from -1.08/+1.71 to -1.07/+1.64 dB; music moved from
 -2.67/+5.68 to -2.64/+5.61 dB. This is a small allocation-quality correction,
 not a rate increase. Tonality slope and stateful stereo-saving inputs were not
 combined into this trial.
+
+## Post-Audit: CELT Stereo Tonality Slope (2026-07-21)
+
+An isolated follow-up estimates the frequency slope of active tonal CELT bands
+from the normalised MDCT spectrum and feeds the libopus-style bounded
+`2*(tonality_slope+.05)` term to stereo allocation trim. Normalised bands more
+than eight log2-amplitude units below the peak are excluded so quantisation-floor
+shape cannot drive the decision. Stereo saving and VBR sizing are unchanged.
+
+The code-generated reproducer now includes 32 kbit/s. Its matched gaps moved
+from 5.886 to 5.726 dB at 24 kbit/s and from the audit's approximately 5.21 dB
+to 4.948 dB at 32 kbit/s, with own totals fixed at 2,960 and 3,930 bytes.
+
+The final CELT-only stereo candidate completed all 140/140 cells. All loss-0 own-byte totals were
+unchanged. Against the saved current baseline, the stereo-chords loss-0 gaps
+moved from 5.61 to 5.55 dB at 24 kbit/s and 5.49 to 5.40 dB at 32 kbit/s. The
+largest regression was 0.01 dB in one 5% loss cell; the other changed cells
+were neutral or improved by up to 0.24 dB. The stereo-only candidate was
+adopted; an earlier mono+stereo trial was discarded because it changed unrelated
+onset/source byte totals, and hybrid was excluded to preserve the predictive
+packet/final-range digests.
 
 ## Post-Audit Phase 3: SILK/Hybrid Policy Gates (2026-07-17)
 

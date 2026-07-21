@@ -1591,7 +1591,13 @@ func silkNLSFStabilize(nlsf []int16, deltaMin []int16, order int) {
 // Implements silk_NLSF2A from libopus silk/NLSF2A.c using fixed-point arithmetic.
 // QA = 16
 func nlsfToLPCLibopus(nlsfQ15 []int16, order int) []int16 {
+	coeffs := make([]int16, order)
+	return nlsfToLPCLibopusInto(coeffs, nlsfQ15, order)
+}
+
+func nlsfToLPCLibopusInto(coeffs, nlsfQ15 []int16, order int) []int16 {
 	const QA = 16
+	coeffs = coeffs[:order]
 
 	var ordering []int
 	if order == 16 {
@@ -1641,7 +1647,7 @@ func nlsfToLPCLibopus(nlsfQ15 []int16, order int) []int16 {
 		a32QA1[order-k-1] = Qtmp - Ptmp
 	}
 
-	coeffs := silkLPCFit(a32QA1, 12, QA+1, order)
+	silkLPCFitInto(coeffs, a32QA1, 12, QA+1, order)
 	for i := 0; i < 16 && silkLPCInversePredGainQ12(coeffs, order) == 0; i++ {
 		silkBWExpander32(a32QA1, order, 65536-(2<<i))
 		for k := 0; k < order; k++ {
@@ -1670,6 +1676,12 @@ func nlsf2APolyFindPoly(out []int32, cLSF []int32, dd int) {
 
 func silkLPCFit(aQIN []int32, qOut, qIn, order int) []int16 {
 	coeffs := make([]int16, order)
+	silkLPCFitInto(coeffs, aQIN, qOut, qIn, order)
+	return coeffs
+}
+
+func silkLPCFitInto(coeffs []int16, aQIN []int32, qOut, qIn, order int) {
+	coeffs = coeffs[:order]
 	shift := qIn - qOut
 
 	fit := false
@@ -1708,7 +1720,6 @@ func silkLPCFit(aQIN []int32, qOut, qIn, order int) []int16 {
 			aQIN[k] = int32(coeffs[k]) << shift
 		}
 	}
-	return coeffs
 }
 
 func silkBWExpander32(ar []int32, order int, chirpQ16 int32) {

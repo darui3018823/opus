@@ -1,11 +1,17 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-07-19
+Last reviewed: 2026-07-21
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
 disagrees with older planning documents, treat this file as the current
 code-derived status.
+
+The compatibility target is RFC 6716 and core libopus behavior. DRED, QEXT,
+OSCE/DNN processing, Opus Custom, the libopus C ABI, and bit-exact encoder
+output are outside the compatibility claim. Opaque packet-extension transport
+does not imply extension codec support. See `docs/LIBOPUS_SCOPE.md` for the
+claim boundary.
 
 ## Public Package
 
@@ -125,9 +131,11 @@ Public multistream and surround entry points:
 - multistream/surround int16, signed-24-bit-in-int32, float32, and float64 PLC
   and in-band FEC decode, including explicit lost-duration control, packed
   elementary packets, and per-stream CELT PLC fallback during FEC recovery
-- per-stream encoder/decoder access, aggregate bitrate and expert frame-duration
-  control, reset, mapping, stream-count, coupled-stream-count, and final-range
-  getters
+- per-stream encoder/decoder access; aggregate encoder application, signal,
+  bitrate, VBR/CVBR, complexity, DTX/FEC/loss, LSB-depth,
+  prediction/phase-inversion, bandwidth, and expert frame-duration controls;
+  aggregate decoder gain/phase controls; reset, mapping, stream-count,
+  coupled-stream-count, bandwidth/duration, and final-range getters
 - `NewSurroundEncoder(...) (*SurroundEncoder, error)`
 - `NewSurroundDecoder(...) (*SurroundDecoder, error)`
 - mapping families 0 (mono/stereo), 1 (Vorbis order, 1 through 8 channels), and
@@ -347,12 +355,19 @@ mono, and from 1.79 MB/9,457 to 1.31 MB/4,035 for hybrid stereo. The final
 long-stream measurement retained only 432-4,992 bytes of median live heap
 after warm-up, rather than frame-proportional state. Absolute predictive
 encode cost remains higher than CELT; the largest remaining allocation families
-are NLSF reconstruction/LPC output buffers and stereo trellis working storage.
+include stereo trellis and CELT transform working storage.
 The post-audit Medium pass additionally stack-allocates the bounded predictor
 and residual scratch inside `reconstructNLSFQ15`, without changing the returned
 NLSF buffer's ownership. The same-condition SILK-mono benchmark reduced median
 allocation from approximately 282 KB/2,221 allocations to 252 KB/1,711; the
 four predictive packet/final-range digests remain deterministic.
+The 2026-07-21 destination-scratch pass removes per-candidate trial, NLSF
+reconstruction, and LPC-result allocations from the bounded residual search.
+Same-window stereo medians fell from 1.38 MB/4,839 to 1.27 MB/3,179 for SILK
+and from 1.27 MB/3,464 to 1.17 MB/1,821 for hybrid. Final mono medians were
+161 KB/231 allocations for SILK and 327 KB/298 for hybrid. The 256-frame
+benchmark retained 384-4,880 median live bytes and all predictive digests
+remain unchanged.
 
 ### Phase 2: Production CELT Encoder (In Progress)
 
@@ -391,7 +406,7 @@ four predictive packet/final-range digests remain deterministic.
   the activity-derived target. Quiet tonal streams no longer begin at one
   quarter of the nominal budget and recover only after several damaged frames;
   the existing reservoir keeps one-second byte totals unchanged. The permanent
-  stereo-chords regression checks 24/48/64 kbps matched-byte quality,
+  stereo-chords regression checks 24/32/48/64 kbps matched-byte quality,
   deterministic packets, libopus cross-decode, and per-packet final ranges.
 
 #### Slice 2-4: Silence Detection / DTX (Complete)
@@ -1116,6 +1131,28 @@ The retained set passes `go vet ./...`, the full normal and `opusref` suites,
 the full race suite, and all 12 official vectors (maximum RMSE 0.000809); the
 opt-in real-corpus scoreboard completed 140/140 cells.
 
+Post-audit CELT stereo tonality-slope verification on 2026-07-21: allocation
+trim now consumes a bounded frequency slope estimated from active, spectrally
+concentrated stereo bands. The full 140-cell corpus kept every class's loss-0
+own-byte total unchanged. Against the saved current baseline, stereo-chords
+loss-0 gaps moved from 5.61 to 5.55 dB at 24 kbit/s and 5.49 to 5.40 dB at
+32 kbit/s; the largest changed loss cell regressed by 0.01 dB. The permanent
+code-generated reproducer reports 5.726/4.948 dB at 24/32 kbit/s and retains
+packet determinism, libopus cross-decode, and per-packet final-range checks.
+
+Post-audit predictive NLSF destination-scratch verification on 2026-07-21:
+the bounded residual search reuses caller-owned maximum-order buffers for
+candidate indices, NLSF reconstruction, and LPC conversion. The target stereo
+workloads reduced allocation bytes by 7-8% and allocation counts by 34-47% in
+same-window measurements. The 64-frame packet/final-range digests and targeted
+libopus trellis comparisons remain unchanged; the full normal and `opusref`
+suites pass and long-stream retained heap stays bounded.
+
+Post-audit multistream aggregate-CTL verification on 2026-07-21: public
+broadcast methods now mirror libopus's common encoder/decoder SET behavior,
+while scalar GET methods query the first elementary state. Mixed coupled/mono
+tests cover propagation, getters, and rejected-setter state preservation.
+
 P3 phases 1-4 verification on 2026-06-20: signed 24-bit PCM, CELT phase
 inversion controls, multistream, and surround tests pass in the normal suite.
 `TestCGOMultistreamInteroperability` verifies both Go-encoded packets decoded
@@ -1223,11 +1260,11 @@ reference comparison.
 - Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
   to full libopus-compatible mode/rate-control behavior.
 - The post-audit CVBR fix substantially reduces the deterministic CELT/music
-  worst case without increasing its byte total, but the 24/32 kbps
-  stereo-chords cells still trail libopus by approximately 5.7/5.2 dB. The
-  TF-estimate allocation-trim term improves the remaining focused cells only
-  slightly; tonality slope, stereo saving, and broader dynamic-allocation
-  parity remain future measured candidates.
+  worst case without increasing its byte total. TF-estimate and stereo
+  tonality-slope allocation-trim terms further reduce the remaining 24/32 kbps
+  stereo-chords cells, but the saved full-corpus gaps are still approximately
+  5.55/5.40 dB. Stateful stereo saving and broader dynamic-allocation parity
+  remain future measured candidates.
 - Decoder conformance and reference validation passes the official vectors and
   the covered libopus comparisons. The larger remaining compatibility and
   quality gaps are on the encoder side (bit-exact CELT and the broader

@@ -186,6 +186,110 @@ func TestMultistreamPacketPadUnpad(t *testing.T) {
 	}
 }
 
+func TestMultistreamAggregateEncoderControls(t *testing.T) {
+	enc, err := NewMultistreamEncoder(48000, 4, 3, 1, []byte{0, 1, 2, 3}, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetApplication(ApplicationAudio); err != nil {
+		t.Fatal(err)
+	}
+	enc.SetSignalType(SignalMusic)
+	enc.SetVBR(true)
+	enc.SetVBRConstraint(true)
+	if err := enc.SetComplexity(8); err != nil {
+		t.Fatal(err)
+	}
+	enc.SetDTX(true)
+	enc.SetInbandFEC(true)
+	enc.SetPacketLossPerc(17)
+	if err := enc.SetLSBDepth(16); err != nil {
+		t.Fatal(err)
+	}
+	enc.SetPredictionDisabled(true)
+	enc.SetPhaseInversionDisabled(true)
+	if err := enc.SetMaxBandwidth(BandwidthWideband); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetBandwidth(BandwidthNarrowband); err != nil {
+		t.Fatal(err)
+	}
+
+	for stream := 0; stream < enc.Streams(); stream++ {
+		child, err := enc.StreamEncoder(stream)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if child.Application() != ApplicationAudio || child.SignalType() != SignalMusic ||
+			!child.VBR() || !child.VBRConstraint() || child.Complexity() != 8 ||
+			!child.DTX() || !child.InbandFEC() || child.PacketLossPerc() != 17 ||
+			child.LSBDepth() != 16 || !child.PredictionDisabled() ||
+			!child.PhaseInversionDisabled() || child.MaxBandwidth() != BandwidthWideband ||
+			child.Bandwidth() != BandwidthNarrowband {
+			t.Fatalf("stream %d did not receive aggregate controls", stream)
+		}
+	}
+
+	if enc.Application() != ApplicationAudio || enc.SignalType() != SignalMusic ||
+		!enc.VBR() || !enc.VBRConstraint() || enc.Complexity() != 8 ||
+		!enc.DTX() || !enc.InbandFEC() || enc.PacketLossPerc() != 17 ||
+		enc.LSBDepth() != 16 || !enc.PredictionDisabled() ||
+		!enc.PhaseInversionDisabled() || enc.MaxBandwidth() != BandwidthWideband ||
+		enc.Bandwidth() != BandwidthNarrowband || enc.GetBandwidth() != BandwidthNarrowband ||
+		enc.Lookahead() != 120 {
+		t.Fatal("aggregate getters do not reflect the first elementary stream")
+	}
+
+	if err := enc.SetLSBDepth(7); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("invalid aggregate LSB depth error = %v", err)
+	}
+	for stream := 0; stream < enc.Streams(); stream++ {
+		child, _ := enc.StreamEncoder(stream)
+		if child.LSBDepth() != 16 {
+			t.Fatalf("stream %d LSB depth changed after rejected aggregate setter", stream)
+		}
+	}
+}
+
+func TestMultistreamAggregateDecoderControls(t *testing.T) {
+	dec, err := NewMultistreamDecoder(48000, 4, 3, 1, []byte{0, 1, 2, 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dec.SetGain(6 * 256); err != nil {
+		t.Fatal(err)
+	}
+	dec.SetPhaseInversionDisabled(true)
+	for stream := 0; stream < dec.Streams(); stream++ {
+		child, err := dec.StreamDecoder(stream)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if child.Gain() != 6*256 || !child.PhaseInversionDisabled() {
+			t.Fatalf("stream %d did not receive aggregate decoder controls", stream)
+		}
+	}
+	if dec.Gain() != 6*256 || !dec.PhaseInversionDisabled() {
+		t.Fatal("aggregate decoder getters do not reflect the first stream")
+	}
+	if dec.Bandwidth() != BandwidthAuto || dec.GetBandwidth() != BandwidthAuto {
+		t.Fatalf("initial aggregate bandwidth = %d/%d, want auto", dec.Bandwidth(), dec.GetBandwidth())
+	}
+	first, _ := dec.StreamDecoder(0)
+	if dec.GetLastPacketDuration() != first.GetLastPacketDuration() {
+		t.Fatalf("aggregate packet duration = %d, first stream = %d", dec.GetLastPacketDuration(), first.GetLastPacketDuration())
+	}
+	if err := dec.SetGain(GainQ8Max + 1); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("invalid aggregate gain error = %v", err)
+	}
+	for stream := 0; stream < dec.Streams(); stream++ {
+		child, _ := dec.StreamDecoder(stream)
+		if child.Gain() != 6*256 {
+			t.Fatalf("stream %d gain changed after rejected aggregate setter", stream)
+		}
+	}
+}
+
 func TestMultistreamPacketGetNumSamples(t *testing.T) {
 	const (
 		rate      = 48000

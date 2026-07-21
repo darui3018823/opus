@@ -21,7 +21,7 @@ func TestCELTMusicChordsMatchedBitrateReproducer(t *testing.T) {
 	clip := phase1StereoChordsClip()
 	const frameSize = 960 // 20 ms at 48 kHz
 
-	for _, bitrate := range []int{24000, 48000, 64000} {
+	for _, bitrate := range []int{24000, 32000, 48000, 64000} {
 		t.Run(phase1BitrateName(bitrate), func(t *testing.T) {
 			ownPackets, ownRanges, ownBytes := phase1EncodeOwnWithRanges(t, clip, bitrate)
 			repeated, repeatedRanges, repeatedBytes := phase1EncodeOwnWithRanges(t, clip, bitrate)
@@ -64,11 +64,11 @@ func TestCELTMusicChordsMatchedBitrateReproducer(t *testing.T) {
 					t.Fatalf("%s SNR is not finite: %v", label, snr)
 				}
 			}
-			baselineBytes := map[int]int{24000: 2960, 48000: 5870, 64000: 7810}[bitrate]
+			baselineBytes := map[int]int{24000: 2960, 32000: 3930, 48000: 5870, 64000: 7810}[bitrate]
 			if ownBytes > baselineBytes*105/100 {
 				t.Fatalf("own bytes %d exceed the 5%% budget over baseline %d", ownBytes, baselineBytes)
 			}
-			maxGap := map[int]float64{24000: 6.1, 48000: 2, 64000: 2}[bitrate]
+			maxGap := map[int]float64{24000: 5.8, 32000: 5.1, 48000: 2, 64000: 2}[bitrate]
 			if gap > maxGap {
 				t.Fatalf("matched CELT/music gap %.3f dB exceeds %.1f dB regression limit", gap, maxGap)
 			}

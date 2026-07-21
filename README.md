@@ -19,6 +19,11 @@ with libopus and does not reproduce every libopus mode/rate/quality decision.
 The authoritative implementation snapshot is
 [docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md).
 
+The compatibility target is standard Opus and core libopus behavior. DRED,
+QEXT, OSCE/DNN processing, Opus Custom, the libopus C ABI, and bit-exact encoder
+output are outside that claim; see
+[docs/LIBOPUS_SCOPE.md](docs/LIBOPUS_SCOPE.md).
+
 ## Install
 
 ```bash

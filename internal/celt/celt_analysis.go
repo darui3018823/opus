@@ -8,7 +8,7 @@ import "math"
 // libopus celt/celt_encoder.c (spreading_decision, dynalloc_analysis,
 // alloc_trim_analysis), simplified where bit-exactness is not required: the
 // external tonality analyzer, surround/LFE handling, and the spread_weight
-// coupling are dropped (spread_weight is treated as uniform). The decoder reads
+// coupling are simplified (spread_weight is treated as uniform). The decoder reads
 // whatever values these produce, so any in-range result round-trips correctly;
 // these heuristics only shape quality (bit distribution).
 
@@ -687,7 +687,7 @@ func tfAnalysis(end int, isTransient bool, tfRes []int, lambda int, X []float64,
 // equivRate is the
 // per-stream bitrate in bps. X is the normalised spectrum, logE the band log
 // energies (channel-major), frameLen the per-channel coefficient count.
-func allocTrimAnalysis(X, logE []float64, numBands, end, lm, C, frameLen, intensity int, tfEstimate, surroundTrim float64, equivRate int) int {
+func allocTrimAnalysis(X, logE []float64, numBands, end, lm, C, frameLen, intensity int, tfEstimate, surroundTrim float64, equivRate int, useTonalitySlope bool) int {
 	M := 1 << uint(lm)
 	trim := 5.0
 	switch {
@@ -731,6 +731,10 @@ func allocTrimAnalysis(X, logE []float64, numBands, end, lm, C, frameLen, intens
 	trim -= math.Max(-2.0, math.Min(2.0, (diff+1.0)/6.0))
 	trim -= 2 * tfEstimate
 	trim -= surroundTrim
+	if C == 2 && useTonalitySlope {
+		tonalitySlope := spectralTonalitySlope(X, logE, numBands, end, lm, C, frameLen)
+		trim -= math.Max(-2, math.Min(2, 2*(tonalitySlope+0.05)))
+	}
 
 	trimIndex := int(math.Floor(trim + 0.5))
 	if trimIndex < 0 {
@@ -740,6 +744,61 @@ func allocTrimAnalysis(X, logE []float64, numBands, end, lm, C, frameLen, intens
 		trimIndex = 10
 	}
 	return trimIndex
+}
+
+// spectralTonalitySlope approximates the frequency slope of libopus's external
+// tonality analysis from the CELT spectrum already available here. Per-band
+// spectral concentration supplies a bounded tonality proxy, while a relative
+// energy gate prevents normalised quantisation-floor bands from influencing the
+// result. Negative values mean tonality is concentrated in lower bands.
+func spectralTonalitySlope(X, logE []float64, numBands, end, lm, C, frameLen int) float64 {
+	if C < 1 || end < 1 || len(X) < C*frameLen || len(logE) < C*numBands {
+		return 0
+	}
+	maxLogE := logE[0]
+	for c := 0; c < C; c++ {
+		for i := 0; i < end; i++ {
+			if value := logE[c*numBands+i]; value > maxLogE {
+				maxLogE = value
+			}
+		}
+	}
+	M := 1 << uint(lm)
+	slope := 0.0
+	for i := 0; i < end; i++ {
+		bandLogE := logE[i]
+		for c := 1; c < C; c++ {
+			if value := logE[c*numBands+i]; value > bandLogE {
+				bandLogE = value
+			}
+		}
+		// Eight log2-amplitude units are roughly 48 dB. Quieter bands do not
+		// carry a reliable tonality estimate after normalisation.
+		if bandLogE < maxLogE-8 {
+			continue
+		}
+		N := M * int(EBands48000[i+1]-EBands48000[i])
+		if N < 2 {
+			continue
+		}
+		bandTonality := 0.0
+		for c := 0; c < C; c++ {
+			off := c*frameLen + M*int(EBands48000[i])
+			var sum2, sum4 float64
+			for j := 0; j < N; j++ {
+				x2 := X[off+j] * X[off+j]
+				sum2 += x2
+				sum4 += x2 * x2
+			}
+			if sum2 > 0 {
+				concentration := (float64(N)*sum4/(sum2*sum2) - 1) / float64(N-1)
+				bandTonality += math.Max(0, math.Min(1, concentration))
+			}
+		}
+		bandTonality /= float64(C)
+		slope += bandTonality * float64(i-8)
+	}
+	return math.Max(-1, math.Min(1, slope/64))
 }
 
 // surroundMaskTrim isolates libopus' mask-slope contribution to allocation

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Post a Gemini-generated pull request review.
+"""Post an explicitly requested Gemini-generated pull request review.
 
-The workflow that calls this script uses pull_request_target, so this script
-must not checkout or execute pull request head code. It reads PR metadata and
-diffs through GitHub APIs only.
+The workflow only accepts an owner-authored ``@gemini`` mention on a pull
+request. This script repeats that event guard before making any Gemini API call.
+It never checks out or executes pull request head code; PR metadata and diffs
+are read through GitHub APIs only.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from typing import Any
 
 MODEL = "gemini-3.1-pro-preview"
 MAX_OUTPUT_TOKENS = 65536
-TRIGGER_PHRASE = "@gemini review"
+TRIGGER_MENTION = re.compile(r"(?<![\w-])@gemini(?![\w-])", re.IGNORECASE)
 DEFAULT_MAX_DIFF_CHARS = 850_000
 MAX_TOOL_ROUNDS = 8
 MAX_TOOL_RESPONSE_CHARS = 120_000
@@ -86,32 +87,39 @@ def load_event() -> dict[str, Any]:
 
 
 def resolve_pr_number(event_name: str, event: dict[str, Any]) -> int | None:
-    if event_name == "pull_request_target":
-        pull_request = event.get("pull_request") or {}
-        number = pull_request.get("number")
-        return int(number) if number is not None else None
     if event_name == "issue_comment":
         issue = event.get("issue") or {}
         if "pull_request" not in issue or issue.get("pull_request") is None:
             return None
         number = issue.get("number")
         return int(number) if number is not None else None
+    if event_name in {"pull_request_review_comment", "pull_request_review"}:
+        pull_request = event.get("pull_request") or {}
+        number = pull_request.get("number")
+        return int(number) if number is not None else None
     return None
 
 
 def should_run(event_name: str, event: dict[str, Any], owner: str) -> bool:
-    if event_name == "pull_request_target":
-        pull_request = event.get("pull_request") or {}
-        author = (pull_request.get("user") or {}).get("login")
-        return author == owner
-
     if event_name == "issue_comment":
         issue = event.get("issue") or {}
         comment = event.get("comment") or {}
         author = (comment.get("user") or {}).get("login")
         body = comment.get("body") or ""
         is_pr = "pull_request" in issue and issue.get("pull_request") is not None
-        return is_pr and author == owner and TRIGGER_PHRASE in body
+        return is_pr and author == owner and TRIGGER_MENTION.search(body) is not None
+
+    if event_name == "pull_request_review_comment":
+        comment = event.get("comment") or {}
+        author = (comment.get("user") or {}).get("login")
+        body = comment.get("body") or ""
+        return author == owner and TRIGGER_MENTION.search(body) is not None
+
+    if event_name == "pull_request_review":
+        review = event.get("review") or {}
+        author = (review.get("user") or {}).get("login")
+        body = review.get("body") or ""
+        return author == owner and TRIGGER_MENTION.search(body) is not None
 
     return False
 

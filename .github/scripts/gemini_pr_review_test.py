@@ -14,27 +14,69 @@ SPEC.loader.exec_module(gemini_pr_review)
 
 
 class GeminiReviewTest(unittest.TestCase):
-    def test_should_run_owner_pr(self):
+    def test_should_not_run_automatically_for_owner_pr(self):
         event = {"pull_request": {"user": {"login": "owner"}}}
-        self.assertTrue(gemini_pr_review.should_run("pull_request_target", event, "owner"))
-
-    def test_should_not_run_non_owner_pr(self):
-        event = {"pull_request": {"user": {"login": "contrib"}}}
         self.assertFalse(gemini_pr_review.should_run("pull_request_target", event, "owner"))
+        self.assertIsNone(gemini_pr_review.resolve_pr_number("pull_request_target", event))
 
     def test_should_run_owner_comment_on_pr(self):
         event = {
             "issue": {"number": 7, "pull_request": {}},
-            "comment": {"body": "@gemini review", "user": {"login": "owner"}},
+            "comment": {"body": "Please @gemini review this", "user": {"login": "owner"}},
+        }
+        self.assertTrue(gemini_pr_review.should_run("issue_comment", event, "owner"))
+        self.assertEqual(gemini_pr_review.resolve_pr_number("issue_comment", event), 7)
+
+    def test_should_run_case_insensitive_owner_mention(self):
+        event = {
+            "issue": {"number": 7, "pull_request": {}},
+            "comment": {"body": "@Gemini", "user": {"login": "owner"}},
         }
         self.assertTrue(gemini_pr_review.should_run("issue_comment", event, "owner"))
 
     def test_should_not_run_non_owner_comment(self):
         event = {
             "issue": {"number": 7, "pull_request": {}},
-            "comment": {"body": "@gemini review", "user": {"login": "contrib"}},
+            "comment": {"body": "@gemini", "user": {"login": "contrib"}},
         }
         self.assertFalse(gemini_pr_review.should_run("issue_comment", event, "owner"))
+
+    def test_should_not_run_without_exact_mention(self):
+        for body in ("please review", "@gemini-reviewer", "email@gemini.example"):
+            with self.subTest(body=body):
+                event = {
+                    "issue": {"number": 7, "pull_request": {}},
+                    "comment": {"body": body, "user": {"login": "owner"}},
+                }
+                self.assertFalse(gemini_pr_review.should_run("issue_comment", event, "owner"))
+
+    def test_should_not_run_issue_comment_outside_pr(self):
+        event = {
+            "issue": {"number": 7},
+            "comment": {"body": "@gemini", "user": {"login": "owner"}},
+        }
+        self.assertFalse(gemini_pr_review.should_run("issue_comment", event, "owner"))
+        self.assertIsNone(gemini_pr_review.resolve_pr_number("issue_comment", event))
+
+    def test_should_run_owner_inline_review_comment(self):
+        event = {
+            "pull_request": {"number": 8},
+            "comment": {"body": "@gemini please review", "user": {"login": "owner"}},
+        }
+        self.assertTrue(
+            gemini_pr_review.should_run("pull_request_review_comment", event, "owner")
+        )
+        self.assertEqual(
+            gemini_pr_review.resolve_pr_number("pull_request_review_comment", event), 8
+        )
+
+    def test_should_run_owner_review_body(self):
+        event = {
+            "pull_request": {"number": 9},
+            "review": {"body": "@gemini", "user": {"login": "owner"}},
+        }
+        self.assertTrue(gemini_pr_review.should_run("pull_request_review", event, "owner"))
+        self.assertEqual(gemini_pr_review.resolve_pr_number("pull_request_review", event), 9)
 
     def test_changed_right_lines(self):
         diff = """diff --git a/a.go b/a.go

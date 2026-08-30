@@ -6,6 +6,48 @@ import (
 	framing "github.com/darui3018823/opus/internal"
 )
 
+// PacketInfo describes an RFC 6716 Opus packet after complete framing
+// validation. All sample counts are per channel at the sample rate passed to
+// InspectPacket.
+type PacketInfo struct {
+	// Config is the RFC 6716 TOC configuration number (0-31).
+	Config int
+	// Mode is one of ModeSILKOnly, ModeHybrid, or ModeCELTOnly.
+	Mode int
+	// Bandwidth is one of the Bandwidth* constants coded by the TOC.
+	Bandwidth int
+	// Channels is the coded channel count (one or two).
+	Channels int
+	// FrameCount is the number of Opus frames carried by the packet.
+	FrameCount int
+	// SamplesPerFrame is the decoded duration of each frame per channel.
+	SamplesPerFrame int
+	// SampleCount is the decoded packet duration per channel.
+	SampleCount int
+}
+
+// InspectPacket validates complete RFC 6716 framing, including per-frame byte
+// limits and the 120 ms packet-duration limit, and returns the packet's TOC
+// metadata. sampleRate must be a supported Opus rate. This is useful when a
+// caller needs several packet properties and wants to validate the packet only
+// once. Malformed packets return an error wrapping ErrInvalidPacket; an invalid
+// rate returns an error wrapping ErrBadArg and ErrUnsupportedSampleRate.
+func InspectPacket(data []byte, sampleRate int) (PacketInfo, error) {
+	info, err := inspectPacket(data, sampleRate)
+	if err != nil {
+		return PacketInfo{}, err
+	}
+	return PacketInfo{
+		Config:          info.config,
+		Mode:            info.mode,
+		Bandwidth:       info.bandwidth,
+		Channels:        info.channels,
+		FrameCount:      info.frameCount,
+		SamplesPerFrame: info.samplesPerFrame,
+		SampleCount:     info.totalSamples,
+	}, nil
+}
+
 type packetMetadata struct {
 	config          int
 	mode            int

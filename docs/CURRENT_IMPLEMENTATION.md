@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-07-21
+Last reviewed: 2026-08-31
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -84,6 +84,7 @@ Implemented public entry points:
 
 Public packet inspection entry points:
 
+- `InspectPacket(packet []byte, sampleRate int) (PacketInfo, error)`
 - `PacketGetConfig(packet []byte) (int, error)`
 - `PacketGetMode(packet []byte) (int, error)`
 - `PacketGetBandwidth(packet []byte) (int, error)`

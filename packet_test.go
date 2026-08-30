@@ -25,6 +25,22 @@ func TestPacketInspectionHelpers(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			info, err := InspectPacket(tc.packet, SampleRate48kHz)
+			if err != nil {
+				t.Fatalf("InspectPacket: %v", err)
+			}
+			if got, want := info, (PacketInfo{
+				Config:          tc.config,
+				Mode:            tc.mode,
+				Bandwidth:       tc.bandwidth,
+				Channels:        tc.channels,
+				FrameCount:      tc.frames,
+				SamplesPerFrame: tc.samplesPerFrame,
+				SampleCount:     tc.totalSamples,
+			}); got != want {
+				t.Fatalf("InspectPacket() = %+v, want %+v", got, want)
+			}
+
 			checkPacketValue(t, "config", PacketGetConfig, tc.packet, tc.config)
 			checkPacketValue(t, "mode", PacketGetMode, tc.packet, tc.mode)
 			checkPacketValue(t, "bandwidth", PacketGetBandwidth, tc.packet, tc.bandwidth)
@@ -40,6 +56,50 @@ func TestPacketInspectionHelpers(t *testing.T) {
 				t.Fatalf("total samples = %d, %v; want %d", got, err, tc.totalSamples)
 			}
 		})
+	}
+}
+
+func TestInspectPacketSampleRateAndValidation(t *testing.T) {
+	packet := []byte{byte(30 << 3), 0} // one 10 ms fullband CELT frame
+	for _, sampleRate := range []int{
+		SampleRate8kHz,
+		SampleRate12kHz,
+		SampleRate16kHz,
+		SampleRate24kHz,
+		SampleRate48kHz,
+	} {
+		t.Run("rate", func(t *testing.T) {
+			info, err := InspectPacket(packet, sampleRate)
+			if err != nil {
+				t.Fatalf("InspectPacket: %v", err)
+			}
+			if got, want := info.SamplesPerFrame, sampleRate/100; got != want {
+				t.Fatalf("SamplesPerFrame = %d, want %d", got, want)
+			}
+			if got, want := info.SampleCount, sampleRate/100; got != want {
+				t.Fatalf("SampleCount = %d, want %d", got, want)
+			}
+		})
+	}
+
+	if _, err := InspectPacket(packet, 44100); !errors.Is(err, ErrBadArg) || !errors.Is(err, ErrUnsupportedSampleRate) {
+		t.Fatalf("invalid sample rate error = %v, want ErrBadArg and ErrUnsupportedSampleRate", err)
+	}
+	if _, err := InspectPacket(nil, SampleRate48kHz); !errors.Is(err, ErrInvalidPacket) {
+		t.Fatalf("empty packet error = %v, want ErrInvalidPacket", err)
+	}
+
+	frames := make([][]byte, 7)
+	for i := range frames {
+		frames[i] = []byte{0}
+	}
+	payload, code, err := packOpusFrames(frames, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlong := append([]byte{byte(31<<3) | byte(code)}, payload...)
+	if _, err := InspectPacket(overlong, SampleRate48kHz); !errors.Is(err, ErrInvalidPacket) {
+		t.Fatalf("over-120 ms packet error = %v, want ErrInvalidPacket", err)
 	}
 }
 

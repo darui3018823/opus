@@ -6,6 +6,18 @@ import (
 	"github.com/darui3018823/opus"
 )
 
+func ExampleInspectPacket() {
+	// A stereo, fullband CELT packet containing one 10 ms frame.
+	packet := []byte{byte(30<<3) | 0x04, 0}
+	info, err := opus.InspectPacket(packet, opus.SampleRate48kHz)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("config=%d channels=%d frames=%d samples=%d\n", info.Config, info.Channels, info.FrameCount, info.SampleCount)
+	// Output:
+	// config=30 channels=2 frames=1 samples=480
+}
+
 func ExampleEncoder_Encode() {
 	encoder, err := opus.NewEncoder(opus.SampleRate48kHz, 1, opus.ApplicationAudio)
 	if err != nil {

@@ -33,7 +33,7 @@ func ExampleWriter() {
 	if err != nil {
 		panic(err)
 	}
-	if err := writer.WritePacket(encoded, oggopus.PacketWriteOptions{
+	if err := writer.WriteValidatedPacket(encoded, oggopus.PacketWriteOptions{
 		GranulePosition: opus.FrameSize20ms,
 	}); err != nil {
 		panic(err)

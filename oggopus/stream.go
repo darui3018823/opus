@@ -341,6 +341,7 @@ func (r *Reader) packetDuration(data []byte) (int, error) {
 // destination with a different serial number.
 type Writer struct {
 	packets *PacketWriter
+	head    Head
 }
 
 // NewWriter validates and writes the mandatory headers. The ID header is
@@ -361,7 +362,7 @@ func NewWriter(w io.Writer, serial uint32, head Head, tags Tags) (*Writer, error
 	if err := packets.WritePacket(tagsPacket, PacketWriteOptions{GranulePosition: 0, Flush: true}); err != nil {
 		return nil, err
 	}
-	return &Writer{packets: packets}, nil
+	return &Writer{packets: packets, head: head}, nil
 }
 
 // Serial returns the logical stream's serial number.
@@ -373,6 +374,30 @@ func (w *Writer) Serial() uint32 { return w.packets.Serial() }
 func (w *Writer) WritePacket(data []byte, options PacketWriteOptions) error {
 	if len(data) == 0 {
 		return fmt.Errorf("%w: zero-length audio packet", ErrInvalidOpusStream)
+	}
+	return w.packets.WritePacket(data, options)
+}
+
+// WriteValidatedPacket validates one complete Opus packet against this
+// Writer's OpusHead mapping before writing it. Mapping family 0 uses
+// single-stream framing; every other family uses the Head's elementary stream
+// count for RFC 7845 multistream framing. As with WritePacket, callers provide
+// the Ogg granule position and are responsible for its timing semantics.
+//
+// WritePacket remains available for applications that intentionally need to
+// write opaque or externally validated packet data.
+func (w *Writer) WriteValidatedPacket(data []byte, options PacketWriteOptions) error {
+	if len(data) == 0 {
+		return fmt.Errorf("%w: zero-length audio packet", ErrInvalidOpusStream)
+	}
+	var err error
+	if w.head.MappingFamily == 0 {
+		_, err = opus.InspectPacket(data, opus.SampleRate48kHz)
+	} else {
+		_, err = opus.MultistreamPacketGetNumSamples(data, int(w.head.StreamCount), opus.SampleRate48kHz)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: packet framing: %v", ErrInvalidOpusStream, err)
 	}
 	return w.packets.WritePacket(data, options)
 }

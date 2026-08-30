@@ -181,7 +181,9 @@ The `oggopus` subpackage provides:
 - `OpusHead` and `OpusTags` parsing and marshaling
 - Ogg Opus `Reader` and `Writer` APIs; Reader automatically continues across
   chained logical streams with per-link headers, tags, serials, and packet
-  indices, while each Writer emits one logical stream
+  indices, while each Writer emits one logical stream. `WriteValidatedPacket`
+  validates single-stream or multistream Opus framing from the `OpusHead`
+  mapping before output; `WritePacket` remains available for opaque packets.
 - validated 48 kHz packet timing with pre-skip/end-trim discard metadata
 - `(*Reader).SeekPCM(sample int64)` for granule-position bisection seeking on
   `io.ReadSeeker` sources with RFC 7845 80 ms decoder pre-roll

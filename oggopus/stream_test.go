@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"testing"
+
+	opus "github.com/darui3018823/opus"
 )
 
 func TestOggOpusWriterReaderGranuleEOSRoundTrip(t *testing.T) {
@@ -173,5 +175,79 @@ func TestOggOpusReaderRejectsMissingFinalEOS(t *testing.T) {
 		if _, err := reader.NextPacket(); !errors.Is(err, ErrInvalidOpusStream) {
 			t.Fatalf("attempt %d missing EOS error = %v", attempt, err)
 		}
+	}
+}
+
+func TestWriterWriteValidatedPacket(t *testing.T) {
+	encoder, err := opus.NewEncoder(opus.SampleRate48kHz, 1, opus.ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := encoder.Encode(make([]int16, opus.FrameSize20ms), opus.FrameSize20ms)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stream bytes.Buffer
+	writer, err := NewWriter(&stream, 101, Head{Version: 1, Channels: 1}, Tags{Vendor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteValidatedPacket([]byte{0xff, 0}, PacketWriteOptions{GranulePosition: 960}); !errors.Is(err, ErrInvalidOpusStream) {
+		t.Fatalf("invalid packet error = %v, want ErrInvalidOpusStream", err)
+	}
+	if err := writer.WriteValidatedPacket(packet, PacketWriteOptions{GranulePosition: 960, EOS: true}); err != nil {
+		t.Fatalf("valid packet: %v", err)
+	}
+
+	reader, err := NewReader(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := reader.NextPacket()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Data, packet) || got.Duration48k != opus.FrameSize20ms || !got.EOS {
+		t.Fatalf("packet = %+v, want a 20 ms EOS packet", got)
+	}
+}
+
+func TestWriterWriteValidatedPacketMultistream(t *testing.T) {
+	encoder, err := opus.NewMultistreamEncoder(opus.SampleRate48kHz, 3, 2, 1, []byte{0, 1, 2}, opus.ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet, err := encoder.Encode(make([]int16, 3*opus.FrameSize20ms), opus.FrameSize20ms)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stream bytes.Buffer
+	writer, err := NewWriter(&stream, 102, Head{
+		Version:        1,
+		Channels:       3,
+		MappingFamily:  1,
+		StreamCount:    2,
+		CoupledCount:   1,
+		ChannelMapping: []uint8{0, 1, 2},
+	}, Tags{Vendor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteValidatedPacket(packet, PacketWriteOptions{GranulePosition: 960, EOS: true}); err != nil {
+		t.Fatalf("multistream packet: %v", err)
+	}
+
+	reader, err := NewReader(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := reader.NextPacket()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got.Data, packet) || got.Duration48k != opus.FrameSize20ms || !got.EOS {
+		t.Fatalf("packet = %+v, want a 20 ms EOS packet", got)
 	}
 }

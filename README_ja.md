@@ -87,8 +87,8 @@ func main() {
 | loss 対応 | duration を明示する CELT/SILK/hybrid PLC と SILK LBRR in-band FEC。int16、signed 24-bit-in-int32、float32、float64 に対応 |
 | multistream/surround | RFC self-delimited framing、family 0/1（7.1 まで）/255、同じ PCM variant の PLC/FEC |
 | projection/Ambisonics | RFC 8486 family 2/3、family 3 の 1st〜5th order 定義済み matrix |
-| packet 操作 | 検査、repacketize、padding、soft clip、LBRR 検出、extension |
-| Ogg Opus | CRC/lacing、header/tag、timing trim、chain 読取り、link 単位 seek、single-link 書込み |
+| packet 操作 | 検証付き検査、repacketize、padding、soft clip、LBRR 検出、extension |
+| Ogg Opus | CRC/lacing、header/tag、timing trim、chain 読取り、link 単位 seek、検証付き single-link 書込み |
 | runtime 依存 | Pure Go。CGO/libopus は `opusref` の任意テストのみ |
 
 `MaxFrameSize` は 48 kHz で 1 channel 当たり 5760 sample（120 ms）です。

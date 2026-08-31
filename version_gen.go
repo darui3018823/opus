@@ -4,8 +4,8 @@ package opus
 
 // Public module version generated from VERSION.
 const (
-	Version      = "1.4.0"
+	Version      = "1.4.1"
 	VersionMajor = 1
 	VersionMinor = 4
-	VersionPatch = 0
+	VersionPatch = 1
 )

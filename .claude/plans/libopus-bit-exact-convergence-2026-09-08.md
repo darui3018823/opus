@@ -60,7 +60,7 @@ state or entropy divergence.
 |---|---|---|
 | Entropy coder | Documented and tested as matching libopus range coding | Retain final-range and symbol traces |
 | Decoder framing/range | Official vectors pass; CELT single-frame range is compared in diagnostics | Make range mismatches hard failures for deterministic valid fixtures |
-| int16 decode conversion | Single-stream paths truncate float PCM while libopus `FLOAT2INT16` rounds and saturates | Port conversion semantics and compare `opus_decode` int16 output |
+| int16 decode conversion | Float32 scaling, saturation, and nearest-even rounding now mirror libopus `FLOAT2INT16` across single-stream and multistream decode/PLC/FEC | Add direct `opus_decode` int16 differential output |
 | CELT synthesis | Float implementation is waveform-compatible, not sample-exact | Add per-stage/int16 delta localization before fixed-point ports |
 | SILK synthesis/PLC | Parameter/range coverage exists; PLC is explicitly non-bit-exact | Compare fixed-point state and PCM on deterministic packet sequences |
 | Encoder | Packets interoperate but are not byte-identical | Add mode-specific byte and first-symbol divergence traces |
@@ -90,3 +90,17 @@ Each slice should also name and run a narrower command that proves its specific
 oracle. Expensive full gates may be checkpointed after a sequence of small
 commits, but no mismatch is considered removed until the applicable reference
 test passes.
+
+## Completed Slices
+
+### 2026-09-08: int16 output conversion
+
+- Reference: `libopus/celt/float_cast.h::FLOAT2INT16`,
+  `libopus/celt/mathops.c::celt_float2int16_c`, and
+  `libopus/src/opus_decoder.c::opus_decode`.
+- Replaced zero-direction truncation with float32-domain scaling, saturation,
+  and nearest-even rounding.
+- Unified single-stream and multistream normal decode, PLC, and FEC int16
+  conversions on the same helper.
+- Verified the focused rounding oracle, `go vet ./...`, normal and `opusref`
+  suites, the full race suite, and all 12 official vectors.

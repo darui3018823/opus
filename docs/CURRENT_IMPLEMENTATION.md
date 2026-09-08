@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-08-31
+Last reviewed: 2026-09-08
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -632,6 +632,11 @@ Packets whose decoded duration exceeds 120 ms are rejected as invalid.
 
 Current decoder behavior and limitations:
 
+- All single-stream and multistream int16 decode, PLC, and FEC entry points use
+  the floating-point libopus `FLOAT2INT16` conversion order: float32 scaling by
+  32768, saturation to the int16 domain, then nearest-even rounding. This makes
+  the API conversion itself C-faithful; codec synthesis is not yet generally
+  sample-exact with libopus.
 - `DecodePLC` supports CELT-only, SILK-only, and hybrid streams. Before the
   first successful packet and after reset it returns zero concealment, matching
   libopus. The requested duration may be any positive 2.5 ms multiple through

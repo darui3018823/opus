@@ -1210,6 +1210,14 @@ Notes:
   needs a C toolchain plus libopus (reported `libopus 1.6.1` locally); it passes
   all 12 vectors. Normal builds use a `!opusref` stub so the codec stays
   CGO-free.
+- A constituent-frame oracle for testvector01 packet 0 additionally holds all
+  three CELT final ranges exact and prevents int16 agreement from regressing
+  below 1920/1920, 1903/1920, and 1919/1920 samples. Remaining mismatches are
+  at most 1 LSB. The decoder now mirrors the floating libopus build's float32
+  coarse/fine energy and de-emphasis state semantics, including the absence of
+  the fixed-point-only `-28` coarse-energy clamp. The next localized PCM gate
+  is the long-block IMDCT: Go uses a Bluestein FFT whereas libopus uses its
+  mixed-radix KISS FFT.
 - The pure-Go **encoder** is also cross-validated against libopus under the same
   tag: `TestCGOEncodeRef` encodes synthetic signals with our encoder and decodes
   the packets with libopus 1.6.1, then measures delay-aligned SNR. libopus

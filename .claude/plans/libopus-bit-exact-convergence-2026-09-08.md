@@ -61,7 +61,7 @@ state or entropy divergence.
 | Entropy coder | Documented and tested as matching libopus range coding | Retain final-range and symbol traces |
 | Decoder framing/range | All 12 official vectors now have zero `FinalRange` mismatches against libopus 1.6.1 and their `.bit` records | Retain the all-vector zero-mismatch gate while localizing PCM divergence |
 | int16 decode conversion | Conversion semantics match `FLOAT2INT16`; direct `opus_decode` comparison now reports exact-sample percentage, first/max LSB delta, and range mismatch count | Raise mode-specific exact-sample coverage after range alignment |
-| CELT synthesis | Float implementation is waveform-compatible, not sample-exact | Add per-stage/int16 delta localization before fixed-point ports |
+| CELT synthesis | tv01 packet 0 constituent ranges are exact; sequential int16 agreement is 1920/1920, 1903/1920, and 1919/1920 with every mismatch limited to 1 LSB | Replace or validate the Bluestein IMDCT against libopus's float mixed-radix KISS FFT before broad fixed-point work |
 | SILK synthesis/PLC | Parameter/range coverage exists; PLC is explicitly non-bit-exact | Compare fixed-point state and PCM on deterministic packet sequences |
 | Encoder | Packets interoperate but are not byte-identical | Add mode-specific byte and first-symbol divergence traces |
 | Mode/rate policy | Known partial parity in `docs/MODE_RATE_POLICY_DIFF.md` | Compare decisions and state over identical PCM/control sequences |
@@ -151,4 +151,26 @@ test passes.
   libopus cannot mistake zero fill for transition redundancy. Added normal and
   `opusref` regression coverage, including per-packet FEC-stream range checks.
 - Verified the focused vector oracle, complete normal and `opusref` suites,
+  `go vet ./...`, and the complete race suite.
+
+### 2026-09-09: CELT float decoder state and tv01 PCM oracle
+
+- Reference: `libopus/celt/arch.h`, `quant_bands.c`, and
+  `celt_decoder.c::deemphasis_stereo_simple`. The floating build uses
+  `float` for `celt_glog`, every `opus_val` width, `celt_sig`, and the
+  de-emphasis memory; the fixed-point-only `-28` coarse-energy clamp is absent.
+- Kept fine-corrected `oldBandE` directly in the log domain instead of
+  reconstructing it through linear energy and `log2`, and matched float32
+  predictor, fine-energy, and de-emphasis state transitions.
+- Added a constituent-frame tv01 oracle that compares both int16 and float32
+  libopus output, sequential and reset-state decoding, maximum error location,
+  and a fitted-scale residual. All three frame ranges remain exact. The first
+  frame is int16 sample-exact; the next two differ at 17 and 1 samples,
+  respectively, always by 1 LSB.
+- The fitted-scale residual rules out a uniform gain error. The largest second
+  frame float error is near its end, while the third frame's maximum is at its
+  beginning, consistent with a long-block transform error followed by carried
+  de-emphasis state. Go currently uses a Bluestein FFT while libopus uses its
+  mixed-radix KISS FFT, making that transform boundary the next focused gate.
+- Verified the focused oracle, complete normal and `opusref` suites,
   `go vet ./...`, and the complete race suite.

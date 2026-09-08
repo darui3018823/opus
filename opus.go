@@ -1109,14 +1109,6 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int, celtToSilk bo
 				e.silkEncoder.DiscardPendingLBRR()
 			}
 		}
-		if !frameRedundancy && e.shouldPadSILKStream(silkPCM) {
-			targetBytes := e.silkStreamTargetBytes(group)
-			if len(stream) < targetBytes {
-				padded := make([]byte, targetBytes)
-				copy(padded, stream)
-				stream = padded
-			}
-		}
 		streams = append(streams, stream)
 		if encodeSILK {
 			rangeFinal ^= e.silkEncoder.LastFinalRange()
@@ -1142,36 +1134,22 @@ func (e *Encoder) shouldUseConservativeSILKNSQ(groupFrames int) bool {
 		groupFrames == 1
 }
 
-func (e *Encoder) shouldPadSILKStream(pcm []float64) bool {
-	if e.rateMode != celt.RateModeCBR {
-		return false
-	}
-	if isSilentPCM(pcm) {
-		return false
-	}
-	if e.channels == 2 && e.silkEncoder != nil && e.silkEncoder.TrellisNSQ() {
-		// A flushed SILK range stream cannot be padded by appending payload
-		// zeros: libopus then consumes different tail symbols. Stereo trellis
-		// uses its natural budget-controlled stream size.
-		return false
-	}
-	return true
-}
-
 func (e *Encoder) shouldPadSILKPacket(streams [][]byte, celtToSilk bool) bool {
 	if e.rateMode != celt.RateModeCBR || e.padBytes > 0 || celtToSilk {
 		return false
 	}
-	if len(streams) <= 1 {
-		return false
-	}
-	if e.channels != 2 || e.silkEncoder == nil || !e.silkEncoder.TrellisNSQ() {
-		return false
-	}
+	// Padding bytes inside a SILK frame are not inert: libopus interprets any
+	// sufficiently large tail as a 5 ms CELT redundancy frame. Keep the coded
+	// stream at its natural size and use Opus code-3 packet padding instead.
 	for _, stream := range streams {
 		if len(stream) <= 1 {
 			return false
 		}
+	}
+	if len(streams) == 1 && e.channels == 2 && e.silkEncoder != nil && e.silkEncoder.TrellisNSQ() {
+		// Stereo trellis already spends its natural budget without zero-filling,
+		// so retain the compact single-frame code-0 representation.
+		return false
 	}
 	return true
 }

@@ -94,8 +94,8 @@ func TestEncoderSILKOnlyQualityBaseline(t *testing.T) {
 						if config := int(pkt[0] >> 3); config >= 12 {
 							t.Fatalf("frame %d: TOC config=%d, want SILK-only", frame, config)
 						}
-						if code := int(pkt[0] & 0x03); code != 0 {
-							t.Fatalf("frame %d: count code=%d, want 0 for 20ms SILK packet", frame, code)
+						if code := int(pkt[0] & 0x03); code != 0 && code != 3 {
+							t.Fatalf("frame %d: count code=%d, want single-frame SILK packet", frame, code)
 						}
 						decoded, err := dec.DecodeFloat(pkt)
 						if err != nil {

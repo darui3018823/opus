@@ -48,8 +48,8 @@ func TestEncoderSILKOnlyVOIPLowBitrateRoundTrip(t *testing.T) {
 			if config != tc.wantConfig {
 				t.Fatalf("TOC config=%d, want SILK-only 20ms config %d (toc=0x%02x)", config, tc.wantConfig, pkt[0])
 			}
-			if code := int(pkt[0] & 0x03); code != 0 {
-				t.Fatalf("count code=%d, want 0 for one 20ms SILK frame", code)
+			if code := int(pkt[0] & 0x03); code != 0 && code != 3 {
+				t.Fatalf("count code=%d, want one 20ms SILK frame", code)
 			}
 
 			dec, err := NewDecoder(tc.rate, 1)
@@ -62,6 +62,9 @@ func TestEncoderSILKOnlyVOIPLowBitrateRoundTrip(t *testing.T) {
 			}
 			if len(decoded) != frameSize {
 				t.Fatalf("decoded samples=%d, want %d", len(decoded), frameSize)
+			}
+			if dec.prevRedundancy {
+				t.Fatal("plain SILK packet was misread as transition redundancy")
 			}
 		})
 	}

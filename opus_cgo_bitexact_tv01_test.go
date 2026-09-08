@@ -92,12 +92,17 @@ func TestTV01Packet0FrameRangesMatchLibopus(t *testing.T) {
 		maxDelta := 0
 		floatAbsLSB := 0.0
 		floatMaxLSB := 0.0
+		floatMaxIndex := -1
+		var dot, refEnergy float64
 		for sample := range goPCM {
 			goSample := float32(goFloat[sample])
+			dot += float64(goSample) * float64(refFloat[sample])
+			refEnergy += float64(refFloat[sample]) * float64(refFloat[sample])
 			floatDeltaLSB := math.Abs(float64(goSample-refFloat[sample])) * 32768
 			floatAbsLSB += floatDeltaLSB
 			if floatDeltaLSB > floatMaxLSB {
 				floatMaxLSB = floatDeltaLSB
+				floatMaxIndex = sample
 			}
 			if goSample == refFloat[sample] {
 				floatExact++
@@ -123,8 +128,19 @@ func TestTV01Packet0FrameRangesMatchLibopus(t *testing.T) {
 		if exact < minimumSequentialExact[i] || maxDelta > 1 {
 			t.Errorf("frame %d sequential PCM regressed: exact=%d/%d maxDelta=%d", i, exact, len(goPCM), maxDelta)
 		}
-		t.Logf("frame=%d float32 exact=%d/%d firstDiff=%d meanAbsLSB=%.6f maxAbsLSB=%.6f",
-			i, floatExact, len(goFloat), firstFloatDiff, floatAbsLSB/float64(len(goFloat)), floatMaxLSB)
+		t.Logf("frame=%d float32 exact=%d/%d firstDiff=%d meanAbsLSB=%.6f maxAbsLSB=%.6f@%d",
+			i, floatExact, len(goFloat), firstFloatDiff, floatAbsLSB/float64(len(goFloat)), floatMaxLSB, floatMaxIndex)
+		scale := dot / refEnergy
+		var scaledAbsLSB, scaledMaxLSB float64
+		for sample := range goFloat {
+			deltaLSB := math.Abs(float64(float32(goFloat[sample]))-scale*float64(refFloat[sample])) * 32768
+			scaledAbsLSB += deltaLSB
+			if deltaLSB > scaledMaxLSB {
+				scaledMaxLSB = deltaLSB
+			}
+		}
+		t.Logf("frame=%d fittedScale=%.12f residualMeanAbsLSB=%.6f residualMaxAbsLSB=%.6f",
+			i, scale, scaledAbsLSB/float64(len(goFloat)), scaledMaxLSB)
 		if firstDiff >= 0 {
 			t.Logf("frame=%d sample=%d Go=%g (%08x) libopus=%g (%08x)", i, firstDiff,
 				float32(goFloat[firstDiff]), math.Float32bits(float32(goFloat[firstDiff])),

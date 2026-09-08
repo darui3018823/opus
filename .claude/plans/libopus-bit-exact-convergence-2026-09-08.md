@@ -1,6 +1,6 @@
 # libopus Bit-Exact Convergence Plan
 
-Last updated: 2026-09-08
+Last updated: 2026-09-09
 Status: Active
 
 ## Objective
@@ -59,7 +59,7 @@ state or entropy divergence.
 | Area | Current evidence | Next exactness gate |
 |---|---|---|
 | Entropy coder | Documented and tested as matching libopus range coding | Retain final-range and symbol traces |
-| Decoder framing/range | Using the last constituent frame range removed 3680 mismatches; vectors 01-07 and 11 are exact, with only 1/1/13/12 mismatches in vectors 08/09/10/12 | Localize vector 08 packet 4, the first remaining mismatch |
+| Decoder framing/range | All 12 official vectors now have zero `FinalRange` mismatches against libopus 1.6.1 and their `.bit` records | Retain the all-vector zero-mismatch gate while localizing PCM divergence |
 | int16 decode conversion | Conversion semantics match `FLOAT2INT16`; direct `opus_decode` comparison now reports exact-sample percentage, first/max LSB delta, and range mismatch count | Raise mode-specific exact-sample coverage after range alignment |
 | CELT synthesis | Float implementation is waveform-compatible, not sample-exact | Add per-stage/int16 delta localization before fixed-point ports |
 | SILK synthesis/PLC | Parameter/range coverage exists; PLC is explicitly non-bit-exact | Compare fixed-point state and PCM on deterministic packet sequences |
@@ -134,4 +134,21 @@ test passes.
   1, vector 09 has 1, vector 10 has 13, vector 12 has 12, and all other vectors
   have zero.
 - Verified the focused oracle, complete normal and `opusref` suites,
+  `go vet ./...`, and the complete race suite.
+
+### 2026-09-09: SILK and hybrid transition redundancy
+
+- Reference: `libopus/src/opus_decoder.c::opus_decode_frame`, especially the
+  SILK-only implicit redundancy rule, direction bit, CELT end-band selection,
+  redundant range XOR, and `prev_redundancy` update.
+- Localized vector 08 packet 4 through the C SILK symbol boundaries. Its SILK
+  body range already matched; Go treated the following direction bit as a
+  redundancy-presence bit and skipped a trailing SILK-to-CELT frame.
+- Unified leading/trailing SILK and hybrid redundancy decoding, CELT state
+  carry/reset, crossfade, and final-range XOR. Official-vector `FinalRange`
+  mismatches fell from 27 to zero across all 12 vectors.
+- Moved Go encoder CBR fill from the SILK frame body to RFC packet padding so
+  libopus cannot mistake zero fill for transition redundancy. Added normal and
+  `opusref` regression coverage, including per-packet FEC-stream range checks.
+- Verified the focused vector oracle, complete normal and `opusref` suites,
   `go vet ./...`, and the complete race suite.

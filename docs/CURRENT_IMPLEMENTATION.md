@@ -191,7 +191,9 @@ The `oggopus` subpackage provides:
 The decoder exposes `SampleRate`, `Channels`, `FinalRange`, and `Pitch`
 getters. For a single-stream packet, `FinalRange` is the final entropy range of
 the last constituent Opus frame, matching libopus; multistream `FinalRange` is
-the XOR across elementary streams. `Pitch` is reported in output-rate samples.
+the XOR across elementary streams. All 12 official vectors currently report
+zero `FinalRange` mismatches against libopus 1.6.1 and their `.bit` records.
+`Pitch` is reported in output-rate samples.
 Decoder output gain is available through `SetGain` and `Gain`, using Q8 dB.
 Single-stream encode/decode also supports signed 24-bit PCM stored in `int32`
 through `Encode24` and `Decode24`. Encoder and decoder phase-inversion controls
@@ -644,10 +646,10 @@ Current decoder behavior and limitations:
   120 ms. Hybrid concealment sums the independently concealed SILK low band and
   CELT high band through the normal resampler/channel paths. Successful PLC sets
   `FinalRange` to zero. SILK PLC is stateful and interoperable but is not
-  bit-exact with libopus PLC. A hybrid packet ending in trailing SILK-to-CELT
-  redundancy marks the next loss for CELT-only concealment, matching libopus'
-  independent `prev_redundancy` state; FEC eligibility continues to use the
-  last received packet's framing mode.
+  bit-exact with libopus PLC. A SILK-only or hybrid packet ending in trailing
+  SILK-to-CELT redundancy marks the next loss for CELT-only concealment,
+  matching libopus' independent `prev_redundancy` state; FEC eligibility
+  continues to use the last received packet's framing mode.
 - `DecodeFECWithDuration` takes the exact missing duration. It decodes LBRR from
   only the first Opus frame in a SILK-only or hybrid carrier, prefixes PLC when
   the loss is longer than that frame, and falls back to PLC when FEC cannot be
@@ -941,6 +943,11 @@ and the two outputs are resampled and time-domain summed. Both redundancy
 directions are handled: trailing SILK→CELT frames crossfade the packet tail and
 seed subsequent CELT state, while leading CELT→SILK/hybrid frames replace the
 first 2.5 ms and crossfade into the new mode over the next 2.5 ms.
+SILK-only transition redundancy follows libopus' implicit syntax: if enough
+bits remain after SILK, the next bit is the direction rather than a presence
+flag, every remaining byte belongs to the 5 ms CELT frame, and its final range
+is XORed with the main range. Encoder CBR fill uses RFC code-3 packet padding
+outside the SILK frame so padding cannot be misread as transition redundancy.
 
 ## Test Status
 
@@ -956,6 +963,11 @@ go vet ./...
 go test -count=1 ./...
 go test -count=1 -tags opusref ./...
 ```
+
+Bit-exact convergence verification on 2026-09-09: passing (`go vet ./...`,
+`go test -count=1 ./...`, `go test -count=1 -tags opusref ./...`, and
+`go test -race -count=1 ./...`). The libopus 1.6.1 official-vector oracle
+reports zero final-range mismatches for all 12 vectors.
 
 Result on 2026-06-16: passing (`go vet ./...`, `go test -count=1 ./...`,
 and `go test -count=1 -tags opusref ./...` exit 0).

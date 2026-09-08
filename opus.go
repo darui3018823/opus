@@ -2868,6 +2868,9 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 	}
 
 	var allPCM []float64
+	// opus_decode_native overwrites rangeFinal for each constituent frame, so
+	// OPUS_GET_FINAL_RANGE reports the last frame rather than an XOR across the
+	// frames of one single-stream packet.
 	var rangeFinal uint32
 	for _, frame := range frames {
 		if d.lastCeltDec != nil && d.lastCeltDec != activeCeltDec {
@@ -2878,7 +2881,7 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 			return nil, fmt.Errorf("CELT decoding failed: %w", err)
 		}
 		d.lastCeltDec = activeCeltDec
-		rangeFinal ^= activeCeltDec.LastFinalRange()
+		rangeFinal = activeCeltDec.LastFinalRange()
 		d.lastPitch = activeCeltDec.Pitch() * d.sampleRate / 48000
 
 		// Resample from 48kHz to output sample rate if needed
@@ -3049,6 +3052,8 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		d.silkRS[1] != nil && d.silkRSInKHz[1] == rateKHz
 
 	var allPCM []float64
+	// A single-stream packet reports its last constituent frame range. XOR is
+	// reserved for combining elementary streams in the multistream API.
 	var rangeFinal uint32
 	for si, stream := range silkStreams {
 		if len(stream) < 2 {
@@ -3060,7 +3065,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 			pcm = d.resampleSILK(pcm, nSilkFramesPerStream, pktChannels, stereoToMono && si == 0)
 			pcm = padOrTrim(pcm, samplesPerStream)
 			allPCM = append(allPCM, pcm...)
-			rangeFinal ^= info.dec.LastFinalRange()
+			rangeFinal = info.dec.LastFinalRange()
 			continue
 		}
 		dec := entcode.NewDecoder(stream)
@@ -3107,7 +3112,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 			}
 		}
 		allPCM = append(allPCM, pcm...)
-		rangeFinal ^= dec.GetRng()
+		rangeFinal = dec.GetRng()
 	}
 	d.lastFinalRange = rangeFinal
 	d.lastPitch = info.dec.Pitch() * d.sampleRate / (rateKHz * 1000)
@@ -3267,6 +3272,8 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 	samplesPerFrame := (d.sampleRate * frameDurationMs / 1000) * d.channels
 
 	var allPCM []float64
+	// Match opus_decode_native: each packet frame replaces rangeFinal rather
+	// than being XORed with preceding frames from the same stream.
 	var rangeFinal uint32
 	trailingRedundancy := false
 	for si, stream := range silkStreams {
@@ -3371,7 +3378,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 			}
 		}
 		allPCM = append(allPCM, silkOut...)
-		rangeFinal ^= dec.GetRng()
+		rangeFinal = dec.GetRng()
 	}
 	d.lastFinalRange = rangeFinal
 	d.lastPitch = info.dec.Pitch() * d.sampleRate / (rateKHz * 1000)

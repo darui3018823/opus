@@ -59,8 +59,8 @@ state or entropy divergence.
 | Area | Current evidence | Next exactness gate |
 |---|---|---|
 | Entropy coder | Documented and tested as matching libopus range coding | Retain final-range and symbol traces |
-| Decoder framing/range | Official vectors pass; CELT single-frame range is compared in diagnostics | Make range mismatches hard failures for deterministic valid fixtures |
-| int16 decode conversion | Float32 scaling, saturation, and nearest-even rounding now mirror libopus `FLOAT2INT16` across single-stream and multistream decode/PLC/FEC | Add direct `opus_decode` int16 differential output |
+| Decoder framing/range | The int16 oracle proves zero range mismatches for vectors 02-07, but records 1413/402/367/1164/349/12 mismatches for vectors 01/08/09/10/11/12 | Localize vector 01 packet 0 to its first divergent CELT entropy stage |
+| int16 decode conversion | Conversion semantics match `FLOAT2INT16`; direct `opus_decode` comparison now reports exact-sample percentage, first/max LSB delta, and range mismatch count | Raise mode-specific exact-sample coverage after range alignment |
 | CELT synthesis | Float implementation is waveform-compatible, not sample-exact | Add per-stage/int16 delta localization before fixed-point ports |
 | SILK synthesis/PLC | Parameter/range coverage exists; PLC is explicitly non-bit-exact | Compare fixed-point state and PCM on deterministic packet sequences |
 | Encoder | Packets interoperate but are not byte-identical | Add mode-specific byte and first-symbol divergence traces |
@@ -104,3 +104,18 @@ test passes.
   conversions on the same helper.
 - Verified the focused rounding oracle, `go vet ./...`, normal and `opusref`
   suites, the full race suite, and all 12 official vectors.
+
+### 2026-09-08: libopus int16 convergence oracle
+
+- Added a CGO wrapper for libopus `opus_decode`, retaining `opus_decode_float`
+  for quality comparisons but no longer using mixed output APIs for the
+  bit-exact scoreboard.
+- `TestCGORef` now checks libopus `OPUS_GET_FINAL_RANGE` against every official
+  `.bit` record, compares int16 samples directly, and reports exact-sample
+  coverage, first/max LSB delta, and Go final-range mismatch count.
+- The zero-mismatch range baselines for vectors 02-07 are hard regression
+  gates; nonzero vector baselines may decrease but may not increase.
+- The first remaining entropy mismatch is vector 01 packet 0: Go `0aa13300`,
+  libopus/bitstream `16230400`. This is the next convergence slice.
+- Verified with `go test -count=1 -tags opusref -run '^TestCGORef$' -v .`,
+  `go vet ./...`, and the complete normal and `opusref` suites.

@@ -628,15 +628,7 @@ func (d *MultistreamDecoder) Decode(data []byte, pcm []int16) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	for i, sample := range floatPCM {
-		scaled := sample * 32768
-		if scaled > 32767 {
-			scaled = 32767
-		} else if scaled < -32768 {
-			scaled = -32768
-		}
-		pcm[i] = int16(math.Round(scaled))
-	}
+	floatToInt16(pcm[:required], floatPCM)
 	return duration, nil
 }
 

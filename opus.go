@@ -2291,18 +2291,7 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 	}
 
 	n := len(floatPCM)
-
-	// Convert float64 to int16
-	for i := 0; i < n; i++ {
-		sample := floatPCM[i] * 32768.0
-		if sample > 32767.0 {
-			sample = 32767.0
-		}
-		if sample < -32768.0 {
-			sample = -32768.0
-		}
-		pcm[i] = int16(sample)
-	}
+	floatToInt16(pcm[:n], floatPCM)
 
 	samplesPerChannel := n / d.channels
 	return samplesPerChannel, nil
@@ -3556,16 +3545,7 @@ func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	for i, sample := range floatPCM {
-		sample *= 32768.0
-		if sample > 32767.0 {
-			sample = 32767.0
-		}
-		if sample < -32768.0 {
-			sample = -32768.0
-		}
-		pcm[i] = int16(sample)
-	}
+	floatToInt16(pcm[:required], floatPCM)
 	return frameSize, nil
 }
 
@@ -3814,14 +3794,21 @@ func floatToInt24(dst []int32, src []float64) {
 
 func floatToInt16(dst []int16, src []float64) {
 	for i, sample := range src {
-		scaled := sample * 32768.0
-		if scaled > 32767.0 {
-			scaled = 32767.0
-		} else if scaled < -32768.0 {
-			scaled = -32768.0
-		}
-		dst[i] = int16(scaled)
+		dst[i] = libopusFloatToInt16(sample)
 	}
+}
+
+// libopusFloatToInt16 mirrors FLOAT2INT16 in libopus/celt/float_cast.h for
+// the normal floating-point build: perform the scaling in float precision,
+// saturate, then use the platform's default nearest-even rounding semantics.
+func libopusFloatToInt16(sample float64) int16 {
+	scaled := float32(sample) * float32(32768)
+	if scaled > 32767 {
+		scaled = 32767
+	} else if scaled < -32768 {
+		scaled = -32768
+	}
+	return int16(math.RoundToEven(float64(scaled)))
 }
 
 func lossDecodeChunk(remaining, sampleRate, mode int) int {
@@ -3870,15 +3857,7 @@ func (d *Decoder) DecodeFECWithDuration(data []byte, pcm []int16, frameSize int)
 	if err != nil {
 		return 0, err
 	}
-	for i, sample := range floatPCM {
-		scaled := sample * 32768.0
-		if scaled > 32767.0 {
-			scaled = 32767.0
-		} else if scaled < -32768.0 {
-			scaled = -32768.0
-		}
-		pcm[i] = int16(scaled)
-	}
+	floatToInt16(pcm[:required], floatPCM)
 	return frameSize, nil
 }
 

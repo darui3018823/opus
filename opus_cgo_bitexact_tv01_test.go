@@ -3,13 +3,18 @@
 package opus
 
 import (
+	"math"
 	"testing"
 
 	"github.com/darui3018823/opus/internal/celt"
 	"github.com/darui3018823/opus/internal/cgoref"
+	"github.com/darui3018823/opus/internal/entcode"
 )
 
 func TestTV01Packet0FrameRangesMatchLibopus(t *testing.T) {
+	minimumSequentialExact := [...]int{1920, 1903, 1919}
+	minimumIsolatedExact := [...]int{1920, 1552, 1920}
+
 	packet := readOpusDemoPackets(t, "testvector01.bit")[0]
 	toc := packet.packet[0]
 	config := int(toc >> 3)
@@ -35,9 +40,20 @@ func TestTV01Packet0FrameRangesMatchLibopus(t *testing.T) {
 		t.Fatalf("cgoref.NewDecoder: %v", err)
 	}
 	defer refDec.Close()
+	refFloatDec, err := cgoref.NewDecoder(SampleRate48kHz, ChannelsStereo)
+	if err != nil {
+		t.Fatalf("cgoref.NewDecoder for float output: %v", err)
+	}
+	defer refFloatDec.Close()
 
 	var goLast, refLast uint32
 	for i, frame := range frames {
+		probe := entcode.NewDecoder(frame)
+		if probe.ECTell() == 1 {
+			_ = probe.DecodeBitLogp(15)
+		}
+		pfPeriod, pfGain, pfTapset, pfEnabled := celt.DecodePostFilterParams(probe, len(frame)*8, 3)
+		isTransient := probe.DecodeBitLogp(3)
 		goFloat, err := goDec.Decode(frame)
 		if err != nil {
 			t.Fatalf("frame %d Go CELT decode: %v", i, err)
@@ -57,17 +73,37 @@ func TestTV01Packet0FrameRangesMatchLibopus(t *testing.T) {
 		if err != nil {
 			t.Fatalf("frame %d libopus final range: %v", i, err)
 		}
+		refFloat, err := refFloatDec.DecodeFloat(singlePacket, FrameSize20ms)
+		if err != nil {
+			t.Fatalf("frame %d libopus float decode: %v", i, err)
+		}
 
 		goLast = goRange
 		refLast = refRange
-		t.Logf("frame=%d bytes=%d go=%08x libopus=%08x", i, len(frame), goRange, refRange)
+		t.Logf("frame=%d bytes=%d postfilter=%v/%d/%.6f/%d transient=%v pitch=%d go=%08x libopus=%08x",
+			i, len(frame), pfEnabled, pfPeriod, pfGain, pfTapset, isTransient, goDec.Pitch(), goRange, refRange)
 		if goRange != refRange {
 			t.Errorf("frame %d final range=%08x, libopus=%08x", i, goRange, refRange)
 		}
 		firstDiff := -1
+		firstFloatDiff := -1
 		exact := 0
+		floatExact := 0
 		maxDelta := 0
+		floatAbsLSB := 0.0
+		floatMaxLSB := 0.0
 		for sample := range goPCM {
+			goSample := float32(goFloat[sample])
+			floatDeltaLSB := math.Abs(float64(goSample-refFloat[sample])) * 32768
+			floatAbsLSB += floatDeltaLSB
+			if floatDeltaLSB > floatMaxLSB {
+				floatMaxLSB = floatDeltaLSB
+			}
+			if goSample == refFloat[sample] {
+				floatExact++
+			} else if firstFloatDiff < 0 {
+				firstFloatDiff = sample
+			}
 			delta := int(goPCM[sample]) - int(refPCM[sample])
 			if delta == 0 {
 				exact++
@@ -84,6 +120,46 @@ func TestTV01Packet0FrameRangesMatchLibopus(t *testing.T) {
 			}
 		}
 		t.Logf("frame=%d PCM exact=%d/%d firstDiff=%d maxDelta=%d", i, exact, len(goPCM), firstDiff, maxDelta)
+		if exact < minimumSequentialExact[i] || maxDelta > 1 {
+			t.Errorf("frame %d sequential PCM regressed: exact=%d/%d maxDelta=%d", i, exact, len(goPCM), maxDelta)
+		}
+		t.Logf("frame=%d float32 exact=%d/%d firstDiff=%d meanAbsLSB=%.6f maxAbsLSB=%.6f",
+			i, floatExact, len(goFloat), firstFloatDiff, floatAbsLSB/float64(len(goFloat)), floatMaxLSB)
+		if firstDiff >= 0 {
+			t.Logf("frame=%d sample=%d Go=%g (%08x) libopus=%g (%08x)", i, firstDiff,
+				float32(goFloat[firstDiff]), math.Float32bits(float32(goFloat[firstDiff])),
+				refFloat[firstDiff], math.Float32bits(refFloat[firstDiff]))
+		}
+
+		isolatedGo, err := celt.NewDecoderEx(FrameSize20ms, SampleRate48kHz, 21, ChannelsStereo)
+		if err != nil {
+			t.Fatalf("frame %d isolated Go decoder: %v", i, err)
+		}
+		isolatedFloat, err := isolatedGo.Decode(frame)
+		if err != nil {
+			t.Fatalf("frame %d isolated Go decode: %v", i, err)
+		}
+		isolatedPCM := make([]int16, len(isolatedFloat))
+		floatToInt16(isolatedPCM, isolatedFloat)
+		isolatedRef, err := cgoref.NewDecoder(SampleRate48kHz, ChannelsStereo)
+		if err != nil {
+			t.Fatalf("frame %d isolated libopus decoder: %v", i, err)
+		}
+		isolatedRefPCM, err := isolatedRef.Decode(singlePacket, FrameSize20ms)
+		isolatedRef.Close()
+		if err != nil {
+			t.Fatalf("frame %d isolated libopus decode: %v", i, err)
+		}
+		isolatedExact := 0
+		for sample := range isolatedPCM {
+			if isolatedPCM[sample] == isolatedRefPCM[sample] {
+				isolatedExact++
+			}
+		}
+		t.Logf("frame=%d isolated PCM exact=%d/%d", i, isolatedExact, len(isolatedPCM))
+		if isolatedExact < minimumIsolatedExact[i] {
+			t.Errorf("frame %d isolated PCM regressed: exact=%d/%d", i, isolatedExact, len(isolatedPCM))
+		}
 		if i == 0 && firstDiff >= 0 {
 			t.Fatalf("frame 0 unexpectedly differs first at sample %d", firstDiff)
 		}

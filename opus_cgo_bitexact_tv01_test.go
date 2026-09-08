@@ -38,15 +38,19 @@ func TestTV01Packet0FrameRangesMatchLibopus(t *testing.T) {
 
 	var goLast, refLast uint32
 	for i, frame := range frames {
-		if _, err := goDec.Decode(frame); err != nil {
+		goFloat, err := goDec.Decode(frame)
+		if err != nil {
 			t.Fatalf("frame %d Go CELT decode: %v", i, err)
 		}
+		goPCM := make([]int16, len(goFloat))
+		floatToInt16(goPCM, goFloat)
 		goRange := goDec.LastFinalRange()
 
 		singlePacket := make([]byte, 1, len(frame)+1)
 		singlePacket[0] = toc &^ 3
 		singlePacket = append(singlePacket, frame...)
-		if _, err := refDec.Decode(singlePacket, FrameSize20ms); err != nil {
+		refPCM, err := refDec.Decode(singlePacket, FrameSize20ms)
+		if err != nil {
 			t.Fatalf("frame %d libopus decode: %v", i, err)
 		}
 		refRange, err := refDec.FinalRange()
@@ -59,6 +63,29 @@ func TestTV01Packet0FrameRangesMatchLibopus(t *testing.T) {
 		t.Logf("frame=%d bytes=%d go=%08x libopus=%08x", i, len(frame), goRange, refRange)
 		if goRange != refRange {
 			t.Errorf("frame %d final range=%08x, libopus=%08x", i, goRange, refRange)
+		}
+		firstDiff := -1
+		exact := 0
+		maxDelta := 0
+		for sample := range goPCM {
+			delta := int(goPCM[sample]) - int(refPCM[sample])
+			if delta == 0 {
+				exact++
+				continue
+			}
+			if firstDiff < 0 {
+				firstDiff = sample
+			}
+			if delta < 0 {
+				delta = -delta
+			}
+			if delta > maxDelta {
+				maxDelta = delta
+			}
+		}
+		t.Logf("frame=%d PCM exact=%d/%d firstDiff=%d maxDelta=%d", i, exact, len(goPCM), firstDiff, maxDelta)
+		if i == 0 && firstDiff >= 0 {
+			t.Fatalf("frame 0 unexpectedly differs first at sample %d", firstDiff)
 		}
 	}
 

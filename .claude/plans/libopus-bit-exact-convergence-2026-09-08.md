@@ -59,7 +59,7 @@ state or entropy divergence.
 | Area | Current evidence | Next exactness gate |
 |---|---|---|
 | Entropy coder | Documented and tested as matching libopus range coding | Retain final-range and symbol traces |
-| Decoder framing/range | The int16 oracle proves zero range mismatches for vectors 02-07, but records 1413/402/367/1164/349/12 mismatches for vectors 01/08/09/10/11/12 | Localize vector 01 packet 0 to its first divergent CELT entropy stage |
+| Decoder framing/range | Using the last constituent frame range removed 3680 mismatches; vectors 01-07 and 11 are exact, with only 1/1/13/12 mismatches in vectors 08/09/10/12 | Localize vector 08 packet 4, the first remaining mismatch |
 | int16 decode conversion | Conversion semantics match `FLOAT2INT16`; direct `opus_decode` comparison now reports exact-sample percentage, first/max LSB delta, and range mismatch count | Raise mode-specific exact-sample coverage after range alignment |
 | CELT synthesis | Float implementation is waveform-compatible, not sample-exact | Add per-stage/int16 delta localization before fixed-point ports |
 | SILK synthesis/PLC | Parameter/range coverage exists; PLC is explicitly non-bit-exact | Compare fixed-point state and PCM on deterministic packet sequences |
@@ -119,3 +119,19 @@ test passes.
   libopus/bitstream `16230400`. This is the next convergence slice.
 - Verified with `go test -count=1 -tags opusref -run '^TestCGORef$' -v .`,
   `go vet ./...`, and the complete normal and `opusref` suites.
+
+### 2026-09-08: single-stream multi-frame final range
+
+- Reference: `libopus/src/opus_decoder.c::opus_decode_native` and
+  `opus_decode_frame`. The outer packet loop overwrites `rangeFinal` after each
+  constituent frame; it does not XOR frame ranges from one stream.
+- Added a focused oracle for vector 01 packet 0. All three CELT frame ranges
+  already matched libopus independently; only the Go packet aggregation was
+  wrong (`0aa13300` instead of the last frame's `16230400`).
+- Applied last-frame replacement to CELT-only, SILK-only, and hybrid decode.
+  Multistream continues to XOR the final ranges of its elementary streams.
+- Official-vector range mismatches fell from 3707 total to 27: vector 08 has
+  1, vector 09 has 1, vector 10 has 13, vector 12 has 12, and all other vectors
+  have zero.
+- Verified the focused oracle, complete normal and `opusref` suites,
+  `go vet ./...`, and the complete race suite.

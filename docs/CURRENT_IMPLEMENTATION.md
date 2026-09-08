@@ -189,8 +189,9 @@ The `oggopus` subpackage provides:
   `io.ReadSeeker` sources with RFC 7845 80 ms decoder pre-roll
 
 The decoder exposes `SampleRate`, `Channels`, `FinalRange`, and `Pitch`
-getters. `FinalRange` is the XOR of the constituent frame entropy ranges, as
-for the libopus single-stream CTL. `Pitch` is reported in output-rate samples.
+getters. For a single-stream packet, `FinalRange` is the final entropy range of
+the last constituent Opus frame, matching libopus; multistream `FinalRange` is
+the XOR across elementary streams. `Pitch` is reported in output-rate samples.
 Decoder output gain is available through `SetGain` and `Gain`, using Q8 dB.
 Single-stream encode/decode also supports signed 24-bit PCM stored in `int32`
 through `Encode24` and `Decode24`. Encoder and decoder phase-inversion controls

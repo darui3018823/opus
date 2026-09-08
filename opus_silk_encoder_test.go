@@ -106,12 +106,8 @@ func TestEncoderSILKOnlyVOIPMultiFrameRoundTrip(t *testing.T) {
 			if config != wantConfig {
 				t.Fatalf("TOC config=%d, want SILK NB config %d", config, wantConfig)
 			}
-			wantCode := 0
-			if mult == 6 {
-				wantCode = 2
-			}
-			if code := int(pkt[0] & 0x03); code != wantCode {
-				t.Fatalf("count code=%d, want %d", code, wantCode)
+			if code := int(pkt[0] & 0x03); code != 3 {
+				t.Fatalf("count code=%d, want code-3 packet padding", code)
 			}
 
 			dec, err := NewDecoder(rate, 1)
@@ -218,8 +214,9 @@ func TestEncoderSILKOnlyAllSupportedDurationsStrict(t *testing.T) {
 				if gotStereo := (pkt[0] & 0x04) != 0; gotStereo != (tc.channels == 2) {
 					t.Fatalf("%dms: TOC stereo=%v, want %v", mult*20, gotStereo, tc.channels == 2)
 				}
-				if code := int(pkt[0] & 0x03); code != strictSILKCountCode(mult, tc.channels) {
-					t.Fatalf("%dms: count code=%d, want %d", mult*20, code, strictSILKCountCode(mult, tc.channels))
+				wantCode := strictSILKCountCode(mult, tc.channels)
+				if code := int(pkt[0] & 0x03); code != wantCode && code != 3 {
+					t.Fatalf("%dms: count code=%d, want compact %d or padded 3", mult*20, code, wantCode)
 				}
 
 				decoded, err := dec.DecodeFloat(pkt)

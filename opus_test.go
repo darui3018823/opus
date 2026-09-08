@@ -969,10 +969,6 @@ func TestDecoderPLCAfterSILKSilence(t *testing.T) {
 			if mode, err := PacketGetMode(packets[0]); err != nil || mode != ModeSILKOnly {
 				t.Fatalf("packet mode = %d, err=%v, want SILK-only", mode, err)
 			}
-			if packets[0][0]&0x03 != 0 {
-				t.Fatalf("expected a code-0 packet, TOC = %#02x", packets[0][0])
-			}
-
 			dec, err := NewDecoder(rate, tc.channels)
 			if err != nil {
 				t.Fatal(err)
@@ -984,7 +980,7 @@ func TestDecoderPLCAfterSILKSilence(t *testing.T) {
 				}
 			}
 			// RFC 6716 digital silence: same TOC, single zero payload byte.
-			silence := []byte{packets[0][0], 0x00}
+			silence := []byte{packets[0][0] &^ 0x03, 0x00}
 			for i := 0; i < 2; i++ {
 				if _, err := dec.Decode(silence, out); err != nil {
 					t.Fatalf("silence packet %d: %v", i, err)

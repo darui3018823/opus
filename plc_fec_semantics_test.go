@@ -197,7 +197,10 @@ func TestDecodeFECPackedErrorPreservesState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	corrupt := append([]byte(nil), packed[:len(packed)-1]...)
+	// Force code 2 with a first-frame length that cannot fit in the packet.
+	// Truncating the tail is insufficient because RFC packet padding is allowed
+	// to shrink without changing the encoded frames.
+	corrupt := []byte{packed[0]&^0x03 | 0x02, 252}
 
 	candidate := primedLossDecoder(t, rate, packets[:lost])
 	control := primedLossDecoder(t, rate, packets[:lost])

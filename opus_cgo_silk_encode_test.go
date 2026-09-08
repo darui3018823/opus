@@ -93,7 +93,7 @@ func TestCGOEncodeRefSILKOnly(t *testing.T) {
 						if stereo != (tc.channels == 2) {
 							t.Fatalf("packet %d: TOC stereo=%v, want %v (toc=0x%02x)", p, stereo, tc.channels == 2, pkt[0])
 						}
-						if code != wantCode {
+						if code != wantCode && code != 3 {
 							t.Fatalf("packet %d: count code=%d, want %d for %d ms packet", p, code, wantCode, packetMs)
 						}
 

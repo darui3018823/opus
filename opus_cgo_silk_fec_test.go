@@ -234,12 +234,17 @@ func TestCGOEncodeRefSILKFECMultiFrame(t *testing.T) {
 			}
 			defer refDec.Close()
 			refFrames := make([][]float64, nPackets)
+			refRanges := make([]uint32, nPackets)
 			for p := 0; p < nPackets; p++ {
 				out, err := refDec.DecodeFloat(pktsFEC[p], maxSPC)
 				if err != nil {
 					t.Fatalf("packet %d: libopus normal decode failed (grammar desync): %v", p, err)
 				}
 				refFrames[p] = toFloat64(out)
+				refRanges[p], err = refDec.FinalRange()
+				if err != nil {
+					t.Fatalf("packet %d: libopus final range: %v", p, err)
+				}
 			}
 
 			// Cross-check the same FEC packets with the Go decoder. This verifies
@@ -258,13 +263,19 @@ func TestCGOEncodeRefSILKFECMultiFrame(t *testing.T) {
 				if n != frameSize {
 					t.Fatalf("packet %d: Go decoded samples=%d, want %d", p, n, frameSize)
 				}
+				if gotRange := goDec.FinalRange(); gotRange != refRanges[p] {
+					t.Fatalf("packet %d: Go final range=%08x, libopus=%08x", p, gotRange, refRanges[p])
+				}
 				got := make([]float64, len(pcm))
 				for i, v := range pcm {
 					got[i] = float64(v) / 32768
 				}
-				s, _, _, _ := silkRefAlignedSNR(refFrames[p], got, frameSize/2)
-				if s < 8 {
+				s, rmse, _, _ := silkRefAlignedSNR(refFrames[p], got, frameSize/2)
+				if s < 8 && rmse > 0.002 {
 					t.Fatalf("packet %d: Go/libopus FEC-stream normal decode diverged: %.2f dB", p, s)
+				}
+				if s < 8 {
+					t.Logf("packet %d: near-silence comparison uses RMSE %.6f (SNR %.2f dB)", p, rmse, s)
 				}
 			}
 

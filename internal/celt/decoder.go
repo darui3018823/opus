@@ -41,7 +41,7 @@ type Decoder struct {
 
 	// Post-filter (one per channel)
 	postFilter []*PostFilter
-	preemphMem []float64
+	preemphMem []float32
 
 	// lastFinalRange is the range coder rng after the last Decode call.
 	lastFinalRange uint32
@@ -103,7 +103,7 @@ func NewDecoderEx(frameSize, sampleRate, numBands, channels int) (*Decoder, erro
 
 	// Initialize post-filters (one per channel)
 	d.postFilter = make([]*PostFilter, channels)
-	d.preemphMem = make([]float64, channels)
+	d.preemphMem = make([]float32, channels)
 	for i := range d.postFilter {
 		d.postFilter[i] = NewPostFilter()
 	}
@@ -239,24 +239,18 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	// Decode band coefficients: allocation, fine energy, PVQ, anti-collapse.
 	// The Q3 bit budget is computed inside from len(frameData) and ec_tell_frac.
 	// quant_all_bands also performs stereo (M/S→L/R) merge internally.
-	_, _, err := d.decodeBandCoeffs(dec, totalBytes, allocTrim, isTransient, spread, tfRes, offsets, start, end)
+	_, _, err := d.decodeBandCoeffs(dec, totalBytes, allocTrim, isTransient, spread, tfRes, offsets, quantLogE, start, end)
 	if err != nil {
 		return nil, err
 	}
 	htr(dec, "bandcoeffs")
 
-	// Update oldBandE with fine-corrected mean-subtracted values.
+	// oldBandE is the fine-corrected, mean-subtracted log2 amplitude. libopus
+	// updates this same array throughout coarse and fine energy decoding; do not
+	// reconstruct it from linear energy through a lossy log2 round trip.
 	for i := start; i < end; i++ {
 		for c := 0; c < ch; c++ {
-			e := d.bandProcs[c].bands[i].Energy
-			if e < 1e-20 {
-				e = 1e-20
-			}
-			v := 0.5*math.Log2(e) - EMean(i)
-			if v < -28.0 {
-				v = -28.0
-			}
-			d.prevEnergies[c*numBands+i] = v
+			d.prevEnergies[c*numBands+i] = quantLogE[c*numBands+i]
 		}
 	}
 	if ch == 1 && len(d.prevEnergies) >= 2*numBands {
@@ -456,16 +450,22 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 			d.postFilter[ch].copyFrom(filter)
 		}
 	}
-	d.preemphMem = append([]float64(nil), src.preemphMem...)
+	d.preemphMem = append([]float32(nil), src.preemphMem...)
 }
 
 func (d *Decoder) applyDeemphasis(ch int, samples []float64) {
-	const coef = 0.85
+	const (
+		coef      = float32(0.85)
+		verySmall = float32(1e-30)
+	)
 	mem := d.preemphMem[ch]
-	for i, x := range samples {
-		y := x + mem
+	for i := range samples {
+		// libopus stores celt_sig as float and evaluates
+		// x[i] + VERY_SMALL + mem in that precision and order.
+		y := float32(samples[i]) + verySmall
+		y += mem
 		mem = coef * y
-		samples[i] = y
+		samples[i] = float64(y)
 	}
 	d.preemphMem[ch] = mem
 }
@@ -485,7 +485,7 @@ var spreadIcdf = [4]uint8{25, 23, 2, 0}
 // remaining is the PVQ budget (totalBits - tell, before stereo/skip bits).
 // Stereo parameters (intensity, dualStereo) are decoded inside computeAllocation.
 // Returns intensity and dualStereo for use by the caller's M/S conversion.
-func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int, isTransient bool, spread int, tfRes, offsets []int, start, end int) (intensity int, dualStereo bool, err error) {
+func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int, isTransient bool, spread int, tfRes, offsets []int, quantLogE []float64, start, end int) (intensity int, dualStereo bool, err error) {
 	numBands := d.mode.Bands.NumBands
 	lm := d.mode.LM
 	ch := d.mode.Channels
@@ -518,6 +518,9 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 		for c := 0; c < ch; c++ {
 			q2 := int(dec.DecodeBits(uint(fb)))
 			d.bandProcs[c].ApplyFineEnergy(i, q2, fb)
+			offset := (float32(q2)+0.5)*float32(int(1)<<uint(14-fb))*(1.0/16384.0) - 0.5
+			idx := c*numBands + i
+			quantLogE[idx] = float64(float32(quantLogE[idx]) + offset)
 		}
 	}
 
@@ -552,6 +555,9 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 			for c := 0; c < ch; c++ {
 				q2 := int(dec.DecodeBits(1))
 				d.bandProcs[c].ApplyFinalFineEnergy(i, q2, eBits[i])
+				offset := (float32(q2) - 0.5) * float32(int(1)<<uint(14-eBits[i]-1)) * (1.0 / 16384.0)
+				idx := c*numBands + i
+				quantLogE[idx] = float64(float32(quantLogE[idx]) + offset)
 				bitsLeft--
 			}
 		}

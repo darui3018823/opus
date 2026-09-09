@@ -88,15 +88,178 @@ $source = [regex]::Replace($source, $callPattern,
     'oracle_dump_norm(mode, X+c*N, oldBandE+c*nbEBands, c, start, effEnd, M);' + "`r`n         " + '$1', 1)
 Set-Content -LiteralPath $generated -Value $source
 
+$generatedBands = Join-Path $env:TEMP 'opus_celt_bands_coeff_instr.c'
+$bandsSource = Get-Content (Join-Path $celt 'bands.c') -Raw
+$bandsHelper = @'
+
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+extern int oracle_trace_enabled;
+static int oracle_stereo_merge_call;
+
+static uint32_t oracle_band_float_bits(float value)
+{
+   uint32_t bits;
+   memcpy(&bits, &value, sizeof(bits));
+   return bits;
+}
+
+static uint64_t oracle_band_hash(const celt_norm *x, int n)
+{
+   int i, byte;
+   uint64_t hash = UINT64_C(14695981039346656037);
+   for (i=0;i<n;i++) {
+      uint32_t bits = oracle_band_float_bits(x[i]);
+      for (byte=0;byte<4;byte++) {
+         hash ^= (bits >> (8*byte)) & 0xff;
+         hash *= UINT64_C(1099511628211);
+      }
+   }
+   return hash;
+}
+
+'@
+$bandsMarker = 'static void stereo_merge('
+if (-not $bandsSource.Contains($bandsMarker)) { throw "stereo_merge marker not found" }
+$bandsSource = $bandsSource.Replace($bandsMarker, $bandsHelper + $bandsMarker)
+$gainMarker = '   rgain = celt_rsqrt_norm32(t);'
+if (-not $bandsSource.Contains($gainMarker)) { throw "stereo_merge gain marker not found" }
+$gainTrace = @'
+   if (oracle_trace_enabled) {
+      fprintf(stderr, "[STEREO_MERGE] call=%d n=%d xhash=%016llx yhash=%016llx mid=%08x xp=%08x side=%08x el=%08x er=%08x lgain=%08x rgain=%08x\n",
+            oracle_stereo_merge_call++, N,
+            (unsigned long long)oracle_band_hash(X, N),
+            (unsigned long long)oracle_band_hash(Y, N), oracle_band_float_bits(mid),
+            oracle_band_float_bits(xp), oracle_band_float_bits(side),
+            oracle_band_float_bits(El), oracle_band_float_bits(Er),
+            oracle_band_float_bits(lgain), oracle_band_float_bits(rgain));
+   }
+'@
+$bandsSource = $bandsSource.Replace($gainMarker, $gainMarker + "`r`n" + $gainTrace)
+Set-Content -LiteralPath $generatedBands -Value $bandsSource
+
+$generatedVQ = Join-Path $env:TEMP 'opus_celt_vq_coeff_instr.c'
+$vqSource = Get-Content (Join-Path $celt 'vq.c') -Raw
+$vqHelper = @'
+
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+extern int oracle_trace_enabled;
+static int oracle_pvq_call;
+
+static uint64_t oracle_vq_hash_float(uint64_t hash, float value)
+{
+   uint32_t bits;
+   int byte;
+   memcpy(&bits, &value, sizeof(bits));
+   for (byte=0;byte<4;byte++) {
+      hash ^= (bits >> (8*byte)) & 0xff;
+      hash *= UINT64_C(1099511628211);
+   }
+   return hash;
+}
+
+static uint32_t oracle_vq_float_bits(float value)
+{
+   uint32_t bits;
+   memcpy(&bits, &value, sizeof(bits));
+   return bits;
+}
+
+static void oracle_dump_pvq_stage(const char *stage, int call,
+      const celt_norm *x, int n, int k, int spread, int b, opus_val32 gain)
+{
+   int i;
+   uint64_t hash = UINT64_C(14695981039346656037);
+   if (!oracle_trace_enabled) return;
+   for (i=0;i<n;i++) hash = oracle_vq_hash_float(hash, x[i]);
+   fprintf(stderr, "[PVQ_%s] call=%d n=%d k=%d spread=%d b=%d gain=%08x hash=%016llx\n",
+         stage, call, n, k, spread, b, oracle_vq_float_bits(gain),
+         (unsigned long long)hash);
+}
+
+static void oracle_dump_pvq_pulses(int call, const int *iy, int n, int k,
+      opus_val32 ryy)
+{
+   int i, byte;
+   uint64_t hash = UINT64_C(14695981039346656037);
+   if (!oracle_trace_enabled) return;
+   for (i=0;i<n;i++) {
+      uint32_t bits = (uint32_t)iy[i];
+      for (byte=0;byte<4;byte++) {
+         hash ^= (bits >> (8*byte)) & 0xff;
+         hash *= UINT64_C(1099511628211);
+      }
+   }
+   fprintf(stderr, "[PVQ_PULSES] call=%d n=%d k=%d ryy=%08x hash=%016llx values=",
+         call, n, k, oracle_vq_float_bits(ryy), (unsigned long long)hash);
+   for (i=0;i<n;i++) fprintf(stderr, "%s%d", i ? "," : "", iy[i]);
+   fprintf(stderr, "\n");
+}
+
+'@
+$vqMarker = 'unsigned alg_unquant('
+$vqIndex = $vqSource.IndexOf($vqMarker)
+if ($vqIndex -lt 0) { throw "alg_unquant marker not found" }
+$vqPrefix = $vqSource.Substring(0, $vqIndex)
+$vqSuffix = $vqSource.Substring($vqIndex)
+$vqSuffix = $vqSuffix.Replace($vqMarker, $vqHelper + $vqMarker)
+$normaliseMarker = '   normalise_residual(iy, X, N, Ryy, gain, yy_shift);'
+if (-not $vqSuffix.Contains($normaliseMarker)) { throw "alg_unquant normalise marker not found" }
+$vqSuffix = $vqSuffix.Replace($normaliseMarker,
+    '   oracle_dump_pvq_pulses(oracle_pvq_call, iy, N, K, Ryy);' + "`r`n" +
+    $normaliseMarker + "`r`n" +
+    '   oracle_dump_pvq_stage("NORM", oracle_pvq_call, X, N, K, spread, B, gain);')
+$rotationMarker = '   exp_rotation(X, N, -1, B, K, spread);'
+if (-not $vqSuffix.Contains($rotationMarker)) { throw "alg_unquant rotation marker not found" }
+$vqSuffix = $vqSuffix.Replace($rotationMarker, $rotationMarker + "`r`n" +
+    '   oracle_dump_pvq_stage("ROT", oracle_pvq_call, X, N, K, spread, B, gain);' + "`r`n" +
+    '   if (oracle_trace_enabled) oracle_pvq_call++;')
+$vqSource = $vqPrefix + $vqSuffix
+Set-Content -LiteralPath $generatedVQ -Value $vqSource
+
+$generatedCWRS = Join-Path $env:TEMP 'opus_celt_cwrs_coeff_instr.c'
+$cwrsSource = Get-Content (Join-Path $celt 'cwrs.c') -Raw
+$cwrsInclude = '#include "os_support.h"'
+if (-not $cwrsSource.Contains($cwrsInclude)) { throw "cwrs include marker not found" }
+$cwrsSource = $cwrsSource.Replace($cwrsInclude, $cwrsInclude + @'
+
+#include <stdio.h>
+extern int oracle_trace_enabled;
+static int oracle_cwrs_call;
+'@)
+$cwrsDecode = @'
+opus_val32 decode_pulses(int *_y,int _n,int _k,ec_dec *_dec){
+  return cwrsi(_n,_k,ec_dec_uint(_dec,CELT_PVQ_V(_n,_k)),_y);
+}
+'@
+$cwrsDecodeTrace = @'
+opus_val32 decode_pulses(int *_y,int _n,int _k,ec_dec *_dec){
+  opus_uint32 ft;
+  opus_uint32 index;
+  ft=CELT_PVQ_V(_n,_k);
+  index=ec_dec_uint(_dec,ft);
+  if (oracle_trace_enabled)
+    fprintf(stderr,"[CWRS] call=%d n=%d k=%d ft=%u index=%u\n",
+          oracle_cwrs_call++,_n,_k,ft,index);
+  return cwrsi(_n,_k,index,_y);
+}
+'@
+if (-not $cwrsSource.Contains($cwrsDecode)) { throw "non-small decode_pulses marker not found" }
+$cwrsSource = $cwrsSource.Replace($cwrsDecode, $cwrsDecodeTrace)
+Set-Content -LiteralPath $generatedCWRS -Value $cwrsSource
+
 $sources = @(
-    'bands.c', 'celt.c', 'cwrs.c', 'entcode.c', 'entdec.c', 'entenc.c',
+    'celt.c', 'entcode.c', 'entdec.c', 'entenc.c',
     'kiss_fft.c', 'laplace.c', 'mathops.c', 'mdct.c', 'modes.c', 'pitch.c',
-    'celt_lpc.c', 'quant_bands.c', 'rate.c', 'vq.c'
+    'celt_lpc.c', 'quant_bands.c', 'rate.c'
 ) | ForEach-Object { Join-Path $celt $_ }
 
 & gcc -O1 -DOPUS_BUILD -DVAR_ARRAYS "-I$celt" "-I$(Join-Path $repo 'libopus\include')" `
     "-I$(Join-Path $repo 'libopus')" "-I$(Join-Path $repo 'libopus\silk')" `
     (Join-Path $PSScriptRoot 'celt_coeff_oracle.c') `
-    $generated @sources -lm -o $Output
+    $generated $generatedBands $generatedVQ $generatedCWRS @sources -lm -o $Output
 if ($LASTEXITCODE -ne 0) { throw "gcc failed with exit code $LASTEXITCODE" }
 Write-Output $Output

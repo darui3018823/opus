@@ -65,16 +65,16 @@ func (m *CELTMode) IMDCTRaw(X []float64) []float64 {
 
 	f := make([]Complex, N4)
 	for i := 0; i < N4; i++ {
-		xp1 := X[2*i]
-		xp2 := X[N2-1-2*i]
-		t0 := math.Cos(2 * math.Pi * (float64(i) + 0.125) / float64(2*N))
-		t1 := math.Cos(2 * math.Pi * (float64(N4+i) + 0.125) / float64(2*N))
+		xp1 := float32(X[2*i])
+		xp2 := float32(X[N2-1-2*i])
+		t0 := float32(math.Cos(2 * math.Pi * (float64(i) + 0.125) / float64(2*N)))
+		t1 := float32(math.Cos(2 * math.Pi * (float64(N4+i) + 0.125) / float64(2*N)))
 		yr := xp2*t0 + xp1*t1
 		yi := xp1*t0 - xp2*t1
-		f[i] = Complex{Real: yi, Imag: yr}
+		f[i] = Complex{Real: float64(yi), Imag: float64(yr)}
 	}
 
-	z := AnyFFT(f)
+	z := opusFFT(f)
 	buf := make([]float64, N2)
 	for i, c := range z {
 		buf[2*i] = c.Real
@@ -85,24 +85,24 @@ func (m *CELTMode) IMDCTRaw(X []float64) []float64 {
 		yp0 := 2 * i
 		yp1 := N2 - 2 - 2*i
 
-		re := buf[yp0+1]
-		im := buf[yp0]
-		t0 := math.Cos(2 * math.Pi * (float64(i) + 0.125) / float64(2*N))
-		t1 := math.Cos(2 * math.Pi * (float64(N4+i) + 0.125) / float64(2*N))
+		re := float32(buf[yp0+1])
+		im := float32(buf[yp0])
+		t0 := float32(math.Cos(2 * math.Pi * (float64(i) + 0.125) / float64(2*N)))
+		t1 := float32(math.Cos(2 * math.Pi * (float64(N4+i) + 0.125) / float64(2*N)))
 		yr := re*t0 + im*t1
 		yi := re*t1 - im*t0
 
-		re = buf[yp1+1]
-		im = buf[yp1]
-		buf[yp0] = yr
-		buf[yp1+1] = yi
+		re = float32(buf[yp1+1])
+		im = float32(buf[yp1])
+		buf[yp0] = float64(yr)
+		buf[yp1+1] = float64(yi)
 
-		t0 = math.Cos(2 * math.Pi * (float64(N4-i-1) + 0.125) / float64(2*N))
-		t1 = math.Cos(2 * math.Pi * (float64(N2-i-1) + 0.125) / float64(2*N))
+		t0 = float32(math.Cos(2 * math.Pi * (float64(N4-i-1) + 0.125) / float64(2*N)))
+		t1 = float32(math.Cos(2 * math.Pi * (float64(N2-i-1) + 0.125) / float64(2*N)))
 		yr = re*t0 + im*t1
 		yi = re*t1 - im*t0
-		buf[yp1] = yr
-		buf[yp0+1] = yi
+		buf[yp1] = float64(yr)
+		buf[yp0+1] = float64(yi)
 	}
 
 	return buf
@@ -217,12 +217,12 @@ func (m *CELTMode) CLTMDCTBackward(X []float64, carry []float64) []float64 {
 	copy(buf[half:], raw)
 
 	for i := 0; i < half; i++ {
-		x1 := buf[ov-1-i]
-		x2 := buf[i]
-		wi := m.Window[i]
-		wj := m.Window[ov-1-i]
-		buf[i] = wj*x2 - wi*x1
-		buf[ov-1-i] = wi*x2 + wj*x1
+		x1 := float32(buf[ov-1-i])
+		x2 := float32(buf[i])
+		wi := float32(m.Window[i])
+		wj := float32(m.Window[ov-1-i])
+		buf[i] = float64(wj*x2 - wi*x1)
+		buf[ov-1-i] = float64(wi*x2 + wj*x1)
 	}
 
 	copy(carry, buf[N:N+half])

@@ -1,6 +1,9 @@
 package dsp
 
-import "math"
+import (
+	"math"
+	"sync"
+)
 
 // opusComplex is the scalar type used by the floating-point libopus KISS FFT.
 type opusComplex struct {
@@ -32,6 +35,8 @@ type opusFFTPlan struct {
 	twiddles []opusComplex
 }
 
+var opusFFTPlans sync.Map
+
 // opusFFT computes the unscaled DFT using the float KISS FFT stage ordering
 // used by the static 48 kHz CELT mode. CELT's MDCT uses only these four sizes.
 func opusFFT(input []Complex) []Complex {
@@ -39,7 +44,7 @@ func opusFFT(input []Complex) []Complex {
 	if n != 60 && n != 120 && n != 240 && n != 480 {
 		return AnyFFT(input)
 	}
-	plan := newOpusFFTPlan(n)
+	plan := getOpusFFTPlan(n)
 	fout := make([]opusComplex, n)
 	for i, value := range input {
 		fout[plan.bitrev[i]] = opusComplex{r: float32(value.Real), i: float32(value.Imag)}
@@ -52,8 +57,11 @@ func opusFFT(input []Complex) []Complex {
 	return out
 }
 
-func newOpusFFTPlan(n int) opusFFTPlan {
-	plan := opusFFTPlan{n: n}
+func getOpusFFTPlan(n int) *opusFFTPlan {
+	if cached, ok := opusFFTPlans.Load(n); ok {
+		return cached.(*opusFFTPlan)
+	}
+	plan := &opusFFTPlan{n: n}
 	for scaled := n; scaled < 480; scaled <<= 1 {
 		plan.shift++
 	}
@@ -82,7 +90,8 @@ func newOpusFFTPlan(n int) opusFFTPlan {
 		phase := (-2 * math.Pi / 480) * float64(i)
 		plan.twiddles[i] = opusComplex{r: float32(math.Cos(phase)), i: float32(math.Sin(phase))}
 	}
-	return plan
+	actual, _ := opusFFTPlans.LoadOrStore(n, plan)
+	return actual.(*opusFFTPlan)
 }
 
 func opusFFTFactors(n int) []int {

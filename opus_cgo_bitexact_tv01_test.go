@@ -12,8 +12,8 @@ import (
 )
 
 func TestTV01Packet0FrameRangesMatchLibopus(t *testing.T) {
-	minimumSequentialExact := [...]int{1920, 1903, 1919}
-	minimumIsolatedExact := [...]int{1920, 1552, 1920}
+	minimumSequentialExact := [...]int{1920, 1920, 1920}
+	minimumIsolatedExact := [...]int{1920, 1920, 1920}
 
 	packet := readOpusDemoPackets(t, "testvector01.bit")[0]
 	toc := packet.packet[0]
@@ -125,7 +125,7 @@ func TestTV01Packet0FrameRangesMatchLibopus(t *testing.T) {
 			}
 		}
 		t.Logf("frame=%d PCM exact=%d/%d firstDiff=%d maxDelta=%d", i, exact, len(goPCM), firstDiff, maxDelta)
-		if exact < minimumSequentialExact[i] || maxDelta > 1 {
+		if exact < minimumSequentialExact[i] || maxDelta != 0 {
 			t.Errorf("frame %d sequential PCM regressed: exact=%d/%d maxDelta=%d", i, exact, len(goPCM), maxDelta)
 		}
 		t.Logf("frame=%d float32 exact=%d/%d firstDiff=%d meanAbsLSB=%.6f maxAbsLSB=%.6f@%d",

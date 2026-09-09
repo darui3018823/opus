@@ -12,6 +12,7 @@ $helper = @'
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 extern int oracle_trace_enabled;
 
@@ -67,6 +68,11 @@ static void oracle_dump_norm(const CELTMode *mode, const celt_norm *x,
       fprintf(stderr, "[NORM_BAND] ch=%d band=%d n=%d hash=%016llx energy=%.9g energyBits=%08x\n",
             ch, band, last-first, (unsigned long long)hash,
             (double)oldBandE[band], oracle_float_bits(oldBandE[band]));
+      if (getenv("OPUS_ORACLE_COEFFS") != NULL) {
+         for (j=first;j<last;j++)
+            fprintf(stderr, "[NORM_COEFF] ch=%d band=%d index=%d value=%.9g bits=%08x\n",
+                  ch, band, j-first, (double)x[j], oracle_float_bits(x[j]));
+      }
    }
 }
 

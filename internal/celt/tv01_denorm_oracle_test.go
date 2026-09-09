@@ -2,6 +2,7 @@ package celt
 
 import (
 	"math"
+	"os"
 	"testing"
 )
 
@@ -172,6 +173,7 @@ func TestTV01Frame1DenormalizedBandsAgainstLibopus(t *testing.T) {
 		firstMismatch := -1
 		matchingNormalized := 0
 		firstNormalizedMismatch := -1
+		var normalizedMismatches []int
 		matchingEnergy := 0
 		firstEnergyMismatch := -1
 		for band, state := range decoder.bandProcs[ch].bands {
@@ -184,8 +186,17 @@ func TestTV01Frame1DenormalizedBandsAgainstLibopus(t *testing.T) {
 			normalizedHash := hashLibopusFloatSlice(normalized[ch][state.Start : state.Start+state.Size])
 			if normalizedHash == wantNormalized[ch][band] {
 				matchingNormalized++
-			} else if firstNormalizedMismatch < 0 {
-				firstNormalizedMismatch = band
+			} else {
+				if firstNormalizedMismatch < 0 {
+					firstNormalizedMismatch = band
+				}
+				normalizedMismatches = append(normalizedMismatches, band)
+				if os.Getenv("OPUS_GO_COEFFS") != "" {
+					for index, value := range normalized[ch][state.Start : state.Start+state.Size] {
+						t.Logf("[GO_NORM_COEFF] ch=%d band=%d index=%d value=%.9g bits=%08x",
+							ch, band, index, value, math.Float32bits(float32(value)))
+					}
+				}
 			}
 			energyBits := math.Float32bits(float32(decoder.prevEnergies[ch*21+band]))
 			if energyBits == wantEnergyBits[ch][band] {
@@ -197,6 +208,7 @@ func TestTV01Frame1DenormalizedBandsAgainstLibopus(t *testing.T) {
 		t.Logf("channel=%d full=%016x libopus=%016x denorm=%d/21 firstDenormMismatch=%d normalized=%d/21 firstNormalizedMismatch=%d energy=%d/21 firstEnergyMismatch=%d",
 			ch, gotFull, wantFull[ch], matchingBands, firstMismatch,
 			matchingNormalized, firstNormalizedMismatch, matchingEnergy, firstEnergyMismatch)
+		t.Logf("channel=%d normalizedMismatchBands=%v", ch, normalizedMismatches)
 		if matchingEnergy != 21 {
 			t.Errorf("channel %d energy matches=%d/21, first mismatch=%d", ch, matchingEnergy, firstEnergyMismatch)
 		}

@@ -1215,9 +1215,13 @@ Notes:
   below 1920/1920, 1903/1920, and 1919/1920 samples. Remaining mismatches are
   at most 1 LSB. The decoder now mirrors the floating libopus build's float32
   coarse/fine energy and de-emphasis state semantics, including the absence of
-  the fixed-point-only `-28` coarse-energy clamp. The next localized PCM gate
-  is the long-block IMDCT: Go uses a Bluestein FFT whereas libopus uses its
-  mixed-radix KISS FFT.
+  the fixed-point-only `-28` coarse-energy clamp. The remaining PCM divergence
+  is now localized before the transform boundary. The decoder uses libopus's
+  radix 2/3/4/5 mixed-radix KISS FFT rather than Bluestein. A C oracle compiled
+  directly from the checked-in libopus 1.6.1 source proves bit-for-bit float32
+  equality for all four CELT FFT sizes and all four inverse-MDCT sizes,
+  including windowed overlap/carry. The next localized PCM gate is therefore
+  PVQ normalization/spreading and band denormalization before IMDCT.
 - The pure-Go **encoder** is also cross-validated against libopus under the same
   tag: `TestCGOEncodeRef` encodes synthetic signals with our encoder and decodes
   the packets with libopus 1.6.1, then measures delay-aligned SNR. libopus

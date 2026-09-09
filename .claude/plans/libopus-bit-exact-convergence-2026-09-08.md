@@ -61,7 +61,7 @@ state or entropy divergence.
 | Entropy coder | Documented and tested as matching libopus range coding | Retain final-range and symbol traces |
 | Decoder framing/range | All 12 official vectors now have zero `FinalRange` mismatches against libopus 1.6.1 and their `.bit` records | Retain the all-vector zero-mismatch gate while localizing PCM divergence |
 | int16 decode conversion | Conversion semantics match `FLOAT2INT16`; direct `opus_decode` comparison now reports exact-sample percentage, first/max LSB delta, and range mismatch count | Raise mode-specific exact-sample coverage after range alignment |
-| CELT synthesis | tv01 packet 0 constituent ranges are exact; sequential int16 agreement is 1920/1920, 1903/1920, and 1919/1920 with every mismatch limited to 1 LSB | Replace or validate the Bluestein IMDCT against libopus's float mixed-radix KISS FFT before broad fixed-point work |
+| CELT synthesis | The 60/120/240/480-point FFT and 120/240/480/960-sample inverse MDCT now match libopus 1.6.1 float output bit-for-bit; tv01 sequential int16 agreement remains 1920/1920, 1903/1920, and 1919/1920 | Localize the remaining pre-IMDCT difference across PVQ normalization, spreading, and band denormalization |
 | SILK synthesis/PLC | Parameter/range coverage exists; PLC is explicitly non-bit-exact | Compare fixed-point state and PCM on deterministic packet sequences |
 | Encoder | Packets interoperate but are not byte-identical | Add mode-specific byte and first-symbol divergence traces |
 | Mode/rate policy | Known partial parity in `docs/MODE_RATE_POLICY_DIFF.md` | Compare decisions and state over identical PCM/control sequences |
@@ -174,3 +174,21 @@ test passes.
   mixed-radix KISS FFT, making that transform boundary the next focused gate.
 - Verified the focused oracle, complete normal and `opusref` suites,
   `go vet ./...`, and the complete race suite.
+
+### 2026-09-10: bit-exact CELT float KISS FFT and inverse MDCT
+
+- Reference: checked-in libopus 1.6.1 `celt/kiss_fft.c`, `_kiss_fft_guts.h`,
+  `mdct.c`, and `static_modes_float.h`.
+- Replaced the decoder IMDCT's Bluestein DFT with libopus's radix 2/3/4/5
+  factor order, bit reversal, shared 480-point twiddle table semantics, and
+  float32 butterfly ordering. FFT plans are immutable and cached without
+  increasing the decoder allocation regression baseline.
+- Added a C oracle built directly from the checked-in source. Deterministic
+  all-output float32 hashes match for every CELT FFT size (60, 120, 240, 480)
+  and every inverse-MDCT size (120, 240, 480, 960), including windowed overlap
+  and carry state.
+- tv01's remaining 17- and 1-sample int16 differences did not change. Because
+  the transform boundary is now independently bit-exact, the next divergence
+  is before IMDCT in PVQ normalization/spreading or band denormalization.
+- Verified the C hash oracle, allocation gate, focused tv01 oracle, complete
+  normal and `opusref` suites, `go vet ./...`, and the complete race suite.

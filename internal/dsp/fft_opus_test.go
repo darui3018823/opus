@@ -51,3 +51,38 @@ func TestOpusFFTMatchesDFT(t *testing.T) {
 		})
 	}
 }
+
+func TestOpusFFTMatchesLibopusFloatBits(t *testing.T) {
+	wants := map[int]uint64{
+		60:  0x8b3a7986ce7cd103,
+		120: 0x1414064ac6384bd1,
+		240: 0x99ed5feec9b83b4e,
+		480: 0x6b5add6a08d83318,
+	}
+	for _, n := range []int{60, 120, 240, 480} {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			input := make([]Complex, n)
+			for i := range input {
+				realPart := float32((i*37)%257-128) * (1.0 / 64.0)
+				imagPart := float32((i*73)%251-125) * (1.0 / 128.0)
+				input[i] = Complex{Real: float64(realPart), Imag: float64(imagPart)}
+			}
+			output := opusFFT(input)
+			hash := uint64(14695981039346656037)
+			for _, value := range output {
+				for _, bits := range []uint32{
+					math.Float32bits(float32(value.Real)),
+					math.Float32bits(float32(value.Imag)),
+				} {
+					for shift := uint(0); shift < 32; shift += 8 {
+						hash ^= uint64(byte(bits >> shift))
+						hash *= 1099511628211
+					}
+				}
+			}
+			if hash != wants[n] {
+				t.Fatalf("float output hash=%016x, libopus=%016x", hash, wants[n])
+			}
+		})
+	}
+}

@@ -11,7 +11,7 @@ func TestApplyDeemphasisMatchesLibopusFloatState(t *testing.T) {
 	samples := []float64{0, 32768, -16384, 8192, -4096}
 	want := make([]float32, len(samples))
 	const (
-		coef      = float32(0.85)
+		coef      = float32(0.850006103515625)
 		verySmall = float32(1e-30)
 	)
 	var wantMem float32

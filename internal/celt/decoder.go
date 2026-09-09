@@ -465,7 +465,7 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 
 func (d *Decoder) applyDeemphasis(ch int, samples []float64) {
 	const (
-		coef      = float32(0.85)
+		coef      = float32(0.850006103515625) // libopus 48 kHz mode: 27853/32768
 		verySmall = float32(1e-30)
 	)
 	mem := d.preemphMem[ch]

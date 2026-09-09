@@ -48,6 +48,11 @@ type Decoder struct {
 	lastStartBand  int
 	lastEndBand    int
 	disableInv     bool
+
+	// normalizedCoeffHook is used by package tests to inspect the exact PVQ
+	// output before band-energy denormalization. Production decoders leave it
+	// nil, so the diagnostic does not allocate or retain coefficient buffers.
+	normalizedCoeffHook func(channel int, coeffs []float64)
 }
 
 // NewDecoder creates a new CELT decoder.
@@ -244,6 +249,11 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 		return nil, err
 	}
 	htr(dec, "bandcoeffs")
+	if d.normalizedCoeffHook != nil {
+		for c := 0; c < ch; c++ {
+			d.normalizedCoeffHook(c, d.bandProcs[c].AssembleMDCT())
+		}
+	}
 
 	// oldBandE is the fine-corrected, mean-subtracted log2 amplitude. libopus
 	// updates this same array throughout coarse and fine energy decoding; do not

@@ -3,7 +3,8 @@
  * Build from the repository root with:
  *   gcc -O1 -DCUSTOM_MODES -DOPUS_BUILD -DVAR_ARRAYS \
  *     -Ilibopus/celt -Ilibopus/include -Ilibopus \
- *     scripts/oracle/fft_oracle.c libopus/celt/kiss_fft.c -lm \
+ *     scripts/oracle/fft_oracle.c libopus/celt/kiss_fft.c \
+ *     libopus/celt/mdct.c -lm \
  *     -o fft_oracle.exe
  */
 #include <stdint.h>
@@ -12,6 +13,7 @@
 #include <string.h>
 
 #include "kiss_fft.h"
+#include "mdct.h"
 
 static uint64_t hash_u32(uint64_t hash, uint32_t value) {
   int byte;
@@ -62,11 +64,48 @@ static int run_size(int n) {
   return 0;
 }
 
+static int run_mdct(void) {
+  mdct_lookup lookup;
+  float window[120];
+  int shift;
+  int wi;
+  for (wi = 0; wi < 120; ++wi) {
+    double inner = sin(0.5 * 3.14159265358979323846264338327 *
+                       ((double)wi + 0.5) / 120.0);
+    window[wi] = (float)sin(0.5 * 3.14159265358979323846264338327 *
+                            inner * inner);
+  }
+  if (!clt_mdct_init(&lookup, 1920, 3, 0)) return 1;
+  for (shift = 0; shift <= 3; ++shift) {
+    int n = 960 >> shift;
+    float *input = (float *)calloc((size_t)n, sizeof(*input));
+    float *output = (float *)calloc((size_t)(n + 60), sizeof(*output));
+    uint64_t hash = UINT64_C(14695981039346656037);
+    int i;
+    if (input == NULL || output == NULL) return 1;
+    for (i = 0; i < n; ++i)
+      input[i] = (float)((i * 29) % 263 - 131) * (1.0f / 256.0f);
+    for (i = 0; i < 60; ++i)
+      output[i] = (float)((i * 17) % 61 - 30) * (1.0f / 512.0f);
+    clt_mdct_backward_c(&lookup, input, output, window, 120, shift, 1,
+                        0);
+    for (i = 0; i < n + 60; ++i)
+      hash = hash_u32(hash, float_bits(output[i]));
+    printf("mdct=%d hash=%016llx first=%08x tail=%08x\n", n,
+           (unsigned long long)hash, float_bits(output[0]),
+           float_bits(output[n + 59]));
+    free(input);
+    free(output);
+  }
+  clt_mdct_clear(&lookup, 0);
+  return 0;
+}
+
 int main(void) {
   static const int sizes[] = {60, 120, 240, 480};
   size_t i;
   for (i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
     if (run_size(sizes[i]) != 0) return 1;
   }
-  return 0;
+  return run_mdct();
 }

@@ -86,3 +86,43 @@ func TestOpusFFTMatchesLibopusFloatBits(t *testing.T) {
 		})
 	}
 }
+
+func TestCLTMDCTBackwardMatchesLibopusFloatBits(t *testing.T) {
+	wants := map[int]uint64{
+		960: 0x0280683ffd82ab4d,
+		480: 0xaf316500239ea5d0,
+		240: 0x2b1b707b749b9d80,
+		120: 0x2c99f57be8f85c2e,
+	}
+	window := make([]float32, 120)
+	for i := range window {
+		inner := math.Sin(0.5 * math.Pi * (float64(i) + 0.5) / 120)
+		window[i] = float32(math.Sin(0.5 * math.Pi * inner * inner))
+	}
+	for _, n := range []int{960, 480, 240, 120} {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			input := make([]float64, n)
+			for i := range input {
+				input[i] = float64(float32((i*29)%263-131) * (1.0 / 256.0))
+			}
+			carry := make([]float64, 120)
+			for i := 0; i < 60; i++ {
+				carry[i] = float64(float32((i*17)%61-30) * (1.0 / 512.0))
+			}
+			mode := NewCELTMode(n, 120, window)
+			output := mode.CLTMDCTBackward(input, carry)
+			output = append(output, carry[:60]...)
+			hash := uint64(14695981039346656037)
+			for _, value := range output {
+				bits := math.Float32bits(float32(value))
+				for shift := uint(0); shift < 32; shift += 8 {
+					hash ^= uint64(byte(bits >> shift))
+					hash *= 1099511628211
+				}
+			}
+			if hash != wants[n] {
+				t.Fatalf("float output hash=%016x, libopus=%016x", hash, wants[n])
+			}
+		})
+	}
+}

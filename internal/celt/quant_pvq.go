@@ -98,6 +98,10 @@ func celtCosNorm(x float32) float32 {
 	return float32(math.Cos((0.5 * math.Pi) * float64(x)))
 }
 
+func mulFloat32(a, b float64) float64 {
+	return float64(float32(a) * float32(b))
+}
+
 // getPulses matches libopus get_pulses (rate.h).
 func getPulses(i int) int {
 	if i < 8 {
@@ -234,26 +238,27 @@ func algUnquant(X []float64, n, k, spread, b int, dec *entcode.Decoder, gain flo
 }
 
 func renormaliseVector(X []float64, n int, gain float64) {
-	e := 1e-15
+	e := float32(1e-15)
 	for i := 0; i < n; i++ {
-		e += X[i] * X[i]
+		x := float32(X[i])
+		e += x * x
 	}
-	g := (1.0 / math.Sqrt(e)) * gain
+	g := (float32(1.0) / float32(math.Sqrt(float64(e)))) * float32(gain)
 	for i := 0; i < n; i++ {
-		X[i] *= g
+		X[i] = float64(g * float32(X[i]))
 	}
 }
 
 // haar1 matches libopus haar1 (bands.c), float build.
 func haar1(X []float64, n0, stride int) {
 	n0 >>= 1
-	const s = 0.70710678
+	const s = float32(0.70710678)
 	for i := 0; i < stride; i++ {
 		for j := 0; j < n0; j++ {
-			t1 := s * X[stride*2*j+i]
-			t2 := s * X[stride*(2*j+1)+i]
-			X[stride*2*j+i] = t1 + t2
-			X[stride*(2*j+1)+i] = t1 - t2
+			t1 := s * float32(X[stride*2*j+i])
+			t2 := s * float32(X[stride*(2*j+1)+i])
+			X[stride*2*j+i] = float64(t1 + t2)
+			X[stride*(2*j+1)+i] = float64(t1 - t2)
 		}
 	}
 }
@@ -647,8 +652,8 @@ func quantPartition(ctx *bandCtx, X []float64, n, b, B int, lowband []float64, l
 		sc := computeTheta(ctx, X, Y, n, &b, B, B0, lm, false, &fill)
 		imid, iside := sc.imid, sc.iside
 		delta, itheta, qalloc := sc.delta, sc.itheta, sc.qalloc
-		mid := float64(imid) / 32768.0
-		side := float64(iside) / 32768.0
+		mid := float64(float32(imid) * (float32(1.0) / 32768.0))
+		side := float64(float32(iside) * (float32(1.0) / 32768.0))
 
 		if B0 > 1 && (itheta&0x3fff) != 0 {
 			if itheta > 8192 {
@@ -678,19 +683,19 @@ func quantPartition(ctx *bandCtx, X []float64, n, b, B int, lowband []float64, l
 		}
 		rebalance := ctx.remainingBits
 		if mbits >= sbits {
-			cm = quantPartition(ctx, X, n, mbits, B, lowband, lm, gain*mid, fill)
+			cm = quantPartition(ctx, X, n, mbits, B, lowband, lm, mulFloat32(gain, mid), fill)
 			rebalance = mbits - (rebalance - ctx.remainingBits)
 			if rebalance > 3<<bitres && itheta != 0 {
 				sbits += rebalance - (3 << bitres)
 			}
-			cm |= quantPartition(ctx, Y, n, sbits, B, nextLowband2, lm, gain*side, fill>>uint(B)) << uint(B0>>1)
+			cm |= quantPartition(ctx, Y, n, sbits, B, nextLowband2, lm, mulFloat32(gain, side), fill>>uint(B)) << uint(B0>>1)
 		} else {
-			cm = quantPartition(ctx, Y, n, sbits, B, nextLowband2, lm, gain*side, fill>>uint(B)) << uint(B0>>1)
+			cm = quantPartition(ctx, Y, n, sbits, B, nextLowband2, lm, mulFloat32(gain, side), fill>>uint(B)) << uint(B0>>1)
 			rebalance = sbits - (rebalance - ctx.remainingBits)
 			if rebalance > 3<<bitres && itheta != 16384 {
 				mbits += rebalance - (3 << bitres)
 			}
-			cm |= quantPartition(ctx, X, n, mbits, B, lowband, lm, gain*mid, fill)
+			cm |= quantPartition(ctx, X, n, mbits, B, lowband, lm, mulFloat32(gain, mid), fill)
 		}
 		return cm
 	}
@@ -731,11 +736,11 @@ func quantPartition(ctx *bandCtx, X []float64, n, b, B int, lowband []float64, l
 			} else {
 				for j := 0; j < n; j++ {
 					ctx.seed = celtLCGRand(ctx.seed)
-					tmp := 1.0 / 256.0
+					tmp := float32(1.0 / 256.0)
 					if ctx.seed&0x8000 != 0 {
-						X[j] = lowband[j] + tmp
+						X[j] = float64(float32(lowband[j]) + tmp)
 					} else {
-						X[j] = lowband[j] - tmp
+						X[j] = float64(float32(lowband[j]) - tmp)
 					}
 				}
 				cm = uint(fill)
@@ -835,9 +840,9 @@ func quantBand(ctx *bandCtx, X []float64, n, b, B int, lowband []float64, lm int
 	B <<= recombine
 
 	if lowbandOut != nil {
-		nrm := math.Sqrt(float64(n0))
+		nrm := float32(math.Sqrt(float64(n0)))
 		for j := 0; j < n0; j++ {
-			lowbandOut[j] = nrm * X[j]
+			lowbandOut[j] = float64(nrm * float32(X[j]))
 		}
 	}
 	cm &= (1 << uint(B)) - 1
@@ -864,8 +869,8 @@ func quantBandStereo(ctx *bandCtx, X, Y []float64, n, b, B int, lowband []float6
 	sc := computeTheta(ctx, X, Y, n, &b, B, B, lm, true, &fill)
 	inv, imid, iside := sc.inv, sc.imid, sc.iside
 	delta, itheta, qalloc := sc.delta, sc.itheta, sc.qalloc
-	mid := float64(imid) / 32768.0
-	side := float64(iside) / 32768.0
+	mid := float64(float32(imid) * (float32(1.0) / 32768.0))
+	side := float64(float32(iside) * (float32(1.0) / 32768.0))
 
 	if n == 2 {
 		mbits := b
@@ -949,26 +954,29 @@ func quantBandStereo(ctx *bandCtx, X, Y []float64, n, b, B int, lowband []float6
 
 // stereoMerge — float port of bands.c stereo_merge.
 func stereoMerge(X, Y []float64, mid float64, n int) {
-	var xp, side float64
+	var xp, side float32
 	for j := 0; j < n; j++ {
-		xp += X[j] * Y[j]
-		side += Y[j] * Y[j]
+		x := float32(X[j])
+		y := float32(Y[j])
+		xp += y * x
+		side += y * y
 	}
-	xp *= mid
-	mid2 := mid // SHR16(mid,1) is no-op in float build (libopus arch.h), so mid2=mid
+	mid32 := float32(mid)
+	xp *= mid32
+	mid2 := mid32 // SHR16(mid,1) is no-op in float build (libopus arch.h), so mid2=mid
 	El := mid2*mid2 + side - 2*xp
 	Er := mid2*mid2 + side + 2*xp
 	if Er < 6e-4 || El < 6e-4 {
 		copy(Y[:n], X[:n])
 		return
 	}
-	lgain := 1.0 / math.Sqrt(El)
-	rgain := 1.0 / math.Sqrt(Er)
+	lgain := float32(1.0) / float32(math.Sqrt(float64(El)))
+	rgain := float32(1.0) / float32(math.Sqrt(float64(Er)))
 	for j := 0; j < n; j++ {
-		l := mid * X[j]
-		r := Y[j]
-		X[j] = lgain * (l - r)
-		Y[j] = rgain * (l + r)
+		l := mid32 * float32(X[j])
+		r := float32(Y[j])
+		X[j] = float64(lgain * (l - r))
+		Y[j] = float64(rgain * (l + r))
 	}
 }
 
@@ -1141,7 +1149,7 @@ func quantAllBandsImpl(encode bool, enc *entcode.Encoder, dec *entcode.Decoder, 
 			dualStereo = false
 			lim := M*int(eBands[i]) - normOffset
 			for j := 0; j < lim; j++ {
-				norm[j] = 0.5 * (norm[j] + norm[normLen+j])
+				norm[j] = float64(float32(0.5) * (float32(norm[j]) + float32(norm[normLen+j])))
 			}
 		}
 

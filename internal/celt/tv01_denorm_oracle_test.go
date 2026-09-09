@@ -200,11 +200,11 @@ func TestTV01Frame1DenormalizedBandsAgainstLibopus(t *testing.T) {
 		if matchingEnergy != 21 {
 			t.Errorf("channel %d energy matches=%d/21, first mismatch=%d", ch, matchingEnergy, firstEnergyMismatch)
 		}
-		minimumNormalized := [...]int{10, 6}
+		minimumNormalized := [...]int{18, 17}
 		if matchingNormalized < minimumNormalized[ch] {
 			t.Errorf("channel %d normalized matches=%d/21, want at least %d", ch, matchingNormalized, minimumNormalized[ch])
 		}
-		minimumDenormalized := [...]int{8, 7}
+		minimumDenormalized := [...]int{9, 8}
 		if matchingBands < minimumDenormalized[ch] {
 			t.Errorf("channel %d denormalized matches=%d/21, want at least %d", ch, matchingBands, minimumDenormalized[ch])
 		}

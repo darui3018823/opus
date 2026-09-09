@@ -91,8 +91,12 @@ func isqrt32(val uint32) int {
 	return int(g)
 }
 
-// celtCosNorm matches celt_cos_norm(x) = cos(0.5*pi*x) in the float build.
-func celtCosNorm(x float64) float64 { return math.Cos((0.5 * math.Pi) * x) }
+// celtCosNorm matches the float build's celt_cos_norm macro. The argument and
+// result are celt_norm/opus_val16 float values even though cos itself operates
+// in double precision in C.
+func celtCosNorm(x float32) float32 {
+	return float32(math.Cos((0.5 * math.Pi) * float64(x)))
+}
 
 // getPulses matches libopus get_pulses (rate.h).
 func getPulses(i int) int {
@@ -142,30 +146,31 @@ func decodePulses(dec *entcode.Decoder, n, k int) ([]int, float64) {
 }
 
 func normaliseResidual(iy []int, X []float64, n int, ryy, gain float64) {
-	g := gain
+	g := float32(gain)
 	if ryy > 0 {
-		g = (1.0 / math.Sqrt(ryy)) * gain
+		sqrtRyy := float32(math.Sqrt(float64(float32(ryy))))
+		g = (float32(1.0) / sqrtRyy) * float32(gain)
 	}
 	for i := 0; i < n; i++ {
-		X[i] = g * float64(iy[i])
+		X[i] = float64(g * float32(iy[i]))
 	}
 }
 
-func expRotation1(X []float64, length, stride int, c, s float64) {
+func expRotation1(X []float64, length, stride int, c, s float32) {
 	ms := -s
 	// forward
 	for i := 0; i < length-stride; i++ {
-		x1 := X[i]
-		x2 := X[i+stride]
-		X[i+stride] = c*x2 + s*x1
-		X[i] = c*x1 + ms*x2
+		x1 := float32(X[i])
+		x2 := float32(X[i+stride])
+		X[i+stride] = float64(c*x2 + s*x1)
+		X[i] = float64(c*x1 + ms*x2)
 	}
 	// backward
 	for i := length - 2*stride - 1; i >= 0; i-- {
-		x1 := X[i]
-		x2 := X[i+stride]
-		X[i+stride] = c*x2 + s*x1
-		X[i] = c*x1 + ms*x2
+		x1 := float32(X[i])
+		x2 := float32(X[i+stride])
+		X[i+stride] = float64(c*x2 + s*x1)
+		X[i] = float64(c*x1 + ms*x2)
 	}
 }
 
@@ -175,10 +180,10 @@ func expRotation(X []float64, length, dir, stride, k, spread int) {
 		return
 	}
 	factor := spreadFactor[spread-1]
-	gain := float64(length) / float64(length+factor*k)
-	theta := 0.5 * gain * gain
+	gain := float32(length) / float32(length+factor*k)
+	theta := float32(0.5) * gain * gain
 	c := celtCosNorm(theta)
-	s := celtCosNorm(1.0 - theta) // sin(theta*pi/2)
+	s := celtCosNorm(float32(1.0) - theta) // sin(theta*pi/2)
 	stride2 := 0
 	if length >= 8*stride {
 		stride2 = 1

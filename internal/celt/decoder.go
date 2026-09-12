@@ -53,6 +53,9 @@ type Decoder struct {
 	// output before band-energy denormalization. Production decoders leave it
 	// nil, so the diagnostic does not allocate or retain coefficient buffers.
 	normalizedCoeffHook func(channel int, coeffs []float64)
+	// synthesisStageHook is used by package tests to compare the time-domain
+	// synthesis pipeline with a directly compiled libopus oracle.
+	synthesisStageHook func(stage string, channel int, samples []float64)
 }
 
 // NewDecoder creates a new CELT decoder.
@@ -319,6 +322,9 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			// Non-transient: single N-point IMDCT.
 			samplesOut = d.celtMode.CLTMDCTBackward(coeffs, d.overlap[c])
 		}
+		if d.synthesisStageHook != nil {
+			d.synthesisStageHook("synthesis", c, samplesOut)
+		}
 
 		if !pfEnabled {
 			pfPeriod = 0
@@ -329,7 +335,13 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 		if start == 0 {
 			samplesOut = d.postFilter[c].Apply(samplesOut, pfPeriod, pfGain, pfTapset, d.mode.NBase, lm, d.celtMode.Window)
 		}
+		if d.synthesisStageHook != nil {
+			d.synthesisStageHook("postfilter", c, samplesOut)
+		}
 		d.applyDeemphasis(c, samplesOut)
+		if d.synthesisStageHook != nil {
+			d.synthesisStageHook("pcm", c, samplesOut)
+		}
 
 		for i := 0; i < len(samplesOut) && i < frameSize; i++ {
 			output[i*ch+c] = samplesOut[i] * celtFloatScale

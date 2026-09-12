@@ -1,6 +1,6 @@
 # libopus Bit-Exact Convergence Plan
 
-Last updated: 2026-09-12
+Last updated: 2026-09-13
 Status: Active
 
 ## Objective
@@ -61,7 +61,7 @@ state or entropy divergence.
 | Entropy coder | Documented and tested as matching libopus range coding | Retain final-range and symbol traces |
 | Decoder framing/range | All 12 official vectors now have zero `FinalRange` mismatches against libopus 1.6.1 and their `.bit` records | Retain the all-vector zero-mismatch gate while localizing PCM divergence |
 | int16 decode conversion | Conversion semantics match `FLOAT2INT16`; direct `opus_decode` comparison now reports exact-sample percentage, first/max LSB delta, and range mismatch count | Raise mode-specific exact-sample coverage after range alignment |
-| CELT synthesis | The FFT/inverse MDCT oracle is bit-exact; tv01 frame 1 now also matches all 21 normalized PVQ bands, all 21 energy words, and the complete 960-value denormalized spectrum; packet-0 sequential and isolated int16 output is 1920/1920 exact for all three frames | Localize the remaining sub-LSB float32 drift beginning with frame 0 transient coefficients and the integrated overlap/de-emphasis boundary |
+| CELT synthesis | tv01 frames 0 and 1 match all 21 normalized PVQ bands, all 21 energy words, and complete denormalized spectra; all three packet-0 frames match the checked-in scalar C oracle after synthesis, comb filtering, and de-emphasis; sequential and isolated int16 output is 1920/1920 exact | Extend the exact stage oracle to tv01 frame 33, the first remaining int16 mismatch in the full vector, and keep build-specific SIMD float drift separate from scalar-source conformance |
 | SILK synthesis/PLC | Parameter/range coverage exists; PLC is explicitly non-bit-exact | Compare fixed-point state and PCM on deterministic packet sequences |
 | Encoder | Packets interoperate but are not byte-identical | Add mode-specific byte and first-symbol divergence traces |
 | Mode/rate policy | Known partial parity in `docs/MODE_RATE_POLICY_DIFF.md` | Compare decisions and state over identical PCM/control sequences |
@@ -223,5 +223,37 @@ test passes.
   digest; the new digest was stable across repeated runs and the complete
   libopus interoperability suite remained green.
 - Verified the focused coefficient and tv01 oracles, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...`, `go vet ./...`, and
+  `go test -race -count=1 ./...`.
+
+### 2026-09-13: transient anti-collapse and static transform tables
+
+- Reference: checked-in libopus 1.6.1 `celt_decoder.c::anti_collapse` and
+  `celt_synthesis`, `mdct.c::clt_mdct_backward_c`, `kiss_fft.c`, and the
+  standard tables in `static_modes_float.h`.
+- Changed transient anti-collapse to consume fine-corrected `oldBandE`
+  directly and mirrored libopus float32 threshold, history, exponential,
+  noise, and renormalization order. Both tv01 frame-0 channels now match all
+  21 normalized bands, all 21 energy words, and their complete denormalized
+  coefficient hashes.
+- Localized the next drift to MDCT pre-rotation: the coefficients entering the
+  transform were exact, but Go regenerated twiddles with `math.Cos` while the
+  standard libopus mode uses rounded static constants. A checked-in generator
+  now converts the libopus 1.6.1 window, FFT-twiddle, and MDCT-twiddle literals
+  to exact Go float32 bit patterns.
+- Corrected the standalone FFT/MDCT oracle to use the standard static mode
+  rather than Custom Mode's runtime-generated tables. Exact hashes pass for all
+  four FFT and inverse-MDCT sizes.
+- Added strict tv01 packet-0 stage hashes. All three constituent frames now
+  match the scalar C source after synthesis, after the inactive comb filter,
+  and after de-emphasis/PCM scaling. Sequential and isolated int16 output
+  remains exact. The installed libopus build retains sub-LSB float differences,
+  consistent with build-specific compiler/SIMD arithmetic rather than the
+  checked-in scalar call path.
+- Tightened every official-vector `FinalRange` allowance to zero after a fresh
+  all-vector run confirmed zero mismatches. The next CELT target is tv01 frame
+  33, where the full-vector int16 comparison first differs by one LSB.
+- Verified generated-table stability, the focused static transform and tv01
+  stage oracles, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...`, `go vet ./...`, and
   `go test -race -count=1 ./...`.

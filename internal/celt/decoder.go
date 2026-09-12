@@ -266,8 +266,8 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	// oldBandE value, so derive the linear amplitude only after band decoding.
 	for i := start; i < end; i++ {
 		for c := 0; c < ch; c++ {
-			amp := math.Exp2(quantLogE[c*numBands+i] + EMean(i))
-			e := amp * amp
+			amp := celtExp2RoundedFloat32(float32(quantLogE[c*numBands+i] + EMean(i)))
+			e := float64(amp) * float64(amp)
 			if e < 1e-20 {
 				e = 1e-20
 			}

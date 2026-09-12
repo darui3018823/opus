@@ -901,16 +901,19 @@ func quantBandStereo(ctx *bandCtx, X, Y []float64, n, b, B int, lowband []float6
 		cm = quantBand(ctx, x2, n, mbits, B, lowband, lm, lowbandOut, 1.0, lowbandScratch, origFill)
 		y2[0] = -signf * x2[1]
 		y2[1] = signf * x2[0]
-		// resynth N=2
-		X[0] *= mid
-		X[1] *= mid
-		Y[0] *= side
-		Y[1] *= side
-		t0, t1 := X[0], X[1]
-		X[0] = t0 - Y[0]
-		Y[0] = t0 + Y[0]
-		X[1] = t1 - Y[1]
-		Y[1] = t1 + Y[1]
+		// The floating-point libopus build stores celt_norm, opus_val32, and
+		// the MULT32_32_Q31/ADD32/SUB32 results as float. Preserve those
+		// intermediate roundings instead of carrying the N=2 stereo rotation
+		// through Go's float64 coefficient storage.
+		mid32, side32 := float32(mid), float32(side)
+		x0 := mid32 * float32(X[0])
+		x1 := mid32 * float32(X[1])
+		y0 := side32 * float32(Y[0])
+		y1 := side32 * float32(Y[1])
+		X[0] = float64(x0 - y0)
+		Y[0] = float64(x0 + y0)
+		X[1] = float64(x1 - y1)
+		Y[1] = float64(x1 + y1)
 	} else {
 		mbits := b - delta
 		mbits /= 2

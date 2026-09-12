@@ -574,7 +574,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	}
 
 	if antiCollapseOn {
-		d.antiCollapse(X, collapse, pulses, lm, frameLen, seed, start, end)
+		d.antiCollapse(X, collapse, pulses, quantLogE, lm, frameLen, seed, start, end)
 	}
 
 	// Copy decoded (unit-norm) band coefficients back into the band processors.
@@ -592,7 +592,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	return intensity, dualStereo, nil
 }
 
-func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, lm, frameLen int, seed uint32, start, end int) {
+func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, logE []float64, lm, frameLen int, seed uint32, start, end int) {
 	numBands := d.mode.Bands.NumBands
 	ch := d.mode.Channels
 	M := 1 << uint(lm)
@@ -603,30 +603,25 @@ func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, lm, f
 			continue
 		}
 		depth := ((1 + pulses[i]) / n0) >> uint(lm)
-		thresh := 0.5 * math.Exp2(-0.125*float64(depth))
-		sqrt1 := 1.0 / math.Sqrt(float64(n0*M))
+		thresh := float32(0.5) * celtExp2Float32(-float32(0.125)*float32(depth))
+		sqrt1 := float32(1.0) / float32(math.Sqrt(float64(n0*M)))
 
 		for c := 0; c < ch; c++ {
-			prev1 := d.prevLogE[c*numBands+i]
-			prev2 := d.prevLogE2[c*numBands+i]
+			prev1 := float32(d.prevLogE[c*numBands+i])
+			prev2 := float32(d.prevLogE2[c*numBands+i])
 			if ch == 1 && len(d.prevLogE) >= 2*numBands {
-				prev1 = max(prev1, d.prevLogE[numBands+i])
-				prev2 = max(prev2, d.prevLogE2[numBands+i])
+				prev1 = max(prev1, float32(d.prevLogE[numBands+i]))
+				prev2 = max(prev2, float32(d.prevLogE2[numBands+i]))
 			}
 
-			energy := d.bandProcs[c].bands[i].Energy
-			if energy < 1e-20 {
-				energy = 1e-20
-			}
-			logE := 0.5*math.Log2(energy) - EMean(i)
-			eDiff := logE - min(prev1, prev2)
+			eDiff := float32(logE[c*numBands+i]) - min(prev1, prev2)
 			if eDiff < 0 {
 				eDiff = 0
 			}
 
-			r := 2.0 * math.Exp2(-eDiff)
+			r := float32(2.0) * celtExp2Float32(-eDiff)
 			if lm == 3 {
-				r *= math.Sqrt2
+				r *= float32(1.41421356)
 			}
 			r = min(thresh, r) * sqrt1
 
@@ -646,7 +641,7 @@ func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, lm, f
 					if seed&0x8000 == 0 {
 						v = -v
 					}
-					X[offset+(j<<uint(lm))+k] = v
+					X[offset+(j<<uint(lm))+k] = float64(v)
 				}
 				renorm = true
 			}
@@ -655,6 +650,10 @@ func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, lm, f
 			}
 		}
 	}
+}
+
+func celtExp2Float32(x float32) float32 {
+	return float32(math.Exp(math.Ln2 * float64(x)))
 }
 
 func (d *Decoder) updateLogEnergyHistory(isTransient bool) {

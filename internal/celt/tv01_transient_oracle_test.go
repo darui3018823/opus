@@ -125,8 +125,8 @@ func TestTV01Frame0TransientBandsAgainstLibopus(t *testing.T) {
 			denormalizedMatches, firstDenormalizedMismatch, gotFull, wantFull[ch])
 		t.Logf("channel=%d normalizedMismatchBands=%v denormalizedMismatchBands=%v",
 			ch, normalizedMismatches, denormalizedMismatches)
-		minimumNormalized := [...]int{12, 17}
-		minimumDenormalized := [...]int{14, 18}
+		minimumNormalized := [...]int{21, 21}
+		minimumDenormalized := [...]int{21, 21}
 		if normalizedMatches < minimumNormalized[ch] {
 			t.Errorf("channel %d normalized matches=%d/21, want at least %d", ch, normalizedMatches, minimumNormalized[ch])
 		}
@@ -135,6 +135,9 @@ func TestTV01Frame0TransientBandsAgainstLibopus(t *testing.T) {
 		}
 		if denormalizedMatches < minimumDenormalized[ch] {
 			t.Errorf("channel %d denormalized matches=%d/21, want at least %d", ch, denormalizedMatches, minimumDenormalized[ch])
+		}
+		if gotFull != wantFull[ch] {
+			t.Errorf("channel %d full=%016x, want %016x", ch, gotFull, wantFull[ch])
 		}
 	}
 }

@@ -61,7 +61,7 @@ state or entropy divergence.
 | Entropy coder | Documented and tested as matching libopus range coding | Retain final-range and symbol traces |
 | Decoder framing/range | All 12 official vectors now have zero `FinalRange` mismatches against libopus 1.6.1 and their `.bit` records | Retain the all-vector zero-mismatch gate while localizing PCM divergence |
 | int16 decode conversion | Conversion semantics match `FLOAT2INT16`; direct `opus_decode` comparison now reports exact-sample percentage, first/max LSB delta, and range mismatch count | Raise mode-specific exact-sample coverage after range alignment |
-| CELT synthesis | tv01 frames 0 and 1 match all 21 normalized PVQ bands, all 21 energy words, and complete denormalized spectra; all three packet-0 frames match the checked-in scalar C oracle after synthesis, comb filtering, and de-emphasis; sequential and isolated int16 output is 1920/1920 exact | Extend the exact stage oracle to tv01 frame 33, the first remaining int16 mismatch in the full vector, and keep build-specific SIMD float drift separate from scalar-source conformance |
+| CELT synthesis | tv01 frames 0 and 1 match all 21 normalized PVQ bands, all 21 energy words, and complete denormalized spectra; all three packet-0 frames and packet 33 constituent frame 3 match the checked-in scalar C oracle after synthesis, comb filtering, and de-emphasis | Add a vector-wide scalar-source stage scan to locate the first true CELT arithmetic/state mismatch, while keeping installed-libopus compiler/SIMD drift separate from source conformance |
 | SILK synthesis/PLC | Parameter/range coverage exists; PLC is explicitly non-bit-exact | Compare fixed-point state and PCM on deterministic packet sequences |
 | Encoder | Packets interoperate but are not byte-identical | Add mode-specific byte and first-symbol divergence traces |
 | Mode/rate policy | Known partial parity in `docs/MODE_RATE_POLICY_DIFF.md` | Compare decisions and state over identical PCM/control sequences |
@@ -257,3 +257,21 @@ test passes.
   stage oracles, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...`, `go vet ./...`, and
   `go test -race -count=1 ./...`.
+
+### 2026-09-13: tv01 packet 33 scalar synthesis
+
+- Replayed the complete packet sequence through tv01 packet 33 in both Go and
+  the checked-in scalar libopus decoder, preserving CELT state, packet
+  bandwidth, channel count, duration, and constituent-frame geometry.
+- The installed libopus build's first one-LSB int16 difference is packet 33,
+  sample 6881, which lies in constituent frame 3. That constituent matches the
+  checked-in scalar C source exactly after synthesis, after the inactive comb
+  filter, and after de-emphasis/PCM scaling on both channels.
+- This rules out a source-level Go/C mismatch at that point; the installed
+  build difference is consistent with its compiler/SIMD float path. The next
+  gate is a vector-wide scalar-source stage scan that can identify the first
+  actual CELT source-conformance mismatch without chasing build-specific
+  sub-LSB noise.
+- Verified the rebuilt scalar oracle, the focused packet-33 stage test,
+  `go test -count=1 ./...`, and `go test -count=1 -tags opusref -run
+  '^TestCGORef$' -v .`.

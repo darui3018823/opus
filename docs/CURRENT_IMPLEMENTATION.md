@@ -1229,9 +1229,13 @@ Notes:
   reconstructing it from already-saturated `V` values, and the float PVQ fold,
   rotation, recursive gain, Haar, stereo-merge, and denormalization paths follow
   libopus float32 operation order. For all three tv01 packet-0 constituent
-  frames, the checked-in scalar C oracle now matches complete per-channel hashes
-  after synthesis, after the inactive comb filter, and after de-emphasis/PCM
-  scaling. An independently installed libopus build can still differ below one
+  frames and packet 33 constituent frame 3, the checked-in scalar C oracle now
+  matches complete per-channel hashes after synthesis, after the applicable
+  comb filter, and after de-emphasis/PCM scaling. Packet 33 contains the first
+  one-LSB int16 difference against the independently installed libopus build,
+  so the scalar match identifies that difference as build-specific compiler or
+  SIMD float arithmetic rather than a checked-in source-level mismatch. An
+  independently installed libopus build can still differ below one
   int16 LSB in float output because its compiler/SIMD transform path is not the
   scalar oracle; int16 output remains exact for this packet.
 - The pure-Go **encoder** is also cross-validated against libopus under the same

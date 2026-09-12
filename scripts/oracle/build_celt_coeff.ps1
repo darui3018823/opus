@@ -76,6 +76,33 @@ static void oracle_dump_norm(const CELTMode *mode, const celt_norm *x,
    }
 }
 
+static void oracle_dump_signal(const char *stage, celt_sig *const signal[],
+      int channels, int frame_size)
+{
+   int ch, i;
+   if (!oracle_trace_enabled) return;
+   for (ch=0;ch<channels;ch++) {
+      uint64_t hash = UINT64_C(14695981039346656037);
+      for (i=0;i<frame_size;i++)
+         hash = oracle_hash_float(hash, signal[ch][i]);
+      fprintf(stderr, "[%s] ch=%d n=%d hash=%016llx\n", stage, ch,
+            frame_size, (unsigned long long)hash);
+   }
+}
+
+static void oracle_dump_pcm(const opus_res *pcm, int channels, int frame_size)
+{
+   int ch, i;
+   if (!oracle_trace_enabled) return;
+   for (ch=0;ch<channels;ch++) {
+      uint64_t hash = UINT64_C(14695981039346656037);
+      for (i=0;i<frame_size;i++)
+         hash = oracle_hash_float(hash, pcm[i*channels+ch]);
+      fprintf(stderr, "[PCM] ch=%d n=%d hash=%016llx\n", ch, frame_size,
+            (unsigned long long)hash);
+   }
+}
+
 '@
 
 $marker = 'void celt_synthesis('
@@ -86,6 +113,18 @@ if (-not [regex]::IsMatch($source, $callPattern)) { throw "normal stereo denorma
 $source = [regex]::Replace($source, $callPattern, '$1' + "`r`n         oracle_dump_denorm(mode, freq, c, start, effEnd, M);", 1)
 $source = [regex]::Replace($source, $callPattern,
     'oracle_dump_norm(mode, X+c*N, oldBandE+c*nbEBands, c, start, effEnd, M);' + "`r`n         " + '$1', 1)
+$synthesisPattern = '(?s)(celt_synthesis\(mode, X, out_syn, oldBandE, start, effEnd,\s*C, CC, isTransient, LM, st->downsample, silence, st->arch.*?\);)'
+if (-not [regex]::IsMatch($source, $synthesisPattern)) { throw "decode celt_synthesis call not found" }
+$source = [regex]::Replace($source, $synthesisPattern,
+    '$1' + "`r`n   " + 'oracle_dump_signal("SYNTH", out_syn, CC, N);', 1)
+$postfilterPattern = '(?ms)(^   c=0; do \{\s*st->postfilter_period=IMAX\(st->postfilter_period, COMBFILTER_MINPERIOD\);.*?^   \} while \(\+\+c<CC\);)'
+if (-not [regex]::IsMatch($source, $postfilterPattern)) { throw "decode postfilter block not found" }
+$source = [regex]::Replace($source, $postfilterPattern,
+    '$1' + "`r`n   " + 'oracle_dump_signal("POSTFILTER", out_syn, CC, N);', 1)
+$deemphasisPattern = '(?m)(^   deemphasis\(out_syn, pcm, N, CC, st->downsample, mode->preemph, st->preemph_memD, accum\);)'
+if (-not [regex]::IsMatch($source, $deemphasisPattern)) { throw "decode deemphasis call not found" }
+$source = [regex]::Replace($source, $deemphasisPattern,
+    '$1' + "`r`n   " + 'oracle_dump_pcm(pcm, CC, N);', 1)
 Set-Content -LiteralPath $generated -Value $source
 
 $generatedBands = Join-Path $env:TEMP 'opus_celt_bands_coeff_instr.c'

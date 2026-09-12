@@ -230,11 +230,6 @@ $cwrsSource = $cwrsSource.Replace($cwrsInclude, $cwrsInclude + @'
 extern int oracle_trace_enabled;
 static int oracle_cwrs_call;
 '@)
-$cwrsDecode = @'
-opus_val32 decode_pulses(int *_y,int _n,int _k,ec_dec *_dec){
-  return cwrsi(_n,_k,ec_dec_uint(_dec,CELT_PVQ_V(_n,_k)),_y);
-}
-'@
 $cwrsDecodeTrace = @'
 opus_val32 decode_pulses(int *_y,int _n,int _k,ec_dec *_dec){
   opus_uint32 ft;
@@ -247,8 +242,9 @@ opus_val32 decode_pulses(int *_y,int _n,int _k,ec_dec *_dec){
   return cwrsi(_n,_k,index,_y);
 }
 '@
-if (-not $cwrsSource.Contains($cwrsDecode)) { throw "non-small decode_pulses marker not found" }
-$cwrsSource = $cwrsSource.Replace($cwrsDecode, $cwrsDecodeTrace)
+$cwrsDecodePattern = 'opus_val32 decode_pulses\(int \*_y,int _n,int _k,ec_dec \*_dec\)\{\r?\n  return cwrsi\(_n,_k,ec_dec_uint\(_dec,CELT_PVQ_V\(_n,_k\)\),_y\);\r?\n\}'
+if (-not [regex]::IsMatch($cwrsSource, $cwrsDecodePattern)) { throw "non-small decode_pulses marker not found" }
+$cwrsSource = [regex]::Replace($cwrsSource, $cwrsDecodePattern, $cwrsDecodeTrace, 1)
 Set-Content -LiteralPath $generatedCWRS -Value $cwrsSource
 
 $sources = @(

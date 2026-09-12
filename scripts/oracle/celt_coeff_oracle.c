@@ -126,19 +126,33 @@ int main(int argc, char **argv) {
   end = data + file_size;
   for (packet_index = 0; packet_index <= packet_target; ++packet_index) {
     const unsigned char *packet;
-    int frame_count;
+    int config, endband, frame_count, frame_size, stream_channels;
     if (end - cursor < 8) return 2;
     packet_size = read_be32(cursor);
     if (packet_size < 2 || packet_size > (unsigned long)(end - cursor - 8))
       return 2;
     packet = cursor + 8;
+    config = packet[0] >> 3;
+    if (config < 16) return 2;
+    frame_size = 120 << (config & 3);
+    stream_channels = (packet[0] & 4) != 0 ? 2 : 1;
+    switch ((config - 16) >> 2) {
+      case 0: endband = 13; break;
+      case 1: endband = 17; break;
+      case 2: endband = 19; break;
+      case 3: endband = 21; break;
+      default: return 2;
+    }
+    if (celt_decoder_ctl(decoder, CELT_SET_END_BAND(endband)) != OPUS_OK ||
+        celt_decoder_ctl(decoder, CELT_SET_CHANNELS(stream_channels)) != OPUS_OK)
+      return 2;
     frame_count = split_frames(packet, (int)packet_size, frames, sizes);
     if (frame_count < 1) return 2;
     if (packet_index == packet_target && target >= frame_count) return 2;
     for (frame = 0; frame < frame_count; ++frame) {
       oracle_trace_enabled = packet_index == packet_target && frame == target;
-      ret = celt_decode_with_ec(decoder, frames[frame], sizes[frame], pcm, 960,
-                                NULL, 0);
+      ret = celt_decode_with_ec(decoder, frames[frame], sizes[frame], pcm,
+                                frame_size, NULL, 0);
       fprintf(stderr,
               "packet=%d frame=%d bytes=%d ret=%d traced=%d\n",
               packet_index, frame, sizes[frame], ret, oracle_trace_enabled);

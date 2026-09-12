@@ -1,7 +1,7 @@
 /* Emit deterministic hashes from libopus's floating-point KISS FFT.
  *
  * Build from the repository root with:
- *   gcc -O1 -DCUSTOM_MODES -DOPUS_BUILD -DVAR_ARRAYS \
+ *   gcc -O1 -DOPUS_BUILD -DVAR_ARRAYS \
  *     -Ilibopus/celt -Ilibopus/include -Ilibopus \
  *     scripts/oracle/fft_oracle.c libopus/celt/kiss_fft.c \
  *     libopus/celt/mdct.c -lm \
@@ -14,6 +14,10 @@
 
 #include "kiss_fft.h"
 #include "mdct.h"
+#include "modes.h"
+static const opus_int16 eband5ms[] = {0};
+static const unsigned char band_allocation[] = {0};
+#include "static_modes_float.h"
 
 static uint64_t hash_u32(uint64_t hash, uint32_t value) {
   int byte;
@@ -31,13 +35,19 @@ static uint32_t float_bits(float value) {
 }
 
 static int run_size(int n) {
-  kiss_fft_state *state;
+  const kiss_fft_state *state;
   kiss_fft_cpx *input;
   kiss_fft_cpx *output;
   uint64_t hash = UINT64_C(14695981039346656037);
   int i;
 
-  state = opus_fft_alloc(n, NULL, NULL, 0);
+  switch (n) {
+    case 60: state = &fft_state48000_960_3; break;
+    case 120: state = &fft_state48000_960_2; break;
+    case 240: state = &fft_state48000_960_1; break;
+    case 480: state = &fft_state48000_960_0; break;
+    default: return 1;
+  }
   input = (kiss_fft_cpx *)calloc((size_t)n, sizeof(*input));
   output = (kiss_fft_cpx *)calloc((size_t)n, sizeof(*output));
   if (state == NULL || input == NULL || output == NULL) return 1;
@@ -58,24 +68,14 @@ static int run_size(int n) {
          float_bits(output[0].i), float_bits(output[n - 1].r),
          float_bits(output[n - 1].i));
 
-  opus_fft_free(state, 0);
   free(input);
   free(output);
   return 0;
 }
 
 static int run_mdct(void) {
-  mdct_lookup lookup;
-  float window[120];
+  const mdct_lookup *lookup = &mode48000_960_120.mdct;
   int shift;
-  int wi;
-  for (wi = 0; wi < 120; ++wi) {
-    double inner = sin(0.5 * 3.14159265358979323846264338327 *
-                       ((double)wi + 0.5) / 120.0);
-    window[wi] = (float)sin(0.5 * 3.14159265358979323846264338327 *
-                            inner * inner);
-  }
-  if (!clt_mdct_init(&lookup, 1920, 3, 0)) return 1;
   for (shift = 0; shift <= 3; ++shift) {
     int n = 960 >> shift;
     float *input = (float *)calloc((size_t)n, sizeof(*input));
@@ -87,7 +87,7 @@ static int run_mdct(void) {
       input[i] = (float)((i * 29) % 263 - 131) * (1.0f / 256.0f);
     for (i = 0; i < 60; ++i)
       output[i] = (float)((i * 17) % 61 - 30) * (1.0f / 512.0f);
-    clt_mdct_backward_c(&lookup, input, output, window, 120, shift, 1,
+    clt_mdct_backward_c(lookup, input, output, window120, 120, shift, 1,
                         0);
     for (i = 0; i < n + 60; ++i)
       hash = hash_u32(hash, float_bits(output[i]));
@@ -97,7 +97,6 @@ static int run_mdct(void) {
     free(input);
     free(output);
   }
-  clt_mdct_clear(&lookup, 0);
   return 0;
 }
 

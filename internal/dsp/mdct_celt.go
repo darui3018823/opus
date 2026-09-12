@@ -2,6 +2,8 @@ package dsp
 
 import "math"
 
+//go:generate go run generate_mdct_twiddles.go
+
 // CELTMode holds parameters for the CELT MDCT with small-overlap model.
 type CELTMode struct {
 	N       int       // frame size (e.g. 960)
@@ -67,13 +69,12 @@ func (m *CELTMode) IMDCTRaw(X []float64) []float64 {
 	for i := 0; i < N4; i++ {
 		xp1 := float32(X[2*i])
 		xp2 := float32(X[N2-1-2*i])
-		t0 := float32(math.Cos(2 * math.Pi * (float64(i) + 0.125) / float64(2*N)))
-		t1 := float32(math.Cos(2 * math.Pi * (float64(N4+i) + 0.125) / float64(2*N)))
+		t0 := libopusMDCTTwiddle(N, i)
+		t1 := libopusMDCTTwiddle(N, N4+i)
 		yr := xp2*t0 + xp1*t1
 		yi := xp1*t0 - xp2*t1
 		f[i] = Complex{Real: float64(yi), Imag: float64(yr)}
 	}
-
 	z := opusFFT(f)
 	buf := make([]float64, N2)
 	for i, c := range z {
@@ -87,8 +88,8 @@ func (m *CELTMode) IMDCTRaw(X []float64) []float64 {
 
 		re := float32(buf[yp0+1])
 		im := float32(buf[yp0])
-		t0 := float32(math.Cos(2 * math.Pi * (float64(i) + 0.125) / float64(2*N)))
-		t1 := float32(math.Cos(2 * math.Pi * (float64(N4+i) + 0.125) / float64(2*N)))
+		t0 := libopusMDCTTwiddle(N, i)
+		t1 := libopusMDCTTwiddle(N, N4+i)
 		yr := re*t0 + im*t1
 		yi := re*t1 - im*t0
 
@@ -97,15 +98,30 @@ func (m *CELTMode) IMDCTRaw(X []float64) []float64 {
 		buf[yp0] = float64(yr)
 		buf[yp1+1] = float64(yi)
 
-		t0 = float32(math.Cos(2 * math.Pi * (float64(N4-i-1) + 0.125) / float64(2*N)))
-		t1 = float32(math.Cos(2 * math.Pi * (float64(N2-i-1) + 0.125) / float64(2*N)))
+		t0 = libopusMDCTTwiddle(N, N4-i-1)
+		t1 = libopusMDCTTwiddle(N, N2-i-1)
 		yr = re*t0 + im*t1
 		yi = re*t1 - im*t0
 		buf[yp1] = float64(yr)
 		buf[yp0+1] = float64(yi)
 	}
-
 	return buf
+}
+
+func libopusMDCTTwiddle(n, index int) float32 {
+	offset := 0
+	switch n {
+	case 960:
+	case 480:
+		offset = 960
+	case 240:
+		offset = 1440
+	case 120:
+		offset = 1680
+	default:
+		return float32(math.Cos(2 * math.Pi * (float64(index) + 0.125) / float64(2*n)))
+	}
+	return math.Float32frombits(libopusMDCTTwiddleBits[offset+index])
 }
 
 // CLTMDCTForward performs the CELT forward MDCT, the analysis counterpart of

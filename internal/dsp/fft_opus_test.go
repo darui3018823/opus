@@ -54,10 +54,10 @@ func TestOpusFFTMatchesDFT(t *testing.T) {
 
 func TestOpusFFTMatchesLibopusFloatBits(t *testing.T) {
 	wants := map[int]uint64{
-		60:  0x8b3a7986ce7cd103,
-		120: 0x1414064ac6384bd1,
-		240: 0x99ed5feec9b83b4e,
-		480: 0x6b5add6a08d83318,
+		60:  0xbd49a13451724ac8,
+		120: 0x8d6491fd2c9c2c9b,
+		240: 0x7265bc722e075e24,
+		480: 0x2b1fdb6abc51c3e8,
 	}
 	for _, n := range []int{60, 120, 240, 480} {
 		t.Run(strconv.Itoa(n), func(t *testing.T) {
@@ -89,15 +89,14 @@ func TestOpusFFTMatchesLibopusFloatBits(t *testing.T) {
 
 func TestCLTMDCTBackwardMatchesLibopusFloatBits(t *testing.T) {
 	wants := map[int]uint64{
-		960: 0x0280683ffd82ab4d,
-		480: 0xaf316500239ea5d0,
-		240: 0x2b1b707b749b9d80,
-		120: 0x2c99f57be8f85c2e,
+		960: 0x1a13a4e44165ff51,
+		480: 0x0dfb5c6279241f44,
+		240: 0xd1bafa111ea208b2,
+		120: 0x6d885f9ab13652fb,
 	}
 	window := make([]float32, 120)
 	for i := range window {
-		inner := math.Sin(0.5 * math.Pi * (float64(i) + 0.5) / 120)
-		window[i] = float32(math.Sin(0.5 * math.Pi * inner * inner))
+		window[i] = math.Float32frombits(libopusWindow120Bits[i])
 	}
 	for _, n := range []int{960, 480, 240, 120} {
 		t.Run(strconv.Itoa(n), func(t *testing.T) {

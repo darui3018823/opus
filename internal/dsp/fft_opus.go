@@ -87,8 +87,10 @@ func getOpusFFTPlan(n int) *opusFFTPlan {
 
 	plan.twiddles = make([]opusComplex, 480)
 	for i := range plan.twiddles {
-		phase := (-2 * math.Pi / 480) * float64(i)
-		plan.twiddles[i] = opusComplex{r: float32(math.Cos(phase)), i: float32(math.Sin(phase))}
+		plan.twiddles[i] = opusComplex{
+			r: math.Float32frombits(libopusFFTTwiddleBits[2*i]),
+			i: math.Float32frombits(libopusFFTTwiddleBits[2*i+1]),
+		}
 	}
 	actual, _ := opusFFTPlans.LoadOrStore(n, plan)
 	return actual.(*opusFFTPlan)

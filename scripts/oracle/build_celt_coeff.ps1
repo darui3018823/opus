@@ -15,6 +15,9 @@ $helper = @'
 #include <stdlib.h>
 #include <string.h>
 extern int oracle_trace_enabled;
+extern int oracle_stage_trace_enabled;
+extern int oracle_packet_index;
+extern int oracle_frame_index;
 
 static uint64_t oracle_hash_float(uint64_t hash, float value)
 {
@@ -80,25 +83,27 @@ static void oracle_dump_signal(const char *stage, celt_sig *const signal[],
       int channels, int frame_size)
 {
    int ch, i;
-   if (!oracle_trace_enabled) return;
+   if (!oracle_stage_trace_enabled) return;
    for (ch=0;ch<channels;ch++) {
       uint64_t hash = UINT64_C(14695981039346656037);
       for (i=0;i<frame_size;i++)
          hash = oracle_hash_float(hash, signal[ch][i]);
-      fprintf(stderr, "[%s] ch=%d n=%d hash=%016llx\n", stage, ch,
-            frame_size, (unsigned long long)hash);
+      fprintf(stderr, "[%s] packet=%d frame=%d ch=%d n=%d hash=%016llx\n",
+            stage, oracle_packet_index, oracle_frame_index, ch, frame_size,
+            (unsigned long long)hash);
    }
 }
 
 static void oracle_dump_pcm(const opus_res *pcm, int channels, int frame_size)
 {
    int ch, i;
-   if (!oracle_trace_enabled) return;
+   if (!oracle_stage_trace_enabled) return;
    for (ch=0;ch<channels;ch++) {
       uint64_t hash = UINT64_C(14695981039346656037);
       for (i=0;i<frame_size;i++)
          hash = oracle_hash_float(hash, pcm[i*channels+ch]);
-      fprintf(stderr, "[PCM] ch=%d n=%d hash=%016llx\n", ch, frame_size,
+      fprintf(stderr, "[PCM] packet=%d frame=%d ch=%d n=%d hash=%016llx\n",
+            oracle_packet_index, oracle_frame_index, ch, frame_size,
             (unsigned long long)hash);
    }
 }

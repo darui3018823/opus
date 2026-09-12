@@ -1,10 +1,14 @@
 /* Decode one CELT packet constituent-by-constituent for coefficient tracing. */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "celt.h"
 
 int oracle_trace_enabled = 0;
+int oracle_stage_trace_enabled = 0;
+int oracle_packet_index = -1;
+int oracle_frame_index = -1;
 
 static unsigned int read_be32(const unsigned char *p) {
   return ((unsigned int)p[0] << 24) | ((unsigned int)p[1] << 16) |
@@ -92,18 +96,19 @@ int main(int argc, char **argv) {
   unsigned int packet_size;
   const unsigned char *frames[48];
   int sizes[48];
-  int target, packet_target, decoder_size, frame, ret, packet_index;
+  int target, packet_target, all_stages, decoder_size, frame, ret, packet_index;
   const unsigned char *cursor;
   const unsigned char *end;
   CELTDecoder *decoder;
   float pcm[960 * 2];
 
   if (argc < 2) {
-    fprintf(stderr, "usage: %s vector.bit [constituent-frame] [packet-index]\n", argv[0]);
+    fprintf(stderr, "usage: %s vector.bit [constituent-frame packet-index|--all-stages]\n", argv[0]);
     return 2;
   }
-  target = argc >= 3 ? atoi(argv[2]) : 0;
-  packet_target = argc >= 4 ? atoi(argv[3]) : 0;
+  all_stages = argc >= 3 && strcmp(argv[2], "--all-stages") == 0;
+  target = !all_stages && argc >= 3 ? atoi(argv[2]) : 0;
+  packet_target = !all_stages && argc >= 4 ? atoi(argv[3]) : 0;
   if (target < 0 || packet_target < 0) return 2;
   file = fopen(argv[1], "rb");
   if (file == NULL) return 2;
@@ -124,7 +129,9 @@ int main(int argc, char **argv) {
 
   cursor = data;
   end = data + file_size;
-  for (packet_index = 0; packet_index <= packet_target; ++packet_index) {
+  for (packet_index = 0;
+       cursor < end && (all_stages || packet_index <= packet_target);
+       ++packet_index) {
     const unsigned char *packet;
     int config, endband, frame_count, frame_size, stream_channels;
     if (end - cursor < 8) return 2;
@@ -150,7 +157,11 @@ int main(int argc, char **argv) {
     if (frame_count < 1) return 2;
     if (packet_index == packet_target && target >= frame_count) return 2;
     for (frame = 0; frame < frame_count; ++frame) {
-      oracle_trace_enabled = packet_index == packet_target && frame == target;
+      oracle_packet_index = packet_index;
+      oracle_frame_index = frame;
+      oracle_trace_enabled = !all_stages &&
+                             packet_index == packet_target && frame == target;
+      oracle_stage_trace_enabled = all_stages || oracle_trace_enabled;
       ret = celt_decode_with_ec(decoder, frames[frame], sizes[frame], pcm,
                                 frame_size, NULL, 0);
       fprintf(stderr,
@@ -161,6 +172,7 @@ int main(int argc, char **argv) {
     cursor += 8 + packet_size;
   }
   oracle_trace_enabled = 0;
+  oracle_stage_trace_enabled = 0;
   free(decoder);
   free(data);
   return 0;

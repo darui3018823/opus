@@ -43,9 +43,14 @@ static void oracle_dump_denorm(const CELTMode *mode, const celt_sig *freq,
 {
    int band, j;
    uint64_t full = UINT64_C(14695981039346656037);
-   if (!oracle_trace_enabled) return;
+   if (!oracle_trace_enabled && !oracle_stage_trace_enabled) return;
    for (j=0;j<mode->shortMdctSize*M;j++)
       full = oracle_hash_float(full, freq[j]);
+   if (oracle_stage_trace_enabled)
+      fprintf(stderr, "[DENORM_SUMMARY] packet=%d frame=%d ch=%d n=%d hash=%016llx\n",
+            oracle_packet_index, oracle_frame_index, ch,
+            mode->shortMdctSize*M, (unsigned long long)full);
+   if (!oracle_trace_enabled) return;
    fprintf(stderr, "[DENORM] ch=%d full=%016llx\n", ch,
          (unsigned long long)full);
    for (band=start;band<end;band++) {
@@ -55,6 +60,11 @@ static void oracle_dump_denorm(const CELTMode *mode, const celt_sig *freq,
       for (j=first;j<last;j++) hash = oracle_hash_float(hash, freq[j]);
       fprintf(stderr, "[DENORM_BAND] ch=%d band=%d n=%d hash=%016llx\n",
             ch, band, last-first, (unsigned long long)hash);
+      if (getenv("OPUS_ORACLE_COEFFS") != NULL) {
+         for (j=first;j<last;j++)
+            fprintf(stderr, "[DENORM_COEFF] ch=%d band=%d index=%d value=%.9g bits=%08x\n",
+                  ch, band, j-first, (double)freq[j], oracle_float_bits(freq[j]));
+      }
    }
 }
 
@@ -62,6 +72,18 @@ static void oracle_dump_norm(const CELTMode *mode, const celt_norm *x,
       const celt_glog *oldBandE, int ch, int start, int end, int M)
 {
    int band, j;
+   int n = M*mode->eBands[mode->nbEBands];
+   uint64_t full = UINT64_C(14695981039346656037);
+   uint64_t energy = UINT64_C(14695981039346656037);
+   if (!oracle_trace_enabled && !oracle_stage_trace_enabled) return;
+   for (j=0;j<n;j++) full = oracle_hash_float(full, x[j]);
+   for (band=0;band<mode->nbEBands;band++)
+      energy = oracle_hash_float(energy, oldBandE[band]);
+   if (oracle_stage_trace_enabled)
+      fprintf(stderr, "[NORM_SUMMARY] packet=%d frame=%d ch=%d n=%d hash=%016llx energyN=%d energy=%016llx\n",
+            oracle_packet_index, oracle_frame_index, ch, n,
+            (unsigned long long)full, mode->nbEBands,
+            (unsigned long long)energy);
    if (!oracle_trace_enabled) return;
    for (band=start;band<end;band++) {
       int first = M*mode->eBands[band];
@@ -140,6 +162,8 @@ $bandsHelper = @'
 #include <stdint.h>
 #include <string.h>
 extern int oracle_trace_enabled;
+extern int oracle_packet_index;
+extern int oracle_frame_index;
 static int oracle_stereo_merge_call;
 
 static uint32_t oracle_band_float_bits(float value)
@@ -164,8 +188,8 @@ static uint64_t oracle_band_hash(const celt_norm *x, int n)
 }
 
 '@
-$bandsMarker = 'static void stereo_merge('
-if (-not $bandsSource.Contains($bandsMarker)) { throw "stereo_merge marker not found" }
+$bandsMarker = 'void denormalise_bands('
+if (-not $bandsSource.Contains($bandsMarker)) { throw "denormalise_bands marker not found" }
 $bandsSource = $bandsSource.Replace($bandsMarker, $bandsHelper + $bandsMarker)
 $gainMarker = '   rgain = celt_rsqrt_norm32(t);'
 if (-not $bandsSource.Contains($gainMarker)) { throw "stereo_merge gain marker not found" }
@@ -181,6 +205,16 @@ $gainTrace = @'
    }
 '@
 $bandsSource = $bandsSource.Replace($gainMarker, $gainMarker + "`r`n" + $gainTrace)
+$denormGainMarker = '      g = celt_exp2_db(MIN32(32.f, lg));'
+if (-not $bandsSource.Contains($denormGainMarker)) { throw "denormalise gain marker not found" }
+$denormGainTrace = @'
+      if (oracle_trace_enabled)
+         fprintf(stderr, "[DENORM_GAIN] packet=%d frame=%d band=%d lg=%08x gain=%08x\n",
+               oracle_packet_index, oracle_frame_index, i,
+               oracle_band_float_bits(lg), oracle_band_float_bits(g));
+'@
+$bandsSource = $bandsSource.Replace($denormGainMarker,
+    $denormGainMarker + "`r`n" + $denormGainTrace)
 Set-Content -LiteralPath $generatedBands -Value $bandsSource
 
 $generatedVQ = Join-Path $env:TEMP 'opus_celt_vq_coeff_instr.c'

@@ -22,8 +22,17 @@ type celtScalarStageKey struct {
 	channel int
 }
 
+type celtScalarStageWant struct {
+	hash uint64
+	n    int
+}
+
 var celtScalarStagePattern = regexp.MustCompile(
 	`^\[(SYNTH|POSTFILTER|PCM)\] packet=(\d+) frame=(\d+) ch=(\d+) n=(\d+) hash=([0-9a-f]{16})$`,
+)
+
+var celtScalarCoefficientPattern = regexp.MustCompile(
+	`^\[(NORM|DENORM)_SUMMARY\] packet=(\d+) frame=(\d+) ch=(\d+) n=(\d+) hash=([0-9a-f]{16})(?: energyN=(\d+) energy=([0-9a-f]{16}))?$`,
 )
 
 // TestCELTScalarSynthesisStageScan compares every CELT constituent frame in a
@@ -65,11 +74,7 @@ func TestCELTScalarSynthesisStageScan(t *testing.T) {
 	currentPacket := -1
 	frameCounts := make(map[string]int)
 	compared := 0
-	hook := func(stage string, channel int, samples []float64) {
-		stage = strings.ToUpper(stage)
-		if stage == "SYNTHESIS" {
-			stage = "SYNTH"
-		}
+	compare := func(stage string, channel int, values []float64) {
 		counter := fmt.Sprintf("%s/%d", stage, channel)
 		frame := frameCounts[counter]
 		frameCounts[counter] = frame + 1
@@ -80,6 +85,21 @@ func TestCELTScalarSynthesisStageScan(t *testing.T) {
 		if !ok {
 			t.Fatalf("Go emitted unexpected stage %+v", key)
 		}
+		if len(values) < expected.n {
+			t.Fatalf("stage %+v has %d values, oracle hashed %d", key, len(values), expected.n)
+		}
+		got := hashFloat32Slice(values[:expected.n])
+		if got != expected.hash {
+			t.Fatalf("first scalar stage mismatch: packet=%d frame=%d stage=%s channel=%d got=%016x want=%016x",
+				currentPacket, frame, stage, channel, got, expected.hash)
+		}
+		compared++
+	}
+	synthesisHook := func(stage string, channel int, samples []float64) {
+		stage = strings.ToUpper(stage)
+		if stage == "SYNTHESIS" {
+			stage = "SYNTH"
+		}
 		values := samples
 		if stage == "PCM" {
 			values = make([]float64, len(samples))
@@ -87,17 +107,24 @@ func TestCELTScalarSynthesisStageScan(t *testing.T) {
 				values[i] = sample * (1.0 / 32768.0)
 			}
 		}
-		got := hashFloat32Slice(values)
-		if got != expected {
-			t.Fatalf("first scalar stage mismatch: packet=%d frame=%d stage=%s channel=%d got=%016x want=%016x",
-				currentPacket, frame, stage, channel, got, expected)
+		compare(stage, channel, values)
+	}
+	coefficientHook := func(stage string, channel int, coeffs, energies []float64) {
+		switch stage {
+		case "normalized":
+			compare("NORM", channel, coeffs)
+			compare("ENERGY", channel, energies)
+		case "denormalized":
+			compare("DENORM", channel, coeffs)
+		default:
+			t.Fatalf("unexpected coefficient stage %q", stage)
 		}
-		compared++
 	}
 	for bandwidth := range decoder.celtDecoders {
 		for lm := range decoder.celtDecoders[bandwidth] {
 			for channel := range decoder.celtDecoders[bandwidth][lm] {
-				decoder.celtDecoders[bandwidth][lm][channel].SetSynthesisStageHook(hook)
+				decoder.celtDecoders[bandwidth][lm][channel].SetCoefficientStageHook(coefficientHook)
+				decoder.celtDecoders[bandwidth][lm][channel].SetSynthesisStageHook(synthesisHook)
 			}
 		}
 	}
@@ -115,32 +142,50 @@ func TestCELTScalarSynthesisStageScan(t *testing.T) {
 	t.Logf("%s: all %d scalar CELT stage hashes match", vector, compared)
 }
 
-func parseCELTScalarStageHashes(t *testing.T, output []byte) map[celtScalarStageKey]uint64 {
+func parseCELTScalarStageHashes(t *testing.T, output []byte) map[celtScalarStageKey]celtScalarStageWant {
 	t.Helper()
-	hashes := make(map[celtScalarStageKey]uint64)
+	hashes := make(map[celtScalarStageKey]celtScalarStageWant)
 	scanner := bufio.NewScanner(bytes.NewReader(output))
 	for scanner.Scan() {
-		match := celtScalarStagePattern.FindStringSubmatch(scanner.Text())
-		if match == nil {
+		line := scanner.Text()
+		if match := celtScalarStagePattern.FindStringSubmatch(line); match != nil {
+			addCELTScalarHash(t, hashes, match[1], match[2], match[3], match[4], match[5], match[6])
 			continue
 		}
-		packet := mustCELTScalarInt(t, match[2])
-		frame := mustCELTScalarInt(t, match[3])
-		channel := mustCELTScalarInt(t, match[4])
-		hash, err := strconv.ParseUint(match[6], 16, 64)
-		if err != nil {
-			t.Fatalf("parse scalar hash %q: %v", match[6], err)
+		if match := celtScalarCoefficientPattern.FindStringSubmatch(line); match != nil {
+			addCELTScalarHash(t, hashes, match[1], match[2], match[3], match[4], match[5], match[6])
+			if match[1] == "NORM" {
+				if match[7] == "" || match[8] == "" {
+					t.Fatalf("normalized summary lacks energy hash: %s", line)
+				}
+				addCELTScalarHash(t, hashes, "ENERGY", match[2], match[3], match[4], match[7], match[8])
+			}
 		}
-		key := celtScalarStageKey{packet: packet, frame: frame, stage: match[1], channel: channel}
-		if _, exists := hashes[key]; exists {
-			t.Fatalf("duplicate scalar stage hash %+v", key)
-		}
-		hashes[key] = hash
 	}
 	if err := scanner.Err(); err != nil {
 		t.Fatalf("scan scalar oracle output: %v", err)
 	}
 	return hashes
+}
+
+func addCELTScalarHash(t *testing.T, hashes map[celtScalarStageKey]celtScalarStageWant,
+	stage, packetText, frameText, channelText, countText, hashText string,
+) {
+	t.Helper()
+	key := celtScalarStageKey{
+		packet:  mustCELTScalarInt(t, packetText),
+		frame:   mustCELTScalarInt(t, frameText),
+		stage:   stage,
+		channel: mustCELTScalarInt(t, channelText),
+	}
+	hash, err := strconv.ParseUint(hashText, 16, 64)
+	if err != nil {
+		t.Fatalf("parse scalar hash %q: %v", hashText, err)
+	}
+	if _, exists := hashes[key]; exists {
+		t.Fatalf("duplicate scalar stage hash %+v", key)
+	}
+	hashes[key] = celtScalarStageWant{hash: hash, n: mustCELTScalarInt(t, countText)}
 }
 
 func mustCELTScalarInt(t *testing.T, value string) int {

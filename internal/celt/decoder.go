@@ -53,9 +53,18 @@ type Decoder struct {
 	// output before band-energy denormalization. Production decoders leave it
 	// nil, so the diagnostic does not allocate or retain coefficient buffers.
 	normalizedCoeffHook func(channel int, coeffs []float64)
+	// coefficientStageHook exposes compact scalar-oracle boundaries together
+	// with their fine-corrected energy state to conformance tests.
+	coefficientStageHook func(stage string, channel int, coeffs, energies []float64)
 	// synthesisStageHook is used by package tests to compare the time-domain
 	// synthesis pipeline with a directly compiled libopus oracle.
 	synthesisStageHook func(stage string, channel int, samples []float64)
+}
+
+// SetCoefficientStageHook installs an internal conformance-test hook.
+// The coefficient and energy slices are borrowed for the callback only.
+func (d *Decoder) SetCoefficientStageHook(hook func(stage string, channel int, coeffs, energies []float64)) {
+	d.coefficientStageHook = hook
 }
 
 // SetSynthesisStageHook installs an internal conformance-test hook. Production
@@ -232,24 +241,6 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 		}
 	}
 
-	// quantLogE[c*numBands+i] is mean-subtracted log2-amplitude. libopus
-	// denormalise_bands adds eMeans[i] when applying the final gain.
-	for i := start; i < end; i++ {
-		for c := 0; c < ch; c++ {
-			amp := math.Exp2(quantLogE[c*numBands+i] + EMean(i))
-			e := amp * amp
-			if e < 1e-20 {
-				e = 1e-20
-			}
-			d.bandProcs[c].bands[i].Energy = e
-		}
-	}
-
-	d.bandProcs[0].InterpolateBandEnergies()
-	if ch == 2 {
-		d.bandProcs[1].InterpolateBandEnergies()
-	}
-
 	// Decode band coefficients: allocation, fine energy, PVQ, anti-collapse.
 	// The Q3 bit budget is computed inside from len(frameData) and ec_tell_frac.
 	// quant_all_bands also performs stereo (M/S→L/R) merge internally.
@@ -262,6 +253,30 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 		for c := 0; c < ch; c++ {
 			d.normalizedCoeffHook(c, d.bandProcs[c].AssembleMDCT())
 		}
+	}
+	if d.coefficientStageHook != nil {
+		for c := 0; c < ch; c++ {
+			d.coefficientStageHook("normalized", c, d.bandProcs[c].AssembleMDCT(),
+				quantLogE[c*numBands:(c+1)*numBands])
+		}
+	}
+
+	// quantLogE now includes both the initial fine-energy pass and the final
+	// one-bit refinement. libopus denormalise_bands consumes that completed
+	// oldBandE value, so derive the linear amplitude only after band decoding.
+	for i := start; i < end; i++ {
+		for c := 0; c < ch; c++ {
+			amp := math.Exp2(quantLogE[c*numBands+i] + EMean(i))
+			e := amp * amp
+			if e < 1e-20 {
+				e = 1e-20
+			}
+			d.bandProcs[c].bands[i].Energy = e
+		}
+	}
+	d.bandProcs[0].InterpolateBandEnergies()
+	if ch == 2 {
+		d.bandProcs[1].InterpolateBandEnergies()
 	}
 
 	// oldBandE is the fine-corrected, mean-subtracted log2 amplitude. libopus
@@ -289,6 +304,10 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			ext := make([]float64, frameSize)
 			copy(ext, coeffs)
 			coeffs = ext
+		}
+		if d.coefficientStageHook != nil {
+			d.coefficientStageHook("denormalized", c, coeffs,
+				quantLogE[c*numBands:(c+1)*numBands])
 		}
 		mdctCoeffsPerCh[c] = coeffs
 	}

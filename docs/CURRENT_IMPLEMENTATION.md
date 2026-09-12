@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-09-08
+Last reviewed: 2026-09-12
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -1211,17 +1211,22 @@ Notes:
   all 12 vectors. Normal builds use a `!opusref` stub so the codec stays
   CGO-free.
 - A constituent-frame oracle for testvector01 packet 0 additionally holds all
-  three CELT final ranges exact and prevents int16 agreement from regressing
-  below 1920/1920, 1903/1920, and 1919/1920 samples. Remaining mismatches are
-  at most 1 LSB. The decoder now mirrors the floating libopus build's float32
-  coarse/fine energy and de-emphasis state semantics, including the absence of
-  the fixed-point-only `-28` coarse-energy clamp. The remaining PCM divergence
-  is now localized before the transform boundary. The decoder uses libopus's
-  radix 2/3/4/5 mixed-radix KISS FFT rather than Bluestein. A C oracle compiled
-  directly from the checked-in libopus 1.6.1 source proves bit-for-bit float32
-  equality for all four CELT FFT sizes and all four inverse-MDCT sizes,
-  including windowed overlap/carry. The next localized PCM gate is therefore
-  PVQ normalization/spreading and band denormalization before IMDCT.
+  three CELT final ranges exact and requires exact int16 output for all
+  1920/1920 samples of every frame in both sequential and reset-state decoding.
+  The decoder mirrors the floating libopus build's float32 coarse/fine energy
+  and de-emphasis state semantics, including the standard 48 kHz
+  `27853/32768` de-emphasis coefficient and the absence of the fixed-point-only
+  `-28` coarse-energy clamp. A C oracle compiled directly from the checked-in
+  libopus 1.6.1 source proves bit-for-bit float32 equality for all four CELT FFT
+  sizes and all four inverse-MDCT sizes, including windowed overlap/carry. For
+  tv01 frame 1 it also proves all 21 normalized PVQ bands, all 21
+  fine-corrected energy words, and both complete 960-value denormalized spectra
+  bit-exact. The CWRS decoder now computes `U(N,K)` directly rather than
+  reconstructing it from already-saturated `V` values, and the float PVQ fold,
+  rotation, recursive gain, Haar, stereo-merge, and denormalization paths follow
+  libopus float32 operation order. A smaller float32 PCM drift remains despite
+  exact int16 output; the next boundary is the frame-0 transient coefficient
+  path and integrated overlap/de-emphasis synthesis.
 - The pure-Go **encoder** is also cross-validated against libopus under the same
   tag: `TestCGOEncodeRef` encodes synthetic signals with our encoder and decodes
   the packets with libopus 1.6.1, then measures delay-aligned SNR. libopus

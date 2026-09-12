@@ -1,6 +1,6 @@
 # libopus Bit-Exact Convergence Plan
 
-Last updated: 2026-09-09
+Last updated: 2026-09-12
 Status: Active
 
 ## Objective
@@ -61,7 +61,7 @@ state or entropy divergence.
 | Entropy coder | Documented and tested as matching libopus range coding | Retain final-range and symbol traces |
 | Decoder framing/range | All 12 official vectors now have zero `FinalRange` mismatches against libopus 1.6.1 and their `.bit` records | Retain the all-vector zero-mismatch gate while localizing PCM divergence |
 | int16 decode conversion | Conversion semantics match `FLOAT2INT16`; direct `opus_decode` comparison now reports exact-sample percentage, first/max LSB delta, and range mismatch count | Raise mode-specific exact-sample coverage after range alignment |
-| CELT synthesis | The 60/120/240/480-point FFT and 120/240/480/960-sample inverse MDCT now match libopus 1.6.1 float output bit-for-bit; tv01 sequential int16 agreement remains 1920/1920, 1903/1920, and 1919/1920 | Localize the remaining pre-IMDCT difference across PVQ normalization, spreading, and band denormalization |
+| CELT synthesis | The FFT/inverse MDCT oracle is bit-exact; tv01 frame 1 now also matches all 21 normalized PVQ bands, all 21 energy words, and the complete 960-value denormalized spectrum; packet-0 sequential and isolated int16 output is 1920/1920 exact for all three frames | Localize the remaining sub-LSB float32 drift beginning with frame 0 transient coefficients and the integrated overlap/de-emphasis boundary |
 | SILK synthesis/PLC | Parameter/range coverage exists; PLC is explicitly non-bit-exact | Compare fixed-point state and PCM on deterministic packet sequences |
 | Encoder | Packets interoperate but are not byte-identical | Add mode-specific byte and first-symbol divergence traces |
 | Mode/rate policy | Known partial parity in `docs/MODE_RATE_POLICY_DIFF.md` | Compare decisions and state over identical PCM/control sequences |
@@ -192,3 +192,36 @@ test passes.
   is before IMDCT in PVQ normalization/spreading or band denormalization.
 - Verified the C hash oracle, allocation gate, focused tv01 oracle, complete
   normal and `opusref` suites, `go vet ./...`, and the complete race suite.
+
+### 2026-09-12: bit-exact tv01 PVQ and band denormalization
+
+- Reference: checked-in libopus 1.6.1 `celt/cwrs.c::cwrsi`,
+  `vq.c::alg_unquant`/`exp_rotation`/`renormalise_vector`,
+  `bands.c::quant_partition`/`stereo_merge`/`denormalise_bands`, and the
+  standard 48 kHz pre-emphasis value in `static_modes_float.h`.
+- Added a constituent-frame C oracle that traces normalized coefficients,
+  fine-corrected `oldBandE`, denormalized spectra, CWRS indices and pulse
+  vectors, PVQ normalization/rotation, and stereo-merge state directly from
+  the checked-in C source.
+- Replaced the saturated-V reconstruction of CELT's symmetric `U(N,K)` table
+  with its direct recurrence. This fixes the near-`uint32` index
+  `V(24,9)=4003707568`, where Go and C consumed index `2779010792` but formerly
+  produced different integer pulse vectors.
+- Matched float32 assignment order in pulse normalization, spreading,
+  recursive split gains, Haar transforms, spectral folding, folding
+  renormalization, and stereo merge. tv01 frame 1 now matches libopus in every
+  normalized band and energy word.
+- Removed a second, non-libopus normalization from band synthesis. Applying
+  the decoded amplitude directly and retaining the uncoded zero tail makes
+  both complete 960-value denormalized spectra bit-exact.
+- Updated the standard 48 kHz de-emphasis coefficient from the rounded `0.85`
+  to libopus's `27853/32768`. tv01 packet 0 now has exact int16 output for all
+  three constituent frames in both sequential and reset-state decoding. Its
+  float32 output still has sub-LSB drift (maximum below 0.000005 int16 LSB in
+  the focused run), so convergence remains active.
+- Shared encoder PVQ arithmetic changed one deterministic hybrid-stereo packet
+  digest; the new digest was stable across repeated runs and the complete
+  libopus interoperability suite remained green.
+- Verified the focused coefficient and tv01 oracles, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...`, `go vet ./...`, and
+  `go test -race -count=1 ./...`.

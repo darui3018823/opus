@@ -58,6 +58,12 @@ type Decoder struct {
 	synthesisStageHook func(stage string, channel int, samples []float64)
 }
 
+// SetSynthesisStageHook installs an internal conformance-test hook. Production
+// callers inside the module leave it nil.
+func (d *Decoder) SetSynthesisStageHook(hook func(stage string, channel int, samples []float64)) {
+	d.synthesisStageHook = hook
+}
+
 // NewDecoder creates a new CELT decoder.
 func NewDecoder(frameSize, sampleRate, channels int) (*Decoder, error) {
 	return NewDecoderEx(frameSize, sampleRate, 0, channels)

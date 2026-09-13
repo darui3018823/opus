@@ -72,17 +72,17 @@ static void oracle_dump_norm(const CELTMode *mode, const celt_norm *x,
       const celt_glog *oldBandE, int ch, int start, int end, int M)
 {
    int band, j;
-   int n = M*mode->eBands[mode->nbEBands];
+   int n = M*mode->eBands[end];
    uint64_t full = UINT64_C(14695981039346656037);
    uint64_t energy = UINT64_C(14695981039346656037);
    if (!oracle_trace_enabled && !oracle_stage_trace_enabled) return;
    for (j=0;j<n;j++) full = oracle_hash_float(full, x[j]);
-   for (band=0;band<mode->nbEBands;band++)
+   for (band=0;band<end;band++)
       energy = oracle_hash_float(energy, oldBandE[band]);
    if (oracle_stage_trace_enabled)
       fprintf(stderr, "[NORM_SUMMARY] packet=%d frame=%d ch=%d n=%d hash=%016llx energyN=%d energy=%016llx\n",
             oracle_packet_index, oracle_frame_index, ch, n,
-            (unsigned long long)full, mode->nbEBands,
+            (unsigned long long)full, end,
             (unsigned long long)energy);
    if (!oracle_trace_enabled) return;
    for (band=start;band<end;band++) {
@@ -140,6 +140,12 @@ if (-not [regex]::IsMatch($source, $callPattern)) { throw "normal stereo denorma
 $source = [regex]::Replace($source, $callPattern, '$1' + "`r`n         oracle_dump_denorm(mode, freq, c, start, effEnd, M);", 1)
 $source = [regex]::Replace($source, $callPattern,
     'oracle_dump_norm(mode, X+c*N, oldBandE+c*nbEBands, c, start, effEnd, M);' + "`r`n         " + '$1', 1)
+$monoToStereoPattern = '(?s)(denormalise_bands\(mode, X, freq, oldBandE, start, effEnd, M,\s*downsample, silence\);)'
+if (-not [regex]::IsMatch($source, $monoToStereoPattern)) { throw "mono-to-stereo denormalise call not found" }
+$source = [regex]::Replace($source, $monoToStereoPattern,
+    'oracle_dump_norm(mode, X, oldBandE, 0, start, effEnd, M);' + "`r`n      " +
+    '$1' + "`r`n      " +
+    'oracle_dump_denorm(mode, freq, 0, start, effEnd, M);', 1)
 $synthesisPattern = '(?s)(celt_synthesis\(mode, X, out_syn, oldBandE, start, effEnd,\s*C, CC, isTransient, LM, st->downsample, silence, st->arch.*?\);)'
 if (-not [regex]::IsMatch($source, $synthesisPattern)) { throw "decode celt_synthesis call not found" }
 $source = [regex]::Replace($source, $synthesisPattern,

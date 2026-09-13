@@ -73,6 +73,7 @@ func TestCELTScalarSynthesisStageScan(t *testing.T) {
 
 	currentPacket := -1
 	frameCounts := make(map[string]int)
+	comparedKeys := make(map[celtScalarStageKey]bool)
 	compared := 0
 	compare := func(stage string, channel int, values []float64, required bool) {
 		counter := fmt.Sprintf("%s/%d", stage, channel)
@@ -96,6 +97,7 @@ func TestCELTScalarSynthesisStageScan(t *testing.T) {
 			t.Fatalf("first scalar stage mismatch: packet=%d frame=%d stage=%s channel=%d got=%016x want=%016x",
 				currentPacket, frame, stage, channel, got, expected.hash)
 		}
+		comparedKeys[key] = true
 		compared++
 	}
 	synthesisHook := func(stage string, channel int, samples []float64) {
@@ -144,8 +146,21 @@ func TestCELTScalarSynthesisStageScan(t *testing.T) {
 			t.Fatalf("decode packet %d: %v", packet, err)
 		}
 	}
-	if compared != len(want) {
-		t.Fatalf("compared %d stage hashes, oracle emitted %d", compared, len(want))
+	for key, expected := range want {
+		if comparedKeys[key] {
+			continue
+		}
+		// The C oracle is configured for stereo output and synthesizes a second
+		// identical channel for mono streams. Go duplicates that channel in the
+		// outer Opus decoder, after these internal CELT hooks. Accept only an
+		// exact C-side duplicate of the already-compared channel-zero stage.
+		channelZero := key
+		channelZero.channel = 0
+		if key.channel == 1 && comparedKeys[channelZero] && want[channelZero] == expected {
+			continue
+		}
+		t.Fatalf("C oracle stage was not emitted by Go: %+v (compared %d of %d)",
+			key, compared, len(want))
 	}
 	t.Logf("%s: all %d scalar CELT stage hashes match", vector, compared)
 }

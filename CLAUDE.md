@@ -9,6 +9,9 @@ Read `docs/CURRENT_IMPLEMENTATION.md` before making implementation or
 documentation claims. It is the code-derived status snapshot and takes
 precedence over older roadmaps, task notes, and README text when they disagree.
 
+All contributions, formatting, and commit messages must strictly comply with
+`CONTRIBUTING.md` and repository rules.
+
 Repository-specific operational rules live under `.claude/rules/`. Read every
 rule applicable to the work before starting:
 
@@ -16,6 +19,7 @@ rule applicable to the work before starting:
   first.
 - `.claude/rules/documentation-rules.md` — status authority, classification,
   naming, tracking, and lifecycle of documents under `.claude/`.
+- `.claude/rules/commit-rules.md` — strict Conventional Commits prefix enforcement.
 - `.claude/rules/webhook-rules.md` — local notification integration. This file
   and its local configuration are intentionally ignored; consult them only when
   sending a notification.

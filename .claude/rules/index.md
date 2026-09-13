@@ -12,6 +12,7 @@ infer its contents, or recover it from Git history.
 | Rule | Tracking | Applies to |
 |---|---|---|
 | `documentation-rules.md` | Tracked | Status authority, `.claude/` classification, naming, links, and document lifecycle |
+| `commit-rules.md` | Tracked | Strict Conventional Commits with prefix constraints for AI and humans |
 | `webhook-rules.md` | Local / ignored | Discord notification payload and identity handling |
 | `user-preferences.md` | Local / ignored | User-specific commit, escalation, and SubAgent preferences |
 

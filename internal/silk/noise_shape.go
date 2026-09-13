@@ -122,7 +122,7 @@ func (e *Encoder) silkComplexityConfig() silkComplexityConfig {
 }
 
 func silkFloat2Int(x float64) int32 {
-	return int32(math.Floor(x + 0.5))
+	return int32(math.RoundToEven(float64(float32(x))))
 }
 
 func silkEnergyFLP(x []float64) float64 {

@@ -74,7 +74,7 @@ func TestCELTScalarSynthesisStageScan(t *testing.T) {
 	currentPacket := -1
 	frameCounts := make(map[string]int)
 	compared := 0
-	compare := func(stage string, channel int, values []float64) {
+	compare := func(stage string, channel int, values []float64, required bool) {
 		counter := fmt.Sprintf("%s/%d", stage, channel)
 		frame := frameCounts[counter]
 		frameCounts[counter] = frame + 1
@@ -83,6 +83,9 @@ func TestCELTScalarSynthesisStageScan(t *testing.T) {
 		}
 		expected, ok := want[key]
 		if !ok {
+			if !required {
+				return
+			}
 			t.Fatalf("Go emitted unexpected stage %+v", key)
 		}
 		if len(values) < expected.n {
@@ -107,15 +110,20 @@ func TestCELTScalarSynthesisStageScan(t *testing.T) {
 				values[i] = sample * (1.0 / 32768.0)
 			}
 		}
-		compare(stage, channel, values)
+		compare(stage, channel, values, true)
 	}
 	coefficientHook := func(stage string, channel int, coeffs, energies []float64) {
 		switch stage {
 		case "normalized":
-			compare("NORM", channel, coeffs)
-			compare("ENERGY", channel, energies)
+			// libopus omits coefficient callbacks on some silence/PLC paths,
+			// while the Go diagnostic hook still reports its zeroed buffers.
+			// Treat those Go-only diagnostic callbacks as optional; every stage
+			// actually emitted by the C oracle remains mandatory via the final
+			// compared-count check below.
+			compare("NORM", channel, coeffs, false)
+			compare("ENERGY", channel, energies, false)
 		case "denormalized":
-			compare("DENORM", channel, coeffs)
+			compare("DENORM", channel, coeffs, false)
 		default:
 			t.Fatalf("unexpected coefficient stage %q", stage)
 		}

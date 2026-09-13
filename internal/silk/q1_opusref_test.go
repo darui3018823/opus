@@ -32,6 +32,8 @@ func TestSILKQ1LPCNLSFOracle(t *testing.T) {
 		{name: "nb-voiced-steady-20ms-interp", rate: 8000, frameMs: 20, frame: 3, voiced: true, complexity: 5, mode: "mono-silk", wantInterp: true},
 		{name: "mb-unvoiced-steady-10ms", rate: 12000, frameMs: 10, frame: 4, complexity: 5, mode: "mono-silk"},
 		{name: "wb-voiced-steady-20ms-interp", rate: 16000, frameMs: 20, frame: 5, voiced: true, complexity: 8, mode: "mono-silk", wantInterp: true},
+		{name: "wb-stereo-mid-steady-20ms", rate: 16000, frameMs: 20, frame: 6, voiced: true, complexity: 5, mode: "stereo-mid-silk", wantInterp: true},
+		{name: "wb-hybrid-low-reset-20ms", rate: 16000, frameMs: 20, frame: 0, complexity: 5, mode: "hybrid-low-band"},
 	}
 
 	seenInterpolation := false

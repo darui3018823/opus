@@ -550,7 +550,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	cb := getNLSFCB(e.lpcOrder)
 	var domainGainTargets []int
 	var domainConfig []lpcInPreConfig
-	if !e.stereoComponent && !e.hybridMode && signalType != SignalTypeInactive {
+	if signalType != SignalTypeInactive {
 		bootstrap := e.analyzeNLSF(signal, cb, signalType)
 		quantOffset = e.estimateQuantOffsetType(signal, bootstrap.lpcQ12, signalType, pitchLag, pitchGain)
 		pitchLags := make([]int, e.nSubframes)

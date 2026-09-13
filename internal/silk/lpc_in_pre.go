@@ -57,14 +57,14 @@ func buildLPCInPre(x []float64, subframeLengths []int, invGains []float64, ltpCo
 		if subLen < 0 {
 			subLen = 0
 		}
-		invGain := 1.0
+		invGain := float32(1.0)
 		if sf < len(invGains) && invGains[sf] != 0 {
-			invGain = invGains[sf]
+			invGain = float32(invGains[sf])
 		}
 		xPtr := frameStart + cum - order
 		if !voiced {
 			for i := 0; i < subLen+order; i++ {
-				out[dst+i] = sampleAt(x, xPtr+i) * invGain
+				out[dst+i] = float64(float32(sampleAt(x, xPtr+i)) * invGain)
 			}
 		} else {
 			lag := 0
@@ -76,18 +76,18 @@ func buildLPCInPre(x []float64, subframeLengths []int, invGains []float64, ltpCo
 				coefs = ltpCoefs[sf]
 			}
 			for i := 0; i < subLen+order; i++ {
-				v := sampleAt(x, xPtr+i)
+				v := float32(sampleAt(x, xPtr+i))
 				if lag > 0 {
 					lagPtr := xPtr - lag + i
 					for j := 0; j < ltpOrder; j++ {
-						b := 0.0
+						b := float32(0.0)
 						if j < len(coefs) {
-							b = coefs[j]
+							b = float32(coefs[j])
 						}
-						v -= b * sampleAt(x, lagPtr+ltpOrder/2-j)
+						v -= b * float32(sampleAt(x, lagPtr+ltpOrder/2-j))
 					}
 				}
-				out[dst+i] = v * invGain
+				out[dst+i] = float64(v * invGain)
 			}
 		}
 		dst += subLen + order

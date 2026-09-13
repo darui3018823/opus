@@ -1814,7 +1814,7 @@ func (e *Encoder) analyzeNLSF(signal []float64, cb *nlsfCBParams, signalType int
 	x := signal
 	subfrLength := len(signal)
 	nbSubfr := 1
-	minInvGain := 1e-4
+	minInvGain := lpcMinInvGain(0, 1, e.firstFrameAfterReset)
 	useInterpolated := false
 
 	if len(preConfig) > 0 {

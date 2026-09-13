@@ -5,7 +5,9 @@ package cgoref
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../libopus/include -IC:/msys64/mingw64/include/opus
-#cgo LDFLAGS: -LC:/msys64/mingw64/lib -lopus
+#cgo windows LDFLAGS: C:/msys64/mingw64/lib/libopus.a
+#cgo linux LDFLAGS: -Wl,-Bstatic -lopus -Wl,-Bdynamic -lm
+#cgo darwin LDFLAGS: -lopus
 #include <opus.h>
 #include <opus_multistream.h>
 #include <stdlib.h>

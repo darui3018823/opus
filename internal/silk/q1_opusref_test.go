@@ -34,6 +34,11 @@ func TestSILKQ1LPCNLSFOracle(t *testing.T) {
 		{name: "wb-voiced-steady-20ms-interp", rate: 16000, frameMs: 20, frame: 5, voiced: true, complexity: 8, mode: "mono-silk", wantInterp: true},
 		{name: "wb-stereo-mid-steady-20ms", rate: 16000, frameMs: 20, frame: 6, voiced: true, complexity: 5, mode: "stereo-mid-silk", wantInterp: true},
 		{name: "wb-hybrid-low-reset-20ms", rate: 16000, frameMs: 20, frame: 0, complexity: 5, mode: "hybrid-low-band"},
+		{name: "nb-unvoiced-steady-c0", rate: 8000, frameMs: 20, frame: 7, complexity: 0, mode: "mono-silk"},
+		{name: "mb-voiced-steady-c1", rate: 12000, frameMs: 20, frame: 8, voiced: true, complexity: 1, mode: "mono-silk"},
+		{name: "wb-unvoiced-steady-c2", rate: 16000, frameMs: 20, frame: 9, complexity: 2, mode: "mono-silk"},
+		{name: "mb-voiced-steady-c4", rate: 12000, frameMs: 20, frame: 10, voiced: true, complexity: 4, mode: "mono-silk", wantInterp: true},
+		{name: "wb-unvoiced-steady-c6", rate: 16000, frameMs: 20, frame: 11, complexity: 6, mode: "mono-silk", wantInterp: true},
 	}
 
 	seenInterpolation := false
@@ -131,6 +136,10 @@ func runSILKQ1Fixture(t *testing.T, fixture silkQ1Fixture) bool {
 
 	targetNLSF, interpFactor := silkFindLPCFLP(goPre, float64(minInvGain), subfrLength, nbSubfr, order,
 		useInterpolated, firstAfterReset, prevNLSF)
+	if useInterpolated && !firstAfterReset && nbSubfr == 4 {
+		secondHalfA, _ := silkBurgModifiedFLP(goPre[2*subfrLength:], float64(minInvGain), subfrLength, 2, order)
+		compareSILKQ1FloatStage(t, fixture, "second-half Burg LPC coefficients", want.SecondHalfBurgA, secondHalfA)
+	}
 	compareSILKQ1Int16Stage(t, fixture, "A2NLSF result", want.A2NLSFQ15, targetNLSF)
 	compareSILKQ1IntStage(t, fixture, "NLSF interpolation factor", []int{want.InterpolationFactor}, []int{interpFactor})
 

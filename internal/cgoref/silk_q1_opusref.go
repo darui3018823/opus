@@ -50,6 +50,7 @@ extern opus_int32 silk_NLSF_encode(opus_int8 *, opus_int16 *, const silk_NLSF_CB
 typedef struct {
     silk_float burg_a[16];
     silk_float burg_residual;
+    silk_float second_half_burg_a[16];
     opus_int16 a2nlsf_q15[16];
     opus_int16 nlsf_weights_q2[16];
     opus_int16 stabilized_nlsf_q15[16];
@@ -149,6 +150,7 @@ static int go_silk_q1_analyze(
     if (use_interpolated && !first_after_reset && nb_subfr == 4) {
         res_nrg -= silk_burg_modified_FLP(candidate_a, x + 2 * subfr_length,
             min_inv_gain, subfr_length, 2, order, 0);
+        memcpy(out->second_half_burg_a, candidate_a, order * sizeof(silk_float));
         silk_A2NLSF_FLP(target_q15, candidate_a, order);
         res_nrg_2nd = FLT_MAX;
         for (k = 3; k >= 0; k--) {
@@ -314,6 +316,7 @@ type SILKQ1Input struct {
 type SILKQ1Result struct {
 	BurgA               []float32
 	BurgResidual        float32
+	SecondHalfBurgA     []float32
 	A2NLSFQ15           []int16
 	NLSFWeightsQ2       []int16
 	StabilizedNLSFQ15   []int16
@@ -357,6 +360,7 @@ func SILKQ1Analyze(in SILKQ1Input) (SILKQ1Result, error) {
 	result := SILKQ1Result{
 		BurgA:               make([]float32, in.Order),
 		BurgResidual:        float32(out.burg_residual),
+		SecondHalfBurgA:     make([]float32, in.Order),
 		A2NLSFQ15:           make([]int16, in.Order),
 		NLSFWeightsQ2:       make([]int16, in.Order),
 		StabilizedNLSFQ15:   make([]int16, in.Order),
@@ -382,6 +386,7 @@ func SILKQ1Analyze(in SILKQ1Input) (SILKQ1Result, error) {
 	}
 	for i := 0; i < in.Order; i++ {
 		result.BurgA[i] = float32(out.burg_a[i])
+		result.SecondHalfBurgA[i] = float32(out.second_half_burg_a[i])
 		result.A2NLSFQ15[i] = int16(out.a2nlsf_q15[i])
 		result.NLSFWeightsQ2[i] = int16(out.nlsf_weights_q2[i])
 		result.StabilizedNLSFQ15[i] = int16(out.stabilized_nlsf_q15[i])

@@ -1522,67 +1522,82 @@ func (d *Decoder) decodeNLSF(dec *entcode.Decoder, cb *nlsfCBParams, signalType 
 func silkNLSFStabilize(nlsf []int16, deltaMin []int16, order int) {
 	const maxIter = 20
 
-	for iter := 0; iter < maxIter; iter++ {
-		// Find the location of the largest constraint violation
-		I := -1
-		minVal := int32(-32767)
-
-		// Check lower bound: nlsf[0] >= deltaMin[0]
-		violation := int32(deltaMin[0]) - int32(nlsf[0])
-		if violation > minVal {
-			minVal = violation
-			I = 0
-		}
-		// Check upper bound: nlsf[order-1] <= 32767 - deltaMin[order]
-		violation = int32(nlsf[order-1]) - (32767 - int32(deltaMin[order]))
-		if violation > minVal {
-			minVal = violation
-			I = order
-		}
-		// Check spacing: nlsf[i] >= nlsf[i-1] + deltaMin[i]
+	for loops := 0; loops < maxIter; loops++ {
+		minDiff := int32(nlsf[0]) - int32(deltaMin[0])
+		index := 0
 		for i := 1; i < order; i++ {
-			violation = int32(deltaMin[i]) + int32(nlsf[i-1]) - int32(nlsf[i])
-			if violation > minVal {
-				minVal = violation
-				I = i
+			diff := int32(nlsf[i]) - (int32(nlsf[i-1]) + int32(deltaMin[i]))
+			if diff < minDiff {
+				minDiff = diff
+				index = i
 			}
 		}
-
-		if minVal <= 0 {
-			break // No violations
+		diff := int32(1<<15) - (int32(nlsf[order-1]) + int32(deltaMin[order]))
+		if diff < minDiff {
+			minDiff = diff
+			index = order
+		}
+		if minDiff >= 0 {
+			return
 		}
 
-		// Fix the violation
-		if I == 0 {
+		switch index {
+		case 0:
 			nlsf[0] = deltaMin[0]
-		} else if I == order {
-			nlsf[order-1] = int16(32767 - int32(deltaMin[order]))
-		} else {
-			// Move both nlsf[I-1] and nlsf[I] to center
-			mid := (int32(nlsf[I-1]) + int32(nlsf[I])) >> 1
-			nlsf[I-1] = int16(mid - int32(deltaMin[I])>>1)
-			nlsf[I] = int16(mid + int32(deltaMin[I]) - int32(deltaMin[I])>>1)
+		case order:
+			nlsf[order-1] = int16((1 << 15) - int32(deltaMin[order]))
+		default:
+			minCenter := int32(0)
+			for k := 0; k < index; k++ {
+				minCenter += int32(deltaMin[k])
+			}
+			minCenter += int32(deltaMin[index]) >> 1
+			maxCenter := int32(1 << 15)
+			for k := order; k > index; k-- {
+				maxCenter -= int32(deltaMin[k])
+			}
+			maxCenter -= int32(deltaMin[index]) >> 1
+			center := int32(silkRShiftRound(int64(int32(nlsf[index-1])+int32(nlsf[index])), 1))
+			if center < minCenter {
+				center = minCenter
+			} else if center > maxCenter {
+				center = maxCenter
+			}
+			nlsf[index-1] = int16(center - (int32(deltaMin[index]) >> 1))
+			nlsf[index] = int16(int32(nlsf[index-1]) + int32(deltaMin[index]))
 		}
 	}
 
-	// Final clamp
+	// Exact libopus fallback after 20 unsuccessful repair iterations.
+	for i := 1; i < order; i++ {
+		value := nlsf[i]
+		j := i - 1
+		for j >= 0 && value < nlsf[j] {
+			nlsf[j+1] = nlsf[j]
+			j--
+		}
+		nlsf[j+1] = value
+	}
 	if nlsf[0] < deltaMin[0] {
 		nlsf[0] = deltaMin[0]
 	}
 	for i := 1; i < order; i++ {
-		minV := int32(nlsf[i-1]) + int32(deltaMin[i])
-		if int32(nlsf[i]) < minV {
-			nlsf[i] = int16(minV)
+		minValue := int32(nlsf[i-1]) + int32(deltaMin[i])
+		if minValue > math.MaxInt16 {
+			minValue = math.MaxInt16
+		}
+		if int32(nlsf[i]) < minValue {
+			nlsf[i] = int16(minValue)
 		}
 	}
-	maxBound := int16(32767 - int32(deltaMin[order]))
-	if nlsf[order-1] > maxBound {
-		nlsf[order-1] = maxBound
+	maxValue := int16((1 << 15) - int32(deltaMin[order]))
+	if nlsf[order-1] > maxValue {
+		nlsf[order-1] = maxValue
 	}
 	for i := order - 2; i >= 0; i-- {
-		maxV := int32(nlsf[i+1]) - int32(deltaMin[i+1])
-		if int32(nlsf[i]) > maxV {
-			nlsf[i] = int16(maxV)
+		maxValue := int32(nlsf[i+1]) - int32(deltaMin[i+1])
+		if int32(nlsf[i]) > maxValue {
+			nlsf[i] = int16(maxValue)
 		}
 	}
 }

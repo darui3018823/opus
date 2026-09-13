@@ -35,7 +35,7 @@ const (
 
 // Quantization constants
 const (
-	MaxFineEnergy = 7 // Maximum bits for fine energy
+	MaxFineEnergy = 8 // libopus MAX_FINE_BITS; final refinement applies while fine bits < 8
 	MinSpread     = 0
 	MaxSpread     = 3
 )

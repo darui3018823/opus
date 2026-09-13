@@ -41,6 +41,7 @@ SILK エンコーダの品質ギャップ根本原因はここにあります。
   - active stereo/hybrid production path でも raw signal fallback を使わず `LPC_in_pre` domain を構築
 - **未検証・残作業：**
   - full libopus encoder と同じ PCM から、Q1 より前の pitch/LTP/gain/stereo/hybrid state が同じ値に到達するかの end-to-end 中間値比較
+  - base `b70e7a0` 比で 8 kHz speech-like-harmonic の matched loudness 差が -1.50 dB（PASS）から -1.59 dB（FAIL）へ変化。libopus residual-rate table 修正を戻すと Q1 residual index が不一致になるため、threshold は変更せず後続 gain/rate-control 課題として残す
   - Q1 oracle の境界、対応表、fixture 実測値は [`SILK_Q1_ORACLE.md`](SILK_Q1_ORACLE.md) を参照
 - **libopus 参照：** `silk/float/find_LPC_FLP.c`, `silk/process_NLSFs.c`, `silk/NLSF_encode.c`, `silk/interpolate.c`
 

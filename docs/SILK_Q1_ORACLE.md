@@ -99,3 +99,12 @@ the full libopus encoder. Stereo and hybrid have direct Q1-domain fixtures, and
 the production encoder separately enables their domain-construction path. Full
 encoder-state parity for those modes remains to be measured in their respective
 later work.
+
+The full `opusref` comparison retains the known speech-like-harmonic loudness
+failure. Relative to base commit `b70e7a0`, its 8 kHz subtest moved from the
+threshold edge (`-1.50 dB`, PASS, 207 own bytes) to `-1.59 dB` (FAIL, 205 own
+bytes). The change starts with correction of the libopus residual-rate table;
+reverting that table makes the Q1 residual-index oracle fail. No threshold or
+fixture-specific exception is applied. Restoring the quality margin requires
+work in the upstream/downstream gain and rate-control loop, outside this Q1
+boundary.

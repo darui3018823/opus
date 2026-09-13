@@ -823,14 +823,14 @@ func (e *Encoder) selectBudgetRateControlPlan(
 			rmsOK := e.currentFrameOutputRMS() >= minOutputRMS
 			pulseBits := e.estimatePulseBits(pulses, signalType, quantOffset)
 			totalBits := headerBits + pulseBits + 8
-			if rmsOK && totalBits <= targetBits {
+			preserveLowBand := !e.hybridMode || signalType != SignalTypeVoiced
+			if rmsOK && totalBits <= targetBits && (!preserveLowBand || floorOK) {
 				if !hasBudget || totalBits > bestBudgetBits {
 					bestBudget = rateControlPlan{gainTargets: targets, gainIndices: gainIndices, rateScale: scale}
 					bestBudgetBits = totalBits
 					hasBudget = true
 				}
 			}
-			preserveLowBand := !e.hybridMode || signalType != SignalTypeVoiced
 			if preserveLowBand && (!floorOK || !rmsOK) {
 				continue
 			}

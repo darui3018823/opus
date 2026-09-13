@@ -727,6 +727,9 @@ func TestEncoderClosedLoopNSQImprovesVoicedSynthesis(t *testing.T) {
 	if pitchGain < 0.55 {
 		t.Fatalf("test signal pitch gain=%g, want voiced", pitchGain)
 	}
+	// This test isolates steady-state NSQ behavior. Reset-frame prediction-gain
+	// limiting is covered separately and intentionally produces different LPCs.
+	enc.firstFrameAfterReset = false
 	cb := getNLSFCB(enc.lpcOrder)
 	nlsf := enc.analyzeNLSF(signal, cb, SignalTypeVoiced)
 	gainIdx := enc.analysisGainIndex(signal)

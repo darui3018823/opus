@@ -2,6 +2,7 @@ package silk
 
 import (
 	"math"
+	"slices"
 	"testing"
 )
 
@@ -51,6 +52,35 @@ func TestLPCMinInvGainFormula(t *testing.T) {
 	reset := lpcMinInvGain(30.0, 1.0, true)
 	if reset != 1.0/maxPredictionPowerGainAfterReset {
 		t.Fatalf("reset minInvGain=%g, want %g", reset, 1.0/maxPredictionPowerGainAfterReset)
+	}
+}
+
+func TestAnalyzeNLSFUsesResetPredictionGainLimit(t *testing.T) {
+	const rate = 16000
+	enc, err := NewEncoder(rate, 1)
+	if err != nil {
+		t.Fatalf("NewEncoder: %v", err)
+	}
+
+	signal := make([]float64, enc.frameSize)
+	for i := range signal {
+		tm := float64(i) / rate
+		signal[i] = 0.20 * (0.72*math.Sin(2*math.Pi*180*tm) +
+			0.22*math.Sin(2*math.Pi*360*tm+0.3) +
+			0.09*math.Sin(2*math.Pi*540*tm+0.7))
+	}
+
+	cb := getNLSFCB(enc.lpcOrder)
+	minInvGain := lpcMinInvGain(0, 1, true)
+	targetQ15, interpFactor := silkFindLPCFLP(signal, minInvGain, len(signal), 1,
+		cb.order, false, true, enc.prevNLSFQ15)
+	wantCB1, wantRaw, wantQ15, _ := enc.silkProcessNLSFs(cb, targetQ15,
+		enc.prevNLSFQ15, interpFactor, SignalTypeVoiced)
+
+	got := enc.analyzeNLSF(signal, cb, SignalTypeVoiced)
+	if got.cb1Idx != wantCB1 || !slices.Equal(got.rawIdx, wantRaw) || !slices.Equal(got.nlsfQ15, wantQ15) {
+		t.Fatalf("reset NLSF does not use reset gain limit: got cb1=%d raw=%v nlsf=%v, want cb1=%d raw=%v nlsf=%v",
+			got.cb1Idx, got.rawIdx, got.nlsfQ15, wantCB1, wantRaw, wantQ15)
 	}
 }
 

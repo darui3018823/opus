@@ -9,7 +9,7 @@ import "math"
 // quantile-based A2NLSF approximation used by the SILK encoder's NLSF target.
 
 // FIND_LPC_COND_FAC from libopus silk/tuning_parameters.h.
-const findLPCCondFac = 1e-5
+const findLPCCondFac32 = float32(1e-5)
 
 // silkBurgModifiedFLP ports silk_burg_modified_FLP. It computes prediction
 // coefficients A (length order, monic-implied: A(z) = 1 - sum A[k] z^-(k+1))
@@ -25,20 +25,16 @@ func silkBurgModifiedFLP(x []float64, minInvGain float64, subfrLength, nbSubfr, 
 	Af := make([]float64, D)
 
 	// Compute autocorrelations, added over subframes.
-	C0 := silkEnergyFLP(x[:nbSubfr*subfrLength])
+	C0 := silkEnergyFLP32(x[:nbSubfr*subfrLength])
 	for s := 0; s < nbSubfr; s++ {
 		xp := x[s*subfrLength:]
 		for n := 1; n < D+1; n++ {
-			sum := 0.0
-			for i := 0; i < subfrLength-n; i++ {
-				sum += xp[i] * xp[i+n]
-			}
-			CFirstRow[n-1] += sum
+			CFirstRow[n-1] += silkInnerProductFLP32(xp, xp[n:], subfrLength-n)
 		}
 	}
 	copy(CLastRow, CFirstRow)
 
-	CAb[0] = C0 + findLPCCondFac*C0 + 1e-9
+	CAb[0] = C0 + float64(findLPCCondFac32)*C0 + float64(float32(1e-9))
 	CAf[0] = CAb[0]
 	invGain := 1.0
 	reachedMaxGain := false
@@ -47,18 +43,20 @@ func silkBurgModifiedFLP(x []float64, minInvGain float64, subfrLength, nbSubfr, 
 		// Update correlation rows and C*Af / C*flipud(Af).
 		for s := 0; s < nbSubfr; s++ {
 			xp := x[s*subfrLength:]
-			tmp1 := xp[n]
-			tmp2 := xp[subfrLength-n-1]
+			xn := silkFloat32Value(xp[n])
+			xlast := silkFloat32Value(xp[subfrLength-n-1])
+			tmp1 := xn
+			tmp2 := xlast
 			for k := 0; k < n; k++ {
-				CFirstRow[k] -= xp[n] * xp[n-k-1]
-				CLastRow[k] -= xp[subfrLength-n-1] * xp[subfrLength-n+k]
+				CFirstRow[k] -= float64(float32(xn) * float32(silkFloat32Value(xp[n-k-1])))
+				CLastRow[k] -= float64(float32(xlast) * float32(silkFloat32Value(xp[subfrLength-n+k])))
 				atmp := Af[k]
-				tmp1 += xp[n-k-1] * atmp
-				tmp2 += xp[subfrLength-n+k] * atmp
+				tmp1 += silkFloat32Value(xp[n-k-1]) * atmp
+				tmp2 += silkFloat32Value(xp[subfrLength-n+k]) * atmp
 			}
 			for k := 0; k <= n; k++ {
-				CAf[k] -= tmp1 * xp[n-k]
-				CAb[k] -= tmp2 * xp[subfrLength-n+k-1]
+				CAf[k] -= tmp1 * silkFloat32Value(xp[n-k])
+				CAb[k] -= tmp2 * silkFloat32Value(xp[subfrLength-n+k-1])
 			}
 		}
 		tmp1 := CFirstRow[n]
@@ -124,10 +122,10 @@ func silkBurgModifiedFLP(x []float64, minInvGain float64, subfrLength, nbSubfr, 
 	var nrgF float64
 	if reachedMaxGain {
 		for k := 0; k < D; k++ {
-			A[k] = -Af[k]
+			A[k] = float64(float32(-Af[k]))
 		}
 		for s := 0; s < nbSubfr; s++ {
-			C0 -= silkEnergyFLP(x[s*subfrLength : s*subfrLength+D])
+			C0 -= silkEnergyFLP32(x[s*subfrLength : s*subfrLength+D])
 		}
 		nrgF = C0 * invGain
 	} else {
@@ -137,11 +135,49 @@ func silkBurgModifiedFLP(x []float64, minInvGain float64, subfrLength, nbSubfr, 
 			atmp := Af[k]
 			nrgF += CAf[k+1] * atmp
 			tmp1 += atmp * atmp
-			A[k] = -atmp
+			A[k] = float64(float32(-atmp))
 		}
-		nrgF -= findLPCCondFac * C0 * tmp1
+		nrgF -= float64(findLPCCondFac32) * C0 * tmp1
 	}
-	return A, nrgF
+	return A, float64(float32(nrgF))
+}
+
+func silkFloat32Value(v float64) float64 {
+	return float64(float32(v))
+}
+
+// silkEnergyFLP32 mirrors libopus silk_energy_FLP: float input, double
+// accumulation, and its four-sample source grouping.
+func silkEnergyFLP32(x []float64) float64 {
+	result := 0.0
+	i := 0
+	for ; i < len(x)-3; i += 4 {
+		x0 := silkFloat32Value(x[i])
+		x1 := silkFloat32Value(x[i+1])
+		x2 := silkFloat32Value(x[i+2])
+		x3 := silkFloat32Value(x[i+3])
+		result += x0*x0 + x1*x1 + x2*x2 + x3*x3
+	}
+	for ; i < len(x); i++ {
+		v := silkFloat32Value(x[i])
+		result += v * v
+	}
+	return result
+}
+
+func silkInnerProductFLP32(x, y []float64, n int) float64 {
+	result := 0.0
+	i := 0
+	for ; i < n-3; i += 4 {
+		result += silkFloat32Value(x[i])*silkFloat32Value(y[i]) +
+			silkFloat32Value(x[i+1])*silkFloat32Value(y[i+1]) +
+			silkFloat32Value(x[i+2])*silkFloat32Value(y[i+2]) +
+			silkFloat32Value(x[i+3])*silkFloat32Value(y[i+3])
+	}
+	for ; i < n; i++ {
+		result += silkFloat32Value(x[i]) * silkFloat32Value(y[i])
+	}
+	return result
 }
 
 // A2NLSF fixed-point constants from libopus silk/A2NLSF.c and silk/define.h.

@@ -381,3 +381,53 @@ func clampInt16(v int32) int16 {
 	}
 	return int16(v)
 }
+
+// silkProcessNLSFs ports libopus silk_process_NLSFs (silk/process_NLSFs.c).
+// It computes Laroia weights, merges interpolated first-half weights if
+// interpFactor < 4, encodes NLSFs via RD search (silkNLSFEncode), and
+// reconstructs LPC prediction coefficients (predCoefQ12[1] for 2nd half,
+// predCoefQ12[0] for 1st half).
+func (e *Encoder) silkProcessNLSFs(
+	cb *nlsfCBParams,
+	targetNLSFQ15, prevNLSFQ15 []int16,
+	interpFactor, signalType int,
+) (cb1Idx int, rawIdx []int, nlsfQ15 []int16, predCoefQ12 [2][]int16) {
+	order := cb.order
+	doInterpolate := (interpFactor < 4) && len(prevNLSFQ15) == order
+
+	// Calculate NLSF weights (Laroia weights)
+	weightsQW := silkNLSFWeightsLaroia(targetNLSFQ15)
+
+	// Update NLSF weights for interpolated NLSFs (silk/process_NLSFs.c:73-86)
+	if doInterpolate {
+		nlsf0TempQ15 := make([]int16, order)
+		silkInterpolate(nlsf0TempQ15, prevNLSFQ15, targetNLSFQ15, interpFactor, order)
+		weights0TempQW := silkNLSFWeightsLaroia(nlsf0TempQ15)
+		iSqrQ15 := (int32(interpFactor) * int32(interpFactor)) << 11
+		for i := 0; i < order; i++ {
+			wMerged := (int32(weightsQW[i]) >> 1) + ((int32(weights0TempQW[i]) * iSqrQ15) >> 16)
+			if wMerged < 1 {
+				wMerged = 1
+			}
+			weightsQW[i] = int16(wMerged)
+		}
+	}
+
+	cb1Idx, rawIdx = silkNLSFEncode(targetNLSFQ15, cb, weightsQW, e.nlsfMuQ20(), e.nlsfQuantSurvivors(), signalType)
+	nlsfQ15 = reconstructNLSFQ15(cb, cb1Idx, rawIdx)
+
+	// Convert quantized NLSFs back to LPC coefficients (predCoefQ12[1] = 2nd half)
+	predCoefQ12[1] = nlsfToLPCLibopus(nlsfQ15, order)
+
+	if doInterpolate {
+		// Calculate interpolated, quantized NLSF vector for the first half
+		nlsf0TempQ15 := make([]int16, order)
+		silkInterpolate(nlsf0TempQ15, prevNLSFQ15, nlsfQ15, interpFactor, order)
+		predCoefQ12[0] = nlsfToLPCLibopus(nlsf0TempQ15, order)
+	} else {
+		predCoefQ12[0] = make([]int16, order)
+		copy(predCoefQ12[0], predCoefQ12[1])
+	}
+
+	return cb1Idx, rawIdx, nlsfQ15, predCoefQ12
+}

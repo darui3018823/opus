@@ -27,14 +27,19 @@ SILK エンコーダの品質ギャップ根本原因はここにあります。
 
 ### Q1 残：LPC/NLSF 解析の完全ポート
 
-- **実装済み：** Q1a — LPC 由来 NLSF ターゲット生成、コードブック重み付きステージ1探索
-- **未実装：**
-  - `silk_find_LPC_FLP` の完全ポート（現在は簡略 Burg LPC）
-  - `silk_A2NLSF` — LSF 安定化ルート探索
-  - `silk_NLSF_encode` — 真の NLSF レート歪み量子化
-  - `silk_interpolate` — NLSF サブフレーム間補間（voiced フレーム）
-- **libopus 参照：** `silk/float/find_LPC_FLP.c`, `silk/NLSF_encode.c`
-- **目標指標：** voiced fixtures の `lpcResidualEnergy` 低下、`gap_SNR_matched` 縮小
+- **状態：** 実装進行中。主要処理は接続済みだが、encoder-side oracle と全モードの `LPC_in_pre` 入力一致は未完了
+- **実装済み：**
+  - `silk_find_LPC_FLP` の主要処理（全フレーム Burg AR + 後半 10ms Burg AR + 第1ハーフ残差基準 + `k=3..0` 補間探索 + `silkLPCAnalysisFilterFLP` 残差判定）
+  - `silk_A2NLSF` — 多項式求根（チェビシェフ級数）、ソート、安定化
+  - `silk_NLSF2A_FLP` — NLSF Q15 → float AR（`silk/float/wrappers_FLP.c` / `silk/NLSF2A.c` 準拠）
+  - `silk_interpolate` — NLSF サブフレーム間補間（`silk/interpolate.c` 準拠）
+  - `silk_process_NLSFs` / `silk_NLSF_encode` — Laroia 重み計算、補間時合成重み、RD 量子化探索、predCoefQ12 復元（`silk/process_NLSFs.c`, `silk/NLSF_encode.c` 準拠）
+  - legacy 全探索（`guardedFaithfulBurgNLSFAnalysis`, `bestNLSFAnalysis` 等）の撤廃
+- **未検証・残作業：**
+  - libopus 1.6.1 と Burg LPC、NLSF、補間係数、量子化index、`PredCoef_Q12` を比較するencoder-side oracle
+  - stereo/hybrid経路を含む `LPC_in_pre` 入力domainの一致
+  - `silk_float` の演算幅、丸め位置、complexity別の補間制御の一致
+- **libopus 参照：** `silk/float/find_LPC_FLP.c`, `silk/process_NLSFs.c`, `silk/NLSF_encode.c`, `silk/interpolate.c`
 
 ### Q2：ピッチ/LTP の完全ポート
 

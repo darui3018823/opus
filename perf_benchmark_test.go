@@ -97,10 +97,10 @@ func benchmarkPerfLongEncode(b *testing.B, wl perfWorkload) {
 
 func TestPerfPredictivePacketRegression(t *testing.T) {
 	want := map[string]string{
-		"silk/mono/48k/20ms":     "042de40c328a269830545f636d2be138917c0d1e56f0ab94581081b1d336acfe",
-		"silk/stereo/48k/20ms":   "b549162a152534ca8f20485fe4f6daa59086a2a97648fa55fb57096224b58ff6",
-		"hybrid/mono/48k/20ms":   "ac302b15835713697d453237ce0ae6e34b72927baff54f40a63ae5ebf85e139f",
-		"hybrid/stereo/48k/20ms": "cd29b95db5ed839a933e2b9b1d2906a473079393da8543c48460de90a067355b",
+		"silk/mono/48k/20ms":     "c85700f3fab7026031e38146e7389565d0e125a78df78d4960dd36803da40ca0",
+		"silk/stereo/48k/20ms":   "c9fbd8cf8589649e1c25e99d42541d84390c376d89b3ed494a1afa566ca38e2d",
+		"hybrid/mono/48k/20ms":   "a4f8f1b6eb8f6da8c0b3fc40f133e4d05762511c73120603805ad5eaae772ba5",
+		"hybrid/stereo/48k/20ms": "1b41d10287348140d48ff4c0f75e5eaa526b9cdb4fb33313792616f577f8c9d9",
 	}
 	for _, wl := range perfWorkloads() {
 		wantDigest, ok := want[wl.name]

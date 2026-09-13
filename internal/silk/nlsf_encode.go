@@ -144,11 +144,11 @@ func silkNLSFEncode(targetQ15 []int16, cb *nlsfCBParams, weightsQ2 []int16, muQ2
 			cb1ValQ15 := int32(cb.cb1Q8[cb1*order+i]) << 7
 			wQ9 := int32(cb.cb1WghtQ9[cb1*order+i])
 			resQ10[i] = int16((int64(int32(target[i])-cb1ValQ15) * int64(wQ9)) >> 14)
-			den := int64(wQ9) * int64(wQ9)
+			den := int32(wQ9 * wQ9)
 			if den <= 0 {
 				wAdjQ5[i] = 1
 			} else {
-				w := (int64(weightsQ2[i]) << 21) / den
+				w := int64(silkDIV32VarQ(int32(weightsQ2[i]), den, 21))
 				if w < 1 {
 					w = 1
 				}
@@ -227,29 +227,31 @@ func silkNLSFDelDecQuant(xQ10, wQ5 []int16, predCoefQ8 []uint8, ecIx []int, ecRa
 	}
 
 	var ind [nlsfQuantDelDecStates][silkMaxLPCOrder]int
-	var prevOutQ10 [2 * nlsfQuantDelDecStates]int32
-	var rdQ25 [2 * nlsfQuantDelDecStates]int64
+	var prevOutQ10 [2 * nlsfQuantDelDecStates]int16
+	var rdQ25 [2 * nlsfQuantDelDecStates]int32
 	nStates := 1
 	for i := order - 1; i >= 0; i-- {
 		inQ10 := int32(xQ10[i])
 		for j := 0; j < nStates; j++ {
-			predQ10 := (int32(predCoefQ8[i]) * prevOutQ10[j]) >> 8
+			predQ10 := (int32(int16(predCoefQ8[i])) * int32(prevOutQ10[j])) >> 8
 			resQ10 := inQ10 - predQ10
 			indTmp := int((int64(invQuantStepSizeQ6) * int64(resQ10)) >> 16)
 			indTmp = clampInt(indTmp, -nlsfQuantMaxAmplitudeExt, nlsfQuantMaxAmplitudeExt-1)
 			ind[j][i] = indTmp
 
-			out0Q10 := out0Table[indTmp+nlsfQuantMaxAmplitudeExt] + predQ10
-			out1Q10 := out1Table[indTmp+nlsfQuantMaxAmplitudeExt] + predQ10
+			out0Q10 := int16(out0Table[indTmp+nlsfQuantMaxAmplitudeExt] + predQ10)
+			out1Q10 := int16(out1Table[indTmp+nlsfQuantMaxAmplitudeExt] + predQ10)
 			prevOutQ10[j] = out0Q10
 			prevOutQ10[j+nStates] = out1Q10
 
 			rate0Q5, rate1Q5 := nlsfResidualRatesQ5(indTmp, ecIx[i], ecRatesQ5)
 			rdTmp := rdQ25[j]
-			diffQ10 := inQ10 - out0Q10
-			rdQ25[j] = rdTmp + int64(diffQ10)*int64(diffQ10)*int64(wQ5[i]) + int64(muQ20)*int64(rate0Q5)
-			diffQ10 = inQ10 - out1Q10
-			rdQ25[j+nStates] = rdTmp + int64(diffQ10)*int64(diffQ10)*int64(wQ5[i]) + int64(muQ20)*int64(rate1Q5)
+			diffQ10 := int32(int16(inQ10 - int32(out0Q10)))
+			distQ25 := rdTmp + int32(int16(diffQ10))*int32(int16(diffQ10))*int32(wQ5[i])
+			rdQ25[j] = distQ25 + int32(int16(muQ20))*int32(int16(rate0Q5))
+			diffQ10 = int32(int16(inQ10 - int32(out1Q10)))
+			distQ25 = rdTmp + int32(int16(diffQ10))*int32(int16(diffQ10))*int32(wQ5[i])
+			rdQ25[j+nStates] = distQ25 + int32(int16(muQ20))*int32(int16(rate1Q5))
 		}
 
 		if nStates <= nlsfQuantDelDecStates/2 {
@@ -264,8 +266,8 @@ func silkNLSFDelDecQuant(xQ10, wQ5 []int16, predCoefQ8 []uint8, ecIx []int, ecRa
 		}
 
 		var indSort [nlsfQuantDelDecStates]int
-		var rdMinQ25 [nlsfQuantDelDecStates]int64
-		var rdMaxQ25 [nlsfQuantDelDecStates]int64
+		var rdMinQ25 [nlsfQuantDelDecStates]int32
+		var rdMaxQ25 [nlsfQuantDelDecStates]int32
 		for j := 0; j < nlsfQuantDelDecStates; j++ {
 			if rdQ25[j] > rdQ25[j+nlsfQuantDelDecStates] {
 				rdMaxQ25[j] = rdQ25[j]
@@ -281,8 +283,8 @@ func silkNLSFDelDecQuant(xQ10, wQ5 []int16, predCoefQ8 []uint8, ecIx []int, ecRa
 			}
 		}
 		for {
-			minMaxQ25 := int64(math.MaxInt64)
-			maxMinQ25 := int64(0)
+			minMaxQ25 := int32(math.MaxInt32)
+			maxMinQ25 := int32(0)
 			indMinMax, indMaxMin := 0, 0
 			for j := 0; j < nlsfQuantDelDecStates; j++ {
 				if minMaxQ25 > rdMaxQ25[j] {
@@ -301,7 +303,7 @@ func silkNLSFDelDecQuant(xQ10, wQ5 []int16, predCoefQ8 []uint8, ecIx []int, ecRa
 			rdQ25[indMaxMin] = rdQ25[indMinMax+nlsfQuantDelDecStates]
 			prevOutQ10[indMaxMin] = prevOutQ10[indMinMax+nlsfQuantDelDecStates]
 			rdMinQ25[indMaxMin] = 0
-			rdMaxQ25[indMinMax] = math.MaxInt64
+			rdMaxQ25[indMinMax] = math.MaxInt32
 			ind[indMaxMin] = ind[indMinMax]
 		}
 		for j := 0; j < nlsfQuantDelDecStates; j++ {
@@ -310,7 +312,7 @@ func silkNLSFDelDecQuant(xQ10, wQ5 []int16, predCoefQ8 []uint8, ecIx []int, ecRa
 	}
 
 	best := 0
-	minQ25 := int64(math.MaxInt64)
+	minQ25 := int32(math.MaxInt32)
 	for j := 0; j < 2*nlsfQuantDelDecStates; j++ {
 		if minQ25 > rdQ25[j] {
 			minQ25 = rdQ25[j]
@@ -320,7 +322,7 @@ func silkNLSFDelDecQuant(xQ10, wQ5 []int16, predCoefQ8 []uint8, ecIx []int, ecRa
 	raw := make([]int, order)
 	copy(raw, ind[best&(nlsfQuantDelDecStates-1)][:order])
 	raw[0] += best >> nlsfQuantDelDecStatesLog2
-	return raw, minQ25
+	return raw, int64(minQ25)
 }
 
 func nlsfResidualRatesQ5(indTmp, ecIx int, ecRatesQ5 []uint8) (int32, int32) {

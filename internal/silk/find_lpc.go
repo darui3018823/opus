@@ -48,8 +48,6 @@ func silkFindLPCFLP(
 	if order <= 0 || subfrLength <= order || nbSubfr <= 0 || len(x) < subfrLength*nbSubfr {
 		return make([]int16, order), 4
 	}
-	cb := getNLSFCB(order)
-
 	// Burg AR analysis for the full frame
 	a, resNrg := silkBurgModifiedFLP(x[:subfrLength*nbSubfr], minInvGain, subfrLength, nbSubfr, order)
 	targetNLSFQ15 := make([]int16, order)
@@ -59,14 +57,13 @@ func silkFindLPCFLP(
 		halfSubfr := 2
 		secondStart := halfSubfr * subfrLength
 		aTmp, secondNrg := silkBurgModifiedFLP(x[secondStart:subfrLength*nbSubfr], minInvGain, subfrLength, halfSubfr, order)
-		resNrg -= secondNrg
+		resNrg = float64(float32(resNrg - secondNrg))
 
 		// Convert last-half AR to NLSFs
 		silkA2NLSF(targetNLSFQ15, silkFloatToQ16(aTmp), order)
-		silkNLSFStabilize(targetNLSFQ15, cb.deltaMinQ15, order)
 
 		// Search over interpolation indices to find the one with lowest residual energy
-		resNrg2nd := math.MaxFloat64
+		resNrg2nd := float64(math.MaxFloat32)
 		nlsf0Q15 := make([]int16, order)
 		aInterp := make([]float64, order)
 		lpcRes := make([]float64, 2*subfrLength)
@@ -79,9 +76,9 @@ func silkFindLPCFLP(
 			silkNLSF2AFLP(aInterp, nlsf0Q15, order)
 
 			// Calculate residual energy with LSF interpolation
-			silkLPCAnalysisFilterFLP(lpcRes, aInterp, x, 2*subfrLength, order)
-			resNrgInterp := silkEnergyFLP(lpcRes[order:subfrLength]) +
-				silkEnergyFLP(lpcRes[subfrLength+order:2*subfrLength])
+			silkLPCAnalysisFilterFLP32(lpcRes, aInterp, x, 2*subfrLength, order)
+			resNrgInterp := float64(float32(silkEnergyFLP32(lpcRes[order:subfrLength]) +
+				silkEnergyFLP32(lpcRes[subfrLength+order:2*subfrLength])))
 
 			// Determine whether current interpolated NLSFs are best so far
 			if resNrgInterp < resNrg {
@@ -98,8 +95,20 @@ func silkFindLPCFLP(
 	if interpFactor == 4 {
 		// NLSF interpolation is currently inactive, calculate NLSFs from full frame AR coefficients
 		silkA2NLSF(targetNLSFQ15, silkFloatToQ16(a), order)
-		silkNLSFStabilize(targetNLSFQ15, cb.deltaMinQ15, order)
 	}
 
 	return targetNLSFQ15, interpFactor
+}
+
+func silkLPCAnalysisFilterFLP32(r, predCoef, s []float64, length, order int) {
+	for ix := 0; ix < order && ix < length; ix++ {
+		r[ix] = 0
+	}
+	for ix := order; ix < length; ix++ {
+		pred := float32(0)
+		for k := 0; k < order; k++ {
+			pred += float32(s[ix-1-k]) * float32(predCoef[k])
+		}
+		r[ix] = float64(float32(s[ix]) - pred)
+	}
 }

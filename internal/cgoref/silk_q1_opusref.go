@@ -39,6 +39,7 @@ extern void silk_NLSF2A_FLP(silk_float *, const opus_int16 *, int, int);
 extern void silk_interpolate(opus_int16 *, const opus_int16 *, const opus_int16 *, int, int);
 extern void silk_LPC_analysis_filter_FLP(silk_float *, const silk_float *, const silk_float *, int, int);
 extern double silk_energy_FLP(const silk_float *, int);
+extern void silk_LTP_analysis_filter_FLP(silk_float *, const silk_float *, const silk_float *, const int *, const silk_float *, int, int, int);
 extern void silk_NLSF_VQ_weights_laroia(opus_int16 *, const opus_int16 *, int);
 extern void silk_NLSF_stabilize(opus_int16 *, const opus_int16 *, int);
 extern void silk_NLSF_VQ(opus_int32 *, const opus_int16 *, const opus_uint8 *, const opus_int16 *, int, int);
@@ -264,8 +265,20 @@ static int go_silk_build_lpc_in_pre(
     int order,
     int voiced
 ) {
-    int sf, i, j, dst = 0, cum = 0;
+    int sf, i, dst = 0, cum = 0;
     if (!out || !x || !subframe_lengths || !inv_gains || nb_subfr <= 0) return -1;
+    if (voiced) {
+        int subfr_length = subframe_lengths[0];
+        int frame_start = x_len - nb_subfr * subfr_length;
+        for (sf = 0; sf < nb_subfr; sf++) {
+            if (subframe_lengths[sf] != subfr_length) return -1;
+            if (!pitch_lags || !ltp_coefs || pitch_lags[sf] <= 0 ||
+                frame_start - order - pitch_lags[sf] - 2 < 0) return -1;
+        }
+        silk_LTP_analysis_filter_FLP(out, x + frame_start - order, ltp_coefs,
+            pitch_lags, inv_gains, subfr_length, nb_subfr, order);
+        return nb_subfr * (subfr_length + order);
+    }
     for (sf = 0; sf < nb_subfr; sf++) {
         int sub_len = subframe_lengths[sf];
         int x_ptr = frame_start + cum - order;
@@ -273,14 +286,6 @@ static int go_silk_build_lpc_in_pre(
         for (i = 0; i < sub_len + order; i++) {
             int pos = x_ptr + i;
             silk_float v = pos >= 0 && pos < x_len ? x[pos] : 0.0f;
-            if (voiced && pitch_lags && ltp_coefs && pitch_lags[sf] > 0) {
-                int lag_ptr = x_ptr - pitch_lags[sf] + i;
-                for (j = 0; j < 5; j++) {
-                    int lag_pos = lag_ptr + 2 - j;
-                    silk_float delayed = lag_pos >= 0 && lag_pos < x_len ? x[lag_pos] : 0.0f;
-                    v -= ltp_coefs[sf * 5 + j] * delayed;
-                }
-            }
             out[dst + i] = v * inv_gain;
         }
         dst += sub_len + order;

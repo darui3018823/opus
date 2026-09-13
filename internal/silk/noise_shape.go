@@ -69,6 +69,7 @@ type silkComplexityConfig struct {
 	shapingLPCOrder        int
 	laShape                int
 	nStatesDelayedDecision int
+	useInterpolatedNLSFs   bool
 	warpingQ16             int32
 }
 
@@ -114,6 +115,7 @@ func (e *Encoder) silkComplexityConfig() silkComplexityConfig {
 		cfg.shapingLPCOrder, cfg.laShape, cfg.nStatesDelayedDecision = 24, 5*fsKHz, 4
 	}
 	if e.complexity >= 4 {
+		cfg.useInterpolatedNLSFs = true
 		cfg.warpingQ16 = silkFloat2Int(float64(fsKHz) * silkWarpingMultiplier * 65536.0)
 	}
 	return cfg

@@ -1838,7 +1838,7 @@ func (e *Encoder) analyzeNLSF(signal []float64, cb *nlsfCBParams, signalType int
 				subfrLength = sfLen
 				nbSubfr = len(cfg.subframeLengths)
 				minInvGain = lpcMinInvGain(cfg.ltpPredCodGain, cfg.codingQuality, e.firstFrameAfterReset)
-				useInterpolated = (e.nSubframes == 4) && !e.stereoComponent && !e.hybridMode
+				useInterpolated = e.nSubframes == 4 && e.silkComplexityConfig().useInterpolatedNLSFs
 			}
 		}
 	}

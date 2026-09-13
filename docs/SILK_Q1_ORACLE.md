@@ -41,7 +41,7 @@ value, and difference.
 The following checkpoints are compared in execution order:
 
 1. `LPC_in_pre`
-2. Burg LPC coefficients and residual energy
+2. Full-frame and second-half Burg LPC coefficients, plus residual energy
 3. A2NLSF result and interpolation factor
 4. NLSF weights, stabilized target, and stage-1 VQ errors
 5. residual entropy tables, candidate delayed-decision path, and candidate RD
@@ -64,12 +64,19 @@ checkpoints on 2026-09-13:
 | `wb-voiced-steady-20ms-interp` | 16 kHz | mono SILK | steady | 4 | voiced | 8 | 3 |
 | `wb-stereo-mid-steady-20ms` | 16 kHz | stereo mid SILK | steady | 4 | voiced | 5 | 2 |
 | `wb-hybrid-low-reset-20ms` | 16 kHz | hybrid low band | reset | 4 | unvoiced | 5 | 4 |
+| `nb-unvoiced-steady-c0` | 8 kHz | mono SILK | steady | 4 | unvoiced | 0 | 4 |
+| `mb-voiced-steady-c1` | 12 kHz | mono SILK | steady | 4 | voiced | 1 | 4 |
+| `wb-unvoiced-steady-c2` | 16 kHz | mono SILK | steady | 4 | unvoiced | 2 | 4 |
+| `mb-voiced-steady-c4` | 12 kHz | mono SILK | steady | 4 | voiced | 4 | 2 |
+| `wb-unvoiced-steady-c6` | 16 kHz | mono SILK | steady | 4 | unvoiced | 6 | 0 |
 
 ## Corrections established by the oracle
 
 - `LPC_in_pre`, Burg outputs, LPC filtering, and residual-energy boundaries now
   round at the corresponding `silk_float` locations and preserve C operation
   order.
+- Float-to-fixed conversion rounds a `float32` value to nearest-even, matching
+  the libopus 1.6.1 x86_64 `float2int` boundary.
 - A2NLSF output is no longer stabilized before `silk_NLSF_encode`; the first C
   stabilization point is inside NLSF encoding.
 - NLSF stabilization and delayed-decision arithmetic use the C bounds, tie

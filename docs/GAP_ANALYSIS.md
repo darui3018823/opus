@@ -27,7 +27,7 @@ SILK エンコーダの品質ギャップ根本原因はここにあります。
 
 ### Q1 残：LPC/NLSF 解析の C 中間値検証
 
-- **状態：** `LPC_in_pre` 以降の encoder-side oracle を実装済み。2026-09-13 に libopus 1.6.1 と 8 fixture の全 checkpoint が exact match
+- **状態：** `LPC_in_pre` 以降の encoder-side oracle を実装済み。2026-09-13 に libopus 1.6.1 と 13 fixture の全 checkpoint が exact match
 - **実装済み：**
   - `silk_find_LPC_FLP` の主要処理（全フレーム Burg AR + 後半 10ms Burg AR + 第1ハーフ残差基準 + `k=3..0` 補間探索 + `silkLPCAnalysisFilterFLP` 残差判定）
   - `silk_A2NLSF` — 多項式求根（チェビシェフ級数）、ソート、安定化
@@ -36,7 +36,7 @@ SILK エンコーダの品質ギャップ根本原因はここにあります。
   - `silk_process_NLSFs` / `silk_NLSF_encode` — Laroia 重み計算、補間時合成重み、RD 量子化探索、predCoefQ12 復元（`silk/process_NLSFs.c`, `silk/NLSF_encode.c` 準拠）
   - legacy 全探索（`guardedFaithfulBurgNLSFAnalysis`, `bestNLSFAnalysis` 等）の撤廃
   - `opusref` oracle で `LPC_in_pre`、Burg LPC/残差、A2NLSF、補間係数、stage-1/residual index、量子化/補間 NLSF、`PredCoef_Q12` を exact 比較
-  - 8/12/16 kHz、voiced/unvoiced、reset/steady、2/4 subframe、補間あり/なしを検証。stereo mid と hybrid low-band の直接 Q1-domain fixture も含む
+  - 8/12/16 kHz、voiced/unvoiced、reset/steady、2/4 subframe、補間あり/なし、complexity の全 survivor/gate 帯を検証。stereo mid と hybrid low-band の直接 Q1-domain fixture も含む
   - `silk_float` の丸め位置と演算順序、NLSF fixed-width 演算、complexity 0–3/4–10 の補間 gate を C に合わせた
   - active stereo/hybrid production path でも raw signal fallback を使わず `LPC_in_pre` domain を構築
 - **未検証・残作業：**

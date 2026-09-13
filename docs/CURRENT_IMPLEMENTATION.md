@@ -964,10 +964,14 @@ go test -count=1 ./...
 go test -count=1 -tags opusref ./...
 ```
 
-Bit-exact convergence verification on 2026-09-09: passing (`go vet ./...`,
+Bit-exact convergence verification on 2026-09-13: passing (`go vet ./...`,
 `go test -count=1 ./...`, `go test -count=1 -tags opusref ./...`, and
 `go test -race -count=1 ./...`). The libopus 1.6.1 official-vector oracle
-reports zero final-range mismatches for all 12 vectors.
+reports zero final-range mismatches for all 12 vectors. The scalar-source CELT
+stage oracle is exact across pure-CELT vectors 01, 07, and 11. Correcting the
+eighth fine-energy-bit cutoff raised installed-libopus exact int16 coverage to
+99.999% on vector 07, 96.404% on mixed-mode vector 09, and 84.982% on
+mixed-mode vector 10; the remaining differences retain exact final ranges.
 
 Result on 2026-06-16: passing (`go vet ./...`, `go test -count=1 ./...`,
 and `go test -count=1 -tags opusref ./...` exit 0).
@@ -1228,10 +1232,13 @@ Notes:
   anti-collapse arithmetic. The CWRS decoder now computes `U(N,K)` directly rather than
   reconstructing it from already-saturated `V` values, and the float PVQ fold,
   rotation, recursive gain, Haar, stereo-merge, and denormalization paths follow
-  libopus float32 operation order. For all three tv01 packet-0 constituent
-  frames and packet 33 constituent frame 3, the checked-in scalar C oracle now
-  matches complete per-channel hashes after synthesis, after the applicable
-  comb filter, and after de-emphasis/PCM scaling. Packet 33 contains the first
+  libopus float32 operation order. The decoder also applies both fine-energy
+  passes before deriving synthesis amplitudes, uses the libopus eight-bit
+  final-fine cutoff, correctly rounds rare `exp2f` midpoint cases, and mirrors
+  float32 order in the comb filter and two-sample stereo resynthesis. A
+  stateful checked-in scalar C scan now matches every emitted normalized-energy,
+  denormalized-spectrum, synthesis, post-filter, and PCM hash across all three
+  pure-CELT official vectors (01, 07, and 11). Packet 33 contains the first
   one-LSB int16 difference against the independently installed libopus build,
   so the scalar match identifies that difference as build-specific compiler or
   SIMD float arithmetic rather than a checked-in source-level mismatch. An

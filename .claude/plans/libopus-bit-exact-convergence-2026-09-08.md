@@ -61,7 +61,7 @@ state or entropy divergence.
 | Entropy coder | Documented and tested as matching libopus range coding | Retain final-range and symbol traces |
 | Decoder framing/range | All 12 official vectors now have zero `FinalRange` mismatches against libopus 1.6.1 and their `.bit` records | Retain the all-vector zero-mismatch gate while localizing PCM divergence |
 | int16 decode conversion | Conversion semantics match `FLOAT2INT16`; direct `opus_decode` comparison now reports exact-sample percentage, first/max LSB delta, and range mismatch count | Raise mode-specific exact-sample coverage after range alignment |
-| CELT synthesis | tv01 frames 0 and 1 match all 21 normalized PVQ bands, all 21 energy words, and complete denormalized spectra; all three packet-0 frames and packet 33 constituent frame 3 match the checked-in scalar C oracle after synthesis, comb filtering, and de-emphasis | Add a vector-wide scalar-source stage scan to locate the first true CELT arithmetic/state mismatch, while keeping installed-libopus compiler/SIMD drift separate from source conformance |
+| CELT synthesis | Every normalized-energy, denormalized-spectrum, synthesis, post-filter, and PCM stage hash emitted for the three pure-CELT official vectors (01, 07, and 11) matches the checked-in scalar C source | Extend source-level localization to CELT portions of mixed-mode vectors without conflating SILK/CELT transition state or installed-libopus SIMD drift |
 | SILK synthesis/PLC | Parameter/range coverage exists; PLC is explicitly non-bit-exact | Compare fixed-point state and PCM on deterministic packet sequences |
 | Encoder | Packets interoperate but are not byte-identical | Add mode-specific byte and first-symbol divergence traces |
 | Mode/rate policy | Known partial parity in `docs/MODE_RATE_POLICY_DIFF.md` | Compare decisions and state over identical PCM/control sequences |
@@ -275,3 +275,31 @@ test passes.
 - Verified the rebuilt scalar oracle, the focused packet-33 stage test,
   `go test -count=1 ./...`, and `go test -count=1 -tags opusref -run
   '^TestCGORef$' -v .`.
+
+### 2026-09-13: vector-wide scalar CELT convergence
+
+- Added an opt-in stateful oracle scan that compiles the checked-in scalar
+  libopus source and compares normalized coefficients, fine-corrected energy,
+  denormalized spectra, synthesis, comb filtering, and PCM after every CELT
+  constituent frame. The oracle also covers libopus's mono-stream/stereo-output
+  synthesis path without treating its duplicated output channel as a missing Go
+  internal stage.
+- The scan localized and removed four independent float-source mismatches:
+  synthesis now derives band amplitudes after both fine-energy passes, the
+  post-filter mirrors float32 multiply/add assignment order, near-midpoint
+  `exp2f` band gains use a deterministic correctly-rounded fallback, and the
+  special two-sample stereo resynthesis uses float32 intermediates in C order.
+- A pure-CELT vector sweep found a fifth mismatch in narrow-band mono: Go used
+  seven as the final-fine cutoff while libopus `MAX_FINE_BITS` is eight. The
+  corrected cutoff consumes the eighth-bit refinement and preserves raw-tail
+  bit order for later bands.
+- All emitted scalar stage hashes now match for all three pure-CELT official
+  vectors: tv01 (66,288 comparisons), tv07 (37,464 Go stages plus exact C-side
+  mono output duplicates), and tv11 (18,012 comparisons). Installed libopus may
+  still differ by one int16 LSB because its compiler/SIMD path is independent
+  from the checked-in scalar oracle.
+- The eighth-bit correction also improved installed-libopus int16 equality on
+  tv07 from 99.451% to 99.999%, tv09 from 89.189% to 96.404%, and tv10 from
+  78.914% to 84.982%, with every official-vector final range still exact.
+- Verified all three scalar sweeps, `go vet ./...`, the full normal and
+  `opusref` suites, the full race suite, and the verbose all-vector CGO oracle.

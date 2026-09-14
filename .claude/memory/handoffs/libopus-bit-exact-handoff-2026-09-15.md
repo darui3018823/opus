@@ -55,10 +55,36 @@ slice = one child branch = one accept/reject decision.
 
 ### Phase 0 — Re-establish baseline (first working session)
 
-- Run `go build ./...`, `go vet ./...`, `go test -count=1 ./...`, and
-  `go test -count=1 -tags opusref ./...` (PowerShell) on `dev/silk-q1-oracle`.
-- Confirm the only opusref failure is the 8 kHz speech-harmonic loudness gate.
-- Escalate the open decision above by webhook. Do not block on it.
+Baseline measured 2026-09-15 03:58 JST on `dev/silk-q1-oracle` (`2e40474`):
+`go build`, `go vet`, and `go test -count=1 ./...` pass. The `opusref` suite
+has five failing tests, not the one documented by the predecessor:
+
+| Test | Failure | Present on `dev/libopus-bit-exact` | Present on `main` |
+|---|---|---|---|
+| `TestOpusSILKABAgainstLibopusEncoder` speech-like-harmonic | matched loudness 8k -1.59 / 12k -1.93 / 16k -1.57 dB (gate ±1.5) | 8k passes at -1.50; 12k/16k not re-checked | pass |
+| `TestCGOEncodeRefSILKOnlyExtendedDurationsStrict` 80/120 ms | count code 3, want 2 | yes | pass |
+| `TestCGOEncodeRefSILKFEC` | fec=732 no=732 "LBRR absent?" | yes | pass |
+| `TestCGOEncodeRefSILKFECMultiFrame` 40/60 ms | fec size == no-FEC size | yes | pass |
+| `TestCGODecodeFECMatchesLibopus` 40/60 ms | LBRR mask parser rejects count code 3 | yes | pass |
+
+The four non-loudness failures originate in the 2026-09-09 slice
+`641e01a fix(encoder): keep CBR padding outside SILK frames`. The encoder
+default is CBR (`opus.go` `rateMode: celt.RateModeCBR`), so every packet now
+carries code-3 padding and equal sizes; `60918f3` relaxed only the non-strict
+`TestCGOEncodeRefSILKOnly`. These look like stale test contracts rather than a
+codec regression, but that must be proven, not assumed.
+
+Phase 0 tasks:
+
+- Triage the four padding-related failures: parse the padded packets, confirm
+  the LBRR flag is set in the FEC stream and that the SILK payload differs from
+  the no-FEC stream, then update the test contracts (unpad before LBRR mask
+  parsing, compare payload rather than packet size, accept code 3 for strict
+  durations under CBR). If LBRR is actually missing, that is a real regression
+  from the padding slice and takes priority over everything below.
+- Re-run the full `opusref` suite; the remaining failures must be exactly the
+  speech-like-harmonic loudness gates.
+- Escalate the open Q1 decision above by webhook. Do not block on it.
 
 ### Phase 1 — SILK encoder Q2: pitch/LTP exactness
 

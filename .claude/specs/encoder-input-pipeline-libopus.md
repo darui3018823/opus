@@ -119,6 +119,15 @@ that must be reconciled when this pipeline lands.
   quantisation live in `internal/silk/front_end.go`. End-to-end delay equals
   libopus in every mode and the pipeline oracle is exact through the
   resampler at 24/48 kHz.
+- **decide_fec bandwidth reduction.** `decide_fec` lowers the coded
+  bandwidth until FEC fits when the loss exceeds 5 % and the equivalent rate
+  is below the threshold; the Go encoder mirrors the LBRR_coded decision
+  (`encoder_fec.go`) but its SILK bandwidth follows the input rate, so such
+  streams stay at the wider bandwidth (with FEC).
+- **CBR gain loop.** `encode_frame_FLP` iterates `gainMult_Q8` to hit
+  `maxBits` in CBR; the Go CBR path still uses its own budget search (the
+  LBRR copy already starts from `silk_process_gains_FLP`'s gains as in
+  libopus). CVBR/VBR streams are byte-identical.
 - **CELT prefill on mode switches.** libopus primes CELT with
   `tmp_prefill` (the Fs/400 samples preceding the frame from `delay_buffer`)
   when switching into CELT/hybrid; the Go transition logic does not.

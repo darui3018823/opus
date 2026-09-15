@@ -748,3 +748,49 @@ test passes.
   item before the SILK-only VBR encoder can be called byte-exact.
 - Verified `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (all pass), `go test -race`.
+
+### 2026-09-16: In-band FEC (LBRR) and the real libopus encoder (`3559e49`, `a5517f4`, `dcd288d`, `f3a706d`)
+
+- Reference: `silk/float/encode_frame_FLP.c` (`silk_LBRR_encode_FLP`: the
+  regular indices with `GainsIndices[0] += LBRR_GainIncreases` at a run
+  start, `silk_gains_dequant` from `LBRRprevLastGainIndex`, the frame seed,
+  the regular shaping/Lambda and the pre-frame NSQ state),
+  `silk/control_codec.c` (`silk_setup_LBRR`: 7 after a packet without
+  LBRR_enabled, else `max(7 - loss*0.2, 3)`), `silk/enc_API.c`
+  (`curr_nBitsUsedLBRR` counted from after the VAD/LBRR placeholder; LBRR
+  frames coded with `CODE_CONDITIONALLY` when the previous frame is LBRR
+  coded), `silk/encode_indices.c` (delta lag coding in [-8, 11], the copied
+  `LTP_scaleIndex`), `silk/float/LTP_scale_ctrl_FLP.c` (round_loss from
+  `PacketLoss_perc * nFramesPerPacket`, squared with LBRR_flag, thresholds
+  `log2lin(2900|3900 - SNR_dB_Q7)`), `src/opus_encoder.c` (`decide_fec`,
+  `compute_equiv_rate`, `fec_thresholds`).
+- `3559e49` fix(silk): the LBRR port above replaces the Go LBRR (Lambda x16,
+  seed 0, re-derived deltas, absolute-only lags, LTP scale 0). Voiced frames
+  now code `LTP_scaleIndex` from the loss estimate; regular conditional
+  frames code lag deltas. CBR still quantises the LBRR copy from
+  `silk_process_gains_FLP`'s gains like libopus (the Go CBR search codes the
+  regular frame).
+- `a5517f4` fix(silk): `apply_sine_window_FLP`'s `PI / (length + 1)` is a
+  float32 division; the double quotient rounds differently for the 12 kHz
+  shaping slope (73), which flipped one shaping coefficient at 12 kHz /
+  32 kbps (found through the new `ref-speech` oracle fixture).
+- `dcd288d` fix(encoder): `LBRR_coded` per packet from `decide_fec` /
+  `compute_equiv_rate` (hysteresis on the previous decision); pending LBRR
+  is still emitted when the decision turns off. libopus also narrows the
+  bandwidth to make FEC fit above 5 % loss — the Go SILK bandwidth follows
+  the input rate, so that part is recorded as open.
+- Results: `TestSILKEncoderInputPipelineOracle{,FEC,32k}` — 24 kbps, 24 kbps
+  + 20 % loss, 32 kbps; 8/12/16/24/48 kHz × steady-voiced /
+  speech-like-harmonic / unvoiced-noise / ref-speech: **all 12 packets
+  byte-identical to libopus on all 60 shared-state cells** (onset still
+  diverges at the silence shortcut). `TestCGOEncodeRefSILKByteExact` — the
+  Go encoder against the real libopus 1.6.1 encoder (`cgoref`, no
+  instrumentation, automatic mode/bandwidth: VOIP, CVBR, complexity 5,
+  voice) with and without FEC at 16/24/32 kbps: **24 of 30 cells
+  byte-identical for 14 packets**; the other 6 are libopus choosing hybrid
+  at 32 kbps for 24/48 kHz input (mode policy, logged).
+- Re-baselined: `TestCGOEncodeRefSILKFEC` (CBR) now requires +2 dB FEC over
+  PLC (Go 18.8 vs 15.7 dB; libopus 20.5 vs 16.4 dB on the same fixture — the
+  CBR gain loop is the remaining gap); the multistream FEC and fuzz-seed
+  tests use 28 kbps so `decide_fec` codes LBRR. Verified `go vet ./...`,
+  `go test -count=1 ./...`, `go test -count=1 -tags opusref ./...`.

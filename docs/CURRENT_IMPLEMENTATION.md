@@ -1008,9 +1008,17 @@ shared-state oracle fixture (steady-voiced, speech-like-harmonic,
 unvoiced-noise at 8/12/16/24/48 kHz input); `TestSILKEncoderInputPipelineOracle`
 fails on any difference. Digitally silent input still takes the Go one-byte
 shortcut (libopus codes such frames), so streams containing silence diverge
-from there (see `.claude/specs/encoder-input-pipeline-libopus.md`). LBRR,
-stereo, CBR and the hybrid/CELT paths are not yet under the oracle. The SILK
-AB loudness gate passes at 8/12/16 kHz since the shaping port.
+from there (see `.claude/specs/encoder-input-pipeline-libopus.md`). In-band
+FEC is exact too: `silk_LBRR_encode_FLP`, `silk_LTP_scale_ctrl` and the
+Opus-layer `decide_fec` are ported, so the oracle is byte-identical at
+24 kbps with 20 % loss and at 32 kbps, and `TestCGOEncodeRefSILKByteExact`
+shows the Go encoder producing the same packets as the real libopus 1.6.1
+encoder (automatic mode, VOIP, CVBR, complexity 5) for 8–48 kHz input at
+16/24/32 kbps with and without FEC wherever libopus stays SILK-only (24 of
+30 cells; libopus picks hybrid at 32 kbps for 24/48 kHz input). Stereo, the
+CBR gain loop, decide_fec's bandwidth narrowing and the hybrid/CELT paths
+are not yet exact. The SILK AB loudness gate passes at 8/12/16 kHz since the
+shaping port.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

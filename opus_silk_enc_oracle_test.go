@@ -39,6 +39,20 @@ type encOracleStages struct {
 	harmQ14      []int
 	lfQ14        []int
 	pulses       []int
+	// noise_shape_analysis_FLP outputs (float32)
+	haveShape     bool
+	shapeInputQ   float32
+	shapeCodingQ  float32
+	shapeSNRdBQ7  int
+	shapeWarping  int
+	shapePredGain float32
+	shapeLTPCorr  float32
+	shapeAR       [][]float32
+	shapeGains    []float32
+	shapeLFMA     []float32
+	shapeLFAR     []float32
+	shapeTilt     []float32
+	shapeHarm     []float32
 }
 
 // The encoder input-pipeline oracle: scripts/oracle/build_encoder.ps1 builds
@@ -72,7 +86,35 @@ var (
 	encOracleValuesRe = regexp.MustCompile(`v\[[\d,]+\]=(\S+)`)
 	encOracleNSQInRe  = regexp.MustCompile(`^\[SILK_ENC_NSQ_INPUT\] signalType=(\d+) quantOffset=(\d+) seed=(\d+) Lambda_Q10=(-?\d+) LTP_scale_Q14=(-?\d+)`)
 	encOracleRowsRe   = regexp.MustCompile(`rows=(\d+) cols=(\d+)`)
+	encOracleShapeRe  = regexp.MustCompile(`inputQuality=(\S+) codingQuality=(\S+) SNR_dB_Q7=(-?\d+) warping_Q16=(-?\d+) predGain=(\S+) LTPCorr=(\S+)`)
 )
+
+func parseFloat32Values(line string) []float32 {
+	ms := encOracleValuesRe.FindAllStringSubmatch(line, -1)
+	vals := make([]float32, len(ms))
+	for i, m := range ms {
+		f, _ := strconv.ParseFloat(m[1], 64)
+		vals[i] = float32(f)
+	}
+	return vals
+}
+
+func parseFloat32Rows(line string) [][]float32 {
+	m := encOracleRowsRe.FindStringSubmatch(line)
+	if m == nil {
+		return nil
+	}
+	rows, _ := strconv.Atoi(m[1])
+	cols, _ := strconv.Atoi(m[2])
+	flat := parseFloat32Values(line)
+	out := make([][]float32, rows)
+	for r := 0; r < rows; r++ {
+		if (r+1)*cols <= len(flat) {
+			out[r] = flat[r*cols : (r+1)*cols]
+		}
+	}
+	return out
+}
 
 func parseIntValues(line string) []int {
 	ms := encOracleValuesRe.FindAllStringSubmatch(line, -1)
@@ -177,6 +219,35 @@ func runEncOracle(t *testing.T, rate int, fixture string, frames, bitrate int, b
 			st.seed, _ = strconv.Atoi(m[3])
 			st.lambdaQ10, _ = strconv.Atoi(m[4])
 			st.ltpScaleQ14, _ = strconv.Atoi(m[5])
+		case strings.HasPrefix(line, "[SILK_ENC_NOISE_SHAPE]"):
+			m := encOracleShapeRe.FindStringSubmatch(line)
+			if m == nil {
+				t.Fatalf("bad NOISE_SHAPE line: %s", line)
+			}
+			st := &out[cur].stages
+			st.haveShape = true
+			f, _ := strconv.ParseFloat(m[1], 64)
+			st.shapeInputQ = float32(f)
+			f, _ = strconv.ParseFloat(m[2], 64)
+			st.shapeCodingQ = float32(f)
+			st.shapeSNRdBQ7, _ = strconv.Atoi(m[3])
+			st.shapeWarping, _ = strconv.Atoi(m[4])
+			f, _ = strconv.ParseFloat(m[5], 64)
+			st.shapePredGain = float32(f)
+			f, _ = strconv.ParseFloat(m[6], 64)
+			st.shapeLTPCorr = float32(f)
+		case strings.HasPrefix(line, "[SILK_ENC_SHAPE_AR_FLP]"):
+			out[cur].stages.shapeAR = parseFloat32Rows(line)
+		case strings.HasPrefix(line, "[SILK_ENC_SHAPE_GAINS_PRE_FLP]"):
+			out[cur].stages.shapeGains = parseFloat32Values(line)
+		case strings.HasPrefix(line, "[SILK_ENC_SHAPE_LF_MA_FLP]"):
+			out[cur].stages.shapeLFMA = parseFloat32Values(line)
+		case strings.HasPrefix(line, "[SILK_ENC_SHAPE_LF_AR_FLP]"):
+			out[cur].stages.shapeLFAR = parseFloat32Values(line)
+		case strings.HasPrefix(line, "[SILK_ENC_SHAPE_TILT_FLP]"):
+			out[cur].stages.shapeTilt = parseFloat32Values(line)
+		case strings.HasPrefix(line, "[SILK_ENC_SHAPE_HARM_FLP]"):
+			out[cur].stages.shapeHarm = parseFloat32Values(line)
 		case strings.HasPrefix(line, "[SILK_ENC_NLSF_QUANT_Q15]"):
 			out[cur].stages.nlsfQuantQ15 = parseIntValues(line)
 		case strings.HasPrefix(line, "[SILK_ENC_NSQ_PREDCOEF_Q12]"):
@@ -322,6 +393,45 @@ func stageDiffs(g silk.FrameTrace, c encOracleStages) []string {
 	}
 	if !eqI16(g.Pulses, c.pulses) {
 		diffs = append(diffs, "pulses")
+	}
+	return diffs
+}
+
+// shapeDiffs compares the Go float32 noise-shape port with the oracle's
+// noise_shape_analysis_FLP outputs (float32 bits).
+func shapeDiffs(g silk.FrameTrace, c encOracleStages, nbSubfr, order int) []string {
+	if !c.haveShape {
+		return []string{"no noise-shape trace"}
+	}
+	ar, gains, lfMA, lfAR, tilt, harm, iq, cq := g.Shape32Values(nbSubfr, order)
+	var diffs []string
+	eq := func(a, b []float32) (int, bool) { return firstFloat32Mismatch(a, b) }
+	if math.Float32bits(iq) != math.Float32bits(c.shapeInputQ) {
+		diffs = append(diffs, fmt.Sprintf("input_quality (Go %.9g, C %.9g)", iq, c.shapeInputQ))
+	}
+	if math.Float32bits(cq) != math.Float32bits(c.shapeCodingQ) {
+		diffs = append(diffs, fmt.Sprintf("coding_quality (Go %.9g, C %.9g)", cq, c.shapeCodingQ))
+	}
+	for k := 0; k < nbSubfr && k < len(c.shapeAR); k++ {
+		if i, ok := eq(ar[k], c.shapeAR[k]); !ok {
+			diffs = append(diffs, fmt.Sprintf("AR[%d][%d] (Go %.9g, C %.9g)", k, i, ar[k][i], c.shapeAR[k][i]))
+			break
+		}
+	}
+	if i, ok := eq(gains, c.shapeGains); !ok {
+		diffs = append(diffs, fmt.Sprintf("Gains[%d] (Go %v, C %v)", i, gains, c.shapeGains))
+	}
+	if i, ok := eq(lfMA, c.shapeLFMA); !ok {
+		diffs = append(diffs, fmt.Sprintf("LF_MA[%d] (Go %v, C %v)", i, lfMA, c.shapeLFMA))
+	}
+	if i, ok := eq(lfAR, c.shapeLFAR); !ok {
+		diffs = append(diffs, fmt.Sprintf("LF_AR[%d] (Go %v, C %v)", i, lfAR, c.shapeLFAR))
+	}
+	if i, ok := eq(tilt, c.shapeTilt); !ok {
+		diffs = append(diffs, fmt.Sprintf("Tilt[%d] (Go %v, C %v)", i, tilt, c.shapeTilt))
+	}
+	if i, ok := eq(harm, c.shapeHarm); !ok {
+		diffs = append(diffs, fmt.Sprintf("HarmShapeGain[%d] (Go %v, C %v)", i, harm, c.shapeHarm))
 	}
 	return diffs
 }
@@ -482,6 +592,14 @@ func TestSILKEncoderInputPipelineOracle(t *testing.T) {
 						t.Logf("frame %d: first packet difference (Go %d bytes, libopus %d bytes); pipeline exact through this frame", f, len(pkt), len(r.packet))
 					}
 					if !packetsEqual {
+						tr := enc.silkEncoder.LastFrameTrace()
+						if len(r.stages.shapeAR) > 0 {
+							if d := shapeDiffs(tr, r.stages, len(r.stages.shapeAR), len(r.stages.shapeAR[0])); len(d) > 0 {
+								t.Logf("frame %d: noise-shape port differs: %s (C SNR_dB_Q7=%d warping=%d predGain=%.9g LTPCorr=%.9g)", f, strings.Join(d, "; "), r.stages.shapeSNRdBQ7, r.stages.shapeWarping, r.stages.shapePredGain, r.stages.shapeLTPCorr)
+							} else {
+								t.Logf("frame %d: noise-shape port exact", f)
+							}
+						}
 						if d := stageDiffs(enc.silkEncoder.LastFrameTrace(), r.stages); len(d) > 0 {
 							t.Logf("frame %d: differing analysis stages: %s", f, strings.Join(d, "; "))
 						} else {

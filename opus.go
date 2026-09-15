@@ -1460,6 +1460,16 @@ func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
 	return out
 }
 
+// bitsToBitrate and bitrateToBits are celt.h's integer conversions between a
+// per-packet bit budget and a bitrate.
+func bitsToBitrate(bits, fs, frameSize int) int {
+	return bits * (6 * fs / frameSize) / 6
+}
+
+func bitrateToBits(bitrate, fs, frameSize int) int {
+	return bitrate * 6 / (6 * fs / frameSize)
+}
+
 // delayCompensation returns the Opus-layer input delay in samples at the
 // encoder rate: Fs/250 (4 ms) for every application except restricted low
 // delay, like opus_encoder_init.
@@ -1717,7 +1727,10 @@ func (e *Encoder) applyBitrateSetting(frameSize int) error {
 	e.bitrate = bitrate
 	e.celtEncoder.SetBitrate(e.bitrate)
 	if e.silkEncoder != nil {
-		silkBitrate := e.bitrate
+		// opus_encode_native: SILK gets bits_to_bitrate(bitrate_to_bits(bitrate)
+		// - 8), i.e. the packet rate minus the TOC byte amortised over the
+		// packet (24000 bps at 20 ms -> 23600 bps), which selects SNR_dB_Q7.
+		silkBitrate := bitsToBitrate(bitrateToBits(e.bitrate, e.sampleRate, frameSize)-8, e.sampleRate, frameSize)
 		if silkBitrate > 40000 {
 			silkBitrate = 40000
 		}

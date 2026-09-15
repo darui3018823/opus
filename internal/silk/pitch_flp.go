@@ -390,6 +390,7 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64) (v
 	// LTP quantizer; the la_pitch tail covers the LTP_ORDER samples it reads
 	// past the frame.
 	e.pitchResidual = append([]float64(nil), r.res...)
+	e.pitchPredGain = r.predGain
 	if !runCore {
 		e.ltpCorrState = 0
 		return false, 0, 0, 0

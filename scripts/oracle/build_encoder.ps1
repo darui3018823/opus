@@ -154,10 +154,12 @@ $__new = @"
         psEncCtrl->Tilt[ k ]           = psShapeSt->Tilt_smth;
     }
     if( oracle_trace_enabled ) {
-        fprintf(stderr, "[SILK_ENC_NOISE_SHAPE] signalType=%d quantOffset=%d speechActivity=%.17g inputQuality=%.17g codingQuality=%.17g\n",
+        fprintf(stderr, "[SILK_ENC_NOISE_SHAPE] signalType=%d quantOffset=%d speechActivity=%.17g inputQuality=%.17g codingQuality=%.17g SNR_dB_Q7=%d warping_Q16=%d predGain=%.17g LTPCorr=%.17g useCBR=%d shapeWinLength=%d\n",
                 psEnc->sCmn.indices.signalType, psEnc->sCmn.indices.quantOffsetType,
                 (double)( psEnc->sCmn.speech_activity_Q8 * ( 1.0f / 256.0f ) ),
-                (double)psEncCtrl->input_quality, (double)psEncCtrl->coding_quality);
+                (double)psEncCtrl->input_quality, (double)psEncCtrl->coding_quality,
+                psEnc->sCmn.SNR_dB_Q7, psEnc->sCmn.warping_Q16, (double)psEncCtrl->predGain, (double)psEnc->LTPCorr,
+                psEnc->sCmn.useCBR, psEnc->sCmn.shapeWinLength);
         oracle_silk_dump_float_strided("ENC_SHAPE_AR_FLP", psEncCtrl->AR, psEnc->sCmn.nb_subfr, MAX_SHAPE_LPC_ORDER, psEnc->sCmn.shapingLPCOrder);
         oracle_silk_dump_float("ENC_SHAPE_GAINS_PRE_FLP", psEncCtrl->Gains, psEnc->sCmn.nb_subfr);
         oracle_silk_dump_float("ENC_SHAPE_LF_MA_FLP", psEncCtrl->LF_MA_shp, psEnc->sCmn.nb_subfr);
@@ -267,10 +269,24 @@ $__new = @"
 $nsqDelDec = Replace-Checked $nsqDelDec $__old ($__new.Replace("`r`n", "`n")) "stage anchor 19"
 Set-Content "$bld\NSQ_del_dec_instr.c" $nsqDelDec
 
+# enc_API.c: dump the per-frame SILK target rate derivation.
+$encAPI = (Get-Content "$silk\enc_API.c" -Raw).Replace("`r`n", "`n")
+$encAPI = Replace-Checked $encAPI '#include "tuning_parameters.h"' "#include `"tuning_parameters.h`"`n#include `"silk_trace.h`"" "enc_API include"
+$targetDump = @'
+            TargetRate_bps = silk_LIMIT( TargetRate_bps, encControl->bitRate, 5000 );
+            if( oracle_trace_enabled ) {
+                fprintf(stderr, "[SILK_ENC_TARGET] bitRate=%d payloadSize_ms=%d nBits=%d TargetRate_bps=%d nBitsExceeded=%d nBitsUsedLBRR=%d curr_nBitsUsedLBRR=%d nFramesEncoded=%d nFramesPerPacket=%d tell=%d useCBR=%d maxBits=%d\n",
+                        encControl->bitRate, encControl->payloadSize_ms, nBits, TargetRate_bps, psEnc->nBitsExceeded, psEnc->nBitsUsedLBRR, curr_nBitsUsedLBRR,
+                        psEnc->state_Fxx[ 0 ].sCmn.nFramesEncoded, psEnc->state_Fxx[ 0 ].sCmn.nFramesPerPacket, ec_tell( psRangeEnc ), encControl->useCBR, encControl->maxBits);
+            }
+'@
+$encAPI = Replace-Checked $encAPI "            TargetRate_bps = silk_LIMIT( TargetRate_bps, encControl->bitRate, 5000 );`n" ($targetDump.Replace("`r`n", "`n") + "`n") "enc_API target rate"
+Set-Content "$bld\enc_API_instr.c" $encAPI -NoNewline
+
 $celtSrcs = Get-ChildItem "$celt\*.c" | Where-Object { $_.Name -notmatch '^(opus_custom_demo|dump_modes|.*_test.*)' } | ForEach-Object { $_.FullName }
 $silkSrcs = Get-ChildItem "$silk\*.c" | ForEach-Object { $_.FullName }
 $instrFloat = @('encode_frame_FLP.c','find_LPC_FLP.c','find_pred_coefs_FLP.c','noise_shape_analysis_FLP.c','process_gains_FLP.c','wrappers_FLP.c')
-$silkSrcs = $silkSrcs | Where-Object { $_ -notmatch 'NSQ_del_dec\.c$' }
+$silkSrcs = $silkSrcs | Where-Object { $_ -notmatch 'NSQ_del_dec\.c$' -and $_ -notmatch 'enc_API\.c$' }
 $silkFloat = Get-ChildItem "$silk\float\*.c" | Where-Object { $instrFloat -notcontains $_.Name } | ForEach-Object { $_.FullName }
 $opusStock = @('opus','opus_decoder','extensions','opus_multistream','opus_multistream_encoder',
   'opus_multistream_decoder','repacketizer','opus_projection_encoder','opus_projection_decoder',
@@ -278,7 +294,7 @@ $opusStock = @('opus','opus_decoder','extensions','opus_multistream','opus_multi
 $srcs = $celtSrcs + $silkSrcs + $silkFloat + $opusStock +
         @("$bld\encode_frame_FLP_instr.c", "$bld\opus_encoder_instr.c",
           "$bld\find_LPC_FLP_instr.c", "$bld\find_pred_coefs_FLP_instr.c", "$bld\noise_shape_analysis_FLP_instr.c",
-          "$bld\process_gains_FLP_instr.c", "$bld\wrappers_FLP_instr.c", "$bld\NSQ_del_dec_instr.c",
+          "$bld\process_gains_FLP_instr.c", "$bld\wrappers_FLP_instr.c", "$bld\NSQ_del_dec_instr.c", "$bld\enc_API_instr.c",
           "$bld\enc_oracle.c")
 $inc = @("-I$bld", "-I$celt", "-I$srcDir\include", "-I$srcDir", "-I$silk", "-I$silk\float", "-I$opusSrc")
 

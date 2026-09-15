@@ -108,9 +108,20 @@ type Encoder struct {
 	lastXBuf      []float32
 	// Stage traces (frame_trace.go): pendingTrace is filled by the NSQ call,
 	// lastTrace is the final (non-LBRR) frame's trace.
-	pendingTrace         FrameTrace
-	lastTrace            FrameTrace
-	traceNLSFQ15         []int16
+	pendingTrace FrameTrace
+	lastTrace    FrameTrace
+	traceNLSFQ15 []int16
+	// pitchPredGain is psEncCtrl->predGain from find_pitch_lags (float32).
+	pitchPredGain float64
+	// float32 sShape smoothers of the libopus-faithful noise-shape port
+	// (trace-only until the port drives the quantizer).
+	shapeHarmSmooth32 float64
+	shapeTiltSmooth32 float64
+	pendingShape32    silkNoiseShapeOutputs
+	// libopus bit reservoir (target_rate.go).
+	nBitsExceeded        int
+	nBitsUsedLBRR        int
+	targetRateBps        int
 	prevLagForPitch      int       // Previous frame pitch lag (0 if unvoiced)
 	ltpCorrState         float64   // Normalized LTP correlation from prev frame
 	pitchResidual        []float64 // res_pitch: whitened [history|frame|LTP_ORDER] from the pitch analysis
@@ -406,14 +417,18 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 			lbrrBits, e.lbrrBitsPerFrame, e.bitrate*e.frameMs/1000, e.silkFrameTargetBits())
 	}
 
+	e.updateLBRRUsage(lbrrBits)
+
 	e.beginLBRRPacket()
 	e.lastSNRVBRStream = false
 	for i, signal := range frames {
 		e.curFrame = i
+		e.targetRateBps = e.frameTargetRate(nFrames, i, enc.ECTell())
 		e.encodeRangeFrame(enc, signal, vadFlags[i], i > 0)
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 	}
 	e.finishLBRRPacket(nFrames)
+	e.finishPacketBitReservoir(nFrames, enc.ECTell())
 	return nil
 }
 
@@ -511,6 +526,8 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 	e.side.beginLBRRPacket()
 	e.lastSNRVBRStream = false
 	for i := 0; i < nFrames; i++ {
+		e.targetRateBps = e.frameTargetRate(nFrames, i, enc.ECTell())
+		e.side.targetRateBps = e.targetRateBps
 		encodeStereoPred(enc, stereoPredIx[i])
 		onlyMiddle := false
 		if !vadFlags[1][i] {
@@ -534,6 +551,7 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 	}
 	e.finishLBRRPacket(nFrames)
 	e.side.finishLBRRPacket(nFrames)
+	e.finishPacketBitReservoir(nFrames, enc.ECTell())
 	e.pendingLBRRStereoPred = append(e.pendingLBRRStereoPred[:0], stereoPredIx...)
 	return nil
 }
@@ -663,9 +681,11 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	// the bitstream so the decoder reproduces the same sign sequence.
 	e.nsqSeed = 0
 	e.traceNLSFQ15 = nlsf.nlsfQ15
+	e.pendingShape32 = e.noiseShapeFLP32Trace(signal, signalType, pitchLags)
 	pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, nlsf.lpcQ12Interp, gainIndices,
 		signalType, quantOffset, 0, pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale)
 	e.pendingTrace.Seed = e.nsqSeed
+	e.pendingTrace.Shape32 = e.pendingShape32
 	e.lastTrace = e.pendingTrace
 	enc.EncodeIcdf(int(e.nsqSeed), silkUniform4ICDF[:], 8)
 	e.encodePulses(enc, pulses, signalType, quantOffset)
@@ -3129,6 +3149,12 @@ func (e *Encoder) Reset() {
 	e.pitchHist = e.xBuf[:e.ltpMemLength()]
 	e.encInputDelay = nil
 	e.lastXBuf = nil
+	e.shapeHarmSmooth32 = 0
+	e.shapeTiltSmooth32 = 0
+	e.pitchPredGain = 0
+	e.nBitsExceeded = 0
+	e.nBitsUsedLBRR = 0
+	e.targetRateBps = 0
 	e.prevLagForPitch = 0
 	e.ltpCorrState = 0
 	e.pitchResidual = nil

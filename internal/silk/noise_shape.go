@@ -116,7 +116,9 @@ func (e *Encoder) silkComplexityConfig() silkComplexityConfig {
 	}
 	if e.complexity >= 4 {
 		cfg.useInterpolatedNLSFs = true
-		cfg.warpingQ16 = silkFloat2Int(float64(fsKHz) * silkWarpingMultiplier * 65536.0)
+		// silk_setup_complexity: fs_kHz * SILK_FIX_CONST(WARPING_MULTIPLIER, 16)
+		// = fs_kHz * 983 (rounding the product instead gives 15729 at 16 kHz).
+		cfg.warpingQ16 = int32(fsKHz) * 983
 	}
 	return cfg
 }

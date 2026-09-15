@@ -20,6 +20,28 @@ type FrameTrace struct {
 	LTPScaleQ14             int16
 	Seed                    int32
 	Pulses                  []int16
+	// Shape32 is the libopus-faithful noise-shape analysis of the frame
+	// (float32 values), for comparison with the oracle's *_FLP dumps.
+	Shape32 silkNoiseShapeOutputs
+}
+
+// Shape32Values exposes the float32 noise-shape outputs for tests: AR rows,
+// gains, LF_MA, LF_AR, tilt, harmonic gain, input/coding quality.
+func (t FrameTrace) Shape32Values(nbSubfr, order int) (ar [][]float32, gains, lfMA, lfAR, tilt, harm []float32, inputQuality, codingQuality float32) {
+	s := t.Shape32
+	for k := 0; k < nbSubfr; k++ {
+		row := make([]float32, order)
+		for j := 0; j < order; j++ {
+			row[j] = float32(s.ar[k][j])
+		}
+		ar = append(ar, row)
+		gains = append(gains, float32(s.gains[k]))
+		lfMA = append(lfMA, float32(s.lfMAShp[k]))
+		lfAR = append(lfAR, float32(s.lfARShp[k]))
+		tilt = append(tilt, float32(s.tilt[k]))
+		harm = append(harm, float32(s.harmShapeGain[k]))
+	}
+	return ar, gains, lfMA, lfAR, tilt, harm, float32(s.inputQuality), float32(s.codingQuality)
 }
 
 // LastFrameTrace returns the trace of the most recently coded frame.

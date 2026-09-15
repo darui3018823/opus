@@ -379,3 +379,42 @@ test passes.
 - Verified the Q1 and Q2 oracles, `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (only the 12 kHz speech-like-harmonic
   loudness gate fails), and `go test -race -count=1 ./...`.
+
+### 2026-09-15: SILK pitch analysis in float32
+
+- Reference: checked-in libopus 1.6.1 `silk/float/find_pitch_lags_FLP.c`,
+  `silk/float/pitch_analysis_core_FLP.c`, `silk/float/apply_sine_window_FLP.c`,
+  `silk/float/autocorrelation_FLP.c`, `silk/float/schur_FLP.c`,
+  `silk/float/k2a_FLP.c`, `silk/float/bwexpander_FLP.c`,
+  `celt/pitch.c::celt_pitch_xcorr_c`, `celt/pitch.h::xcorr_kernel_c`, and
+  `silk/float/SigProc_FLP.h` (`silk_float2short_array`, `silk_log2`,
+  `silk_max_float`).
+- Added `cgoref.SILKPitchAnalysisCore` and `cgoref.SILKFindPitchLags`, which
+  replay the C whitening chain with the exported libopus helpers on an
+  injected `x_buf` (history, frame, and `la_pitch` look-ahead) and call the
+  scalar-arch pitch core. `TestSILKQ2PitchOracle` compares autocorrelation,
+  Schur residual energy and reflection coefficients, prediction gain, LPC
+  coefficients, the whole residual, the voicing threshold, LTPCorr, lag and
+  contour indices, and every subframe lag for ten fixtures (8/12/16 kHz,
+  10/20 ms, complexity 0-10, with and without a previous lag, noise, and a
+  long lag).
+- Replaced the float64 pitch estimator with `pitch_core_flp32.go`: float32
+  rounding at every `silk_float` operation, double accumulation only where C
+  uses double (energies, inner products, the stage-1 recursive normalizer,
+  the Schur recursion), the four-lag `xcorr_kernel` float accumulation order
+  for stage 1 and stage 3, nearest-even `float2int` before the fixed-point
+  decimators, and the `silk_max_float` macro semantics (the Schur denominator
+  stays double). The encoder converts the VAD's float activity and tilt to Q8
+  and Q15 integers and uses `SILK_FIX_CONST` Q16 thresholds like
+  `silk_setup_complexity`.
+- All ten fixtures are exact at every checkpoint. Packet digests and the AB
+  scoreboard did not change, so the earlier float64 estimator was already
+  producing identical decisions on these fixtures; the port removes the
+  remaining numerical risk rather than a measured divergence.
+- Still open in this stage: the encoder has no `la_pitch` look-ahead (the LPC
+  window ends at the frame boundary), the VAD is a float port of the
+  fixed-point `silk_VAD_GetSA_Q8`, and the Go-specific first-frame long-lag
+  guard remains in front of the voicing decision.
+- Verified the Q1/Q2 oracles, `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (only the 12 kHz speech-like-harmonic
+  loudness gate fails), and `go test -race -count=1 ./...`.

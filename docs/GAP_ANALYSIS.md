@@ -49,9 +49,11 @@ SILK エンコーダの品質ギャップ根本原因はここにあります。
 
 - **実装済み：** `silk_find_pitch_lags_FLP` + `silk_pitch_analysis_core_FLP` によるピッチ検索は実装済み（float64 近似）。絶対ラグ/ピッチコンター符号化も実装。
 - **2026-09-15 完了：** `silk_find_LTP_FLP`（float32 演算順序・double 累算）と `silk_quant_LTP_gains` / `silk_VQ_WMat_EC`（Q17/Q15/Q8 固定小数点）を忠実移植。`TestSILKQ2LTPOracle`（opusref, 8 fixture）で XX/xX の float32 bit、periodicity/codebook index、`sum_log_gain_Q7`、`pred_gain_dB` が libopus 1.6.1 と完全一致。libopus は最後に評価したコードブックの残差エネルギーから pred gain を報告する癖も含めて一致
+- **2026-09-15 完了（pitch）：** `silk_find_pitch_lags_FLP` + `silk_pitch_analysis_core_FLP` を float32 忠実移植（`pitch_core_flp32.go`）。`TestSILKQ2PitchOracle`（opusref, 10 fixture）で autocorr/Schur/LPC/残差/閾値/LTPCorr/lag/contour/pitchL が完全一致。packet digest・scoreboard は不変
 - **未検証・残作業：**
-  - `silk_find_pitch_lags_FLP` / `silk_pitch_analysis_core_FLP` の float32 exactness（`celt_pitch_xcorr` の float カーネル加算順序、`silk_float2short` の偶数丸め、`la_pitch` 先読み込み）
-  - LTP に渡す残差が libopus の `res_pitch`（pitch 解析 LPC による白色化、先読み付き）ではなく Go 独自の量子化 LPC 残差である点。pitch exactness と同時に揃える
+  - encoder に `la_pitch`（2 ms）先読みが無く、LPC 窓が frame 境界で終わる（framing/delay スライスで解消）
+  - VAD (`silk_VAD_GetSA_Q8`) は float 近似のままで、pitch 閾値へ渡す Q8/Q15 は丸めで生成
+  - LTP に渡す残差が libopus の `res_pitch` ではなく Go 独自の量子化 LPC 残差である点
   - **encoder 全体の byte 一致には SILK の 5 ms (`LA_SHAPE_MS`) 先読み遅延と Opus 層の `delay_compensation` (Fs/250) が前提**。Go encoder は現在 lookahead なしで frame を切っているため、全段が exact でも frame 境界が libopus と一致しない。Phase 4 の前に framing/delay 再編スライスが必要
 - **libopus 参照：** `silk/float/find_LTP_FLP.c`, `silk/quant_LTP_gains.c`, `silk/VQ_WMat_EC.c`, `silk/float/pitch_analysis_core_FLP.c`
 - **スコアボード影響（2026-09-15, gap_SNR_matched 負=Go 優位）：** 8k steady-voiced -3.27→-1.86、16k steady-voiced -0.81→+0.41（libopus に僅差負け）、8k speech-harmonic -5.85→-6.94、16k onset -1.31→-1.57。loudness gate は 3 セル FAIL→12k のみ FAIL（8k -1.47 dB / 16k -1.33 dB は PASS）。Go 側の残差・lag が libopus と一致しない段階で量子化器だけ exact にした結果であり、pitch exactness 後に再評価

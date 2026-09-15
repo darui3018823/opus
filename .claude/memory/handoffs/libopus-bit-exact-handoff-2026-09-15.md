@@ -29,7 +29,8 @@ is complete at the oracle level but has **not** been merged back.
 | SILK encoder Q1 (`LPC_in_pre` → `PredCoef_Q12`) | 13 fixtures exact vs C (`TestSILKQ1LPCNLSFOracle`, opusref) |
 | SILK encoder VAD, pitch, LTP (Q2) | bit-exact on injected inputs (2026-09-15, `dev/silk-q2-ltp-oracle`); wired into the encoder |
 | SILK encoder input pipeline | complete (2026-09-16, `dev/encoder-input-pipeline`): VAD flags, 5 ms look-ahead, Fs/250 CELT delay, high-pass, int16 front end, libopus encoder resampler; conditioned input / x_buf / VAD / HP state bit-exact vs the instrumented libopus encoder at 8/12/16/24/48 kHz; silence-shortcut policy open |
-| SILK encoder Q3–Q7, CELT encoder, mode/rate policy | not bit-exact |
+| SILK encoder Q3 noise shaping | bit-exact vs the instrumented libopus encoder on shared inputs (2026-09-16, `ad81c1f`) |
+| SILK encoder Q4–Q7, CELT encoder, mode/rate policy | not bit-exact (Q5 gains next: frame-0 Gains_Q16 differ from subframe 1) |
 
 ## Open decision (blocks Q1 merge-back)
 
@@ -142,9 +143,12 @@ libopus in every mode; `befc6f7`/`0173420`/`08befec` stage traces). The
 oracle now names every differing NSQ input per frame: on frame 0 NLSF and
 PredCoef match, Gains_Q16 drift from subframe 1 (Q5), unvoiced shaping
 (AR_Q13/Tilt/LF) is zeroed on the Go side (Q3), Lambda_Q10 off by 1–2.
-Remaining: Q3 unvoiced shaping exactness, process_gains + encode_frame_FLP
-gain loop (Q5), the digital-silence shortcut policy, a phase-insensitive
-scoreboard distance. Loudness gate: 8k -2.61 dB fails, 12k/16k pass. Merge-back: `dev/libopus-bit-exact` was fast-forwarded to
+Q3 done (`63808a3`/`ad81c1f`): noise_shape_analysis_FLP bit-exact vs the
+oracle on shared inputs and driving the NSQ; libopus target rate / bit
+reservoir / TOC-adjusted SILK bit rate ported; loudness gate passes at all
+rates (8k -0.64 / 12k -0.25 / 16k -0.01 dB). Remaining: process_gains +
+encode_frame_FLP gain loop (Q5, the frame-0 Gains_Q16 divergence), the
+digital-silence shortcut policy, a phase-insensitive scoreboard distance. Merge-back: `dev/libopus-bit-exact` was fast-forwarded to
 `08c4201` (Q1/Q2/PLC) on 2026-09-16; the child branches
 `dev/silk-plc-exact`, `dev/silk-q1-oracle`, `dev/silk-q2-ltp-oracle` were
 deleted.

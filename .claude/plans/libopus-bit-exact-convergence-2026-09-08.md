@@ -655,3 +655,41 @@ test passes.
   as a consequence (gain-scaled LPC input). Order of attack: Q3 unvoiced
   shaping exactness → process_gains and the encode_frame_FLP gain loop (Q5)
   → seed/pulses follow.
+
+### 2026-09-16: Q3 noise-shape analysis exact (`63808a3`, `ad81c1f`)
+
+- Reference: `silk/float/noise_shape_analysis_FLP.c`, `silk/float/wrappers_FLP.c`
+  (Q13/Q14/Q10 conversions), `silk/float/process_gains_FLP.c` (Lambda),
+  `silk/enc_API.c` (TargetRate_bps: packet budget minus the LBRR usage
+  average, bit reservoir `nBitsExceeded`, in-packet balance), `silk/control_codec.c`
+  (`warping_Q16 = fs_kHz * SILK_FIX_CONST(0.015, 16)`), `src/opus_encoder.c`
+  (SILK bit rate = `bits_to_bitrate(bitrate_to_bits(bitrate) - 8)`, i.e. the
+  TOC byte amortised: 23600 bps at 24 kbps / 20 ms).
+- `internal/silk/noise_shape_flp32.go`: float32-faithful
+  `silkNoiseShapeAnalysisFLP32` (float32 constants, `silk_log2` via log10,
+  double warped autocorrelation/Schur, float sqrt/pow casts). Verified
+  bit-exact against the oracle's `SHAPE_*_FLP` dumps (AR, Gains, LF_MA/AR,
+  Tilt, HarmShapeGain, input/coding quality) on every frame whose inputs the
+  two encoders share (frame 0 on all fixtures, every frame on unvoiced
+  noise, frame 1 once the target-rate reservoir matched).
+- `internal/silk/target_rate.go`: the libopus per-frame target rate drives
+  `SNR_dB_Q7`; `opus.go` hands SILK the TOC-adjusted bit rate; the warping
+  off-by-one (15729 vs 15728 at 16 kHz) fixed.
+- `ad81c1f`: the NSQ now takes AR_Q13/LF_shp/Tilt/HarmShapeGain/Lambda from
+  the exact analysis for every frame type; the Go-specific neutral shaping
+  for unvoiced and stereo components is gone. Scoreboard: **matched loudness
+  8k -0.64 / 12k -0.25 / 16k -0.01 dB (all pass)** — the long-standing
+  loudness gap was the unfaithful shaping — and matched SNR gaps move toward
+  zero (8k steady -1.68, 8k harmonic -1.54, 12k steady +0.19, 16k steady
+  +0.79, 16k onset +2.42, unvoiced-noise 8k +0.99 / 12k +0.65 / 16k -0.16).
+- Test contracts: `TestLBRRNormalDecodeConsumesRedundancy` compares packet 0
+  exactly and later packets within 15 dB (libopus charges LBRR to the
+  target rate, so regular frames legitimately differ);
+  `TestHybridCVBROnsetBudgetOvershoot` retired (its SILK overshoot can no
+  longer be produced by a benign fixture; `TestHybridCVBROnsetFinalRange`
+  keeps the allocation guard); the hybrid-mono PLC parity gate allows 0.5 dB
+  because the CELT PLC is not a bit-exact port. Packet digests regenerated.
+- Remaining frame-0 divergence: Gains_Q16 from subframe 1 (process_gains /
+  the encode_frame_FLP gain loop, Q5), then seed/pulses follow.
+- Verified `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (all pass), `go test -race`.

@@ -997,11 +997,13 @@ VAD activity, and high-pass state are bit-exact through the first frame on
 the 8/12/16/24/48 kHz mono fixtures (the SILK input at 24/48 kHz goes
 through the encoder direction of the bit-exact `silk_resampler` port, and
 the end-to-end delay equals libopus in every mode). Packet bytes still
-differ from the first frame on: the oracle's stage trace shows NLSF and LPC
-matching, the quantisation gains drifting from the second subframe
-(process_gains / gain loop), and the unvoiced noise shaping zeroed on the Go
-side; the Go digital-silence shortcut also diverges from libopus (see
-`.claude/specs/encoder-input-pipeline-libopus.md`).
+differ from the first frame on: the oracle's stage trace shows NLSF, LPC,
+and the noise-shape analysis (AR/tilt/LF/harmonic shaping, Lambda — a
+float32 port of `noise_shape_analysis_FLP` fed by the libopus target rate)
+matching, and the quantisation gains drifting from the second subframe
+(process_gains / gain loop); the Go digital-silence shortcut also diverges
+from libopus (see `.claude/specs/encoder-input-pipeline-libopus.md`). The
+SILK AB loudness gate passes at 8/12/16 kHz since the shaping port.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

@@ -71,6 +71,19 @@ static void fill_silk_fixture(float *pcm, int rate, int frame_size, int frame, c
         }
         return;
     }
+    if (strcmp(fixture, "ref-speech") == 0) {
+        /* silkRefSpeechFrame (opus_cgo_silk_encode_test.go), mono. */
+        for (i = 0; i < frame_size; i++) {
+            double tm = (double)(start + i) / (double)rate;
+            double env = 0.55 + 0.35 * sin(2.0 * M_PI * 3.0 * tm);
+            double s = 0.32 * sin(2.0 * M_PI * 180.0 * tm) +
+                0.12 * sin(2.0 * M_PI * 360.0 * tm + 0.4) +
+                0.06 * sin(2.0 * M_PI * 720.0 * tm + 0.9) +
+                0.025 * sin(2.0 * M_PI * 1100.0 * tm + 1.7);
+            pcm[i] = (float)(env * s);
+        }
+        return;
+    }
     if (strcmp(fixture, "onset") == 0) {
         for (i = 0; i < frame_size; i++) {
             int global = start + i;
@@ -99,7 +112,7 @@ static int parse_bandwidth(const char *s)
 
 static int run_silk_encoder_oracle(int argc, char **argv)
 {
-    int rate, target, frames, bitrate, bandwidth, frame_size, err, frame;
+    int rate, target, frames, bitrate, bandwidth, frame_size, err, frame, lossPerc;
     const char *fixture;
     OpusEncoder *enc;
     float pcm[960 * 5];
@@ -107,7 +120,7 @@ static int run_silk_encoder_oracle(int argc, char **argv)
 
     if (argc < 4) {
         fprintf(stderr, "usage: %s --silk-enc <rate> <fixture> [targetFrame] [frames] [bitrate] [bandwidth]\n", argv[0]);
-        fprintf(stderr, "fixtures: silence, unvoiced-noise, steady-voiced, speech-like-harmonic, onset\n");
+        fprintf(stderr, "fixtures: silence, unvoiced-noise, steady-voiced, speech-like-harmonic, onset, ref-speech\n");
         return 2;
     }
     rate = atoi(argv[2]);
@@ -116,6 +129,7 @@ static int run_silk_encoder_oracle(int argc, char **argv)
     frames = (argc >= 6) ? atoi(argv[5]) : 12;
     bitrate = (argc >= 7) ? atoi(argv[6]) : 24000;
     bandwidth = (argc >= 8) ? parse_bandwidth(argv[7]) : OPUS_AUTO;
+    lossPerc = (argc >= 9) ? atoi(argv[8]) : 0; /* > 0 enables in-band FEC with that loss percentage */
     frame_size = rate / 50;
     if (rate != 8000 && rate != 12000 && rate != 16000 && rate != 24000 && rate != 48000) {
         fprintf(stderr, "--silk-enc rate must be 8000, 12000, 16000, 24000 or 48000\n");
@@ -138,6 +152,10 @@ static int run_silk_encoder_oracle(int argc, char **argv)
     opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
     if (bandwidth != OPUS_AUTO) opus_encoder_ctl(enc, OPUS_SET_BANDWIDTH(bandwidth));
     opus_encoder_ctl(enc, OPUS_SET_FORCE_MODE(MODE_SILK_ONLY));
+    if (lossPerc > 0) {
+        opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(lossPerc));
+        opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1));
+    }
 
     fprintf(stderr, "SILK_ENC_ORACLE rate=%d frame_size=%d fixture=%s target=%d frames=%d bitrate=%d bandwidth=%d\n",
             rate, frame_size, fixture, target, frames, bitrate, bandwidth);

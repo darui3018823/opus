@@ -1000,10 +1000,13 @@ the end-to-end delay equals libopus in every mode). Packet bytes still
 differ from the first frame on: the oracle's stage trace shows NLSF, LPC,
 and the noise-shape analysis (AR/tilt/LF/harmonic shaping, Lambda — a
 float32 port of `noise_shape_analysis_FLP` fed by the libopus target rate)
-matching, and the quantisation gains drifting from the second subframe
-(process_gains / gain loop); the Go digital-silence shortcut also diverges
-from libopus (see `.claude/specs/encoder-input-pipeline-libopus.md`). The
-SILK AB loudness gate passes at 8/12/16 kHz since the shaping port.
+matching, and in VBR the gains too (`process_gains_FLP` / `silk_gains_quant`
+ports): the first SILK packet after a reset is byte-identical to libopus on
+13 of 16 oracle cells (8/12/16/24/48 kHz mono fixtures). Later frames still
+diverge through state-dependent NLSF and the NSQ seed; the Go
+digital-silence shortcut also diverges from libopus (see
+`.claude/specs/encoder-input-pipeline-libopus.md`). The SILK AB loudness
+gate passes at 8/12/16 kHz since the shaping port.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

@@ -693,3 +693,32 @@ test passes.
   the encode_frame_FLP gain loop, Q5), then seed/pulses follow.
 - Verified `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (all pass), `go test -race`.
+
+### 2026-09-16: Q5 (VBR) exact gains — first byte-identical SILK packets (`d0e2532`)
+
+- Reference: `silk/float/encode_frame_FLP.c` (with `useCBR == 0` the
+  quantiser loop breaks after the first pass whenever it fits `maxBits`, so
+  VBR gains are `silk_process_gains_FLP`'s), `silk/float/process_gains_FLP.c`,
+  `silk/gain_quant.c` (`silk_gains_quant` with the double-step delta rule),
+  `silk/float/residual_energy_FLP.c`, `silk/float/find_pred_coefs_FLP.c`
+  (LPC_in_pre scaled by `1.0f / Gains[i]`, the unquantised shape gains;
+  `minInvGain` from the exact `coding_quality`), `silk/encode_pulses.c`
+  (`combine_and_check` scale-down against `silk_max_pulses_table` {8, 10,
+  12, 16} at every shell level, not only the block total).
+- `internal/silk/process_gains_flp32.go`: float32 ports of residual energy,
+  process_gains and gains_quant; in VBR/CVBR `encodeRangeFrame` codes these
+  gains and their delta symbols directly (the Go budget search now serves
+  CBR only). The 48 kHz mono homebrew-NSQ fallback (2026-06 conformance
+  workaround) is removed; the pulse encoder scales blocks down like
+  `combine_and_check` (a block whose pair/quad/octet sums exceeded the table
+  was mis-coded before).
+- Result (`TestSILKEncoderInputPipelineOracle`): the first packet is
+  **byte-identical to libopus** for 13 of 16 cells (8/12/16/24/48 kHz ×
+  steady-voiced / speech-like-harmonic / unvoiced-noise; 48 kHz noise also
+  frame 1). Frame-0 leftovers: 8k noise, 12k steady, 24k harmonic (all
+  traced stages equal, ±1 byte: an entropy-coding corner). From frame 1 on,
+  NLSF_Q15 (state-dependent LPC input) and the NSQ seed/pulses diverge.
+- Test contracts: `TestEncoderSILKOnlyVoicedRateModeContract` now requires
+  the `OPUS_SILK_RC_SNR` A/B switch to leave VBR output unchanged (it only
+  steers the CBR search). Packet digests regenerated. Full opusref suite
+  passes.

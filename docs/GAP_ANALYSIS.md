@@ -66,6 +66,7 @@ SILK エンコーダの品質ギャップ根本原因はここにあります。
 ### Q3/Q4 残：ノイズシェーピング解析 + 本格遅延決定 NSQ
 
 - **実装済み：** Q3a/Q4a — 単一候補の shaping 制御フィード、遅延決定トレリス NSQ の骨格（libopus 構造に忠実）
+- **2026-09-16 完了（Q5 VBR）：** `process_gains_FLP` / `silk_gains_quant` / `residual_energy_FLP` を float32 移植し、VBR/CVBR では（libopus と同様に 1 pass で）その gain をそのまま符号化。`encode_pulses` の `combine_and_check`（shell 各段の上限 8/10/12/16）を再現、48k mono の homebrew NSQ fallback を撤去。**reset 直後の最初の SILK packet が 13/16 oracle セルで libopus と byte 一致**。残り: frame 0 の ±1 byte（8k noise / 12k steady / 24k harmonic、entropy coding の隅）、frame 1 以降の NLSF（状態依存の LPC 入力）と NSQ seed、CBR ループ
 - **2026-09-16 完了（Q3）：** `silk_noise_shape_analysis_FLP` を float32 忠実移植（`noise_shape_flp32.go`）。計装 libopus encoder の `SHAPE_*_FLP` dump と AR/Gains/LF/Tilt/Harm/quality が bit 一致（入力が共有される frame で）。libopus の TargetRate（bit reservoir、LBRR 平均、TOC 分の bitrate 減算）も移植し `SNR_dB_Q7` が一致。NSQ の shaping を全 frame 種でこの結果に切替（unvoiced/stereo の Go 独自 neutral shaping を撤去）→ **loudness gate 全 rate PASS（8k -0.64 / 12k -0.25 / 16k -0.01 dB）**
 - **未実装：**
   - `silk_prefilter_FLP` — 入力プリフィルタ

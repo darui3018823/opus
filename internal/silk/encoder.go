@@ -21,39 +21,44 @@ const (
 
 // Encoder represents a SILK encoder instance
 type Encoder struct {
-	sampleRate       int  // Sample rate (8000, 12000, 16000, 24000)
-	frameSize        int  // Frame size in samples
-	frameMs          int  // Frame duration in milliseconds (10 or 20)
-	nSubframes       int  // Number of SILK subframes in one frame
-	packetFrames     int  // Number of SILK frames in the packet currently being encoded
-	channels         int  // Number of channels (1 or 2)
-	lpcOrder         int  // LPC order based on bandwidth
-	complexity       int  // Complexity (0-10)
-	bitrate          int  // Target bitrate in bps
-	vad              *VAD // Voice activity detector
+	sampleRate       int // Sample rate (8000, 12000, 16000, 24000)
+	frameSize        int // Frame size in samples
+	frameMs          int // Frame duration in milliseconds (10 or 20)
+	nSubframes       int // Number of SILK subframes in one frame
+	packetFrames     int // Number of SILK frames in the packet currently being encoded
+	channels         int // Number of channels (1 or 2)
+	lpcOrder         int // LPC order based on bandwidth
+	complexity       int // Complexity (0-10)
+	bitrate          int // Target bitrate in bps
 	silkVAD          silkVADState
 	speechActivity   float64
 	inputTilt        float64
 	speechActivityQ8 int
 	inputTiltQ15     int
-	inputQuality     float64
-	inputQualityB    [silkVADNBands]float64
-	prevEnergy       float64   // Previous frame energy for smoothing
-	prevLPC          []float64 // Previous LPC coefficients
-	prevNLSF         []float64 // Previous NLSF
-	prevNLSFQ15      []int16   // Previous quantized NLSF in Q15 (matches decoder prevNLSFQ15; used for interpolation search)
-	prevPitchLag     int       // Previous pitch lag
-	prevLagIndex     int       // Previous entropy-coded pitch lag index
-	prevSignalType   int       // Previous SILK signal type
-	prevGains        []float64 // Previous subframe gains
-	prevGainIdx      int       // Previous absolute gain index, matching decoder state
-	prevGainQ16      int32     // Previous synthesis gain, matching decoder state
-	lpcState         []int32   // Encoder-side LPC synthesis state, Q14
-	ltpState         []int32   // Encoder-side LTP output history, Q0
-	nsq              silkNSQState
-	nsqDelDec        [4]nsqDelayedDecision
-	nsqSeed          int32 // winning del-dec seed (silk_NSQ_del_dec writes this back to the bitstream)
-	lastFinalRange   uint32
+	// frameVAD holds the fixed-point VAD result of every frame in the packet
+	// being encoded, computed in frame order before any frame is coded
+	// (silk_encode_do_VAD_FLP); curFrame indexes it during encodeRangeFrame.
+	frameVAD        []silkVADResult
+	curFrame        int
+	noSpeechCounter int
+	inputQuality    float64
+	inputQualityB   [silkVADNBands]float64
+	prevEnergy      float64   // Previous frame energy for smoothing
+	prevLPC         []float64 // Previous LPC coefficients
+	prevNLSF        []float64 // Previous NLSF
+	prevNLSFQ15     []int16   // Previous quantized NLSF in Q15 (matches decoder prevNLSFQ15; used for interpolation search)
+	prevPitchLag    int       // Previous pitch lag
+	prevLagIndex    int       // Previous entropy-coded pitch lag index
+	prevSignalType  int       // Previous SILK signal type
+	prevGains       []float64 // Previous subframe gains
+	prevGainIdx     int       // Previous absolute gain index, matching decoder state
+	prevGainQ16     int32     // Previous synthesis gain, matching decoder state
+	lpcState        []int32   // Encoder-side LPC synthesis state, Q14
+	ltpState        []int32   // Encoder-side LTP output history, Q0
+	nsq             silkNSQState
+	nsqDelDec       [4]nsqDelayedDecision
+	nsqSeed         int32 // winning del-dec seed (silk_NSQ_del_dec writes this back to the bitstream)
+	lastFinalRange  uint32
 	// useTrellisNSQ enables the FLP noise-shape analysis + delayed-decision
 	// trellis NSQ (Q3+Q4) for active frames. Voiced frames use the perceptual
 	// shaping path; unvoiced/stereo-component frames keep neutral shaping while
@@ -221,7 +226,6 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		lpcOrder:         lpcOrder,
 		complexity:       5,
 		bitrate:          sampleRate * channels * 16 / 8,
-		vad:              NewVAD(),
 		silkVAD:          newSilkVADState(),
 		speechActivity:   1.0,
 		speechActivityQ8: 255,
@@ -265,15 +269,6 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		side.stereoComponent = true
 		enc.side = side
 	}
-	// Do not let the history smoother suppress a live onset. This applies to
-	// both mono and stereo components; the VAD flags are written before the
-	// per-frame symbols, so changing an accurately predicted flag does not alter
-	// the encoder/decoder entropy ordering.
-	enc.vad.immediateAttack = true
-	if enc.side != nil {
-		enc.side.vad.immediateAttack = true
-	}
-
 	return enc, nil
 }
 
@@ -364,7 +359,7 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 		start := frame * e.frameSize * e.channels
 		framePCM := pcm[start : start+e.frameSize*e.channels]
 		frames[frame] = framePCM
-		vadFlags[frame] = e.vad.Detect(framePCM)
+		vadFlags[frame] = e.runFrameVAD(frame, framePCM)
 	}
 
 	for _, active := range vadFlags {
@@ -388,6 +383,7 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 	e.beginLBRRPacket()
 	e.lastSNRVBRStream = false
 	for i, signal := range frames {
+		e.curFrame = i
 		e.encodeRangeFrame(enc, signal, vadFlags[i], i > 0)
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 	}
@@ -410,13 +406,6 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		return fmt.Errorf("missing SILK side-channel encoder")
 	}
 
-	// A single-frame stereo packet can report a live onset immediately, which
-	// ensures the frame reaches pitch analysis. Multi-frame stereo streams keep
-	// the smoothed flags: their conditional-gain context is shared across all
-	// frames, and changing the precomputed VAD pattern breaks libopus parity.
-	e.vad.immediateAttack = nFrames == 1
-	e.side.vad.immediateAttack = nFrames == 1
-
 	midFrames := make([][]float64, nFrames)
 	sideFrames := make([][]float64, nFrames)
 	stereoPredIx := make([][2][3]int8, nFrames)
@@ -430,8 +419,8 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		midFrames[frame] = mid
 		sideFrames[frame] = side
 		stereoPredIx[frame] = predIx
-		vadFlags[0][frame] = e.vad.Detect(mid)
-		vadFlags[1][frame] = e.side.vad.Detect(side)
+		vadFlags[0][frame] = e.runFrameVAD(frame, mid)
+		vadFlags[1][frame] = e.side.runFrameVAD(frame, side)
 	}
 
 	for ch := 0; ch < 2; ch++ {
@@ -487,12 +476,14 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 			onlyMiddle = true
 			enc.EncodeIcdf(1, silkStereoOnlyCodeMidICDF[:], 8)
 		}
+		e.curFrame = i
 		e.encodeRangeFrame(enc, midFrames[i], vadFlags[0][i], i > 0)
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 		if !onlyMiddle {
 			if e.prevOnlyMiddle {
 				e.side.Reset()
 			}
+			e.side.curFrame = i
 			e.side.encodeRangeFrame(enc, sideFrames[i], vadFlags[1][i], i > 0 && !e.prevOnlyMiddle)
 			e.lastSNRVBRStream = e.lastSNRVBRStream || e.side.lastSNRVBRFrame
 		} else {
@@ -531,7 +522,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	initialState := e.snapshotFrameState()
 	e.curLTP = nil
 	e.pitchResidual = nil
-	vadSA := e.silkVADGetSAQ8(signal)
+	vadSA := e.frameVADResult(signal)
 	e.speechActivity = vadSA.speechActivity
 	e.inputTilt = vadSA.inputTilt
 	e.speechActivityQ8 = vadSA.speechActivityQ8
@@ -2963,7 +2954,9 @@ func encodePulseSigns(enc *entcode.Encoder, blocks []pulseBlock, signalType, qua
 
 // Reset resets the encoder state
 func (e *Encoder) Reset() {
-	e.vad.Reset()
+	e.frameVAD = nil
+	e.curFrame = 0
+	e.noSpeechCounter = 0
 	e.silkVAD.reset()
 	e.speechActivity = 1.0
 	e.inputTilt = 0
@@ -3070,4 +3063,40 @@ func QuantizeSubframeGains(gains []float64) ([]float64, []int) {
 	}
 
 	return quantized, indices
+}
+
+// runFrameVAD runs the fixed-point VAD on packet frame index frame (in frame
+// order, once per frame) and returns the frame's VAD flag as
+// silk_encode_do_VAD_FLP derives it: active when speech_activity_Q8 reaches
+// SILK_FIX_CONST(SPEECH_ACTIVITY_DTX_THRES, 8). The result is kept for the
+// frame encode so the VAD state advances exactly once per frame.
+func (e *Encoder) runFrameVAD(frame int, pcm []float64) bool {
+	const activityThresholdQ8 = 13 // SILK_FIX_CONST(0.05, 8)
+	if frame == 0 {
+		e.frameVAD = e.frameVAD[:0]
+	}
+	res := e.silkVADGetSAQ8(pcm)
+	for len(e.frameVAD) <= frame {
+		e.frameVAD = append(e.frameVAD, silkVADResult{})
+	}
+	e.frameVAD[frame] = res
+	if res.speechActivityQ8 < activityThresholdQ8 {
+		e.noSpeechCounter++
+		if e.noSpeechCounter > silkMaxConsecutiveDTX+silkNBSpeechFramesBeforeDTX {
+			e.noSpeechCounter = silkNBSpeechFramesBeforeDTX
+		}
+		return false
+	}
+	e.noSpeechCounter = 0
+	return true
+}
+
+// frameVADResult returns the stored VAD result for the frame being encoded,
+// falling back to a direct evaluation when the frame was not pre-analysed
+// (callers outside the packet loop).
+func (e *Encoder) frameVADResult(signal []float64) silkVADResult {
+	if e.curFrame >= 0 && e.curFrame < len(e.frameVAD) {
+		return e.frameVAD[e.curFrame]
+	}
+	return e.silkVADGetSAQ8(signal)
 }

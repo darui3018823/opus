@@ -5,11 +5,13 @@ import (
 	"testing"
 )
 
-// TestLBRRRegularPathDeterminism asserts that enabling inband FEC does not alter
-// the regular (non-LBRR) encode: an FEC encoder and a non-FEC encoder fed the
-// same PCM must keep identical internal state after every packet, and produce
-// identical regular-frame symbols. (The FEC stream only has extra LBRR bytes at
-// the front.)
+// TestLBRRRegularPathDeterminism asserts that enabling inband FEC does not
+// alter the regular (non-LBRR) encode until redundancy is actually written:
+// an FEC encoder and a non-FEC encoder fed the same PCM keep identical
+// internal state while no LBRR bits have been spent. Once a packet carries
+// LBRR, libopus charges those bits to the regular frames' target
+// (silk_Encode: nBits -= nBitsUsedLBRR), so the two encoders may then
+// legitimately choose different gain plans.
 func TestLBRRRegularPathDeterminism(t *testing.T) {
 	const (
 		rate     = 16000
@@ -44,6 +46,10 @@ func TestLBRRRegularPathDeterminism(t *testing.T) {
 		}
 		if _, err := encNo.EncodeMulti(b, nFrames); err != nil {
 			t.Fatalf("packet %d no-FEC EncodeMulti: %v", p, err)
+		}
+		if encFEC.lbrrBitsPerFrame > 0 {
+			t.Logf("packet %d spent %d LBRR bits per frame; regular budgets may diverge from here", p, encFEC.lbrrBitsPerFrame)
+			return
 		}
 		if fa, fb := encFEC.leakFingerprint(), encNo.leakFingerprint(); fa != fb {
 			t.Fatalf("encoder state diverged after packet %d:\n  FEC   = %s\n  noFEC = %s", p, fa, fb)

@@ -297,3 +297,9 @@ func silkSigmQ15(inQ5 int32) int32 {
 	ind := inQ5 >> 5
 	return silkSigmLUTPosQ15[ind] + silkSMULBB(silkSigmLUTSlopeQ10[ind], inQ5&0x1F)
 }
+
+// DTX hangover constants (silk/define.h).
+const (
+	silkNBSpeechFramesBeforeDTX = 10 // NB_SPEECH_FRAMES_BEFORE_DTX
+	silkMaxConsecutiveDTX       = 20 // MAX_CONSECUTIVE_DTX
+)

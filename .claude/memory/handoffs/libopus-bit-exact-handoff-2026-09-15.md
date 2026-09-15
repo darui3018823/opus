@@ -28,7 +28,7 @@ is complete at the oracle level but has **not** been merged back.
 | SILK decoder / PLC | PLC, CNG, glue, one-byte payload handling sample-exact vs libopus (2026-09-15, `dev/silk-plc-exact`) |
 | SILK encoder Q1 (`LPC_in_pre` → `PredCoef_Q12`) | 13 fixtures exact vs C (`TestSILKQ1LPCNLSFOracle`, opusref) |
 | SILK encoder VAD, pitch, LTP (Q2) | bit-exact on injected inputs (2026-09-15, `dev/silk-q2-ltp-oracle`); wired into the encoder |
-| SILK encoder input pipeline | VAD flags, 5 ms look-ahead, Fs/250 CELT delay, high-pass, int16 front end landed (2026-09-16, `dev/encoder-input-pipeline`); bit-exact through frame 0 vs the instrumented libopus encoder at 8/12/16 kHz; 24/48 kHz resampler FIR and silence-shortcut policy open |
+| SILK encoder input pipeline | complete (2026-09-16, `dev/encoder-input-pipeline`): VAD flags, 5 ms look-ahead, Fs/250 CELT delay, high-pass, int16 front end, libopus encoder resampler; conditioned input / x_buf / VAD / HP state bit-exact vs the instrumented libopus encoder at 8/12/16/24/48 kHz; silence-shortcut policy open |
 | SILK encoder Q3–Q7, CELT encoder, mode/rate policy | not bit-exact |
 
 ## Open decision (blocks Q1 merge-back)
@@ -137,11 +137,14 @@ Opus-layer Fs/250 CELT delay; `Lookahead()` = 312 at 48 kHz; `a04f4ce`
 hp_cutoff/dc_reject/variable_HP smoothing, unit-exact vs the libopus float
 bodies; `81444af` int16 front end + instrumented libopus encoder oracle:
 conditioned input, x_buf, VAD, HP state bit-exact through frame 0 on the
-mono AB fixtures). Remaining: libopus down-sampling FIR for 24/48 kHz input
-(hybrid low band leads by ~34 samples at 48 kHz), the digital-silence
-shortcut policy, a phase-insensitive scoreboard distance, then Q3 with the
-oracle's NSQ-input dumps as the next gate. Loudness gate: 8k -2.61 dB fails,
-12k/16k pass. Merge-back: `dev/libopus-bit-exact` was fast-forwarded to
+mono AB fixtures; `94938d2` libopus encoder resampler, delay equal to
+libopus in every mode; `befc6f7`/`0173420`/`08befec` stage traces). The
+oracle now names every differing NSQ input per frame: on frame 0 NLSF and
+PredCoef match, Gains_Q16 drift from subframe 1 (Q5), unvoiced shaping
+(AR_Q13/Tilt/LF) is zeroed on the Go side (Q3), Lambda_Q10 off by 1–2.
+Remaining: Q3 unvoiced shaping exactness, process_gains + encode_frame_FLP
+gain loop (Q5), the digital-silence shortcut policy, a phase-insensitive
+scoreboard distance. Loudness gate: 8k -2.61 dB fails, 12k/16k pass. Merge-back: `dev/libopus-bit-exact` was fast-forwarded to
 `08c4201` (Q1/Q2/PLC) on 2026-09-16; the child branches
 `dev/silk-plc-exact`, `dev/silk-q1-oracle`, `dev/silk-q2-ltp-oracle` were
 deleted.

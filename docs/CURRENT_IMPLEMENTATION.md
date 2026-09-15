@@ -994,9 +994,13 @@ offset (`internal/silk/front_end.go`). Against the instrumented libopus
 1.6.1 encoder (`scripts/oracle/build_encoder.ps1`,
 `TestSILKEncoderInputPipelineOracle`) the conditioned input, SILK `x_buf`,
 VAD activity, and high-pass state are bit-exact through the first frame on
-the 8/12/16 kHz mono fixtures; packet bytes still differ from the first
-frame on (analysis and rate control), the 24/48 kHz down-sampling FIR is not
-ported, and the Go digital-silence shortcut diverges from libopus (see
+the 8/12/16/24/48 kHz mono fixtures (the SILK input at 24/48 kHz goes
+through the encoder direction of the bit-exact `silk_resampler` port, and
+the end-to-end delay equals libopus in every mode). Packet bytes still
+differ from the first frame on: the oracle's stage trace shows NLSF and LPC
+matching, the quantisation gains drifting from the second subframe
+(process_gains / gain loop), and the unvoiced noise shaping zeroed on the Go
+side; the Go digital-silence shortcut also diverges from libopus (see
 `.claude/specs/encoder-input-pipeline-libopus.md`).
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss

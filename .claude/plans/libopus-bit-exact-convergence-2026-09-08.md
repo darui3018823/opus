@@ -628,3 +628,30 @@ test passes.
 - Verified `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (only the 8 kHz loudness gate
   fails, -2.61 dB), and `go test -race -count=1 ./...`.
+
+### 2026-09-16: libopus encoder resampler, stage traces, and the divergence map
+
+- `94938d2` feat(encoder): the Opus layer feeds SILK through
+  `silk.NewEncoderResampler` (encoder direction of the bit-exact
+  `silk_resampler` port: `delay_matrix_enc`, `forEnc` init; exact against
+  `silk_resampler(forEnc=1)` for every 8/12/16/24/48 → 8/12/16 kHz pair,
+  `TestSILKEncoderResamplerOracle`). End-to-end delay now equals libopus in
+  every mode (48 kHz: 312; 24 kHz: 155/156; 16 kHz: 104 samples).
+  `TestEncoderHybrid24kUnvoicedNoiseDoesNotCollapse` scores low-band energy
+  instead of the sign of a noise-waveform alignment scale.
+- `66543b8` the pipeline oracle covers 24/48 kHz input (wideband): the
+  conditioned input and x_buf stay bit-exact through the resampler.
+- `befc6f7` `build_encoder.ps1` also instruments find_LPC, find_pred_coefs,
+  noise_shape_analysis, process_gains, wrappers (NSQ inputs) and NSQ_del_dec
+  with anchor-checked replacements; `0173420` adds `silk.FrameTrace`
+  (`Encoder.LastFrameTrace`) and the oracle test lists every differing NSQ
+  input per frame; `08befec` hands the NSQ pitchL = 0 and LTP_scale_Q14 = 0
+  for non-voiced frames like wrappers_FLP.c (trace-only, digests unchanged).
+- Divergence map on identical input (frame 0 after reset, unvoiced, 8/12/16
+  kHz): NLSF_Q15 and PredCoef_Q12 match libopus; Gains_Q16 match on subframe
+  0 and drift on 1–3 (process_gains / gain loop, Q5); AR_Q13, Tilt_Q14,
+  LF_shp_Q14 differ because the Go unvoiced path deliberately zeroes the
+  shaping (Q3); Lambda_Q10 is off by 1–2. From frame 1 on, NLSF_Q15 differs
+  as a consequence (gain-scaled LPC input). Order of attack: Q3 unvoiced
+  shaping exactness → process_gains and the encode_frame_FLP gain loop (Q5)
+  → seed/pulses follow.

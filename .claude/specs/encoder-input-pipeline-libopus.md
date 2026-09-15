@@ -113,13 +113,12 @@ that must be reconciled when this pipeline lands.
   60–100 Hz cutoff depends on each encoder's cutoff trajectory (phase), so
   the SNR gaps are now a noisier instrument than the byte ratios and the
   RMS loudness; a phase-insensitive (spectral) distance is the fix.
-- **SILK API resampler.** libopus resamples the Opus-rate input to `fs_kHz`
-  with `silk_resampler` (fixed-point). The equal-rate path (a pure
-  `delay_matrix_enc` delay of 6/7/10 samples at 8/12/16 kHz) plus the
-  `inputBuf + 1` offset and the int16 quantisation are reproduced by
-  `internal/silk/front_end.go`; the down-sampling FIR path for 24/48 kHz
-  input is not ported, so at those rates only the one-sample offset applies
-  and the hybrid low band still leads the high band by ~34 samples.
+- **SILK API resampler — done (`94938d2`).** `silk.NewEncoderResampler`
+  (encoder direction of the bit-exact `silk_resampler` port) feeds SILK at
+  24/48 kHz input; the equal-rate delay, `inputBuf + 1` offset and int16
+  quantisation live in `internal/silk/front_end.go`. End-to-end delay equals
+  libopus in every mode and the pipeline oracle is exact through the
+  resampler at 24/48 kHz.
 - **CELT prefill on mode switches.** libopus primes CELT with
   `tmp_prefill` (the Fs/400 samples preceding the frame from `delay_buffer`)
   when switching into CELT/hybrid; the Go transition logic does not.

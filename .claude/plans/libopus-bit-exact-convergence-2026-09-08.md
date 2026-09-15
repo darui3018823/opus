@@ -494,3 +494,28 @@ test passes.
 - Verified `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (only the 8 kHz loudness gate fails),
   and `go test -race -count=1 ./...`.
+
+### 2026-09-15: VAD flags from the fixed-point activity (input pipeline step 0)
+
+- Reference: `silk/float/encode_frame_FLP.c::silk_encode_do_VAD_FLP` and
+  `silk/enc_API.c` (VAD flags patched into the reserved header bits after all
+  frames are coded; `nBits -= nBitsUsedLBRR` charges LBRR to the regular
+  frames).
+- Removed the Go-specific energy/flatness/zero-crossing VAD (`vad.go`) that
+  decided the per-frame VAD flags. `EncodeMulti` now runs the fixed-point
+  `silk_VAD_GetSA_Q8` port once per frame in frame order before coding,
+  derives the flag from `speech_activity_Q8 >= SILK_FIX_CONST(0.05, 8)`,
+  tracks `noSpeechCounter` like libopus, and reuses the stored per-frame
+  activity/tilt/quality inside `encodeRangeFrame`, so the VAD state advances
+  exactly once per frame (also for LBRR re-encodes of the same frame).
+- `TestLBRRRegularPathDeterminism` now compares FEC and non-FEC encoder state
+  only until LBRR bits are spent: the exact VAD marks a long stationary tone
+  inactive after a few hundred milliseconds, which exposed that the Go rate
+  control (like libopus) charges LBRR bits to the regular budget, so the old
+  unconditional state-equality assertion was not a libopus property.
+- Scoreboard: onsets improved (8k -0.94 → -3.49, 12k +0.91 → -0.70, 16k
+  +1.98 → +1.44); matched loudness 8k -1.46 (PASS), 12k -1.52 (FAIL by
+  0.02 dB), 16k -0.64. Packet digests regenerated.
+- Verified `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (only the 12 kHz loudness gate
+  fails), and `go test -race -count=1 ./...`.

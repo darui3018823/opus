@@ -1,6 +1,6 @@
 # Encoder Input Pipeline: libopus Framing, Delay, and High-Pass
 
-Status: Draft (2026-09-15). Prerequisite for encoder byte-exactness (convergence
+Status: In progress on `dev/encoder-input-pipeline` (2026-09-15); step 0 landed in `5e6482f`. Prerequisite for encoder byte-exactness (convergence
 plan Phase 4) and for exact SILK noise-shape analysis (Q3), whose windows
 extend into the look-ahead.
 

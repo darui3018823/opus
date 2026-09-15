@@ -263,21 +263,61 @@ func TestCGOSILKOneBytePayloadExact(t *testing.T) {
 	}
 }
 
+// silkFECGapCarrier picks the packet whose LBRR mask leaves at least one
+// 20 ms subframe without redundancy, preferring a mixed mask (some LBRR, some
+// gap) so the FEC decode exercises both the LBRR frame and the PLC fill in
+// one packet. It returns -1 when every packet carries full LBRR.
+func silkFECGapCarrier(t *testing.T, packets [][]byte, nFrames int) int {
+	t.Helper()
+	anyGap := -1
+	for p := 2; p < len(packets); p++ {
+		present, err := silkMonoLBRRPresent(packets[p], nFrames)
+		if err != nil {
+			t.Fatalf("packet %d: parse LBRR mask: %v", p, err)
+		}
+		gaps, full := 0, 0
+		for _, ok := range present {
+			if ok {
+				full++
+			} else {
+				gaps++
+			}
+		}
+		if gaps > 0 && full > 0 {
+			return p
+		}
+		if gaps > 0 && anyGap < 0 {
+			anyGap = p
+		}
+	}
+	return anyGap
+}
+
 // TestCGOSILKFECGapExact decodes in-band FEC for multi-frame packets whose
 // LBRR mask leaves some subframes to the PLC, and requires the reconstruction
 // and the following normal frames to be sample-exact against libopus.
+//
+// The lost packet is chosen from the encoded stream: the steady harmonic
+// fixture drives the fixed-point VAD's noise floor up until some 20 ms frames
+// fall below LBRR_SPEECH_ACTIVITY_THRES, and the packet right before the
+// first such carrier is dropped so the FEC decode has to fill the gap.
 func TestCGOSILKFECGapExact(t *testing.T) {
 	t.Logf("libopus version: %s", cgoref.Version())
 	const (
 		rate     = 16000
-		nPackets = 12
-		lost     = 5
+		nPackets = 16
 	)
 	for _, packetMs := range []int{20, 40, 60} {
 		packetMs := packetMs
 		t.Run(silkRefPacketName(packetMs), func(t *testing.T) {
 			frameSize := rate * packetMs / 1000
 			packets := silkPLCExactEncode(t, rate, 1, packetMs, nPackets, true)
+			carrier := silkFECGapCarrier(t, packets, packetMs/20)
+			if carrier < 0 {
+				t.Fatalf("%dms fixture no longer exercises an LBRR gap; adjust the fixture", packetMs)
+			}
+			lost := carrier - 1
+			t.Logf("%dms: dropping packet %d, recovering from packet %d", packetMs, lost, carrier)
 
 			goDec, err := opus.NewDecoder(rate, 1)
 			if err != nil {
@@ -333,8 +373,8 @@ func TestCGOSILKFECGapExact(t *testing.T) {
 				}
 				silkPLCExactCompare(t, label, goPCM[:n], refPCM)
 			}
-			if packetMs == 60 && gaps == 0 {
-				t.Fatalf("60ms fixture no longer exercises an LBRR gap; adjust the fixture")
+			if gaps == 0 {
+				t.Fatalf("%dms: recovery carrier %d has no LBRR gap", packetMs, carrier)
 			}
 		})
 	}

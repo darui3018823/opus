@@ -561,3 +561,41 @@ test passes.
 - Verified `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (only the 8/16 kHz loudness gates
   fail), and `go test -race -count=1 ./...`.
+
+### 2026-09-16: input high-pass conditioning (input pipeline step 3)
+
+- Reference: `src/opus_encoder.c` (`hp_cutoff`, `silk_biquad_res` float
+  body, `dc_reject` float body, the `variable_HP_smth2_Q15` smoother, the
+  float-API NaN/energy guard) and `silk/HP_variable_cutoff.c`.
+- `encoder_input.go`: every packet is conditioned before SILK and the CELT
+  delay buffer see it — VOIP runs the SILK-fixed-point-coefficient biquad at
+  `silk_log2lin(variable_HP_smth2_Q15 >> 8)` Hz, other applications the 3 Hz
+  DC blocker; the smoother follows the SILK encoder's
+  `variable_HP_smth1_Q15` for SILK/hybrid packets and the 60 Hz minimum for
+  CELT-only; a non-finite or ≥1e9 frame energy zeroes the frame and the
+  filter memory. The bandwidth analysis and the digital-silence shortcut keep
+  reading the raw input (libopus analyses `pcm`, not `pcm_buf`).
+- `internal/silk/hp_variable_cutoff.go`: `silk_HP_variable_cutoff` port run
+  once per frame before the frame's VAD result is installed.
+- Oracles: `TestCGOInputConditioningExact` (hp_cutoff at 60/73/100 Hz,
+  dc_reject, smoother; 8–48 kHz, mono/stereo, state carried over 6 frames,
+  float32 bits) and `TestSILKHPVariableCutoffOracle` (400 random steps at
+  8/12/16 kHz) compare against the libopus 1.6.1 bodies compiled by the
+  reference C compiler (`internal/cgoref/hp_opusref.go`).
+- Tests that scored a VOIP encoder against the raw input now score against
+  `Encoder.lastConditionedInput` (the high-pass shifts the phase of low
+  harmonics by a fraction of a sample, capping an integer-aligned SNR):
+  `TestEncoderSILKOnlyQualityBaseline`,
+  `TestEncoderHybridToCELTRedundancyStateContinuity`.
+- Scoreboard (matched gap, positive = libopus ahead; before → after):
+  8k steady -2.68 → +1.01, 8k harmonic -3.25 → -0.94, 8k onset -3.21 →
+  -0.89, 12k steady +0.75 → +2.04, 16k steady +3.52 → +4.72, 16k onset -0.53
+  → +2.60; matched loudness 8k -2.33 / 12k -1.87 / 16k -0.59 dB (8k and 12k
+  outside ±1.5). Part of the previous Go advantage was the missing high-pass
+  (the Go output kept low-frequency content the raw-input reference rewards)
+  and the rest is the cutoff-trajectory phase effect noted in the spec; the
+  loudness gap itself is phase-insensitive and remains the Q5 gain-loop item.
+  Packet digests regenerated.
+- Verified `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (only the 8/12 kHz loudness gates
+  fail), and `go test -race -count=1 ./...`.

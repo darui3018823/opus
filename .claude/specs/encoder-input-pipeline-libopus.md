@@ -1,9 +1,11 @@
 # Encoder Input Pipeline: libopus Framing, Delay, and High-Pass
 
-Status: In progress on `dev/encoder-input-pipeline` (2026-09-15); step 0
+Status: In progress on `dev/encoder-input-pipeline` (2026-09-16); step 0
 landed in `5e6482f`, step 1 (SILK look-ahead buffer) in `70cae26`, step 2
 (Opus-layer delay compensation, `Lookahead()` = Fs/400 + Fs/250) in
-`f7de2bf`. Step 3 (high-pass conditioning) and step 4 (oracles) are open.
+`f7de2bf`, step 3 (hp_cutoff / dc_reject / variable_HP_smth1+2 / float-API
+guard, unit-exact against the libopus float bodies) in `a04f4ce`. Step 4
+(end-to-end oracle on the real encoder) is open.
 Prerequisite for encoder byte-exactness (convergence plan Phase 4) and for
 exact SILK noise-shape analysis (Q3), whose windows extend into the
 look-ahead.
@@ -93,6 +95,12 @@ that must be reconciled when this pipeline lands.
 
 ## Open items
 
+- **Scoreboard reference.** `TestOpusSILKABAgainstLibopusEncoder` scores
+  both encoders against the raw input. With the high-pass in place the
+  achievable integer-aligned SNR of a fixture whose fundamental sits near the
+  60–100 Hz cutoff depends on each encoder's cutoff trajectory (phase), so
+  the SNR gaps are now a noisier instrument than the byte ratios and the
+  RMS loudness; a phase-insensitive (spectral) distance is the fix.
 - **SILK API resampler.** libopus resamples the Opus-rate input to `fs_kHz`
   with `silk_resampler` (fixed-point, ~1.5 ms encoder+decoder delay); the Go
   encoder uses `internal/resampler` with a shorter delay. Hybrid alignment

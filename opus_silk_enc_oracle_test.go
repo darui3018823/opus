@@ -15,7 +15,31 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/darui3018823/opus/internal/silk"
 )
+
+// encOracleStages holds the last analysis-stage dump of a frame (libopus
+// runs the NSQ several times inside its gain loop; the final call wins).
+type encOracleStages struct {
+	haveNSQ      bool
+	signalType   int
+	quantOffset  int
+	seed         int
+	lambdaQ10    int
+	ltpScaleQ14  int
+	nlsfQuantQ15 []int
+	predCoefQ12  [][]int // 2 rows
+	ltpCoefQ14   []int
+	arQ13        [][]int // nb_subfr rows
+	gainsQ16     []int
+	gainsIdx     []int
+	pitchL       []int
+	tiltQ14      []int
+	harmQ14      []int
+	lfQ14        []int
+	pulses       []int
+}
 
 // The encoder input-pipeline oracle: scripts/oracle/build_encoder.ps1 builds
 // the checked-in libopus 1.6.1 with the real opus_encode_float instrumented
@@ -38,6 +62,7 @@ type encOracleFrame struct {
 	haveInput    bool
 	haveXBuf     bool
 	havePacketOK bool
+	stages       encOracleStages
 }
 
 var (
@@ -45,7 +70,40 @@ var (
 	encOracleInputRe  = regexp.MustCompile(`^\[ENC_INPUT\] frame_size=(\d+) total_buffer=(\d+) channels=(\d+) mode=(-?\d+) cutoff_Hz=(-?\d+) smth2=(-?\d+) hp_freq_smth1=(-?\d+)`)
 	encOracleXInfoRe  = regexp.MustCompile(`speech_activity_Q8=(-?\d+) variable_HP_smth1_Q15=(-?\d+)`)
 	encOracleValuesRe = regexp.MustCompile(`v\[\d+\]=(\S+)`)
+	encOracleNSQInRe  = regexp.MustCompile(`^\[SILK_ENC_NSQ_INPUT\] signalType=(\d+) quantOffset=(\d+) seed=(\d+) Lambda_Q10=(-?\d+) LTP_scale_Q14=(-?\d+)`)
+	encOracleRowsRe   = regexp.MustCompile(`rows=(\d+) cols=(\d+)`)
 )
+
+func parseIntValues(line string) []int {
+	ms := encOracleValuesRe.FindAllStringSubmatch(line, -1)
+	vals := make([]int, len(ms))
+	for i, m := range ms {
+		v, err := strconv.Atoi(m[1])
+		if err != nil {
+			f, _ := strconv.ParseFloat(m[1], 64)
+			v = int(f)
+		}
+		vals[i] = v
+	}
+	return vals
+}
+
+func parseIntRows(line string) [][]int {
+	m := encOracleRowsRe.FindStringSubmatch(line)
+	if m == nil {
+		return nil
+	}
+	rows, _ := strconv.Atoi(m[1])
+	cols, _ := strconv.Atoi(m[2])
+	flat := parseIntValues(line)
+	out := make([][]int, rows)
+	for r := 0; r < rows; r++ {
+		if (r+1)*cols <= len(flat) {
+			out[r] = flat[r*cols : (r+1)*cols]
+		}
+	}
+	return out
+}
 
 func encOraclePath() string {
 	return filepath.Join(os.TempDir(), "opusoracle", "enc_oracle.exe")
@@ -107,6 +165,40 @@ func runEncOracle(t *testing.T, rate int, fixture string, frames, bitrate int, b
 		case strings.HasPrefix(line, "[SILK_ENC_XBUF]"):
 			out[cur].xBuf = parseFloats(line)
 			out[cur].haveXBuf = true
+		case strings.HasPrefix(line, "[SILK_ENC_NSQ_INPUT]"):
+			m := encOracleNSQInRe.FindStringSubmatch(line)
+			if m == nil {
+				t.Fatalf("bad NSQ_INPUT line: %s", line)
+			}
+			st := &out[cur].stages
+			st.haveNSQ = true
+			st.signalType, _ = strconv.Atoi(m[1])
+			st.quantOffset, _ = strconv.Atoi(m[2])
+			st.seed, _ = strconv.Atoi(m[3])
+			st.lambdaQ10, _ = strconv.Atoi(m[4])
+			st.ltpScaleQ14, _ = strconv.Atoi(m[5])
+		case strings.HasPrefix(line, "[SILK_ENC_NLSF_QUANT_Q15]"):
+			out[cur].stages.nlsfQuantQ15 = parseIntValues(line)
+		case strings.HasPrefix(line, "[SILK_ENC_NSQ_PREDCOEF_Q12]"):
+			out[cur].stages.predCoefQ12 = parseIntRows(line)
+		case strings.HasPrefix(line, "[SILK_ENC_NSQ_LTPCOEF_Q14]"):
+			out[cur].stages.ltpCoefQ14 = parseIntValues(line)
+		case strings.HasPrefix(line, "[SILK_ENC_NSQ_AR_Q13]"):
+			out[cur].stages.arQ13 = parseIntRows(line)
+		case strings.HasPrefix(line, "[SILK_ENC_NSQ_GAINS_Q16]"):
+			out[cur].stages.gainsQ16 = parseIntValues(line)
+		case strings.HasPrefix(line, "[SILK_ENC_GAINS_IDX]"):
+			out[cur].stages.gainsIdx = parseIntValues(line)
+		case strings.HasPrefix(line, "[SILK_ENC_NSQ_PITCHL]"):
+			out[cur].stages.pitchL = parseIntValues(line)
+		case strings.HasPrefix(line, "[SILK_ENC_NSQ_TILT_Q14]"):
+			out[cur].stages.tiltQ14 = parseIntValues(line)
+		case strings.HasPrefix(line, "[SILK_ENC_NSQ_HARM_Q14]"):
+			out[cur].stages.harmQ14 = parseIntValues(line)
+		case strings.HasPrefix(line, "[SILK_ENC_NSQ_LF_Q14]"):
+			out[cur].stages.lfQ14 = parseIntValues(line)
+		case strings.HasPrefix(line, "[SILK_ENC_NSQ_PULSES]"):
+			out[cur].stages.pulses = parseIntValues(line)
 		case strings.HasPrefix(line, "[ENC_PACKET]"):
 			fields := strings.Fields(line)[2:]
 			pkt, err := hex.DecodeString(strings.Join(fields, ""))
@@ -146,6 +238,92 @@ func encOracleNoiseFrame(rate, start, n int) []float64 {
 		out[i] = float64(float32(y))
 	}
 	return out
+}
+
+// stageDiff names the first analysis stage (in libopus order) whose values
+// differ between the Go frame trace and the oracle dump, or "" when all match.
+func stageDiff(g silk.FrameTrace, c encOracleStages) string {
+	if !c.haveNSQ {
+		return "no NSQ trace"
+	}
+	eqI16 := func(a []int16, b []int) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if int(a[i]) != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+	eqI32 := func(a []int32, b []int) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if int(a[i]) != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+	eqInt := func(a []int, b []int) bool {
+		if len(a) != len(b) {
+			return false
+		}
+		for i := range a {
+			if a[i] != b[i] {
+				return false
+			}
+		}
+		return true
+	}
+	if g.SignalType != c.signalType || g.QuantOffset != c.quantOffset {
+		return fmt.Sprintf("signalType/quantOffset (Go %d/%d, C %d/%d)", g.SignalType, g.QuantOffset, c.signalType, c.quantOffset)
+	}
+	if !eqI16(g.NLSFQ15, c.nlsfQuantQ15) {
+		return "NLSF_Q15 (find_LPC/NLSF quantization)"
+	}
+	if len(c.predCoefQ12) == 2 && (!eqI16(g.PredCoefQ12[0], c.predCoefQ12[0]) || !eqI16(g.PredCoefQ12[1], c.predCoefQ12[1])) {
+		return "PredCoef_Q12"
+	}
+	if !eqInt(g.PitchL, c.pitchL) {
+		return fmt.Sprintf("pitchL (Go %v, C %v)", g.PitchL, c.pitchL)
+	}
+	if !eqI16(g.LTPCoefQ14, c.ltpCoefQ14) {
+		return "LTPCoef_Q14"
+	}
+	if !eqInt(g.GainsIndices, c.gainsIdx) {
+		return fmt.Sprintf("gain indices (Go %v, C %v)", g.GainsIndices, c.gainsIdx)
+	}
+	if !eqI32(g.GainsQ16, c.gainsQ16) {
+		return fmt.Sprintf("Gains_Q16 (Go %v, C %v)", g.GainsQ16, c.gainsQ16)
+	}
+	for sf := range c.arQ13 {
+		if sf >= len(g.ARQ13) || !eqI16(g.ARQ13[sf], c.arQ13[sf]) {
+			return fmt.Sprintf("AR_Q13 subframe %d (noise shaping)", sf)
+		}
+	}
+	if !eqI32(g.TiltQ14, c.tiltQ14) {
+		return fmt.Sprintf("Tilt_Q14 (Go %v, C %v)", g.TiltQ14, c.tiltQ14)
+	}
+	if !eqI32(g.HarmShapeGainQ14, c.harmQ14) {
+		return fmt.Sprintf("HarmShapeGain_Q14 (Go %v, C %v)", g.HarmShapeGainQ14, c.harmQ14)
+	}
+	if !eqI32(g.LFShpQ14, c.lfQ14) {
+		return fmt.Sprintf("LF_shp_Q14 (Go %v, C %v)", g.LFShpQ14, c.lfQ14)
+	}
+	if int(g.LambdaQ10) != c.lambdaQ10 || int(g.LTPScaleQ14) != c.ltpScaleQ14 {
+		return fmt.Sprintf("Lambda_Q10/LTP_scale (Go %d/%d, C %d/%d)", g.LambdaQ10, g.LTPScaleQ14, c.lambdaQ10, c.ltpScaleQ14)
+	}
+	if int(g.Seed) != c.seed {
+		return fmt.Sprintf("seed (Go %d, C %d)", g.Seed, c.seed)
+	}
+	if !eqI16(g.Pulses, c.pulses) {
+		return "pulses (NSQ)"
+	}
+	return ""
 }
 
 func firstFloat32Mismatch(got, want []float32) (int, bool) {
@@ -302,6 +480,13 @@ func TestSILKEncoderInputPipelineOracle(t *testing.T) {
 					}
 					if !packetsEqual && f == firstPacketDiff {
 						t.Logf("frame %d: first packet difference (Go %d bytes, libopus %d bytes); pipeline exact through this frame", f, len(pkt), len(r.packet))
+					}
+					if !packetsEqual {
+						if d := stageDiff(enc.silkEncoder.LastFrameTrace(), r.stages); d != "" {
+							t.Logf("frame %d: first differing analysis stage: %s", f, d)
+						} else {
+							t.Logf("frame %d: all traced analysis stages match; difference is in the entropy coding / rate control", f)
+						}
 					}
 				}
 				if firstPacketDiff < 0 && !diverged {

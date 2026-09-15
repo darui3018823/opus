@@ -103,9 +103,14 @@ type Encoder struct {
 	// Front end (front_end.go): the Opus-layer input rate, the libopus
 	// resampler/inputBuf delay line, and the float32 x_buf snapshot of the
 	// most recently coded frame.
-	apiSampleRate        int
-	encInputDelay        []float64
-	lastXBuf             []float32
+	apiSampleRate int
+	encInputDelay []float64
+	lastXBuf      []float32
+	// Stage traces (frame_trace.go): pendingTrace is filled by the NSQ call,
+	// lastTrace is the final (non-LBRR) frame's trace.
+	pendingTrace         FrameTrace
+	lastTrace            FrameTrace
+	traceNLSFQ15         []int16
 	prevLagForPitch      int       // Previous frame pitch lag (0 if unvoiced)
 	ltpCorrState         float64   // Normalized LTP correlation from prev frame
 	pitchResidual        []float64 // res_pitch: whitened [history|frame|LTP_ORDER] from the pitch analysis
@@ -657,8 +662,11 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	// the winning state and its initial seed (e.nsqSeed), which libopus writes to
 	// the bitstream so the decoder reproduces the same sign sequence.
 	e.nsqSeed = 0
+	e.traceNLSFQ15 = nlsf.nlsfQ15
 	pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, nlsf.lpcQ12Interp, gainIndices,
 		signalType, quantOffset, 0, pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale)
+	e.pendingTrace.Seed = e.nsqSeed
+	e.lastTrace = e.pendingTrace
 	enc.EncodeIcdf(int(e.nsqSeed), silkUniform4ICDF[:], 8)
 	e.encodePulses(enc, pulses, signalType, quantOffset)
 
@@ -2461,6 +2469,7 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 	// noise-shape envelope gains (Step 4). Both voiced and unvoiced take it with
 	// those gains; inactive frames produce no excitation (the near-silent path)
 	// and stay on the homebrew zero-pulse branch. Dispatch by type.
+	e.pendingTrace = FrameTrace{SignalType: signalType, QuantOffset: quantOffset}
 	useTrellis := false
 	switch signalType {
 	case SignalTypeVoiced:
@@ -2538,8 +2547,11 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 		lambdaQ10 = 64
 	}
 
-	return e.silkNSQDelDec(x16, lpcQ12, lpcQ12Interp, ltpCoeffsQ14, shape, gainsQ16, pitchL,
+	pulses := e.silkNSQDelDec(x16, lpcQ12, lpcQ12Interp, ltpCoeffsQ14, shape, gainsQ16, pitchL,
 		lambdaQ10, ltpScaleQ14, signalType, quantOffset, seed)
+	e.recordNSQTrace(lpcQ12, lpcQ12Interp, e.traceNLSFQ15, gainIndices, gainsQ16, pitchL, shape, lambdaQ10,
+		ltpCoeffsQ14, ltpScaleQ14, signalType, quantOffset, seed, pulses)
+	return pulses
 }
 
 func (e *Encoder) updateSilentNSQState() {

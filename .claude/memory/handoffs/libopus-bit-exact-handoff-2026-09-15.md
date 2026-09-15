@@ -28,7 +28,8 @@ is complete at the oracle level but has **not** been merged back.
 | SILK decoder / PLC | PLC, CNG, glue, one-byte payload handling sample-exact vs libopus (2026-09-15, `dev/silk-plc-exact`) |
 | SILK encoder Q1 (`LPC_in_pre` → `PredCoef_Q12`) | 13 fixtures exact vs C (`TestSILKQ1LPCNLSFOracle`, opusref) |
 | SILK encoder VAD, pitch, LTP (Q2) | bit-exact on injected inputs (2026-09-15, `dev/silk-q2-ltp-oracle`); wired into the encoder |
-| SILK encoder Q3–Q7, CELT encoder, mode/rate policy, input pipeline | not bit-exact |
+| SILK encoder input pipeline | VAD flags, 5 ms look-ahead framing, Fs/250 CELT delay landed (2026-09-15, `dev/encoder-input-pipeline`); high-pass and SILK resampler open |
+| SILK encoder Q3–Q7, CELT encoder, mode/rate policy | not bit-exact |
 
 ## Open decision (blocks Q1 merge-back)
 
@@ -129,6 +130,14 @@ framing/delay slice is required before packet-level byte comparison.
 Spec: `.claude/specs/encoder-input-pipeline-libopus.md`. Must land before
 Q3 exactness (shaping windows read the look-ahead) and before Phase 4.
 Changes public latency (`Lookahead()` → 6.5 ms like libopus).
+
+Status 2026-09-15: steps 0–2 landed on `dev/encoder-input-pipeline`
+(`5e6482f` VAD flags, `70cae26` SILK 5 ms look-ahead buffer, `f7de2bf`
+Opus-layer Fs/250 CELT delay; `Lookahead()` = 312 at 48 kHz). Remaining:
+step 3 high-pass conditioning (`hp_cutoff`/`dc_reject`/`variable_HP_smth`),
+step 4 oracles, and the SILK API resampler port (Go SILK path is 34 samples
+less delayed than libopus at 48 kHz; hybrid low band leads by that much).
+Loudness gate after the framing change: 8k -1.71 / 12k -1.16 / 16k -1.76 dB.
 
 ### Phase 2 — SILK encoder Q3/Q4: noise shaping and NSQ
 

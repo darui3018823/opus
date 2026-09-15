@@ -980,9 +980,14 @@ bit-exact against libopus 1.6.1 (`go test -count=1 -tags opusref -run
 'TestSILK' -v ./internal/silk/`). Inside the production encoder these stages
 are wired like libopus (pitch residual feeds LTP and the quantizer-offset
 measure, one LTP quantization per frame, first frame after reset unvoiced),
-but the encoder still has no `LA_SHAPE_MS` look-ahead, no Opus-layer delay
-compensation, and no input high-pass filter, so packet bytes are not
-comparable yet (see `.claude/specs/encoder-input-pipeline-libopus.md`).
+and the encoder now frames its input like libopus: the SILK encoder codes
+each frame from a `ltp_mem | frame | LA_SHAPE_MS` look-ahead buffer (the
+coded frame trails the caller's frame by 5 ms) and the Opus layer delays the
+CELT input by Fs/250, so `Lookahead()` reports Fs/400 + Fs/250 (312 samples
+at 48 kHz, Fs/400 for restricted low delay). The input high-pass filter and
+the libopus SILK resampler are still missing (the SILK path is 34 samples
+less delayed than libopus at 48 kHz), so packet bytes are not comparable yet
+(see `.claude/specs/encoder-input-pipeline-libopus.md`).
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

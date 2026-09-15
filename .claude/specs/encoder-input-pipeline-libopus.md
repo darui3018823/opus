@@ -1,8 +1,19 @@
 # Encoder Input Pipeline: libopus Framing, Delay, and High-Pass
 
-Status: In progress on `dev/encoder-input-pipeline` (2026-09-15); step 0 landed in `5e6482f`. Prerequisite for encoder byte-exactness (convergence
-plan Phase 4) and for exact SILK noise-shape analysis (Q3), whose windows
-extend into the look-ahead.
+Status: In progress on `dev/encoder-input-pipeline` (2026-09-15); step 0
+landed in `5e6482f`, step 1 (SILK look-ahead buffer) in `70cae26`, step 2
+(Opus-layer delay compensation, `Lookahead()` = Fs/400 + Fs/250) in
+`f7de2bf`. Step 3 (high-pass conditioning) and step 4 (oracles) are open.
+Prerequisite for encoder byte-exactness (convergence plan Phase 4) and for
+exact SILK noise-shape analysis (Q3), whose windows extend into the
+look-ahead.
+
+Measured end-to-end delay after step 2 (broadband noise, 48 kHz input,
+libopus decoder for both encoders): CELT-only Go 312 = libopus 312 samples;
+SILK-only and hybrid Go 278 vs libopus 312. The 34-sample (0.7 ms) shortfall
+is the Go SILK input resampler's group delay versus libopus'
+`silk_resampler`, so the hybrid low band still leads the high band by 34
+samples until the SILK API resampler is ported (see "Open items").
 
 ## Problem
 
@@ -79,6 +90,20 @@ different audio slice per frame and could never produce libopus' bytes.
 `silk_Encode(..., prefill=1)` on the delay buffer primes the SILK state when
 the mode switches to SILK/hybrid; the Go encoder has its own transition logic
 that must be reconciled when this pipeline lands.
+
+## Open items
+
+- **SILK API resampler.** libopus resamples the Opus-rate input to `fs_kHz`
+  with `silk_resampler` (fixed-point, ~1.5 ms encoder+decoder delay); the Go
+  encoder uses `internal/resampler` with a shorter delay. Hybrid alignment
+  and any byte comparison at 24/48 kHz input need the libopus resampler.
+- **CELT prefill on mode switches.** libopus primes CELT with
+  `tmp_prefill` (the Fs/400 samples preceding the frame from `delay_buffer`)
+  when switching into CELT/hybrid; the Go transition logic does not.
+- **Stereo side channel.** libopus skips `silk_encode_frame_FLP` for the
+  side channel of a mid-only frame (its `x_buf` does not advance); the Go
+  side encoder likewise skips the push but resets its whole state on the
+  next coded side frame instead of the partial reset in `silk_Encode`.
 
 ## Go implementation plan
 

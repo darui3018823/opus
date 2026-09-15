@@ -519,3 +519,45 @@ test passes.
 - Verified `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (only the 12 kHz loudness gate
   fails), and `go test -race -count=1 ./...`.
+
+### 2026-09-15: SILK look-ahead buffer and Opus-layer delay (input pipeline steps 1–2)
+
+- Reference: `silk/float/encode_frame_FLP.c` (`x_buf = ltp_mem | frame |
+  LA_SHAPE_MS`, new input at `x_frame + LA_SHAPE_MS*fs_kHz`, `silk_memmove`
+  after the frame) and `src/opus_encoder.c` (`delay_buffer` / `pcm_buf`,
+  `delay_compensation = Fs/250`, `OPUS_GET_LOOKAHEAD`).
+- `internal/silk.Encoder` keeps `xBuf`; `encodeRangeFrame` runs the VAD on
+  the caller's frame, pushes it at `x_frame + LA_SHAPE`, and codes
+  `x_frame[0:frame]` (previous 5 ms + current 15 ms). Pitch analysis reads
+  the real `la_pitch` window, the LTP residual comes from the whitened
+  look-ahead instead of zero padding, and the noise-shape windows read the
+  real `la_shape` past the frame. The side encoder of a mid-only stereo frame
+  does not advance, like libopus.
+- `opus.Encoder` keeps `delayBuffer`; CELT (main and redundant frames, all
+  frame sizes) codes the input delayed by Fs/250 while SILK and the
+  bandwidth analysis see the current frame. `Lookahead()` now reports
+  Fs/400 + Fs/250 (312 at 48 kHz; Fs/400 for restricted low delay).
+- Test contracts that encoded fixture accidents were corrected:
+  `TestCGOSILKFECGapExact` picks the FEC carrier from the encoded LBRR masks;
+  `TestCGOEncodeRefSILKFEC` averages FEC-vs-PLC recovery over nine frames
+  (single-frame recovery of the ~2-byte LBRR swings by several dB with the
+  frame's pitch decisions); `TestHybridCVBROnsetBudgetOvershoot` moves its
+  low-band burst so the reset onset still overshoots; the hybrid→CELT
+  transition test budgets 16 kbps because the delayed SILK frame carries the
+  warm-up tone; `TestDecoderPLCSILKAndHybrid` bounds the second concealed
+  frame at 1.5× (libopus rises 1.48× on the new packets, Go within 0.5 %);
+  `surroundAlignedSNR` compared an absolute error against a ratio and so
+  always scored delay 0 — fixed, and the mask-trim test now scores the
+  steady state with a +1.5 dB center gate (measured +2.4 dB).
+- Scoreboard (`TestOpusSILKABAgainstLibopusEncoder`): SNR gates all pass;
+  matched loudness on speech-like-harmonic 8k -1.71 / 12k -1.16 / 16k
+  -1.76 dB (8k and 16k outside ±1.5; before: -1.46 / -1.52 / -0.64). Toggling
+  the pitch and noise-shape look-ahead individually moves these by ±0.5 dB
+  either way, so the shift is the framing itself acting on the unfaithful
+  gain loop (Q5), not a look-ahead bug. Packet digests regenerated.
+- End-to-end delay versus libopus (noise fixture, libopus decoder): CELT
+  312 = 312; SILK/hybrid 278 vs 312 — the SILK API resampler port is the
+  remaining alignment item (spec "Open items").
+- Verified `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (only the 8/16 kHz loudness gates
+  fail), and `go test -race -count=1 ./...`.

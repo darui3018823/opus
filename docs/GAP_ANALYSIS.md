@@ -52,10 +52,11 @@ SILK エンコーダの品質ギャップ根本原因はここにあります。
 - **2026-09-15 完了（pitch）：** `silk_find_pitch_lags_FLP` + `silk_pitch_analysis_core_FLP` を float32 忠実移植（`pitch_core_flp32.go`）。`TestSILKQ2PitchOracle`（opusref, 10 fixture）で autocorr/Schur/LPC/残差/閾値/LTPCorr/lag/contour/pitchL が完全一致。packet digest・scoreboard は不変
 - **2026-09-15 完了（quant offset）：** unvoiced の quantOffsetType 判定を `res_pitch` の 2 ms セグメント energy variation（silk_float）で行うよう libopus に合わせた
 - **未検証・残作業：**
-  - encoder に `la_pitch`（2 ms）先読みが無く、LPC 窓が frame 境界で終わる（framing/delay スライスで解消）
+  - (2026-09-15 解消) encoder は `x_buf = ltp_mem | frame | LA_SHAPE_MS` の先読みバッファから frame を切り出すようになり、pitch 解析は実 `la_pitch` 窓、LTP 残差は白色化した先読み、noise shape 窓は実 `la_shape` を読む
   - (2026-09-15 解消) VAD は `silk_VAD_GetSA_Q8_c` の固定小数点移植（`TestSILKVADOracle` で 5×40 frame 全一致）。first frame after reset は libopus どおり pitch 解析を行わず unvoiced。副作用で 8k speech-harmonic loudness が -1.62 dB（gate ±1.5 を 0.12 dB 超過）に戻り、unvoiced first frame のビット消費（rate control 未忠実）が原因
   - (2026-09-15 解消) LTP は pitch 解析残差 `res_pitch` から frame あたり 1 回だけ量子化し、`sum_log_gain_Q7` も 1 回更新するよう再編。AB gate は全 PASS（loudness 8k -1.25 / 12k -1.18 / 16k -0.92 dB）。16k steady-voiced (+1.19) と 16k onset (+2.20) は libopus に負けており、noise shaping / gain loop の exactness で再評価
-  - **encoder 全体の byte 一致には SILK の 5 ms (`LA_SHAPE_MS`) 先読み遅延と Opus 層の `delay_compensation` (Fs/250) が前提**。Go encoder は現在 lookahead なしで frame を切っているため、全段が exact でも frame 境界が libopus と一致しない。Phase 4 の前に framing/delay 再編スライスが必要
+  - (2026-09-15 解消) SILK の 5 ms (`LA_SHAPE_MS`) 先読み遅延と Opus 層の `delay_compensation` (Fs/250) を実装（`Lookahead()` = Fs/400 + Fs/250）。libopus decoder で測った end-to-end 遅延は CELT 312 = 312、SILK/hybrid 278 vs 312（Go の SILK 入力 resampler が libopus `silk_resampler` より 34 sample 短い）。残りは HP 前処理（`hp_cutoff`/`dc_reject`/`variable_HP_smth`）と SILK API resampler 移植
+  - framing 変更後の loudness gate は 8k -1.71 / 12k -1.16 / 16k -1.76 dB（8k/16k が ±1.5 を超過）。先読みの有無を個別に切り替えても ±0.5 dB 動くだけで、gain loop（Q5）未忠実が原因
 - **libopus 参照：** `silk/float/find_LTP_FLP.c`, `silk/quant_LTP_gains.c`, `silk/VQ_WMat_EC.c`, `silk/float/pitch_analysis_core_FLP.c`
 - **スコアボード影響（2026-09-15, gap_SNR_matched 負=Go 優位）：** 8k steady-voiced -3.27→-1.86、16k steady-voiced -0.81→+0.41（libopus に僅差負け）、8k speech-harmonic -5.85→-6.94、16k onset -1.31→-1.57。loudness gate は 3 セル FAIL→12k のみ FAIL（8k -1.47 dB / 16k -1.33 dB は PASS）。Go 側の残差・lag が libopus と一致しない段階で量子化器だけ exact にした結果であり、pitch exactness 後に再評価
 

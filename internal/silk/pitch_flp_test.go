@@ -65,7 +65,10 @@ func TestPitchCoreRejectsNoise(t *testing.T) {
 	}
 }
 
-func TestFirstFrameLongLagDisablesPitchPrediction(t *testing.T) {
+// TestFirstFrameAfterResetIsUnvoiced mirrors silk_find_pitch_lags_FLP: the
+// pitch estimator does not run on the first frame after a reset, so that
+// frame is coded unvoiced even for strongly periodic input.
+func TestFirstFrameAfterResetIsUnvoiced(t *testing.T) {
 	enc, err := NewEncoderWithFrameMs(16000, 1, 20)
 	if err != nil {
 		t.Fatalf("NewEncoder: %v", err)

@@ -379,19 +379,18 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64) (v
 		winLen = bufLen
 	}
 
-	// The VAD port keeps float activity and tilt; libopus feeds the pitch
-	// threshold Q8/Q15 integers, so quantize the same way here.
-	speechActivityQ8 := clampInt(int(math.Round(speechActivity*256)), 0, 255)
-	inputTiltQ15 := clampInt(int(math.Round(e.inputTilt*32768)), -32768, 32767)
-
+	// silk_find_pitch_lags_FLP whitens every active frame but runs the pitch
+	// estimator only when this is not the first frame after a reset; that
+	// first frame is always coded unvoiced.
+	runCore := !e.firstFrameAfterReset
 	r := silkFindPitchLagsFLP32(buf, laPitch, winLen, order, fsKHz, nbSubfr, peComplexity,
-		speechActivityQ8, e.prevSignalType, inputTiltQ15, e.pitchEstimationThresholdQ16(),
-		e.prevLagForPitch, e.ltpCorrState, true)
+		e.speechActivityQ8, e.prevSignalType, e.inputTiltQ15, e.pitchEstimationThresholdQ16(),
+		e.prevLagForPitch, e.ltpCorrState, runCore)
 	// silk_find_pred_coefs_FLP correlates this residual (res_pitch) for the
 	// LTP quantizer and reads LTP_ORDER samples past the frame from the
 	// look-ahead; without look-ahead those samples are zero here.
 	e.pitchResidual = append(append([]float64(nil), r.res...), make([]float64, ltpOrder)...)
-	if e.firstFrameAfterReset && e.channels == 1 && !e.stereoComponent && !e.hybridMode && r.voiced && firstFrameLongLagPitch(r.pitchL, fsKHz) {
+	if !runCore {
 		e.ltpCorrState = 0
 		return false, 0, 0, 0
 	}
@@ -404,22 +403,6 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64) (v
 func (e *Encoder) pitchEstimationThresholdQ16() int {
 	_, _, thres := e.pitchEstParams()
 	return int(int32(thres*65536 + 0.5))
-}
-
-func firstFrameLongLagPitch(pitchLags []int, fsKHz int) bool {
-	if fsKHz != 16 {
-		return false
-	}
-	// Keep the guard to low-F0 wideband onsets. The scoreboard overshoot is the
-	// 16 kHz speech-like harmonic first frame (~145 Hz, lag > 100), while the
-	// shorter-lag voiced/onset fixtures rely on the existing first-frame path.
-	maxReliableFirstFrameLag := fsKHz * 1000 / 160
-	for _, lag := range pitchLags {
-		if lag > maxReliableFirstFrameLag {
-			return true
-		}
-	}
-	return false
 }
 
 // updatePitchHist shifts the encoder's pitch history buffer to end with the most

@@ -21,37 +21,39 @@ const (
 
 // Encoder represents a SILK encoder instance
 type Encoder struct {
-	sampleRate     int  // Sample rate (8000, 12000, 16000, 24000)
-	frameSize      int  // Frame size in samples
-	frameMs        int  // Frame duration in milliseconds (10 or 20)
-	nSubframes     int  // Number of SILK subframes in one frame
-	packetFrames   int  // Number of SILK frames in the packet currently being encoded
-	channels       int  // Number of channels (1 or 2)
-	lpcOrder       int  // LPC order based on bandwidth
-	complexity     int  // Complexity (0-10)
-	bitrate        int  // Target bitrate in bps
-	vad            *VAD // Voice activity detector
-	silkVAD        silkVADState
-	speechActivity float64
-	inputTilt      float64
-	inputQuality   float64
-	inputQualityB  [silkVADNBands]float64
-	prevEnergy     float64   // Previous frame energy for smoothing
-	prevLPC        []float64 // Previous LPC coefficients
-	prevNLSF       []float64 // Previous NLSF
-	prevNLSFQ15    []int16   // Previous quantized NLSF in Q15 (matches decoder prevNLSFQ15; used for interpolation search)
-	prevPitchLag   int       // Previous pitch lag
-	prevLagIndex   int       // Previous entropy-coded pitch lag index
-	prevSignalType int       // Previous SILK signal type
-	prevGains      []float64 // Previous subframe gains
-	prevGainIdx    int       // Previous absolute gain index, matching decoder state
-	prevGainQ16    int32     // Previous synthesis gain, matching decoder state
-	lpcState       []int32   // Encoder-side LPC synthesis state, Q14
-	ltpState       []int32   // Encoder-side LTP output history, Q0
-	nsq            silkNSQState
-	nsqDelDec      [4]nsqDelayedDecision
-	nsqSeed        int32 // winning del-dec seed (silk_NSQ_del_dec writes this back to the bitstream)
-	lastFinalRange uint32
+	sampleRate       int  // Sample rate (8000, 12000, 16000, 24000)
+	frameSize        int  // Frame size in samples
+	frameMs          int  // Frame duration in milliseconds (10 or 20)
+	nSubframes       int  // Number of SILK subframes in one frame
+	packetFrames     int  // Number of SILK frames in the packet currently being encoded
+	channels         int  // Number of channels (1 or 2)
+	lpcOrder         int  // LPC order based on bandwidth
+	complexity       int  // Complexity (0-10)
+	bitrate          int  // Target bitrate in bps
+	vad              *VAD // Voice activity detector
+	silkVAD          silkVADState
+	speechActivity   float64
+	inputTilt        float64
+	speechActivityQ8 int
+	inputTiltQ15     int
+	inputQuality     float64
+	inputQualityB    [silkVADNBands]float64
+	prevEnergy       float64   // Previous frame energy for smoothing
+	prevLPC          []float64 // Previous LPC coefficients
+	prevNLSF         []float64 // Previous NLSF
+	prevNLSFQ15      []int16   // Previous quantized NLSF in Q15 (matches decoder prevNLSFQ15; used for interpolation search)
+	prevPitchLag     int       // Previous pitch lag
+	prevLagIndex     int       // Previous entropy-coded pitch lag index
+	prevSignalType   int       // Previous SILK signal type
+	prevGains        []float64 // Previous subframe gains
+	prevGainIdx      int       // Previous absolute gain index, matching decoder state
+	prevGainQ16      int32     // Previous synthesis gain, matching decoder state
+	lpcState         []int32   // Encoder-side LPC synthesis state, Q14
+	ltpState         []int32   // Encoder-side LTP output history, Q0
+	nsq              silkNSQState
+	nsqDelDec        [4]nsqDelayedDecision
+	nsqSeed          int32 // winning del-dec seed (silk_NSQ_del_dec writes this back to the bitstream)
+	lastFinalRange   uint32
 	// useTrellisNSQ enables the FLP noise-shape analysis + delayed-decision
 	// trellis NSQ (Q3+Q4) for active frames. Voiced frames use the perceptual
 	// shaping path; unvoiced/stereo-component frames keep neutral shaping while
@@ -211,30 +213,31 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 	}
 
 	enc := &Encoder{
-		sampleRate:     sampleRate,
-		frameSize:      frameSize,
-		frameMs:        frameMs,
-		nSubframes:     nSubframes,
-		channels:       channels,
-		lpcOrder:       lpcOrder,
-		complexity:     5,
-		bitrate:        sampleRate * channels * 16 / 8,
-		vad:            NewVAD(),
-		silkVAD:        newSilkVADState(),
-		speechActivity: 1.0,
-		inputQuality:   1.0,
-		prevEnergy:     1.0,
-		prevLPC:        make([]float64, lpcOrder),
-		prevNLSF:       prevNLSF,
-		prevPitchLag:   100,
-		prevLagIndex:   0,
-		prevSignalType: SignalTypeUnvoiced,
-		prevGains:      []float64{1.0, 1.0, 1.0, 1.0},
-		prevGainIdx:    10,
-		prevGainQ16:    65536,
-		lpcState:       make([]int32, silkMaxLPCOrder),
-		ltpState:       make([]int32, silkLTPMemLengthMs*(sampleRate/1000)),
-		nsq:            newSilkNSQState(frameSize, silkLTPMemLengthMs*(sampleRate/1000)),
+		sampleRate:       sampleRate,
+		frameSize:        frameSize,
+		frameMs:          frameMs,
+		nSubframes:       nSubframes,
+		channels:         channels,
+		lpcOrder:         lpcOrder,
+		complexity:       5,
+		bitrate:          sampleRate * channels * 16 / 8,
+		vad:              NewVAD(),
+		silkVAD:          newSilkVADState(),
+		speechActivity:   1.0,
+		speechActivityQ8: 255,
+		inputQuality:     1.0,
+		prevEnergy:       1.0,
+		prevLPC:          make([]float64, lpcOrder),
+		prevNLSF:         prevNLSF,
+		prevPitchLag:     100,
+		prevLagIndex:     0,
+		prevSignalType:   SignalTypeUnvoiced,
+		prevGains:        []float64{1.0, 1.0, 1.0, 1.0},
+		prevGainIdx:      10,
+		prevGainQ16:      65536,
+		lpcState:         make([]int32, silkMaxLPCOrder),
+		ltpState:         make([]int32, silkLTPMemLengthMs*(sampleRate/1000)),
+		nsq:              newSilkNSQState(frameSize, silkLTPMemLengthMs*(sampleRate/1000)),
 
 		pitchHist:            make([]float64, peLtpMemLengthMs*(sampleRate/1000)),
 		prevLagForPitch:      0,
@@ -531,6 +534,8 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	vadSA := e.silkVADGetSAQ8(signal)
 	e.speechActivity = vadSA.speechActivity
 	e.inputTilt = vadSA.inputTilt
+	e.speechActivityQ8 = vadSA.speechActivityQ8
+	e.inputTiltQ15 = vadSA.inputTiltQ15
 	e.inputQuality = vadSA.inputQuality
 	e.inputQualityB = vadSA.inputQualityBand
 
@@ -2962,6 +2967,8 @@ func (e *Encoder) Reset() {
 	e.silkVAD.reset()
 	e.speechActivity = 1.0
 	e.inputTilt = 0
+	e.speechActivityQ8 = 255
+	e.inputTiltQ15 = 0
 	e.inputQuality = 1.0
 	for i := range e.inputQualityB {
 		e.inputQualityB[i] = 1.0

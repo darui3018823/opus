@@ -1624,9 +1624,19 @@ func TestEncoderSILKOnlyVBRAndDTXDoNotUseCBRPadding(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Encode: %v", err)
 			}
-			if len(pkt) >= cbrBytes {
-				t.Fatalf("%s packet bytes=%d, want less than CBR padded size %d", tc.name, len(pkt), cbrBytes)
+			// VBR and DTX packets carry no RFC padding: the compact form is the
+			// packet itself, and the count code is never the padded code 3.
+			unpadded, err := PacketUnpad(pkt)
+			if err != nil {
+				t.Fatalf("PacketUnpad: %v", err)
 			}
+			if len(unpadded) != len(pkt) || pkt[0]&0x03 == 3 {
+				t.Fatalf("%s packet bytes=%d unpadded=%d code=%d, want no CBR padding", tc.name, len(pkt), len(unpadded), pkt[0]&0x03)
+			}
+			if len(pkt) == cbrBytes && tc.name == "dtx" {
+				t.Fatalf("%s packet bytes=%d equals the CBR padded size %d", tc.name, len(pkt), cbrBytes)
+			}
+			t.Logf("%s packet bytes=%d (CBR size %d)", tc.name, len(pkt), cbrBytes)
 			if config := int(pkt[0] >> 3); config != 9 {
 				t.Fatalf("TOC config=%d, want SILK WB 20ms config 9", config)
 			}

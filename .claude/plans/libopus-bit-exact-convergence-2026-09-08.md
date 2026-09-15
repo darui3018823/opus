@@ -418,3 +418,29 @@ test passes.
 - Verified the Q1/Q2 oracles, `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (only the 12 kHz speech-like-harmonic
   loudness gate fails), and `go test -race -count=1 ./...`.
+
+### 2026-09-15: LTP quantization on the pitch-analysis residual
+
+- Reference: `silk/float/encode_frame_FLP.c` (`res_pitch`/`res_pitch_frame`)
+  and `silk/float/find_pred_coefs_FLP.c`, which correlate the pitch-analysis
+  residual once per frame and update `sum_log_gain_Q7` once.
+- The Go frame pipeline consulted the LTP quantizer from three stages
+  (gain bootstrap, gain-plan selection, and the final index encode), each
+  time on its own quantized-LPC residual and each time advancing
+  `sum_log_gain_Q7`. The encoder now keeps the whitened residual from
+  `silkFindPitchLags` (`res_pitch`, history plus frame plus `LTP_ORDER`
+  zeros standing in for the missing look-ahead), computes the LTP result once
+  per frame, caches it, and re-applies the single `sum_log_gain_Q7` update
+  from every consumer so the rate-control state restores cannot lose it.
+- Scoreboard (gap_SNR_matched, negative = Go ahead): speech-like-harmonic
+  8k -6.94 → -8.55, 12k -4.87 → -5.47, 16k -3.65 → -5.03; steady-voiced
+  8k -1.86 → -2.25, 12k -1.18 → -1.48, 16k +0.41 → +1.19; onset
+  8k -1.30 → -1.20, 12k -2.58 → -0.38, 16k -1.57 → +2.20. Every
+  `TestOpusSILKABAgainstLibopusEncoder` gate now passes, including the three
+  matched-loudness gates that had been failing since the Q1 port
+  (8k -1.25 dB, 12k -1.18 dB, 16k -0.92 dB). The internal quality baseline's
+  decoded-pitch tracker was made octave-robust because a perfectly periodic
+  decoded frame correlates equally at the fundamental and its octave.
+- The perf-regression packet digests were regenerated (stable across runs).
+- Verified `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...`, and `go test -race -count=1 ./...`.

@@ -69,7 +69,7 @@ var (
 	encOracleFrameRe  = regexp.MustCompile(`^ENC_RESULT frame=(\d+) bytes=(\d+)`)
 	encOracleInputRe  = regexp.MustCompile(`^\[ENC_INPUT\] frame_size=(\d+) total_buffer=(\d+) channels=(\d+) mode=(-?\d+) cutoff_Hz=(-?\d+) smth2=(-?\d+) hp_freq_smth1=(-?\d+)`)
 	encOracleXInfoRe  = regexp.MustCompile(`speech_activity_Q8=(-?\d+) variable_HP_smth1_Q15=(-?\d+)`)
-	encOracleValuesRe = regexp.MustCompile(`v\[\d+\]=(\S+)`)
+	encOracleValuesRe = regexp.MustCompile(`v\[[\d,]+\]=(\S+)`)
 	encOracleNSQInRe  = regexp.MustCompile(`^\[SILK_ENC_NSQ_INPUT\] signalType=(\d+) quantOffset=(\d+) seed=(\d+) Lambda_Q10=(-?\d+) LTP_scale_Q14=(-?\d+)`)
 	encOracleRowsRe   = regexp.MustCompile(`rows=(\d+) cols=(\d+)`)
 )
@@ -240,11 +240,13 @@ func encOracleNoiseFrame(rate, start, n int) []float64 {
 	return out
 }
 
-// stageDiff names the first analysis stage (in libopus order) whose values
-// differ between the Go frame trace and the oracle dump, or "" when all match.
-func stageDiff(g silk.FrameTrace, c encOracleStages) string {
+// stageDiffs lists the analysis stages (in libopus order) whose values differ
+// between the Go frame trace and the oracle dump; empty when all match.
+// libopus stores delta-coded gain indices for subframes > 0, so the indices
+// are compared through the dequantised Gains_Q16.
+func stageDiffs(g silk.FrameTrace, c encOracleStages) []string {
 	if !c.haveNSQ {
-		return "no NSQ trace"
+		return []string{"no NSQ trace"}
 	}
 	eqI16 := func(a []int16, b []int) bool {
 		if len(a) != len(b) {
@@ -279,51 +281,49 @@ func stageDiff(g silk.FrameTrace, c encOracleStages) string {
 		}
 		return true
 	}
+	var diffs []string
 	if g.SignalType != c.signalType || g.QuantOffset != c.quantOffset {
-		return fmt.Sprintf("signalType/quantOffset (Go %d/%d, C %d/%d)", g.SignalType, g.QuantOffset, c.signalType, c.quantOffset)
+		diffs = append(diffs, fmt.Sprintf("signalType/quantOffset (Go %d/%d, C %d/%d)", g.SignalType, g.QuantOffset, c.signalType, c.quantOffset))
 	}
 	if !eqI16(g.NLSFQ15, c.nlsfQuantQ15) {
-		return "NLSF_Q15 (find_LPC/NLSF quantization)"
+		diffs = append(diffs, "NLSF_Q15")
 	}
 	if len(c.predCoefQ12) == 2 && (!eqI16(g.PredCoefQ12[0], c.predCoefQ12[0]) || !eqI16(g.PredCoefQ12[1], c.predCoefQ12[1])) {
-		return "PredCoef_Q12"
+		diffs = append(diffs, "PredCoef_Q12")
 	}
 	if !eqInt(g.PitchL, c.pitchL) {
-		return fmt.Sprintf("pitchL (Go %v, C %v)", g.PitchL, c.pitchL)
+		diffs = append(diffs, fmt.Sprintf("pitchL (Go %v, C %v)", g.PitchL, c.pitchL))
 	}
 	if !eqI16(g.LTPCoefQ14, c.ltpCoefQ14) {
-		return "LTPCoef_Q14"
-	}
-	if !eqInt(g.GainsIndices, c.gainsIdx) {
-		return fmt.Sprintf("gain indices (Go %v, C %v)", g.GainsIndices, c.gainsIdx)
+		diffs = append(diffs, "LTPCoef_Q14")
 	}
 	if !eqI32(g.GainsQ16, c.gainsQ16) {
-		return fmt.Sprintf("Gains_Q16 (Go %v, C %v)", g.GainsQ16, c.gainsQ16)
+		diffs = append(diffs, fmt.Sprintf("Gains_Q16 (Go %v, C %v)", g.GainsQ16, c.gainsQ16))
 	}
 	for sf := range c.arQ13 {
 		if sf >= len(g.ARQ13) || !eqI16(g.ARQ13[sf], c.arQ13[sf]) {
-			return fmt.Sprintf("AR_Q13 subframe %d (noise shaping)", sf)
+			diffs = append(diffs, fmt.Sprintf("AR_Q13[%d]", sf))
 		}
 	}
 	if !eqI32(g.TiltQ14, c.tiltQ14) {
-		return fmt.Sprintf("Tilt_Q14 (Go %v, C %v)", g.TiltQ14, c.tiltQ14)
+		diffs = append(diffs, fmt.Sprintf("Tilt_Q14 (Go %v, C %v)", g.TiltQ14, c.tiltQ14))
 	}
 	if !eqI32(g.HarmShapeGainQ14, c.harmQ14) {
-		return fmt.Sprintf("HarmShapeGain_Q14 (Go %v, C %v)", g.HarmShapeGainQ14, c.harmQ14)
+		diffs = append(diffs, fmt.Sprintf("HarmShapeGain_Q14 (Go %v, C %v)", g.HarmShapeGainQ14, c.harmQ14))
 	}
 	if !eqI32(g.LFShpQ14, c.lfQ14) {
-		return fmt.Sprintf("LF_shp_Q14 (Go %v, C %v)", g.LFShpQ14, c.lfQ14)
+		diffs = append(diffs, fmt.Sprintf("LF_shp_Q14 (Go %v, C %v)", g.LFShpQ14, c.lfQ14))
 	}
 	if int(g.LambdaQ10) != c.lambdaQ10 || int(g.LTPScaleQ14) != c.ltpScaleQ14 {
-		return fmt.Sprintf("Lambda_Q10/LTP_scale (Go %d/%d, C %d/%d)", g.LambdaQ10, g.LTPScaleQ14, c.lambdaQ10, c.ltpScaleQ14)
+		diffs = append(diffs, fmt.Sprintf("Lambda_Q10/LTP_scale (Go %d/%d, C %d/%d)", g.LambdaQ10, g.LTPScaleQ14, c.lambdaQ10, c.ltpScaleQ14))
 	}
 	if int(g.Seed) != c.seed {
-		return fmt.Sprintf("seed (Go %d, C %d)", g.Seed, c.seed)
+		diffs = append(diffs, fmt.Sprintf("seed (Go %d, C %d)", g.Seed, c.seed))
 	}
 	if !eqI16(g.Pulses, c.pulses) {
-		return "pulses (NSQ)"
+		diffs = append(diffs, "pulses")
 	}
-	return ""
+	return diffs
 }
 
 func firstFloat32Mismatch(got, want []float32) (int, bool) {
@@ -482,8 +482,8 @@ func TestSILKEncoderInputPipelineOracle(t *testing.T) {
 						t.Logf("frame %d: first packet difference (Go %d bytes, libopus %d bytes); pipeline exact through this frame", f, len(pkt), len(r.packet))
 					}
 					if !packetsEqual {
-						if d := stageDiff(enc.silkEncoder.LastFrameTrace(), r.stages); d != "" {
-							t.Logf("frame %d: first differing analysis stage: %s", f, d)
+						if d := stageDiffs(enc.silkEncoder.LastFrameTrace(), r.stages); len(d) > 0 {
+							t.Logf("frame %d: differing analysis stages: %s", f, strings.Join(d, "; "))
 						} else {
 							t.Logf("frame %d: all traced analysis stages match; difference is in the entropy coding / rate control", f)
 						}

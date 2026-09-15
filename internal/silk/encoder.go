@@ -2470,6 +2470,10 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 	// those gains; inactive frames produce no excitation (the near-silent path)
 	// and stay on the homebrew zero-pulse branch. Dispatch by type.
 	e.pendingTrace = FrameTrace{SignalType: signalType, QuantOffset: quantOffset}
+	if signalType != SignalTypeVoiced {
+		// wrappers_FLP.c hands the NSQ LTP_scale_Q14 = 0 for non-voiced frames.
+		ltpScaleQ14 = 0
+	}
 	useTrellis := false
 	switch signalType {
 	case SignalTypeVoiced:
@@ -2504,12 +2508,17 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 			gq = 1
 		}
 		gainsQ16[sf] = gq
-		lag := e.prevPitchLag
-		if sf < len(pitchLags) && pitchLags[sf] > 0 {
-			lag = pitchLags[sf]
-		}
-		if lag < 1 {
-			lag = 1
+		// libopus hands the NSQ pitchL = 0 for non-voiced frames (only
+		// NSQ->lagPrev observes it); the lag itself is only read for voiced.
+		lag := 0
+		if signalType == SignalTypeVoiced {
+			lag = e.prevPitchLag
+			if sf < len(pitchLags) && pitchLags[sf] > 0 {
+				lag = pitchLags[sf]
+			}
+			if lag < 1 {
+				lag = 1
+			}
 		}
 		pitchL[sf] = lag
 	}

@@ -278,12 +278,41 @@ func (e *Encoder) quantLTPGains(XX [][ltpOrder * ltpOrder]float64, xX [][ltpOrde
 // returns the chosen periodicity index, the per-subframe gain indices, and the
 // resulting Q14 taps. Replaces the centre-tap-only homebrew selectLTPGain.
 func (e *Encoder) selectLTPGainsVQWithGain(signal []float64, lpcQ12 []int16, pitchLags []int) (perIdx int, gainIndices []int, ltpCoeffsQ14 [][5]int16, predGainDB float64) {
-	subfrLen := e.frameSize / e.nSubframes
-	res, frameStart := e.lpcResidualInt16Domain(signal, lpcQ12)
-	XX, xX := e.findLTP(res, frameStart, pitchLags, subfrLen)
-	perIdx, gainIndices, predGainDB = e.quantLTPGains(XX, xX, subfrLen)
-	ltpCoeffsQ14 = ltpCoeffsForPerSubframe(perIdx, gainIndices)
-	return
+	// libopus runs silk_find_LTP_FLP and silk_quant_LTP_gains_FLP once per
+	// frame in silk_find_pred_coefs_FLP, on the pitch-analysis residual and
+	// with a single sum_log_gain update. The Go frame pipeline consults the
+	// LTP result from several stages, so it is computed once and cached for
+	// the frame; every consumer re-applies the same state update so frame
+	// state restores inside the rate-control loop cannot lose it.
+	if e.curLTP == nil {
+		subfrLen := e.frameSize / e.nSubframes
+		var res []float64
+		frameStart := 0
+		if len(e.pitchResidual) >= len(e.pitchHist)+e.frameSize+ltpOrder {
+			res = e.pitchResidual
+			frameStart = len(e.pitchHist)
+		} else {
+			res, frameStart = e.lpcResidualInt16Domain(signal, lpcQ12)
+		}
+		XX, xX := e.findLTP(res, frameStart, pitchLags, subfrLen)
+		var r frameLTPResult
+		r.perIdx, r.gainIndices, r.sumLogGainQ7, r.predGainDB = silkQuantLTPGains(XX, xX, subfrLen, e.nSubframes, e.ltpSumLogGainQ7)
+		r.ltpCoeffsQ14 = ltpCoeffsForPerSubframe(r.perIdx, r.gainIndices)
+		e.curLTP = &r
+	}
+	e.ltpSumLogGainQ7 = e.curLTP.sumLogGainQ7
+	coeffs := make([][5]int16, len(e.curLTP.ltpCoeffsQ14))
+	copy(coeffs, e.curLTP.ltpCoeffsQ14)
+	return e.curLTP.perIdx, append([]int(nil), e.curLTP.gainIndices...), coeffs, e.curLTP.predGainDB
+}
+
+// frameLTPResult caches one frame's LTP quantization.
+type frameLTPResult struct {
+	perIdx       int
+	gainIndices  []int
+	ltpCoeffsQ14 [][5]int16
+	sumLogGainQ7 int32
+	predGainDB   float64
 }
 
 func (e *Encoder) selectLTPGainsVQ(signal []float64, lpcQ12 []int16, pitchLags []int) (perIdx int, gainIndices []int, ltpCoeffsQ14 [][5]int16) {

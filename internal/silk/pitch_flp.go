@@ -387,6 +387,10 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64) (v
 	r := silkFindPitchLagsFLP32(buf, laPitch, winLen, order, fsKHz, nbSubfr, peComplexity,
 		speechActivityQ8, e.prevSignalType, inputTiltQ15, e.pitchEstimationThresholdQ16(),
 		e.prevLagForPitch, e.ltpCorrState, true)
+	// silk_find_pred_coefs_FLP correlates this residual (res_pitch) for the
+	// LTP quantizer and reads LTP_ORDER samples past the frame from the
+	// look-ahead; without look-ahead those samples are zero here.
+	e.pitchResidual = append(append([]float64(nil), r.res...), make([]float64, ltpOrder)...)
 	if e.firstFrameAfterReset && e.channels == 1 && !e.stereoComponent && !e.hybridMode && r.voiced && firstFrameLongLagPitch(r.pitchL, fsKHz) {
 		e.ltpCorrState = 0
 		return false, 0, 0, 0

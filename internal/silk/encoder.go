@@ -84,9 +84,11 @@ type Encoder struct {
 	pitchHist            []float64 // Past ltp_mem_length input samples, [-1,1]
 	prevLagForPitch      int       // Previous frame pitch lag (0 if unvoiced)
 	ltpCorrState         float64   // Normalized LTP correlation from prev frame
-	firstFrameAfterReset bool      // True until the first frame after reset is encoded
-	curPitchLagIndex     int       // Lag index selected for the current frame
-	curPitchContourIndex int       // Pitch contour index for the current frame
+	pitchResidual        []float64 // res_pitch: whitened [history|frame|LTP_ORDER] from the pitch analysis
+	curLTP               *frameLTPResult
+	firstFrameAfterReset bool // True until the first frame after reset is encoded
+	curPitchLagIndex     int  // Lag index selected for the current frame
+	curPitchContourIndex int  // Pitch contour index for the current frame
 
 	// ltpSumLogGainQ7 is the cumulative log prediction gain across subframes
 	// (silk sum_log_gain_Q7), limiting the total LTP gain for stability.
@@ -524,6 +526,8 @@ func encodeStereoPred(enc *entcode.Encoder, ix [2][3]int8) {
 // and pulse coding is driven from a short-term residual instead of raw samples.
 func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadActive, conditionalGain bool) {
 	initialState := e.snapshotFrameState()
+	e.curLTP = nil
+	e.pitchResidual = nil
 	vadSA := e.silkVADGetSAQ8(signal)
 	e.speechActivity = vadSA.speechActivity
 	e.inputTilt = vadSA.inputTilt
@@ -2992,6 +2996,8 @@ func (e *Encoder) Reset() {
 	}
 	e.prevLagForPitch = 0
 	e.ltpCorrState = 0
+	e.pitchResidual = nil
+	e.curLTP = nil
 	e.firstFrameAfterReset = true
 	e.curPitchLagIndex = 0
 	e.curPitchContourIndex = 0

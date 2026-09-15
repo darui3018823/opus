@@ -410,6 +410,22 @@ func (d *Decoder) DecodeFloatFEC(packet []byte, frameSize int) ([]float32, error
 	return pcm[:int(n)*d.channels], nil
 }
 
+// DecodeFEC reconstructs the lost frame preceding packet through libopus'
+// opus_decode int16 entry point with decode_fec=1. Returns samples per channel.
+func (d *Decoder) DecodeFEC(packet []byte, frameSize int) ([]int16, error) {
+	if len(packet) == 0 {
+		return nil, fmt.Errorf("empty packet for FEC decode")
+	}
+	pcm := make([]int16, frameSize*d.channels)
+	n := C.opus_decode(d.dec,
+		(*C.uchar)(unsafe.Pointer(&packet[0])), C.opus_int32(len(packet)),
+		(*C.opus_int16)(unsafe.Pointer(&pcm[0])), C.int(frameSize), 1)
+	if n < 0 {
+		return nil, fmt.Errorf("opus_decode(FEC): %s", C.GoString(C.opus_strerror(n)))
+	}
+	return pcm[:int(n)*d.channels], nil
+}
+
 // FinalRange returns the entropy decoder's final range for the last packet.
 func (d *Decoder) FinalRange() (uint32, error) {
 	var rng C.opus_uint32

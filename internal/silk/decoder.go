@@ -21,6 +21,7 @@ const (
 	silkMaxPulses          = 16 // SILK_MAX_PULSES
 	nRateLevels            = 10 // N_RATE_LEVELS
 	silkMaxLPCOrder        = 16 // MAX_LPC_ORDER
+	silkMaxNbSubfr         = 4  // MAX_NB_SUBFR
 	silkLTPMemLengthMs     = 20 // LTP_MEM_LENGTH_MS
 )
 
@@ -219,11 +220,11 @@ type Decoder struct {
 	// Random seed for excitation
 	randSeed int32
 
-	// PLC state
-	plcCount        int
-	prevLPCQ12      []int16
-	prevOutput      []int32 // Q14
-	lastFrameSilent bool    // last decoded frame was a digital-silence packet
+	// Loss concealment state mirrored from libopus silk_decoder_state.
+	lossCnt int                       // consecutive concealed frames
+	excQ14  [silkMaxFrameLength]int32 // excitation of the last decoded frame
+	plc     plcState
+	cng     cngState
 
 	// Stereo packets code mid and side as separate SILK channel states.
 	side                 *Decoder
@@ -324,9 +325,11 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 		lpcState:       make([]int32, silkMaxLPCOrder),
 		ltpState:       make([]int32, ltpMemLen),
 		randSeed:       7818,
-		prevLPCQ12:     make([]int16, lpcOrder),
-		prevOutput:     make([]int32, frameSize),
 	}
+	d.plcReset()
+	d.plc.fsKHz = fsKHz
+	d.cngReset()
+	d.cng.fsKHz = fsKHz
 
 	// Initialize prevNLSFQ15 to evenly spaced values
 	for i := 0; i < lpcOrder; i++ {
@@ -365,9 +368,6 @@ func (d *Decoder) SetFrameMs(frameMs int) {
 	d.nSubframes = nSubframes
 	d.frameSize = d.sampleRate * frameMs / 1000
 	d.subfrmLen = d.frameSize / nSubframes
-	if len(d.prevOutput) != d.frameSize {
-		d.prevOutput = make([]int32, d.frameSize)
-	}
 	if d.side != nil {
 		d.side.SetFrameMs(frameMs)
 	}
@@ -403,17 +403,11 @@ func (d *Decoder) DecodeMulti(packet []byte, nFrames int) ([]float64, error) {
 		return d.decodeMultiStereo(packet, nFrames)
 	}
 
-	// Single-byte silence packet
-	if len(packet) == 1 && packet[0] == 0x00 {
-		d.lastFinalRange = 0
-		d.noteDigitalSilence()
-		result := make([]float64, d.frameSize*d.channels*nFrames)
-		return result, nil
-	}
-
-	// Need at least 2 bytes for range decoder
+	// libopus treats a payload of at most one byte (DTX or empty frame) as a
+	// lost packet and runs the PLC for the packet duration.
 	if len(packet) < 2 {
-		return d.concealPacketLoss()
+		d.lastFinalRange = 0
+		return d.concealLostFrames(nFrames)
 	}
 
 	dec := entcode.NewDecoder(packet)
@@ -505,7 +499,7 @@ func (d *Decoder) DecodePLC(nFrames int) ([]float64, error) {
 		nFrames = 1
 	}
 	if d.channels == 1 {
-		return d.concealFECFrames(nFrames)
+		return d.concealLostFrames(nFrames)
 	}
 	if d.side == nil {
 		return nil, fmt.Errorf("missing SILK side-channel decoder")
@@ -533,11 +527,7 @@ func (d *Decoder) decodeFECChannel(dec *entcode.Decoder, nFrames, mask int) ([]f
 	for i := 0; i < nFrames; i++ {
 		present := mask&(1<<uint(i)) != 0
 		if !present {
-			pcm, err := d.concealPacketLoss()
-			if err != nil {
-				return nil, err
-			}
-			allPCM = append(allPCM, pcm...)
+			allPCM = append(allPCM, d.concealLBRRGap()...)
 			prevPresent = false
 			continue
 		}
@@ -593,7 +583,7 @@ func (d *Decoder) decodeFECStereo(dec *entcode.Decoder, nFrames int) ([]float64,
 		if midPresent {
 			mid, err = d.decodeFrameMono(dec, 1, frame > 0 && masks[0]&(1<<uint(frame-1)) != 0)
 		} else {
-			mid, err = d.concealPacketLossMono()
+			mid = d.concealLBRRGapMono()
 		}
 		if err != nil {
 			return nil, err
@@ -607,7 +597,7 @@ func (d *Decoder) decodeFECStereo(dec *entcode.Decoder, nFrames int) ([]float64,
 				}
 				side, err = d.side.decodeFrame(dec, 1, frame > 0 && masks[1]&(1<<uint(frame-1)) != 0)
 			} else {
-				side, err = d.side.concealPacketLoss()
+				side = d.side.concealLBRRGap()
 			}
 			if err != nil {
 				return nil, err
@@ -628,7 +618,27 @@ func (d *Decoder) concealPacketLossMono() ([]float64, error) {
 	return pcm, err
 }
 
+func (d *Decoder) concealLBRRGapMono() []float64 {
+	channels := d.channels
+	d.channels = 1
+	pcm := d.concealLBRRGap()
+	d.channels = channels
+	return pcm
+}
+
+// concealFECFrames conceals nFrames frames of a packet decoded through the
+// FEC path that carries no usable LBRR data (FLAG_DECODE_LBRR concealment).
 func (d *Decoder) concealFECFrames(nFrames int) ([]float64, error) {
+	allPCM := make([]float64, 0, d.frameSize*nFrames)
+	for i := 0; i < nFrames; i++ {
+		allPCM = append(allPCM, d.concealLBRRGap()...)
+	}
+	return allPCM, nil
+}
+
+// concealLostFrames conceals nFrames frames of a lost or empty packet
+// (FLAG_PACKET_LOST concealment).
+func (d *Decoder) concealLostFrames(nFrames int) ([]float64, error) {
 	allPCM := make([]float64, 0, d.frameSize*nFrames)
 	for i := 0; i < nFrames; i++ {
 		pcm, err := d.concealPacketLoss()
@@ -721,13 +731,9 @@ func (d *Decoder) decodeMultiStereo(packet []byte, nFrames int) ([]float64, erro
 		return nil, fmt.Errorf("missing SILK side-channel decoder")
 	}
 
-	if len(packet) == 1 && packet[0] == 0x00 {
-		d.noteDigitalSilence()
-		d.side.noteDigitalSilence()
-		return make([]float64, d.frameSize*d.channels*nFrames), nil
-	}
 	if len(packet) < 2 {
-		return d.concealPacketLoss()
+		d.lastFinalRange = 0
+		return d.DecodePLC(nFrames)
 	}
 
 	dec := entcode.NewDecoder(packet)
@@ -1121,6 +1127,16 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 		lpcSets[0] = lpcSets[1]
 	}
 
+	copy(d.prevNLSFQ15, nlsfQ15)
+
+	// After a packet loss do BWE of LPC coefs (silk_decode_parameters).
+	if d.lossCnt > 0 {
+		silkBwexpander16(lpcSets[1], d.lpcOrder, bweAfterLossQ16)
+		if interpFactor < 4 {
+			silkBwexpander16(lpcSets[0], d.lpcOrder, bweAfterLossQ16)
+		}
+	}
+
 	lpcCoeffsQ12 := make([][]int16, d.nSubframes)
 	for sf := 0; sf < d.nSubframes; sf++ {
 		lpcCoeffsQ12[sf] = lpcSets[sf>>1]
@@ -1135,12 +1151,11 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 	}
 
 	// ── 5. Decode pitch parameters (voiced only) ─────────────────────────────
+	// silk_decode_parameters zeroes pitch lags, LTP coefficients, and the
+	// LTP scale for non-voiced frames; the PLC state update relies on that.
 	pitchLags := make([]int, d.nSubframes)
-	for sf := range pitchLags {
-		pitchLags[sf] = d.lagPrev
-	}
 	ltpCoeffsQ14 := make([][5]int16, d.nSubframes)
-	ltpScaleQ14 := int16(15565) // ~0.95 in Q14
+	ltpScaleQ14 := int16(0)
 
 	if signalType == SignalTypeVoiced {
 		decodeAbsoluteLagIndex := true
@@ -1186,8 +1201,6 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 				pitchLags[sf] = maxLag
 			}
 		}
-		d.lagPrev = pitchLags[d.nSubframes-1]
-
 		// LTP gains
 		ltpPerIdx := dec.DecodeIcdf(silkLTPPerIndexICDF[:], 8)
 		for sf := 0; sf < d.nSubframes; sf++ {
@@ -1252,15 +1265,24 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 		pitchLags, ltpCoeffsQ14, ltpScaleQ14,
 		signalType, quantOffset, seed)
 
-	// ── 9. Update state ───────────────────────────────────────────────────────
-	copy(d.prevNLSFQ15, nlsfQ15)
-	if len(lpcCoeffsQ12) > 0 {
-		copy(d.prevLPCQ12, lpcCoeffsQ12[len(lpcCoeffsQ12)-1])
+	// ── 9. Update state (silk_decode_frame after silk_decode_core) ───────────
+	// prevNLSF_Q15 is stored by silk_decode_parameters before synthesis, so
+	// the CNG update below already sees the current frame's NLSFs.
+	ctrl := &decoderControl{
+		signalType:  signalType,
+		pitchL:      pitchLags,
+		ltpCoefQ14:  ltpCoeffsQ14,
+		predCoefQ12: lpcCoeffsQ12[d.nSubframes-1],
+		ltpScaleQ14: ltpScaleQ14,
+		gainsQ16:    gainsQ16,
 	}
+	d.plcUpdate(ctrl)
+	d.lossCnt = 0
 	d.prevSignalType = signalType
 	d.firstFrame = false
-	d.plcCount = 0
-	d.lastFrameSilent = false
+	d.cngProcess(ctrl, outputI16)
+	d.plcGlueFrames(outputI16)
+	d.lagPrev = pitchLags[d.nSubframes-1]
 
 	// Convert int16 PCM → float64 normalized to [-1, 1]
 	result := make([]float64, d.frameSize)
@@ -2215,6 +2237,8 @@ func (d *Decoder) synthesize(
 		tf := &d.trace.Frames[len(d.trace.Frames)-1]
 		tf.ExcQ14 = append([]int32(nil), excQ14...)
 	}
+	// psDec->exc_Q14 keeps the excitation for PLC and CNG.
+	copy(d.excQ14[:d.frameSize], excQ14)
 
 	ltpMemLen := len(d.ltpState)
 	sLTPQ15 := make([]int32, ltpMemLen+d.frameSize)
@@ -2244,8 +2268,21 @@ func (d *Decoder) synthesize(
 		d.prevGainQ16 = gainsQ16[sf]
 		lpc := lpcCoeffsQ12[sf]
 		lag := pitchLags[sf]
+		bQ14 := ltpCoeffsQ14[sf]
+		sfSignalType := signalType
 
-		if signalType == SignalTypeVoiced {
+		// Avoid abrupt transition from voiced PLC to unvoiced normal decoding
+		// (libopus decode_core.c).
+		if d.lossCnt > 0 && d.prevSignalType == SignalTypeVoiced &&
+			signalType != SignalTypeVoiced && sf < silkMaxNbSubfr/2 {
+			bQ14 = [5]int16{}
+			bQ14[5/2] = plcPostLossCenterTapQ14
+			sfSignalType = SignalTypeVoiced
+			pitchLags[sf] = d.lagPrev
+			lag = pitchLags[sf]
+		}
+
+		if sfSignalType == SignalTypeVoiced {
 			// libopus decode_core.c:141 — re-whiten when
 			//   k == 0 || (k == 2 && NLSF_interpolation_flag).
 			// NLSF_interpolation_flag == 1 iff interpFactor < 4 (interpolation active),
@@ -2280,12 +2317,12 @@ func (d *Decoder) synthesize(
 
 		presQ14 := excQ14[start : start+d.subfrmLen]
 		for i := 0; i < d.subfrmLen; i++ {
-			if signalType == SignalTypeVoiced {
+			if sfSignalType == SignalTypeVoiced {
 				ltpPredQ13 := int32(2) // rounding bias (matches libopus)
 				for k := 0; k < 5; k++ {
 					ltpIdx := sLTPBufIdx - lag + 2 - k
 					if ltpIdx >= 0 && ltpIdx < len(sLTPQ15) {
-						ltpPredQ13 = silkSMLAWB(ltpPredQ13, sLTPQ15[ltpIdx], ltpCoeffsQ14[sf][k])
+						ltpPredQ13 = silkSMLAWB(ltpPredQ13, sLTPQ15[ltpIdx], bQ14[k])
 					}
 				}
 				presQ14[i] = excQ14[start+i] + (ltpPredQ13 << 1)
@@ -2319,149 +2356,34 @@ func (d *Decoder) synthesize(
 	return output
 }
 
-// decodeSilence returns a zero-filled frame.
-func (d *Decoder) decodeSilence() ([]float64, error) {
-	return make([]float64, d.frameSize*d.channels), nil
-}
-
-// noteDigitalSilence records a decoded digital-silence packet. The synthesis
-// history is cleared so that a following packet loss is concealed as continued
-// silence instead of replaying stale pre-silence speech.
-func (d *Decoder) noteDigitalSilence() {
-	d.lastFrameSilent = true
-	d.plcCount = 0
-	d.prevSignalType = SignalTypeUnvoiced
-	for i := range d.lpcState {
-		d.lpcState[i] = 0
-	}
-	for i := range d.ltpState {
-		d.ltpState[i] = 0
-	}
-	for i := range d.prevOutput {
-		d.prevOutput[i] = 0
-	}
-	// The true delayed samples after a silence frame are zeros; without this
-	// the stereo unmix replays the pre-silence tail into the next frame.
-	d.stereoMid = [2]int16{}
-	d.stereoSide = [2]int16{}
-}
-
-// concealPacketLoss performs pitch-history based packet loss concealment.
+// concealPacketLoss conceals one lost SILK frame with the libopus PLC and
+// returns it as normalized float samples. It mirrors the FLAG_PACKET_LOST
+// branch of silk_Decode, including the LastGainIndex reset that prevents the
+// gain from bouncing back when losses hit a decaying signal.
 func (d *Decoder) concealPacketLoss() ([]float64, error) {
-	if d.lastFrameSilent {
-		// Digital silence continues as silence; the cleared history would
-		// otherwise only feed the concealment noise generator.
-		d.plcCount++
-		return make([]float64, d.frameSize*d.channels), nil
-	}
-	d.plcCount++
+	pcm := d.concealLBRRGap()
+	d.prevGainIndex = 10
+	return pcm, nil
+}
 
-	output := make([]int32, d.frameSize)
-	lag := d.lagPrev
-	if lag <= 0 || lag > len(d.ltpState) {
-		lag = d.fsKHz * 10
-	}
-	if lag <= 0 {
-		lag = 1
-	}
-
-	histStart := len(d.ltpState) - lag
-	for i := range output {
-		var pred int32
-		src := histStart + i
-		switch {
-		case src >= 0 && src < len(d.ltpState):
-			pred = d.ltpState[src]
-		case i >= lag:
-			pred = output[i-lag]
-		case len(d.ltpState) > 0:
-			pred = d.ltpState[len(d.ltpState)-1]
-		}
-
-		if d.prevSignalType != SignalTypeVoiced {
-			d.randSeed = 196314165*d.randSeed + 907633515
-			noise := d.randSeed >> 20
-			var lpcPred64 int64
-			for j := 0; j < d.lpcOrder; j++ {
-				pastIdx := i - j - 1
-				var past int32
-				if pastIdx >= 0 {
-					past = output[pastIdx] << 14
-				} else {
-					histIdx := len(d.lpcState) + pastIdx
-					if histIdx >= 0 && histIdx < len(d.lpcState) {
-						past = d.lpcState[histIdx]
-					}
-				}
-				lpcPred64 += int64(d.prevLPCQ12[j]) * int64(past)
-			}
-			pred = int32(lpcPred64>>26) + noise
-		}
-
-		frameFade := 1.0 - 0.25*float64(i)/float64(max(1, d.frameSize-1))
-		lossFade := math.Pow(0.85, float64(d.plcCount-1))
-		output[i] = clampPCM32(int64(math.Round(float64(pred) * frameFade * lossFade)))
-	}
-
-	d.updatePLCState(output)
+// concealLBRRGap conceals one frame whose LBRR data is absent while decoding
+// in-band FEC. libopus reaches silk_PLC through FLAG_DECODE_LBRR here, so
+// the gain index is left untouched.
+func (d *Decoder) concealLBRRGap() []float64 {
+	frame := d.concealFrame()
 	result := make([]float64, d.frameSize)
-	for i, s := range output {
+	for i, s := range frame {
 		result[i] = float64(s) / 32768.0
 	}
-
 	if d.channels == 2 {
 		stereo := make([]float64, d.frameSize*2)
 		for i, s := range result {
 			stereo[i*2] = s
 			stereo[i*2+1] = s
 		}
-		return stereo, nil
+		return stereo
 	}
-	return result, nil
-}
-
-func (d *Decoder) updatePLCState(output []int32) {
-	if len(output) == 0 {
-		return
-	}
-	if len(d.prevOutput) != d.frameSize {
-		d.prevOutput = make([]int32, d.frameSize)
-	}
-	for i, sample := range output {
-		d.prevOutput[i] = sample << 14
-	}
-	for i := range d.lpcState {
-		src := len(output) - len(d.lpcState) + i
-		if src >= 0 {
-			d.lpcState[i] = output[src] << 14
-		} else {
-			d.lpcState[i] = 0
-		}
-	}
-	if len(output) <= len(d.ltpState) {
-		mvLen := len(d.ltpState) - len(output)
-		copy(d.ltpState[:mvLen], d.ltpState[len(output):])
-		for i, sample := range output {
-			d.ltpState[mvLen+i] = sample
-		}
-	} else {
-		// output longer than the LTP buffer (e.g. 16 kHz: 320 > 288): keep the
-		// most recent len(d.ltpState) samples so the pitch history stays fresh.
-		offset := len(output) - len(d.ltpState)
-		for i := range d.ltpState {
-			d.ltpState[i] = output[offset+i]
-		}
-	}
-}
-
-func clampPCM32(v int64) int32 {
-	if v > math.MaxInt16 {
-		return math.MaxInt16
-	}
-	if v < math.MinInt16 {
-		return math.MinInt16
-	}
-	return int32(v)
+	return result
 }
 
 // Reset resets the decoder state.
@@ -2483,8 +2405,14 @@ func (d *Decoder) Reset() {
 		d.ltpState[i] = 0
 	}
 	d.randSeed = 7818
-	d.plcCount = 0
-	d.lastFrameSilent = false
+	d.lossCnt = 0
+	d.excQ14 = [silkMaxFrameLength]int32{}
+	d.plc = plcState{}
+	d.plcReset()
+	d.plc.fsKHz = d.fsKHz
+	d.cng = cngState{}
+	d.cngReset()
+	d.cng.fsKHz = d.fsKHz
 	d.stereoPredPrevQ13 = [2]int32{}
 	d.stereoMid = [2]int16{}
 	d.stereoSide = [2]int16{}
@@ -2510,10 +2438,10 @@ func (d *Decoder) CopyPrimaryStateFrom(src *Decoder) {
 	copy(d.lpcState, src.lpcState)
 	copy(d.ltpState, src.ltpState)
 	d.randSeed = src.randSeed
-	d.plcCount = src.plcCount
-	d.lastFrameSilent = src.lastFrameSilent
-	copy(d.prevLPCQ12, src.prevLPCQ12)
-	copy(d.prevOutput, src.prevOutput)
+	d.lossCnt = src.lossCnt
+	d.excQ14 = src.excQ14
+	d.plc = src.plc
+	d.cng = src.cng
 }
 
 // CopyAllStateFrom copies the complete decoder configuration and streaming
@@ -2527,8 +2455,6 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 	d.prevNLSFQ15 = append([]int16(nil), src.prevNLSFQ15...)
 	d.lpcState = append([]int32(nil), src.lpcState...)
 	d.ltpState = append([]int32(nil), src.ltpState...)
-	d.prevLPCQ12 = append([]int16(nil), src.prevLPCQ12...)
-	d.prevOutput = append([]int32(nil), src.prevOutput...)
 	if src.side != nil {
 		if dstSide == nil {
 			dstSide = &Decoder{}

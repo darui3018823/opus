@@ -101,9 +101,11 @@ then the Q1 decision governs the merge into `dev/libopus-bit-exact`.
 Status 2026-09-15: LTP correlation + gain quantization exact (`f38a13a`) and
 pitch analysis exact on injected buffers (`0ce1c1b`), both on
 `dev/silk-q2-ltp-oracle`; LTP now runs once per frame on `res_pitch`
-(`ebd1d77`) and every AB gate passes. Remaining in Q2: the VAD fixed-point
-port, the quant-offset sparseness measure on `res_pitch`, and the `la_pitch`
-look-ahead (framing slice).
+(`ebd1d77`); the VAD is fixed-point exact and the first frame after reset is
+unvoiced like libopus (`24943ae`), which leaves the 8k speech-harmonic
+loudness gate failing by 0.12 dB (unvoiced first-frame bit cost → Q5 rate
+control). Remaining in Q2: the quant-offset sparseness measure on `res_pitch`
+and the `la_pitch` look-ahead (framing slice).
 
 Blocking finding for Phase 4: the Go encoder has no SILK `LA_SHAPE_MS` (5 ms)
 look-ahead delay and no Opus-layer `delay_compensation` (Fs/250), so its frame

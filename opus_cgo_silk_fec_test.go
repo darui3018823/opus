@@ -320,10 +320,35 @@ func TestCGOEncodeRefSILKFECMultiFrame(t *testing.T) {
 			snr, rmse, dl, _ := silkRefAlignedSNR(refFrames[N], toFloat64(rec), frameSize/2)
 			t.Logf("%dms: bytes fec=%d no=%d (+%d) | frame %d FEC recovery alignedSNR=%.2fdB rmse=%.4f delay=%d len(rec)=%d len(ref)=%d",
 				packetMs, bytesFEC, bytesNo, bytesFEC-bytesNo, N, snr, rmse, dl, len(rec), len(refFrames[N]))
-			// Measured ~17.9 dB (40 ms) / ~13.4 dB (60 ms) on the deterministic
-			// fixture; floor at 10 dB leaves margin while catching regressions.
-			if snr < 10.0 {
-				t.Fatalf("multi-frame FEC reconstruction too poor: alignedSNR=%.2fdB", snr)
+			// LBRR is only coded for active SILK frames; a lost frame that was
+			// inactive is concealed rather than reconstructed, so the quality
+			// gate covers the subframes that actually carry redundancy.
+			present, err := silkMonoLBRRPresent(pktsFEC[N+1], packetMs/20)
+			if err != nil {
+				t.Fatalf("parse LBRR mask: %v", err)
+			}
+			subframe := rate / 50
+			var refPresent, recPresent []float64
+			refN := refFrames[N]
+			recF := toFloat64(rec)
+			for f, ok := range present {
+				if !ok {
+					t.Logf("%dms: subframe %d has no LBRR (concealed), excluded from the recovery gate", packetMs, f)
+					continue
+				}
+				refPresent = append(refPresent, refN[f*subframe:(f+1)*subframe]...)
+				recPresent = append(recPresent, recF[f*subframe:(f+1)*subframe]...)
+			}
+			if len(refPresent) == 0 {
+				t.Fatalf("%dms: recovery packet carries no LBRR subframes", packetMs)
+			}
+			presentSNR, _, _, _ := silkRefAlignedSNR(refPresent, recPresent, subframe/2)
+			t.Logf("%dms: FEC recovery over LBRR-present subframes alignedSNR=%.2fdB", packetMs, presentSNR)
+			// Measured ~19.8 dB (40 ms) / ~12 dB (60 ms present subframes) on
+			// the deterministic fixture; floor at 10 dB leaves margin while
+			// catching regressions.
+			if presentSNR < 10.0 {
+				t.Fatalf("multi-frame FEC reconstruction too poor: alignedSNR=%.2fdB over LBRR-present subframes", presentSNR)
 			}
 		})
 	}

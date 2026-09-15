@@ -444,3 +444,36 @@ test passes.
 - The perf-regression packet digests were regenerated (stable across runs).
 - Verified `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...`, and `go test -race -count=1 ./...`.
+
+### 2026-09-15: fixed-point SILK VAD and first-frame voicing rule
+
+- Reference: checked-in libopus 1.6.1 `silk/VAD.c` (`silk_VAD_Init`,
+  `silk_VAD_GetSA_Q8_c`, `silk_VAD_GetNoiseLevels`), `silk/ana_filt_bank_1.c`,
+  `silk/sigm_Q15.c`, and `silk/float/find_pitch_lags_FLP.c`'s
+  `first_frame_after_reset` gate.
+- Replaced the float approximation of the VAD with the fixed-point port
+  (Q8 activity, Q15 tilt and band quality, int32 noise-level and smoothed-SNR
+  state). Because `silk_VAD_GetSA_Q8_c` takes the whole encoder state,
+  `cgoref.SILKVAD` replays the C body verbatim on a private state using the
+  exported `silk_ana_filt_bank_1`, `silk_lin2log`, and `silk_sigm_Q15`;
+  `TestSILKVADOracle` compares every frame of five 40-frame sequences (8/12/16
+  kHz, 10/20 ms, speech-like, noise-then-tone, quiet, loud noise) and all are
+  identical. The pitch stage now receives the Q8/Q15 integers directly.
+- Applied libopus' rule that the pitch estimator does not run on the first
+  frame after a reset (coded unvoiced). This replaces the Go-specific
+  16 kHz first-frame long-lag guard, which had approximated the same
+  behaviour for one case; running the estimator on the first frame drops the
+  16 kHz speech-like-harmonic matched loudness to -8 dB, so the rule is
+  confirmed as the fix rather than a regression.
+- Scoreboard: 8k steady-voiced -2.25 → -2.94, 8k speech-harmonic -8.55 →
+  -5.03, 12k steady-voiced -1.48 → -0.15, 12k onset -0.38 → +0.91, 16k
+  steady-voiced +1.19 → +2.88, 16k speech-harmonic -5.03 → -5.47. Matched
+  loudness is 8k -1.62 dB (FAIL by 0.12 dB), 12k -0.95 dB, 16k -1.05 dB. The
+  8 kHz gate is left failing without a threshold change; the unvoiced first
+  frame is expensive under the Go rate control (a 24 kbps CVBR frame of a pure
+  tone reaches 119 bytes), which points at the gain-loop/rate-control slice.
+  `TestEncoderSILKOnlyVBRAndDTXDoNotUseCBRPadding` now asserts the absence of
+  padding instead of a byte bound that depended on the old voiced first frame.
+- Verified `TestSILKVADOracle`, the Q1/Q2 oracles, `go vet ./...`,
+  `go test -count=1 ./...`, `go test -count=1 -tags opusref ./...` (only the
+  8 kHz loudness gate fails), and `go test -race -count=1 ./...`.

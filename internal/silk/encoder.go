@@ -149,17 +149,21 @@ type Encoder struct {
 	// decision); packetLossPerc feeds the LBRR gain-increase schedule.
 	lbrrEnabled    bool
 	packetLossPerc int
-	// lbrrInPrevPacket records whether the previous packet generated LBRR data,
-	// selecting the LBRR_GainIncreases schedule (silk_setup_LBRR).
-	lbrrInPrevPacket bool
+	// lbrrEnabledPrev is LBRR_enabled of the previous packet and
+	// lbrrGainIncreases the resulting LBRR_GainIncreases (silk_setup_LBRR);
+	// lbrrPrevLastGainIndex is LBRRprevLastGainIndex; lbrrFlag the LBRR_flag
+	// written in the current packet (it feeds silk_LTP_scale_ctrl).
+	lbrrEnabledPrev       bool
+	lbrrGainIncreases     int
+	lbrrPrevLastGainIndex int
+	lbrrFlag              bool
 	// pendingLBRR holds the LBRR frames generated while encoding the previous
 	// packet; they are emitted at the front of the current packet (the cross-
 	// packet one-packet FEC delay). curLBRR accumulates the current packet's
 	// LBRR frames. lbrrPlanned is set when curLBRR has at least one frame.
-	pendingLBRR        []lbrrFrameData
-	curLBRR            []lbrrFrameData
-	pendingLBRRFrames  int // frame count the pending LBRR data was generated for
-	lbrrRunPrevGainIdx int // running gain index within the current LBRR run
+	pendingLBRR       []lbrrFrameData
+	curLBRR           []lbrrFrameData
+	pendingLBRRFrames int // frame count the pending LBRR data was generated for
 	// pendingLBRRStereoPred carries the M/S predictor indices for the frames in
 	// pendingLBRR. Stereo LBRR syntax writes these controls frame-by-frame
 	// before the corresponding mid/side redundant bodies.
@@ -170,11 +174,15 @@ type Encoder struct {
 	lbrrBitsPerFrame int
 	// Capture of the current voiced frame's coded pitch/LTP indices, populated
 	// by encodePitchAndLTP so the LBRR generator can replay them.
-	capLagHigh    int
-	capLagLow     int
-	capContour    int
-	capLTPPerIdx  int
-	capLTPGainIdx []int
+	capLagIndex      int
+	capContour       int
+	capLTPPerIdx     int
+	capLTPGainIdx    []int
+	capLTPScaleIndex int
+	// curLTPScaleIndex is this frame's LTP_scaleIndex (silk_LTP_scale_ctrl_FLP)
+	// and lastGainSymbols the gain symbols encodeGains wrote for the frame.
+	curLTPScaleIndex int
+	lastGainSymbols  []int
 }
 
 type nlsfAnalysis struct {
@@ -423,9 +431,8 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 	// LBRR flag + redundant frames carried over from the previous packet (the
 	// one-packet FEC delay). When FEC is disabled this writes a single 0 bit,
 	// identical to the previous hardcoded behaviour.
-	lbrrStartBits := enc.ECTell()
-	e.emitPendingLBRR(enc, nFrames)
-	lbrrBits := enc.ECTell() - lbrrStartBits
+	e.setupLBRR()
+	lbrrBits := e.emitPendingLBRR(enc, nFrames)
 	e.lbrrBitsPerFrame = 0
 	if lbrrBits > 1 {
 		e.lbrrBitsPerFrame = (lbrrBits + nFrames - 1) / nFrames
@@ -441,8 +448,10 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 	e.lastSNRVBRStream = false
 	for i, signal := range frames {
 		e.curFrame = i
-		e.targetRateBps = e.frameTargetRate(nFrames, i, enc.ECTell())
+		tell := enc.ECTell()
+		e.targetRateBps = e.frameTargetRate(nFrames, i, tell)
 		e.encodeRangeFrame(enc, signal, vadFlags[i], i > 0)
+		e.recordRateTrace(nFrames, tell, lbrrBits)
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 	}
 	e.finishLBRRPacket(nFrames)
@@ -497,6 +506,8 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		vadFlags[1][frame] = e.side.runFrameVAD(frame, side)
 	}
 
+	e.setupLBRR()
+	e.side.setupLBRR()
 	for ch := 0; ch < 2; ch++ {
 		for _, active := range vadFlags[ch] {
 			enc.EncodeBitLogp(active, 1)
@@ -511,6 +522,9 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		e.pendingLBRRSymbol(nFrames),
 		e.side.pendingLBRRSymbol(nFrames),
 	}
+	e.lbrrFlag = lbrrSymbols[0] != 0
+	e.side.lbrrFlag = lbrrSymbols[1] != 0
+	lbrrStartBits := enc.ECTell()
 	for ch, symbol := range lbrrSymbols {
 		component := e
 		if ch == 1 {
@@ -521,6 +535,7 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 	// libopus writes stereo LBRR frame-major. A mid-channel redundant frame is
 	// preceded by its stereo predictor and, when side LBRR is absent, the
 	// mid-only flag. The channel bodies then follow mid before side.
+	var midEC, sideEC lbrrECState
 	for frame := 0; frame < nFrames; frame++ {
 		midPresent := lbrrSymbols[0]&(1<<uint(frame)) != 0
 		sidePresent := lbrrSymbols[1]&(1<<uint(frame)) != 0
@@ -533,12 +548,13 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 			if !sidePresent {
 				enc.EncodeIcdf(1, silkStereoOnlyCodeMidICDF[:], 8)
 			}
-			e.writeLBRRFrame(enc, e.pendingLBRR[frame], previousLBRRSignalType(e.pendingLBRR, lbrrSymbols[0], frame))
+			e.writeLBRRFrame(enc, e.pendingLBRR[frame], frame > 0 && lbrrSymbols[0]&(1<<uint(frame-1)) != 0, &midEC)
 		}
 		if sidePresent {
-			e.side.writeLBRRFrame(enc, e.side.pendingLBRR[frame], previousLBRRSignalType(e.side.pendingLBRR, lbrrSymbols[1], frame))
+			e.side.writeLBRRFrame(enc, e.side.pendingLBRR[frame], frame > 0 && lbrrSymbols[1]&(1<<uint(frame-1)) != 0, &sideEC)
 		}
 	}
+	e.updateLBRRUsage(enc.ECTell() - lbrrStartBits)
 
 	e.beginLBRRPacket()
 	e.side.beginLBRRPacket()
@@ -572,15 +588,6 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 	e.finishPacketBitReservoir(nFrames, enc.ECTell())
 	e.pendingLBRRStereoPred = append(e.pendingLBRRStereoPred[:0], stereoPredIx...)
 	return nil
-}
-
-func previousLBRRSignalType(frames []lbrrFrameData, symbol, frame int) int {
-	for i := frame - 1; i >= 0; i-- {
-		if symbol&(1<<uint(i)) != 0 {
-			return frames[i].signalType
-		}
-	}
-	return -1
 }
 
 func encodeStereoPred(enc *entcode.Encoder, ix [2][3]int8) {
@@ -688,20 +695,30 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	if len(domainConfig) == 0 {
 		quantOffset = e.estimateQuantOffsetType(signal, nlsf.lpcQ12, signalType, pitchLag, pitchGain)
 	}
+	e.curLTPScaleIndex = 0
+	if signalType == SignalTypeVoiced && len(domainConfig) == 1 {
+		e.curLTPScaleIndex = silkLTPScaleCtrl(!conditionalGain, domainConfig[0].ltpPredCodGain,
+			e.packetLossPerc, e.packetFrames, e.lbrrFlag, e.frameSNRdBQ7())
+	}
 
 	// VBR: encode_frame_FLP runs its quantiser loop once, so the coded gains
 	// are silk_process_gains_FLP's (exact port); the Go budget search only
-	// serves CBR.
+	// serves CBR. CBR still computes the process_gains result because
+	// silk_LBRR_encode_FLP quantises the redundant copy from those gains
+	// (the loop's gain adjustments never reach the LBRR frame).
 	e.exactGainSymbols = nil
 	var exactGains *silkProcessGainsResult
-	if e.haveShape32 && len(domainConfig) == 1 && e.rateMode != RateModeCBR {
+	if e.haveShape32 && len(domainConfig) == 1 {
 		exactGains = e.exactProcessGains(signal, signalType, quantOffset, nlsf, domainConfig[0], conditionalGain)
+	}
+	useExactGains := exactGains != nil && e.rateMode != RateModeCBR
+	if useExactGains {
 		quantOffset = exactGains.quantOffset
 	}
 
 	plan := e.selectRateControlPlan(initialState, signal, vadActive, signalType, quantOffset, conditionalGain, nlsf, pitchLag, pitchGain, domainGainTargets)
 	e.lastSNRVBRFrame = plan.snrVBR
-	if exactGains != nil {
+	if useExactGains {
 		plan = rateControlPlan{gainTargets: exactGains.absIndices, gainIndices: exactGains.absIndices, rateScale: 1}
 		e.lastSNRVBRFrame = false
 		e.exactGainSymbols = exactGains.symbols
@@ -759,8 +776,19 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	if lbrrDebug {
 		leakBefore = e.leakFingerprint()
 	}
-	e.generateLBRRFrame(signal, signalType, quantOffset, gainIndices, nlsf,
-		pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale, initialState)
+	// The LBRR copy starts from silk_process_gains_FLP's gain symbols and
+	// LastGainIndex (in VBR these are the coded gains; in CBR the Go budget
+	// search may have coded other gains for the regular frame).
+	lbrrGainSymbols, lastGainIndex := e.lastGainSymbols, e.prevGainIdx
+	if len(gainIndices) > 0 {
+		lastGainIndex = gainIndices[len(gainIndices)-1]
+	}
+	if exactGains != nil && len(exactGains.symbols) == e.nSubframes {
+		lbrrGainSymbols = exactGains.symbols
+		lastGainIndex = exactGains.absIndices[e.nSubframes-1]
+	}
+	e.generateLBRRFrame(signal, signalType, quantOffset, lbrrGainSymbols, lastGainIndex, conditionalGain, nlsf,
+		pitchLags, ltpCoeffsQ14, ltpScaleQ14, frameSeed, plan.rateScale, initialState)
 	if lbrrDebug {
 		if after := e.leakFingerprint(); after != leakBefore {
 			fmt.Fprintf(os.Stderr, "[LBRR LEAK]\n  before=%s\n  after =%s\n", leakBefore, after)
@@ -1265,16 +1293,11 @@ func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, signal []float64, lpcQ
 		contourIndex = 0
 	}
 
-	if conditionalGain && e.prevSignalType == SignalTypeVoiced {
-		enc.EncodeIcdf(0, silkPitchDeltaICDF[:], 8) // Force absolute lag coding.
-	}
-	enc.EncodeIcdf(lagIndex, silkPitchLagICDF[:], 8)
-	encodePitchLagLowBits(enc, fsKHz, lagLowBits)
-	encodePitchContour(enc, fsKHz, e.nSubframes, contourIndex)
-
 	// Reconstruct the per-subframe lags the way the decoder will, from the
 	// encoded indices (so encoder and decoder stay bit-for-bit in sync).
 	recLag := lagIndex*step + lagLowBits
+	encodeLagIndex(enc, fsKHz, recLag, conditionalGain && e.prevSignalType == SignalTypeVoiced, e.prevLagIndex)
+	encodePitchContour(enc, fsKHz, e.nSubframes, contourIndex)
 	pitchLags := e.reconstructCurrentPitchLags()
 
 	ltpPerIdx, ltpGainIndices, ltpCoeffsQ14 := e.selectLTPGainsVQ(signal, lpcQ12, pitchLags)
@@ -1290,8 +1313,12 @@ func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, signal []float64, lpcQ
 			enc.EncodeIcdf(ltpGainIdx, silkLTPGainICDF2[:], 8)
 		}
 	}
+	// silk_LTP_scale_ctrl_FLP: the scale index is coded for independently
+	// coded frames only and is 0 otherwise.
+	ltpScaleIndex := 0
 	if !conditionalGain {
-		enc.EncodeIcdf(0, silkLTPScaleICDF[:], 8)
+		ltpScaleIndex = e.curLTPScaleIndex
+		enc.EncodeIcdf(ltpScaleIndex, silkLTPScaleICDF[:], 8)
 	}
 
 	e.prevPitchLag = pitchLags[e.nSubframes-1]
@@ -1299,13 +1326,13 @@ func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, signal []float64, lpcQ
 
 	// Capture the coded pitch/LTP indices so the LBRR generator can replay this
 	// frame's side information into the next packet without recomputation.
-	e.capLagHigh = lagIndex
-	e.capLagLow = lagLowBits
+	e.capLagIndex = recLag
 	e.capContour = contourIndex
 	e.capLTPPerIdx = ltpPerIdx
 	e.capLTPGainIdx = append([]int(nil), ltpGainIndices...)
+	e.capLTPScaleIndex = ltpScaleIndex
 
-	return ltpCoeffsQ14, silkLTPScalesTable[0], pitchLags
+	return ltpCoeffsQ14, silkLTPScalesTable[ltpScaleIndex], pitchLags
 }
 
 // reconstructCurrentPitchLags rebuilds the per-subframe pitch lags from the
@@ -1871,8 +1898,10 @@ func silkQuantizeGainIndex(targetQ16 float64) int {
 
 func (e *Encoder) encodeGains(enc *entcode.Encoder, signalType int, targetIndices []int, conditional bool) []int {
 	absIndices := make([]int, e.nSubframes)
+	e.lastGainSymbols = make([]int, e.nSubframes)
 	if sym := e.exactGainSymbols; len(sym) == e.nSubframes {
 		// silk_encode_indices with the symbols silk_gains_quant produced.
+		copy(e.lastGainSymbols, sym)
 		if conditional {
 			enc.EncodeIcdf(sym[0], silkDeltaGainICDF[:], 8)
 		} else {
@@ -1888,7 +1917,7 @@ func (e *Encoder) encodeGains(enc *entcode.Encoder, signalType int, targetIndice
 	prevIdx := e.prevGainIdx
 	targetIdx := gainTargetAt(targetIndices, 0)
 	if conditional {
-		targetIdx = e.encodeGainDelta(enc, prevIdx, targetIdx)
+		targetIdx, e.lastGainSymbols[0] = e.encodeGainDelta(enc, prevIdx, targetIdx)
 	} else {
 		if targetIdx < prevIdx-16 {
 			targetIdx = prevIdx - 16
@@ -1902,11 +1931,12 @@ func (e *Encoder) encodeGains(enc *entcode.Encoder, signalType int, targetIndice
 		}
 		enc.EncodeIcdf(gainMSB, silkGainICDF[signalType][:], 8)
 		enc.EncodeIcdf(gainLSB, silkUniform8ICDF[:], 8)
+		e.lastGainSymbols[0] = targetIdx
 	}
 	absIndices[0] = targetIdx
 
 	for sf := 1; sf < e.nSubframes; sf++ {
-		targetIdx = e.encodeGainDelta(enc, targetIdx, gainTargetAt(targetIndices, sf))
+		targetIdx, e.lastGainSymbols[sf] = e.encodeGainDelta(enc, targetIdx, gainTargetAt(targetIndices, sf))
 		absIndices[sf] = targetIdx
 	}
 	return absIndices
@@ -1951,7 +1981,9 @@ func gainTargetAt(targetIndices []int, sf int) int {
 	return clampInt(targetIndices[sf], 0, NLevelsQGain-1)
 }
 
-func (e *Encoder) encodeGainDelta(enc *entcode.Encoder, prevIdx, targetIdx int) int {
+// encodeGainDelta codes the clamped gain delta and returns the resulting
+// absolute index and the coded symbol.
+func (e *Encoder) encodeGainDelta(enc *entcode.Encoder, prevIdx, targetIdx int) (int, int) {
 	delta := targetIdx - prevIdx
 	if delta < MinDeltaGainQuant {
 		delta = MinDeltaGainQuant
@@ -1960,7 +1992,7 @@ func (e *Encoder) encodeGainDelta(enc *entcode.Encoder, prevIdx, targetIdx int) 
 		delta = MaxDeltaGainQuant
 	}
 	enc.EncodeIcdf(delta-MinDeltaGainQuant, silkDeltaGainICDF[:], 8)
-	return applyQuantizedGainDelta(prevIdx, delta)
+	return applyQuantizedGainDelta(prevIdx, delta), delta - MinDeltaGainQuant
 }
 
 func quantizedGainDelta(prevIdx, targetIdx int) int {
@@ -3242,14 +3274,18 @@ func (e *Encoder) Reset() {
 	e.curLBRR = nil
 	e.pendingLBRRFrames = 0
 	e.pendingLBRRStereoPred = nil
-	e.lbrrInPrevPacket = false
-	e.lbrrRunPrevGainIdx = 0
+	e.lbrrEnabledPrev = false
+	e.lbrrGainIncreases = 0
+	e.lbrrPrevLastGainIndex = 0
+	e.lbrrFlag = false
 	e.lbrrBitsPerFrame = 0
-	e.capLagHigh = 0
-	e.capLagLow = 0
+	e.capLagIndex = 0
 	e.capContour = 0
 	e.capLTPPerIdx = 0
 	e.capLTPGainIdx = nil
+	e.capLTPScaleIndex = 0
+	e.curLTPScaleIndex = 0
+	e.lastGainSymbols = nil
 	e.stereoState.reset()
 	e.prevOnlyMiddle = false
 	if e.side != nil {

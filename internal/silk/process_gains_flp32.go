@@ -171,14 +171,7 @@ func (e *Encoder) exactProcessGains(signal []float64, signalType, quantOffset in
 	}
 	shapeGains := e.pendingShape32.gains[:e.nSubframes]
 	resNrg := silkResidualEnergyFLP32(scaled, a, shapeGains, subfrLength, e.nSubframes, e.lpcOrder)
-	targetRate := e.targetRateBps
-	if targetRate == 0 {
-		targetRate = e.bitrate
-	}
-	if e.channels > 0 {
-		targetRate /= e.channels
-	}
-	snrDBQ7 := silkControlSNR(targetRate, e.sampleRate/1000, e.nSubframes)
+	snrDBQ7 := e.frameSNRdBQ7()
 	prev := e.prevGainIdx
 	res := silkProcessGainsFLP32(signalType, quantOffset, shapeGains, cfg.ltpPredCodGain, snrDBQ7, e.inputTiltQ15,
 		subfrLength, e.nSubframes, resNrg, &prev, conditional)

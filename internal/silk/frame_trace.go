@@ -31,6 +31,11 @@ type FrameTrace struct {
 	// and InvGains the 1/Gains it was scaled by.
 	LPCInPre []float32
 	InvGains []float32
+	// Rate control inputs of the frame (silk_Encode): the packet budget after
+	// the LBRR average, TargetRate_bps, nBitsExceeded and nBitsUsedLBRR as
+	// used for this frame, the LBRR bits this packet spent (curr_nBitsUsedLBRR)
+	// and ec_tell before the frame.
+	NBits, TargetRateBps, NBitsExceeded, NBitsUsedLBRR, LBRRBits, Tell int
 }
 
 // Shape32Values exposes the float32 noise-shape outputs for tests: AR rows,

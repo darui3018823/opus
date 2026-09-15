@@ -325,13 +325,6 @@ func (e *Encoder) noiseShapeFLP32Trace(signal []float64, signalType int, pitchLa
 			pitchL[k] = 1
 		}
 	}
-	targetRate := e.targetRateBps
-	if targetRate == 0 {
-		targetRate = e.bitrate
-	}
-	if e.channels > 0 {
-		targetRate /= e.channels
-	}
 	in := silkNoiseShapeInputs{
 		fsKHz:               fsKHz,
 		nbSubfr:             e.nSubframes,
@@ -342,7 +335,7 @@ func (e *Encoder) noiseShapeFLP32Trace(signal []float64, signalType int, pitchLa
 		warpingQ16:          cfg.warpingQ16,
 		useCBR:              e.rateMode == RateModeCBR,
 		signalType:          signalType,
-		snrDBQ7:             silkControlSNR(targetRate, fsKHz, e.nSubframes),
+		snrDBQ7:             e.frameSNRdBQ7(),
 		speechActivityQ8:    e.speechActivityQ8,
 		inputQualityBandQ15: e.inputQualityBandQ15,
 		ltpCorr:             e.ltpCorrState,

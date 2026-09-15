@@ -52,7 +52,7 @@ func TestSILKQ2LTPOracle(t *testing.T) {
 			state := fx.seed
 			next := func() float64 {
 				state = state*1664525 + 1013904223
-				return float64(int32(state))/2147483648.0
+				return float64(int32(state)) / 2147483648.0
 			}
 			amp := fx.pulseGain
 			for i := range res {

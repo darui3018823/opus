@@ -64,6 +64,29 @@ func (e *Encoder) finishPacketBitReservoir(nFrames, tell int) {
 	}
 }
 
+// recordRateTrace stores the frame's rate-control inputs in the frame trace.
+func (e *Encoder) recordRateTrace(nFrames, tell, lbrrBits int) {
+	e.lastTrace.NBits = (e.packetBitBudget(nFrames) - e.nBitsUsedLBRR) / nFrames
+	e.lastTrace.TargetRateBps = e.targetRateBps
+	e.lastTrace.NBitsExceeded = e.nBitsExceeded
+	e.lastTrace.NBitsUsedLBRR = e.nBitsUsedLBRR
+	e.lastTrace.LBRRBits = lbrrBits
+	e.lastTrace.Tell = tell
+}
+
+// frameSNRdBQ7 returns the frame's SNR_dB_Q7 (silk_control_SNR of the
+// per-channel target rate).
+func (e *Encoder) frameSNRdBQ7() int {
+	targetRate := e.targetRateBps
+	if targetRate == 0 {
+		targetRate = e.bitrate
+	}
+	if e.channels > 0 {
+		targetRate /= e.channels
+	}
+	return silkControlSNR(targetRate, e.sampleRate/1000, e.nSubframes)
+}
+
 // TargetRateBps returns the SILK target rate used for the most recent frame.
 func (e *Encoder) TargetRateBps() int {
 	return e.targetRateBps

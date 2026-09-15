@@ -118,6 +118,7 @@ type Encoder struct {
 	shapeHarmSmooth32 float64
 	shapeTiltSmooth32 float64
 	pendingShape32    silkNoiseShapeOutputs
+	haveShape32       bool
 	// libopus bit reservoir (target_rate.go).
 	nBitsExceeded        int
 	nBitsUsedLBRR        int
@@ -632,6 +633,10 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 			_, _, ltpCoeffsQ14, ltpPredCodGain = e.selectLTPGainsVQWithGain(signal, bootstrap.lpcQ12, pitchLags)
 			e.ltpSumLogGainQ7 = ltpSum
 		}
+		// silk_noise_shape_analysis_FLP runs once per frame; its AR/tilt/LF/
+		// harmonic shaping drives every NSQ pass of this frame.
+		e.pendingShape32 = e.noiseShapeFLP32Trace(signal, signalType, pitchLags)
+		e.haveShape32 = true
 		gainTargets, shape := e.shapeGainAnalysis(signal, bootstrap.lpcQ12, nil, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
 		domainGainTargets = gainTargets
 		gainIndices := e.resolveGainIndices(gainTargets, conditionalGain)
@@ -681,7 +686,6 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	// the bitstream so the decoder reproduces the same sign sequence.
 	e.nsqSeed = 0
 	e.traceNLSFQ15 = nlsf.nlsfQ15
-	e.pendingShape32 = e.noiseShapeFLP32Trace(signal, signalType, pitchLags)
 	pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, nlsf.lpcQ12Interp, gainIndices,
 		signalType, quantOffset, 0, pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale)
 	e.pendingTrace.Seed = e.nsqSeed
@@ -2545,27 +2549,10 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 
 	pitchGain := estimatePitchGainFromLTP(ltpCoeffsQ14)
 	shape := e.analyzeNoiseShapeFLP(signal, lpcQ12, signalType, quantOffset, pitchLags, pitchGain, e.speechActivity)
-	if e.stereoComponent || signalType == SignalTypeUnvoiced {
-		// Stereo mid/side components are later reconstructed and resampled as a
-		// coupled signal, where component-domain spectral shaping concentrates
-		// quantization noise near the SILK layer edge.
-		//
-		// Unvoiced/noise: the perceptual AR/tilt/LF shaping is what libopus uses,
-		// but it deliberately spreads quantization noise to perceptually masked
-		// bands, which lowers the broadband SNR this project scores against (the
-		// reason unvoiced previously stayed on homebrew). Running the
-		// delayed-decision trellis with *neutral* shaping keeps the lookahead
-		// rate-distortion win — strictly stronger than the greedy single-state
-		// homebrew quantizer — while optimising broadband error, so the trellis
-		// can match or beat homebrew on noise instead of regressing it.
-		//
-		// In both cases keep the delayed-decision trellis and its rate term but
-		// drop the spectral shaping.
-		shape.AR_Q13 = [silkMaxNBSubframes][silkMaxShapeLPCOrder]int16{}
-		shape.LF_shp_Q14 = [silkMaxNBSubframes]int32{}
-		shape.Tilt_Q14 = [silkMaxNBSubframes]int32{}
-		shape.HarmShapeGain_Q14 = [silkMaxNBSubframes]int32{}
-		shape.Warping_Q16 = 0
+	if e.haveShape32 {
+		// wrappers_FLP.c conversions of the float32 noise_shape_analysis_FLP
+		// outputs: AR_Q13, LF_shp_Q14, Tilt_Q14, HarmShapeGain_Q14, Lambda_Q10.
+		e.applyShape32(&shape, signalType, quantOffset)
 	}
 
 	lambdaQ10 := shape.Lambda_Q10

@@ -58,7 +58,11 @@ func TestLBRRRegularPathDeterminism(t *testing.T) {
 }
 
 // TestLBRRNormalDecodeConsumesRedundancy verifies that normal decoding skips the
-// LBRR bodies and lands on the same regular-frame symbols as a no-FEC stream.
+// LBRR bodies and lands on the regular-frame symbols: the first packet (no
+// LBRR yet) decodes identically to the no-FEC stream, and once LBRR is
+// present the regular frames — which libopus and this encoder code at a
+// target rate reduced by the LBRR bits (nBitsUsedLBRR), so the symbols
+// legitimately differ — still decode to the same audio within a tight SNR.
 // The redundant frames must not be synthesized or alter the regular decoder
 // state unless the caller explicitly requests FEC recovery.
 func TestLBRRNormalDecodeConsumesRedundancy(t *testing.T) {
@@ -114,10 +118,22 @@ func TestLBRRNormalDecodeConsumesRedundancy(t *testing.T) {
 		if len(outFEC) != len(outNo) {
 			t.Fatalf("packet %d decoded lengths differ: FEC=%d no-FEC=%d", p, len(outFEC), len(outNo))
 		}
-		for i := range outFEC {
-			if outFEC[i] != outNo[i] {
-				t.Fatalf("packet %d sample %d differs: FEC=%g no-FEC=%g", p, i, outFEC[i], outNo[i])
+		if p == 0 {
+			for i := range outFEC {
+				if outFEC[i] != outNo[i] {
+					t.Fatalf("packet %d sample %d differs: FEC=%g no-FEC=%g", p, i, outFEC[i], outNo[i])
+				}
 			}
+			continue
+		}
+		var sig, err2 float64
+		for i := range outFEC {
+			sig += outNo[i] * outNo[i]
+			d := outFEC[i] - outNo[i]
+			err2 += d * d
+		}
+		if err2 > 0 && 10*math.Log10(sig/err2) < 15 {
+			t.Fatalf("packet %d: FEC-stream normal decode diverged from the no-FEC decode: %.2f dB", p, 10*math.Log10(sig/err2))
 		}
 	}
 }

@@ -273,6 +273,35 @@ func silkNoiseShapeAnalysisFLP32(in silkNoiseShapeInputs, x, pitchRes []float64,
 	return out
 }
 
+// applyShape32 overwrites the quantizer shaping fields of shape with the
+// wrappers_FLP.c conversions of the float32 analysis (silk_float2int of the
+// scaled float32 values) and the process_gains_FLP Lambda.
+func (e *Encoder) applyShape32(shape *silkNoiseShapeAnalysis, signalType, quantOffset int) {
+	s := &e.pendingShape32
+	cfg := e.silkComplexityConfig()
+	for k := 0; k < e.nSubframes; k++ {
+		for j := 0; j < cfg.shapingLPCOrder; j++ {
+			shape.AR_Q13[k][j] = int16(silkFloat2Int(f32(s.ar[k][j] * 8192)))
+		}
+		shape.LF_shp_Q14[k] = silkFloat2Int(f32(s.lfARShp[k]*16384))<<16 |
+			int32(uint16(silkFloat2Int(f32(s.lfMAShp[k]*16384))))
+		shape.Tilt_Q14[k] = silkFloat2Int(f32(s.tilt[k] * 16384))
+		shape.HarmShapeGain_Q14[k] = silkFloat2Int(f32(s.harmShapeGain[k] * 16384))
+	}
+	shape.ShapingLPCOrder = cfg.shapingLPCOrder
+	shape.Warping_Q16 = cfg.warpingQ16
+	shape.InputQuality = s.inputQuality
+	shape.CodingQuality = s.codingQuality
+	quantOffsetF := f32(float64(silkQuantizationOffsetsQ10[signalType>>1][quantOffset]) / 1024.0)
+	lambda := c32(lambdaOffset)
+	lambda = f32(lambda + f32(c32(lambdaDelayedDecisions)*float64(cfg.nStatesDelayedDecision)))
+	lambda = f32(lambda + f32(f32(c32(lambdaSpeechAct)*float64(e.speechActivityQ8))*(1.0/256.0)))
+	lambda = f32(lambda + f32(c32(lambdaInputQuality)*s.inputQuality))
+	lambda = f32(lambda + f32(c32(lambdaCodingQuality)*s.codingQuality))
+	lambda = f32(lambda + f32(c32(lambdaQuantOffset)*quantOffsetF))
+	shape.Lambda_Q10 = silkFloat2Int(f32(lambda * 1024))
+}
+
 // noiseShapeFLP32Trace runs the faithful analysis on the frame with the
 // encoder's current state (once per frame, advancing the float32 smoothers).
 func (e *Encoder) noiseShapeFLP32Trace(signal []float64, signalType int, pitchLags []int) silkNoiseShapeOutputs {

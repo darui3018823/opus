@@ -303,7 +303,8 @@ func makeDecoderFECSequenceSeed() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := enc.SetBitrate(18000); err != nil {
+	// 28 kbps CBR clears decide_fec's wideband threshold at 20 % loss.
+	if err := enc.SetBitrate(28000); err != nil {
 		return nil, err
 	}
 	enc.SetSignalType(SignalVoice)

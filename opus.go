@@ -108,6 +108,9 @@ type Encoder struct {
 	// encoder only emits LBRR when this is on and packetLossPerc > 0.
 	useInbandFEC   bool
 	packetLossPerc int
+	// lbrrCoded is the previous packet's LBRR_coded decision (decide_fec
+	// hysteresis).
+	lbrrCoded bool
 
 	// Bandwidth control (CELT-only path). maxBandwidth caps the automatic
 	// selection; forcedBandwidth pins an exact bandwidth (BandwidthAuto means
@@ -444,6 +447,9 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	}
 	if e.shouldEncodeSILKOnly() {
 		celtToSilk := e.prevMode == framing.ModeCELTOnly
+		if silkBW, ok := nativeSilkFramingBandwidth(e.silkSampleRate); ok {
+			e.updateLBRRCoded(framing.ModeSILKOnly, silkBW, e.sampleRate/frameSize)
+		}
 		out, err := e.encodeSILKOnlyPacket(pcm, raw, celtPCM, nFrames, celtToSilk)
 		if err == nil {
 			e.prevMode = framing.ModeSILKOnly
@@ -474,6 +480,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	}
 
 	if hybrid {
+		e.updateLBRRCoded(framing.ModeHybrid, bw, e.sampleRate/frameSize)
 		out, redundancyEmitted, err := e.encodeHybridPacket(pcm, celtPCM, nFrames, bw, redundancy, celtToSilk)
 		if err == nil {
 			// to_celt: after the deferred frame the real switch happens, so the

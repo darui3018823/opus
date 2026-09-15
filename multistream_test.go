@@ -328,7 +328,9 @@ func TestMultistreamDecodeFECRoundTripMapping(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := child.SetBitrate(18000); err != nil {
+		// decide_fec only codes LBRR when the equivalent rate clears the
+		// wideband threshold (~24.3 kbps for CBR at complexity 5 and 20 % loss).
+		if err := child.SetBitrate(28000); err != nil {
 			t.Fatal(err)
 		}
 		child.SetSignalType(SignalVoice)

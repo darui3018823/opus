@@ -541,9 +541,11 @@ func TestEncoderHybridToCELTWithoutRedundancyKeepsHybridState(t *testing.T) {
 
 	// At this tighter budget the deferred hybrid packet still fits, but its
 	// trailing redundancy does not. The emitted packet is therefore plain
-	// hybrid and must remain the predecessor for the next mode decision.
+	// hybrid and must remain the predecessor for the next mode decision. The
+	// SILK layer codes the warm-up frame's last 5 ms (LA_SHAPE look-ahead)
+	// ahead of the silent input, so the budget must leave room for that.
 	enc.SetSignalType(SignalMusic)
-	if err := enc.SetBitrate(10000); err != nil {
+	if err := enc.SetBitrate(16000); err != nil {
 		t.Fatalf("SetBitrate transition: %v", err)
 	}
 	transitionPCM := make([]float64, frameSize*channels)

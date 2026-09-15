@@ -134,11 +134,14 @@ func TestCGOEncodeRefSILKFEC(t *testing.T) {
 		}
 	}
 
-	// 2) FEC recovery: drop frame N, reconstruct it from packet N+1 via decode_fec.
-	const N = 6
+	// 2) FEC recovery: drop frame N, reconstruct it from packet N+1 via
+	// decode_fec. Every steady-state frame is tried, because the per-frame
+	// recovery quality of this ~2-byte LBRR (side information plus a sparse
+	// excitation) swings by several dB with the frame's pitch/gain decisions,
+	// so a single hard-coded frame would only measure the fixture.
 	maxDelay := frameSize / 2
 
-	recoverFrame := func(pkts [][]byte) []float64 {
+	recoverFrame := func(pkts [][]byte, N int) []float64 {
 		d, err := cgoref.NewDecoder(rate, channels)
 		if err != nil {
 			t.Fatalf("cgoref.NewDecoder: %v", err)
@@ -156,23 +159,31 @@ func TestCGOEncodeRefSILKFEC(t *testing.T) {
 		return toFloat64(out)
 	}
 
-	recFEC := recoverFrame(pktsFEC)
-	recPLC := recoverFrame(pktsNo)
-
-	snrFEC, rmseFEC, _, _ := silkRefAlignedSNR(refFrames[N], recFEC, maxDelay)
-	snrPLC, rmsePLC, _, _ := silkRefAlignedSNR(refFrames[N], recPLC, maxDelay)
-	t.Logf("frame %d recovery: FEC alignedSNR=%.2fdB rmse=%.4f | PLC(no-FEC) alignedSNR=%.2fdB rmse=%.4f",
-		N, snrFEC, rmseFEC, snrPLC, rmsePLC)
-
-	// The LBRR reconstruction must be a real match to the lost frame, and clearly
-	// better than the PLC extrapolation libopus falls back to with no redundancy.
-	// Measured ~25.8 dB on the deterministic fixture; floor well above the old
-	// placeholder so a real regression is caught.
-	if snrFEC < 10.0 {
-		t.Fatalf("FEC reconstruction too poor: alignedSNR=%.2fdB rmse=%.4f", snrFEC, rmseFEC)
+	var sumFEC, sumPLC float64
+	frames := 0
+	for N := 2; N < nPackets-1; N++ {
+		recFEC := recoverFrame(pktsFEC, N)
+		recPLC := recoverFrame(pktsNo, N)
+		snrFEC, rmseFEC, _, _ := silkRefAlignedSNR(refFrames[N], recFEC, maxDelay)
+		snrPLC, rmsePLC, _, _ := silkRefAlignedSNR(refFrames[N], recPLC, maxDelay)
+		t.Logf("frame %d recovery: FEC alignedSNR=%.2fdB rmse=%.4f | PLC(no-FEC) alignedSNR=%.2fdB rmse=%.4f",
+			N, snrFEC, rmseFEC, snrPLC, rmsePLC)
+		// Every LBRR reconstruction must be a real match to the lost frame.
+		if snrFEC < 10.0 {
+			t.Fatalf("frame %d: FEC reconstruction too poor: alignedSNR=%.2fdB rmse=%.4f", N, snrFEC, rmseFEC)
+		}
+		sumFEC += snrFEC
+		sumPLC += snrPLC
+		frames++
 	}
-	if snrFEC < snrPLC+3.0 {
-		t.Fatalf("FEC did not improve over PLC baseline: FEC=%.2fdB PLC=%.2fdB", snrFEC, snrPLC)
+	meanFEC := sumFEC / float64(frames)
+	meanPLC := sumPLC / float64(frames)
+	t.Logf("mean recovery over %d frames: FEC=%.2fdB PLC=%.2fdB", frames, meanFEC, meanPLC)
+
+	// On average the redundancy must clearly beat the PLC extrapolation libopus
+	// falls back to with no redundancy (measured ~20 dB vs ~16 dB).
+	if meanFEC < meanPLC+3.0 {
+		t.Fatalf("FEC did not improve over PLC baseline: mean FEC=%.2fdB PLC=%.2fdB", meanFEC, meanPLC)
 	}
 }
 

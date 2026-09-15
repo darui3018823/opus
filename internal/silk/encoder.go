@@ -87,7 +87,12 @@ type Encoder struct {
 	stereoState     stereoPredState
 	prevOnlyMiddle  bool // previous stereo frame omitted the side channel
 
-	// Pitch analysis state (silk_find_pitch_lags_FLP).
+	// Input buffer (silk_encoder_state_FLP.x_buf): [ltp_mem_length history |
+	// frame_length coded frame | LA_SHAPE_MS look-ahead] in [-1,1]. New input
+	// lands at xBuf[ltpMem+laShape:], so the coded frame trails the caller's
+	// frame by LA_SHAPE_MS (5 ms) exactly as in libopus. pitchHist aliases the
+	// history region.
+	xBuf                 []float64
 	pitchHist            []float64 // Past ltp_mem_length input samples, [-1,1]
 	prevLagForPitch      int       // Previous frame pitch lag (0 if unvoiced)
 	ltpCorrState         float64   // Normalized LTP correlation from prev frame
@@ -243,7 +248,7 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		ltpState:         make([]int32, silkLTPMemLengthMs*(sampleRate/1000)),
 		nsq:              newSilkNSQState(frameSize, silkLTPMemLengthMs*(sampleRate/1000)),
 
-		pitchHist:            make([]float64, peLtpMemLengthMs*(sampleRate/1000)),
+		xBuf:                 make([]float64, (peLtpMemLengthMs+silkLAShapeMs)*(sampleRate/1000)+frameSize),
 		prevLagForPitch:      0,
 		ltpCorrState:         0,
 		firstFrameAfterReset: true,
@@ -255,6 +260,7 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		snrTargetEnabled: os.Getenv("OPUS_SILK_RC_SNR") != "0",
 	}
 	enc.useSNRTargetVBR = enc.snrTargetEnabled
+	enc.pitchHist = enc.xBuf[:enc.ltpMemLength()]
 	for i := range enc.inputQualityB {
 		enc.inputQualityB[i] = 1.0
 	}
@@ -522,7 +528,11 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	initialState := e.snapshotFrameState()
 	e.curLTP = nil
 	e.pitchResidual = nil
+	// The VAD, like silk_encode_do_VAD_FLP, sees the caller's frame; every
+	// analysis and quantisation stage below works on the 5 ms delayed coded
+	// frame taken from the look-ahead buffer.
 	vadSA := e.frameVADResult(signal)
+	signal = e.pushInputFrame(signal)
 	e.speechActivity = vadSA.speechActivity
 	e.inputTilt = vadSA.inputTilt
 	e.speechActivityQ8 = vadSA.speechActivityQ8
@@ -650,8 +660,58 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	} else {
 		e.prevLagForPitch = 0
 	}
-	e.updatePitchHist(signal)
+	e.advanceInputBuffer()
 	e.firstFrameAfterReset = false
+}
+
+// silkLAShapeMs mirrors LA_SHAPE_MS: the fixed look-ahead the SILK encoder keeps
+// past the coded frame regardless of the complexity-dependent la_shape.
+const silkLAShapeMs = 5
+
+// ltpMemLength returns ltp_mem_length in samples.
+func (e *Encoder) ltpMemLength() int {
+	return peLtpMemLengthMs * (e.sampleRate / 1000)
+}
+
+// laShapeLength returns LA_SHAPE_MS*fs_kHz, the look-ahead region of xBuf.
+func (e *Encoder) laShapeLength() int {
+	return silkLAShapeMs * (e.sampleRate / 1000)
+}
+
+// pushInputFrame appends the caller's frame at x_frame + LA_SHAPE_MS*fs_kHz
+// like silk_encode_frame_FLP and returns the coded frame x_frame[0:frame],
+// i.e. the previous frame's last 5 ms followed by the first 15 ms of input.
+func (e *Encoder) pushInputFrame(input []float64) []float64 {
+	ltpMem := e.ltpMemLength()
+	la := e.laShapeLength()
+	want := ltpMem + la + e.frameSize
+	if len(e.xBuf) != want {
+		e.xBuf = make([]float64, want)
+	}
+	e.pitchHist = e.xBuf[:ltpMem]
+	copy(e.xBuf[ltpMem+la:], input[:e.frameSize])
+	return e.xBuf[ltpMem : ltpMem+e.frameSize]
+}
+
+// codedFrameLookahead returns the LA_SHAPE_MS samples that follow the coded
+// frame in xBuf (the first 5 ms of the most recent input frame).
+func (e *Encoder) codedFrameLookahead() []float64 {
+	ltpMem := e.ltpMemLength()
+	if len(e.xBuf) < ltpMem+e.frameSize+e.laShapeLength() {
+		return nil
+	}
+	return e.xBuf[ltpMem+e.frameSize : ltpMem+e.frameSize+e.laShapeLength()]
+}
+
+// advanceInputBuffer shifts xBuf by one frame once the frame is coded, so the
+// history ends at the coded frame and the old look-ahead heads the next frame
+// (silk_encode_frame_FLP: silk_memmove(x_buf, &x_buf[frame_length], ...)).
+func (e *Encoder) advanceInputBuffer() {
+	if len(e.xBuf) < e.frameSize {
+		return
+	}
+	copy(e.xBuf, e.xBuf[e.frameSize:])
+	clear(e.xBuf[len(e.xBuf)-e.frameSize:])
 }
 
 func (e *Encoder) snapshotFrameState() encoderFrameState {
@@ -2991,9 +3051,8 @@ func (e *Encoder) Reset() {
 	for i := range e.ltpState {
 		e.ltpState[i] = 0
 	}
-	for i := range e.pitchHist {
-		e.pitchHist[i] = 0
-	}
+	clear(e.xBuf)
+	e.pitchHist = e.xBuf[:e.ltpMemLength()]
 	e.prevLagForPitch = 0
 	e.ltpCorrState = 0
 	e.pitchResidual = nil

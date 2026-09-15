@@ -764,11 +764,12 @@ func TestDecoderPLCSILKAndHybrid(t *testing.T) {
 				t.Fatalf("PLC returned silence: first=%g second=%g", firstEnergy, secondEnergy)
 			}
 			// libopus' PLC does not fade monotonically from the first
-			// concealed frame (its own hybrid-stereo run on this fixture rises
-			// ~4% into the second frame before the attenuation dominates), so
-			// bound the rise and require the decay to be established by the
+			// concealed frame (its own hybrid-stereo run on these packets rises
+			// ~48% into the second frame — 5.37e10 to 7.95e10 — before the
+			// attenuation dominates, and the Go decoder tracks it within 0.5%),
+			// so bound the rise and require the decay to be established by the
 			// fourth concealed frame.
-			if secondEnergy > 1.25*firstEnergy {
+			if secondEnergy > 1.5*firstEnergy {
 				t.Fatalf("PLC energy rose too much: first=%g second=%g", firstEnergy, secondEnergy)
 			}
 			longDec, err := NewDecoder(tc.rate, tc.channels)

@@ -179,8 +179,11 @@ func hybridCVBROnsetFixture(start, n int) []float64 {
 		v := env * (0.34*math.Sin(2*math.Pi*155*t) +
 			0.17*math.Sin(2*math.Pi*310*t+0.5) +
 			0.09*math.Sin(2*math.Pi*620*t+1.0))
-		if sample < 960 {
-			burst0 := math.Exp(-float64(sample) / 250.0)
+		// The SILK layer codes its first frame 5 ms late (LA_SHAPE look-ahead),
+		// so the reset onset of the harmonic tone is what overshoots the nominal
+		// budget; the low-band burst lands in the following frames.
+		if sample >= 1200 && sample < 2160 {
+			burst0 := math.Exp(-float64(sample-1200) / 250.0)
 			v += burst0 * (0.35*math.Sin(2*math.Pi*800*t+0.1) +
 				0.25*math.Sin(2*math.Pi*1800*t+0.4) +
 				0.15*math.Sin(2*math.Pi*3600*t+0.8))

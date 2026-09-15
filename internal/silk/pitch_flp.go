@@ -352,16 +352,17 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64) (v
 
 	ltpMem := peLtpMemLengthMs * fsKHz
 	frameLen := nbSubfr * peSubfrLengthMs * fsKHz
-	bufLen := ltpMem + frameLen
+	laPitch := 2 * fsKHz // LA_PITCH_MS = 2
+	bufLen := ltpMem + frameLen + laPitch
 
-	if len(e.pitchHist) != ltpMem || len(signal) < frameLen {
+	lookahead := e.codedFrameLookahead()
+	if len(e.pitchHist) != ltpMem || len(signal) < frameLen || len(lookahead) < laPitch {
 		e.ltpCorrState = 0
 		return false, 0, 0, 0
 	}
 
-	// Analysis buffer [history | frame] in silk_float int16 scale. libopus
-	// also appends la_pitch look-ahead samples here; the Go encoder has no
-	// look-ahead delay yet, so the LPC window ends at the frame boundary.
+	// Analysis buffer [history | frame | la_pitch] in silk_float int16 scale,
+	// read from x_buf exactly like silk_find_pitch_lags_FLP.
 	buf := make([]float64, bufLen)
 	for i := 0; i < ltpMem; i++ {
 		buf[i] = f32(e.pitchHist[i] * 32768.0)
@@ -369,14 +370,13 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64) (v
 	for i := 0; i < frameLen; i++ {
 		buf[ltpMem+i] = f32(signal[i] * 32768.0)
 	}
+	for i := 0; i < laPitch; i++ {
+		buf[ltpMem+frameLen+i] = f32(lookahead[i] * 32768.0)
+	}
 
 	winLen := findPitchLPCWinMs * fsKHz
 	if nbSubfr != peMaxNbSubfr {
 		winLen = findPitchLPCWinMs2SF * fsKHz
-	}
-	laPitch := 2 * fsKHz // LA_PITCH_MS = 2
-	if winLen > bufLen {
-		winLen = bufLen
 	}
 
 	// silk_find_pitch_lags_FLP whitens every active frame but runs the pitch
@@ -387,9 +387,9 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64) (v
 		e.speechActivityQ8, e.prevSignalType, e.inputTiltQ15, e.pitchEstimationThresholdQ16(),
 		e.prevLagForPitch, e.ltpCorrState, runCore)
 	// silk_find_pred_coefs_FLP correlates this residual (res_pitch) for the
-	// LTP quantizer and reads LTP_ORDER samples past the frame from the
-	// look-ahead; without look-ahead those samples are zero here.
-	e.pitchResidual = append(append([]float64(nil), r.res...), make([]float64, ltpOrder)...)
+	// LTP quantizer; the la_pitch tail covers the LTP_ORDER samples it reads
+	// past the frame.
+	e.pitchResidual = append([]float64(nil), r.res...)
 	if !runCore {
 		e.ltpCorrState = 0
 		return false, 0, 0, 0
@@ -403,19 +403,4 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64) (v
 func (e *Encoder) pitchEstimationThresholdQ16() int {
 	_, _, thres := e.pitchEstParams()
 	return int(int32(thres*65536 + 0.5))
-}
-
-// updatePitchHist shifts the encoder's pitch history buffer to end with the most
-// recent ltp_mem_length input samples.
-func (e *Encoder) updatePitchHist(signal []float64) {
-	ltpMem := len(e.pitchHist)
-	if ltpMem == 0 {
-		return
-	}
-	if len(signal) >= ltpMem {
-		copy(e.pitchHist, signal[len(signal)-ltpMem:])
-		return
-	}
-	copy(e.pitchHist, e.pitchHist[len(signal):])
-	copy(e.pitchHist[ltpMem-len(signal):], signal)
 }

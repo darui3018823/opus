@@ -470,8 +470,11 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 	return out
 }
 
+// noiseShapeAnalysisBuffer returns [la_shape past | frame | la_shape
+// look-ahead], the region silk_noise_shape_analysis_FLP windows around each
+// subframe (x_ptr = x - la_shape .. x + subfr_length + la_shape).
 func (e *Encoder) noiseShapeAnalysisBuffer(signal []float64, laShape int) []float64 {
-	n := laShape + len(signal)
+	n := 2*laShape + len(signal)
 	if cap(e.noiseShapeBuf) < n {
 		e.noiseShapeBuf = make([]float64, n)
 	}
@@ -484,6 +487,9 @@ func (e *Encoder) noiseShapeAnalysisBuffer(signal []float64, laShape int) []floa
 	clear(buf[:laShape-pastLen])
 	copy(buf[laShape-pastLen:laShape], e.pitchHist[pastStart:])
 	copy(buf[laShape:], signal)
+	future := buf[laShape+len(signal):]
+	clear(future)
+	copy(future, e.codedFrameLookahead())
 	return buf
 }
 

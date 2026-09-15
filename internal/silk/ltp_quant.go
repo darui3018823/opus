@@ -12,11 +12,10 @@ import "math"
 // below budget and the byte count falls toward libopus's.
 
 const (
-	ltpOrder        = 5
-	ltpCorrInvMax   = 0.03 // LTP_CORR_INV_MAX
-	ltpGainSafetyQ7 = 51.0 // SILK_FIX_CONST(0.4, 7)
+	ltpOrder      = 5
+	ltpCorrInvMax = 0.03 // LTP_CORR_INV_MAX
 	// SILK_FIX_CONST(MAX_SUM_LOG_GAIN_DB/6, 7), MAX_SUM_LOG_GAIN_DB=250.
-	maxSumLogGainConst = 5333.0
+	maxSumLogGainConst = 5333
 )
 
 // ltpGainCodebook returns the per-vector taps for one of the three LTP gain
@@ -32,54 +31,33 @@ func ltpGainCodebook(perIdx int) [][5]int8 {
 	}
 }
 
-// energyRange returns sum_{i=0}^{n-1} res[off+i]^2, treating out-of-range
-// indices as zero so callers need not reserve look-ahead past the frame.
-func energyRange(res []float64, off, n int) float64 {
-	sum := 0.0
-	for i := 0; i < n; i++ {
-		idx := off + i
-		if idx < 0 || idx >= len(res) {
-			continue
-		}
-		sum += res[idx] * res[idx]
-	}
-	return sum
-}
-
-// innerProdRange returns sum_{i=0}^{n-1} res[a+i]*res[b+i] with out-of-range
-// indices treated as zero.
-func innerProdRange(res []float64, a, b, n int) float64 {
-	sum := 0.0
-	for i := 0; i < n; i++ {
-		ai, bi := a+i, b+i
-		if ai < 0 || ai >= len(res) || bi < 0 || bi >= len(res) {
-			continue
-		}
-		sum += res[ai] * res[bi]
-	}
-	return sum
-}
+// f32 rounds a value to float32 precision; the libopus float build computes
+// these stages in silk_float (float) with double accumulation only inside
+// silk_energy_FLP and silk_inner_product_FLP.
+func f32(x float64) float64 { return float64(float32(x)) }
 
 // corrMatrixLTP builds the LTP_ORDER×LTP_ORDER correlation matrix X'X for the
 // lagged residual starting at base (silk_corrMatrix_FLP, Order=ltpOrder).
+// The running updates multiply and subtract in float before joining the
+// double accumulator, exactly as the C expression evaluates.
 func corrMatrixLTP(res []float64, base, length int) [ltpOrder * ltpOrder]float64 {
 	var XX [ltpOrder * ltpOrder]float64
 	p1 := base + ltpOrder - 1
-	energy := energyRange(res, p1, length)
-	XX[0] = energy
+	energy := silkEnergyFLP32(res[p1 : p1+length])
+	XX[0] = f32(energy)
 	for j := 1; j < ltpOrder; j++ {
-		energy += sq(res, p1-j) - sq(res, p1+length-j)
-		XX[j*ltpOrder+j] = energy
+		energy += f32(f32(res[p1-j]*res[p1-j]) - f32(res[p1+length-j]*res[p1+length-j]))
+		XX[j*ltpOrder+j] = f32(energy)
 	}
 	p2 := base + ltpOrder - 2
 	for lag := 1; lag < ltpOrder; lag++ {
-		energy = innerProdRange(res, p1, p2, length)
-		XX[lag*ltpOrder+0] = energy
-		XX[0*ltpOrder+lag] = energy
+		energy = silkInnerProductFLP32(res[p1:], res[p2:], length)
+		XX[lag*ltpOrder+0] = f32(energy)
+		XX[0*ltpOrder+lag] = f32(energy)
 		for j := 1; j < ltpOrder-lag; j++ {
-			energy += prod(res, p1-j, p2-j) - prod(res, p1+length-j, p2+length-j)
-			XX[(lag+j)*ltpOrder+j] = energy
-			XX[j*ltpOrder+(lag+j)] = energy
+			energy += f32(f32(res[p1-j]*res[p2-j]) - f32(res[p1+length-j]*res[p2+length-j]))
+			XX[(lag+j)*ltpOrder+j] = f32(energy)
+			XX[j*ltpOrder+(lag+j)] = f32(energy)
 		}
 		p2--
 	}
@@ -91,50 +69,43 @@ func corrVectorLTP(res []float64, base, target, length int) [ltpOrder]float64 {
 	var xX [ltpOrder]float64
 	p1 := base + ltpOrder - 1
 	for lag := 0; lag < ltpOrder; lag++ {
-		xX[lag] = innerProdRange(res, p1, target, length)
+		xX[lag] = f32(silkInnerProductFLP32(res[p1:], res[target:], length))
 		p1--
 	}
 	return xX
 }
 
-func sq(res []float64, i int) float64 {
-	if i < 0 || i >= len(res) {
-		return 0
-	}
-	return res[i] * res[i]
-}
-
-func prod(res []float64, a, b int) float64 {
-	if a < 0 || a >= len(res) || b < 0 || b >= len(res) {
-		return 0
-	}
-	return res[a] * res[b]
-}
-
 // findLTP computes the normalised per-subframe correlation matrix/vector pairs
 // used by the gain VQ (silk_find_LTP_FLP). res is the short-term (LPC) residual
-// in the int16 magnitude domain; frameStart indexes the first frame sample;
-// lags are the per-subframe pitch lags.
+// in the int16 magnitude domain (float32-representable values); frameStart
+// indexes the first frame sample and must leave lag+LTP_ORDER/2+LTP_ORDER-1
+// history samples before it; lags are the per-subframe pitch lags. The
+// residual must extend LTP_ORDER samples past the frame for the energy term.
 func (e *Encoder) findLTP(res []float64, frameStart int, lags []int, subfrLen int) ([][ltpOrder * ltpOrder]float64, [][ltpOrder]float64) {
-	XX := make([][ltpOrder * ltpOrder]float64, e.nSubframes)
-	xX := make([][ltpOrder]float64, e.nSubframes)
-	for k := 0; k < e.nSubframes; k++ {
+	return silkFindLTPFLP(res, frameStart, lags, subfrLen, e.nSubframes)
+}
+
+func silkFindLTPFLP(res []float64, frameStart int, lags []int, subfrLen, nbSubfr int) ([][ltpOrder * ltpOrder]float64, [][ltpOrder]float64) {
+	XX := make([][ltpOrder * ltpOrder]float64, nbSubfr)
+	xX := make([][ltpOrder]float64, nbSubfr)
+	const ltpCorrInvMaxHalf = float64(float32(ltpCorrInvMax) * 0.5)
+	for k := 0; k < nbSubfr; k++ {
 		rPtr := frameStart + k*subfrLen
 		lagBase := rPtr - (lags[k] + ltpOrder/2)
 		m := corrMatrixLTP(res, lagBase, subfrLen)
 		v := corrVectorLTP(res, lagBase, rPtr, subfrLen)
-		xx := energyRange(res, rPtr, subfrLen+ltpOrder)
+		xx := f32(silkEnergyFLP32(res[rPtr : rPtr+subfrLen+ltpOrder]))
+		floor := f32(f32(ltpCorrInvMaxHalf*f32(m[0]+m[ltpOrder*ltpOrder-1])) + 1.0)
 		denom := xx
-		floor := ltpCorrInvMax*0.5*(m[0]+m[ltpOrder*ltpOrder-1]) + 1.0
 		if floor > denom {
 			denom = floor
 		}
-		temp := 1.0 / denom
+		temp := f32(1.0 / denom)
 		for i := range m {
-			m[i] *= temp
+			m[i] = f32(m[i] * temp)
 		}
 		for i := range v {
-			v[i] *= temp
+			v[i] = f32(v[i] * temp)
 		}
 		XX[k] = m
 		xX[k] = v
@@ -142,102 +113,164 @@ func (e *Encoder) findLTP(res []float64, frameStart int, lags []int, subfrLen in
 	return XX, xX
 }
 
-// vqWMatLTP runs the weighted rate-distortion VQ search over one codebook for a
-// single subframe (silk_VQ_WMat_EC, float). It returns the best index, the
-// normalised residual energy (+gain penalty), the rate-distortion cost, and the
-// effective gain of the winner.
-func vqWMatLTP(XX [ltpOrder * ltpOrder]float64, xX [ltpOrder]float64, perIdx, subfrLen int, maxGainQ7 float64) (ind int, resNrg, rateDist, gainQ7 float64) {
+// silkLin2Log ports silk_lin2log: approximate 128*log2(inLin) in Q7.
+func silkLin2Log(inLin int32) int32 {
+	lz, fracQ7 := silkCLZFrac(inLin)
+	return silkSMLAWB(fracQ7, fracQ7*(128-fracQ7), 179) + int32(31-lz)<<7
+}
+
+// silkAddPosSat32 ports silk_ADD_POS_SAT32 for non-negative operands.
+func silkAddPosSat32(a, b int32) int32 {
+	sum := int32(uint32(a) + uint32(b))
+	if uint32(sum)&0x80000000 != 0 {
+		return math.MaxInt32
+	}
+	return sum
+}
+
+// silkVQWMatEC ports silk_VQ_WMat_EC_c: the entropy-constrained,
+// matrix-weighted 5-tap codebook search for one subframe in Q17/Q15/Q8
+// fixed point. It returns the best index, residual energy, rate-distortion
+// cost, and the codebook gain of the winner.
+func silkVQWMatEC(xxQ17 *[ltpOrder * ltpOrder]int32, xXQ17 *[ltpOrder]int32, perIdx, subfrLen int, maxGainQ7 int32) (ind int, resNrgQ15, rateDistQ8, gainQ7 int32) {
 	cb := ltpGainCodebook(perIdx)
-	bits := silkLTPGainBITSQ5Codebooks[perIdx]
-	gains := silkLTPGainVQGainCodebooks[perIdx]
-	rateDist = math.Inf(1)
-	resNrg = math.Inf(1)
+	cbGain := silkLTPGainVQGainCodebooks[perIdx]
+	cl := silkLTPGainBITSQ5Codebooks[perIdx]
+
+	var negxXQ24 [ltpOrder]int32
+	for i := range negxXQ24 {
+		negxXQ24[i] = -(xXQ17[i] << 7)
+	}
+	rateDistQ8 = math.MaxInt32
+	resNrgQ15 = math.MaxInt32
+	ind = 0
+	mla := func(a, b int32, c int8) int32 { return a + b*int32(c) }
 	for k := range cb {
-		var b [ltpOrder]float64
-		for i := 0; i < ltpOrder; i++ {
-			b[i] = float64(cb[k][i]) / 128.0 // Q7 -> actual tap
-		}
-		// Quantization error: 1.001 - 2 * xX·b + b'·XX·b.
-		sum1 := 1.001
-		for i := 0; i < ltpOrder; i++ {
-			sum1 -= 2.0 * b[i] * xX[i]
-			for j := 0; j < ltpOrder; j++ {
-				sum1 += b[i] * XX[i*ltpOrder+j] * b[j]
+		row := cb[k]
+		gainTmpQ7 := int32(cbGain[k])
+		// Quantization error: 1 - 2 * xX * cb + cb' * XX * cb.
+		sum1Q15 := int32(32801) // SILK_FIX_CONST(1.001, 15)
+
+		// Penalty for too large gain.
+		penalty := silkMax32(gainTmpQ7-maxGainQ7, 0) << 11
+
+		// First row of XX_Q17.
+		sum2Q24 := mla(negxXQ24[0], xxQ17[1], row[1])
+		sum2Q24 = mla(sum2Q24, xxQ17[2], row[2])
+		sum2Q24 = mla(sum2Q24, xxQ17[3], row[3])
+		sum2Q24 = mla(sum2Q24, xxQ17[4], row[4])
+		sum2Q24 <<= 1
+		sum2Q24 = mla(sum2Q24, xxQ17[0], row[0])
+		sum1Q15 = silkSMLAWB(sum1Q15, sum2Q24, int16(row[0]))
+
+		// Second row.
+		sum2Q24 = mla(negxXQ24[1], xxQ17[7], row[2])
+		sum2Q24 = mla(sum2Q24, xxQ17[8], row[3])
+		sum2Q24 = mla(sum2Q24, xxQ17[9], row[4])
+		sum2Q24 <<= 1
+		sum2Q24 = mla(sum2Q24, xxQ17[6], row[1])
+		sum1Q15 = silkSMLAWB(sum1Q15, sum2Q24, int16(row[1]))
+
+		// Third row.
+		sum2Q24 = mla(negxXQ24[2], xxQ17[13], row[3])
+		sum2Q24 = mla(sum2Q24, xxQ17[14], row[4])
+		sum2Q24 <<= 1
+		sum2Q24 = mla(sum2Q24, xxQ17[12], row[2])
+		sum1Q15 = silkSMLAWB(sum1Q15, sum2Q24, int16(row[2]))
+
+		// Fourth row.
+		sum2Q24 = mla(negxXQ24[3], xxQ17[19], row[4])
+		sum2Q24 <<= 1
+		sum2Q24 = mla(sum2Q24, xxQ17[18], row[3])
+		sum1Q15 = silkSMLAWB(sum1Q15, sum2Q24, int16(row[3]))
+
+		// Last row.
+		sum2Q24 = negxXQ24[4] << 1
+		sum2Q24 = mla(sum2Q24, xxQ17[24], row[4])
+		sum1Q15 = silkSMLAWB(sum1Q15, sum2Q24, int16(row[4]))
+
+		if sum1Q15 >= 0 {
+			// Translate residual energy to bits using the high-rate
+			// assumption (6 dB ==> 1 bit/sample).
+			bitsResQ8 := silkSMULBB(int32(subfrLen), silkLin2Log(sum1Q15+penalty)-(15<<7))
+			// The codelength component is halved ("-1" shift).
+			bitsTotQ8 := bitsResQ8 + int32(cl[k])<<(3-1)
+			if bitsTotQ8 <= rateDistQ8 {
+				rateDistQ8 = bitsTotQ8
+				resNrgQ15 = sum1Q15 + penalty
+				ind = k
+				gainQ7 = gainTmpQ7
 			}
 		}
-		if sum1 < 0 {
-			continue
+	}
+	return ind, resNrgQ15, rateDistQ8, gainQ7
+}
+
+// silkQuantLTPGains ports silk_quant_LTP_gains_FLP: the float correlations
+// are converted to Q17 with libopus' float2int rounding, then the fixed-point
+// codebook search chooses the periodicity index and per-subframe gain
+// indices. It returns those, the updated cumulative log gain, and the LTP
+// prediction gain in dB (Q7 value scaled by 1/128 as a float32).
+func silkQuantLTPGains(XX [][ltpOrder * ltpOrder]float64, xX [][ltpOrder]float64, subfrLen, nbSubfr int, sumLogGainQ7 int32) (perIdx int, gainIndices []int, newSumLogGainQ7 int32, predGainDB float64) {
+	xxQ17 := make([][ltpOrder * ltpOrder]int32, nbSubfr)
+	xXQ17 := make([][ltpOrder]int32, nbSubfr)
+	for j := 0; j < nbSubfr; j++ {
+		for i := range xxQ17[j] {
+			xxQ17[j][i] = silkFloat2Int(XX[j][i] * 131072.0)
 		}
-		g := float64(gains[k])
-		penalty := 0.0
-		if g > maxGainQ7 {
-			penalty = (g - maxGainQ7) / 16.0
-		}
-		// bits ≈ subfr_len * 128 * log2(residual fraction), plus half the code
-		// length (silk's "-1" shift on cl_Q5<<(3-1)).
-		bitsRes := float64(subfrLen) * 128.0 * math.Log2(sum1+penalty)
-		bitsTot := bitsRes + float64(bits[k])*4.0
-		if bitsTot <= rateDist {
-			rateDist = bitsTot
-			resNrg = sum1 + penalty
-			ind = k
-			gainQ7 = g
+		for i := range xXQ17[j] {
+			xXQ17[j][i] = silkFloat2Int(xX[j][i] * 131072.0)
 		}
 	}
-	return ind, resNrg, rateDist, gainQ7
+
+	const gainSafety = int32(51) // SILK_FIX_CONST(0.4, 7)
+	minRateDistQ7 := int32(math.MaxInt32)
+	bestSumLogGainQ7 := int32(0)
+	var resNrgQ15 int32
+	gainIndices = make([]int, nbSubfr)
+	for k := 0; k < 3; k++ {
+		tempIdx := make([]int, nbSubfr)
+		resNrgQ15Tmp := int32(0)
+		rateDistQ7 := int32(0)
+		sumLogGainTmpQ7 := sumLogGainQ7
+		for j := 0; j < nbSubfr; j++ {
+			maxGainQ7 := silkLog2Lin((int32(maxSumLogGainConst)-sumLogGainTmpQ7)+(7<<7)) - gainSafety
+			ind, resNrgSubfr, rateDistSubfr, gainQ7 := silkVQWMatEC(&xxQ17[j], &xXQ17[j], k, subfrLen, maxGainQ7)
+			tempIdx[j] = ind
+			resNrgQ15Tmp = silkAddPosSat32(resNrgQ15Tmp, resNrgSubfr)
+			rateDistQ7 = silkAddPosSat32(rateDistQ7, rateDistSubfr)
+			sumLogGainTmpQ7 = silkMax32(0, sumLogGainTmpQ7+silkLin2Log(gainSafety+gainQ7)-(7<<7))
+		}
+		if rateDistQ7 <= minRateDistQ7 {
+			minRateDistQ7 = rateDistQ7
+			perIdx = k
+			copy(gainIndices, tempIdx)
+			bestSumLogGainQ7 = sumLogGainTmpQ7
+		}
+		// libopus reports the prediction gain from the residual energy of the
+		// last codebook it evaluated, not of the selected one.
+		resNrgQ15 = resNrgQ15Tmp
+	}
+
+	if nbSubfr == 2 {
+		resNrgQ15 >>= 1
+	} else {
+		resNrgQ15 >>= 2
+	}
+	newSumLogGainQ7 = bestSumLogGainQ7
+	predGainDBQ7 := silkSMULBB(-3, silkLin2Log(resNrgQ15)-(15<<7))
+	predGainDB = f32(float64(predGainDBQ7) * (1.0 / 128.0))
+	return perIdx, gainIndices, newSumLogGainQ7, predGainDB
 }
 
 // quantLTPGains chooses the periodicity codebook and per-subframe gain indices
 // that minimise the total weighted rate-distortion (silk_quant_LTP_gains), and
-// returns the resulting Q14 taps plus the LTP prediction coding gain in dB. The
+// returns the resulting indices plus the LTP prediction coding gain in dB. The
 // cumulative sum_log_gain state limits the total prediction gain across
 // subframes for stability.
 func (e *Encoder) quantLTPGains(XX [][ltpOrder * ltpOrder]float64, xX [][ltpOrder]float64, subfrLen int) (perIdx int, gainIndices []int, predGainDB float64) {
-	bestRateDist := math.Inf(1)
-	bestPer := 0
-	bestIndices := make([]int, e.nSubframes)
-	bestResNrg := 0.0
-	bestSumLogGain := 0.0
-
-	for k := 0; k < 3; k++ {
-		indices := make([]int, e.nSubframes)
-		totalRateDist := 0.0
-		totalResNrg := 0.0
-		sumLogGain := e.ltpSumLogGainQ7
-		for j := 0; j < e.nSubframes; j++ {
-			maxGainQ7 := math.Exp2((maxSumLogGainConst-sumLogGain+896.0)/128.0) - ltpGainSafetyQ7
-			ind, resNrg, rateDist, gainQ7 := vqWMatLTP(XX[j], xX[j], k, subfrLen, maxGainQ7)
-			indices[j] = ind
-			totalRateDist += rateDist
-			totalResNrg += resNrg
-			next := sumLogGain + 128.0*math.Log2(ltpGainSafetyQ7+gainQ7) - 896.0
-			if next < 0 {
-				next = 0
-			}
-			sumLogGain = next
-		}
-		if totalRateDist <= bestRateDist {
-			bestRateDist = totalRateDist
-			bestPer = k
-			copy(bestIndices, indices)
-			bestResNrg = totalResNrg
-			bestSumLogGain = sumLogGain
-		}
-	}
-
-	e.ltpSumLogGainQ7 = bestSumLogGain
-
-	// Average normalised residual energy -> pred_gain_dB = -3*log2(res_nrg).
-	avgResNrg := bestResNrg / float64(e.nSubframes)
-	if avgResNrg < 1e-9 {
-		avgResNrg = 1e-9
-	}
-	if avgResNrg > 1.0 {
-		avgResNrg = 1.0
-	}
-	predGainDB = -3.0 * math.Log2(avgResNrg)
-
-	return bestPer, bestIndices, predGainDB
+	perIdx, gainIndices, e.ltpSumLogGainQ7, predGainDB = silkQuantLTPGains(XX, xX, subfrLen, e.nSubframes, e.ltpSumLogGainQ7)
+	return perIdx, gainIndices, predGainDB
 }
 
 // selectLTPGainsVQ runs the full LTP gain quantizer for one voiced frame:
@@ -290,7 +323,8 @@ func (e *Encoder) lpcResidualInt16Domain(signal []float64, lpcQ12 []int16) ([]fl
 		for j := 0; j < e.lpcOrder && j <= i-1; j++ {
 			pred += float64(lpcQ12[j]) / 4096.0 * buf[i-j-1]
 		}
-		res[i] = (buf[i] - pred) * 32768.0
+		// silk_float residual: the exact LTP stages expect float32 values.
+		res[i] = f32((buf[i] - pred) * 32768.0)
 	}
 	return res, frameStart
 }

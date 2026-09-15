@@ -2,7 +2,6 @@ package silk
 
 import (
 	"math"
-	"math/bits"
 	"sort"
 )
 
@@ -356,15 +355,6 @@ func nlsfUnpack(cb *nlsfCBParams, cb1Idx int) ([]int, []uint8) {
 		predQ8[i+1] = cb.predQ8[i+int((entry>>4)&1)*(cb.order-1)+1]
 	}
 	return ecIx, predQ8
-}
-
-func silkLin2Log(inLin int32) int32 {
-	if inLin <= 0 {
-		return 0
-	}
-	lz := bits.LeadingZeros32(uint32(inLin))
-	fracQ7 := int32(bits.RotateLeft32(uint32(inLin), -(24-lz)) & 0x7f)
-	return fracQ7 + int32((int64(fracQ7)*int64(128-fracQ7)*179)>>16) + int32(31-lz)<<7
 }
 
 func abs64(v int64) int64 {

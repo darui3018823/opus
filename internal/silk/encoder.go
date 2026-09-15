@@ -90,7 +90,7 @@ type Encoder struct {
 
 	// ltpSumLogGainQ7 is the cumulative log prediction gain across subframes
 	// (silk sum_log_gain_Q7), limiting the total LTP gain for stability.
-	ltpSumLogGainQ7 float64
+	ltpSumLogGainQ7 int32
 
 	// ── Inband Low Bitrate Redundancy (LBRR / in-band FEC) ──────────────────
 	// lbrrEnabled is the SILK LBRR_coded gate (set by the top-level FEC
@@ -150,7 +150,7 @@ type encoderFrameState struct {
 	nsq             silkNSQState
 	shapeHarmSmooth float64
 	shapeTiltSmooth float64
-	ltpSumLogGainQ7 float64
+	ltpSumLogGainQ7 int32
 }
 
 type rateControlPlan struct {

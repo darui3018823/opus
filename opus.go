@@ -1163,10 +1163,11 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm, raw, celtPCM []float64, nFrames int,
 }
 
 func (e *Encoder) shouldUseConservativeSILKNSQ(groupFrames int) bool {
-	return e.sampleRate == 48000 &&
-		e.silkSampleRate == 16000 &&
-		e.channels == 1 &&
-		groupFrames == 1
+	// libopus runs the same delayed-decision NSQ for every configuration; the
+	// former 48 kHz mono single-frame fallback to the homebrew quantizer
+	// (a 2026-06 conformance workaround) predates the exact noise-shape
+	// analysis and is no longer applied.
+	return false
 }
 
 func (e *Encoder) shouldPadSILKPacket(streams [][]byte, celtToSilk bool) bool {

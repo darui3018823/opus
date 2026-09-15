@@ -119,6 +119,7 @@ type Encoder struct {
 	shapeTiltSmooth32 float64
 	pendingShape32    silkNoiseShapeOutputs
 	haveShape32       bool
+	exactGainSymbols  []int
 	// libopus bit reservoir (target_rate.go).
 	nBitsExceeded        int
 	nBitsUsedLBRR        int
@@ -641,6 +642,16 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		domainGainTargets = gainTargets
 		gainIndices := e.resolveGainIndices(gainTargets, conditionalGain)
 		invGains := invGainsFromIndices(gainIndices)
+		codingQuality := shape.CodingQuality
+		if e.haveShape32 {
+			// find_pred_coefs_FLP scales LPC_in_pre by 1.0f / Gains[i], the
+			// unquantised noise-shape gains, and find_LPC's minInvGain reads
+			// the exact coding_quality.
+			for k := range invGains {
+				invGains[k] = f32(1.0 / e.pendingShape32.gains[k])
+			}
+			codingQuality = e.pendingShape32.codingQuality
+		}
 		domainConfig = []lpcInPreConfig{{
 			input:           e.lpcInPreInput(signal),
 			subframeLengths: equalSubframeLengths(e.frameSize, e.nSubframes),
@@ -648,7 +659,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 			ltpCoefs:        ltpQ14ToFloat(ltpCoeffsQ14),
 			pitchLags:       pitchLags,
 			ltpPredCodGain:  ltpPredCodGain,
-			codingQuality:   shape.CodingQuality,
+			codingQuality:   codingQuality,
 			voiced:          signalType == SignalTypeVoiced,
 		}}
 	}
@@ -657,12 +668,28 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		quantOffset = e.estimateQuantOffsetType(signal, nlsf.lpcQ12, signalType, pitchLag, pitchGain)
 	}
 
+	// VBR: encode_frame_FLP runs its quantiser loop once, so the coded gains
+	// are silk_process_gains_FLP's (exact port); the Go budget search only
+	// serves CBR.
+	e.exactGainSymbols = nil
+	var exactGains *silkProcessGainsResult
+	if e.haveShape32 && len(domainConfig) == 1 && e.rateMode != RateModeCBR {
+		exactGains = e.exactProcessGains(signal, signalType, quantOffset, nlsf, domainConfig[0], conditionalGain)
+		quantOffset = exactGains.quantOffset
+	}
+
 	plan := e.selectRateControlPlan(initialState, signal, vadActive, signalType, quantOffset, conditionalGain, nlsf, pitchLag, pitchGain, domainGainTargets)
 	e.lastSNRVBRFrame = plan.snrVBR
+	if exactGains != nil {
+		plan = rateControlPlan{gainTargets: exactGains.absIndices, gainIndices: exactGains.absIndices, rateScale: 1}
+		e.lastSNRVBRFrame = false
+		e.exactGainSymbols = exactGains.symbols
+	}
 
 	e.restoreFrameState(initialState)
 	e.encodeTypeOffset(enc, vadActive, signalType, quantOffset)
 	gainIndices := e.encodeGains(enc, signalType, plan.gainTargets, conditionalGain)
+	e.exactGainSymbols = nil
 	e.encodeNLSF(enc, cb, signalType, nlsf)
 	if e.nSubframes == 4 {
 		enc.EncodeIcdf(nlsf.interpFactor, silkNLSFInterpFactorICDF[:], 8)
@@ -1814,6 +1841,20 @@ func silkQuantizeGainIndex(targetQ16 float64) int {
 
 func (e *Encoder) encodeGains(enc *entcode.Encoder, signalType int, targetIndices []int, conditional bool) []int {
 	absIndices := make([]int, e.nSubframes)
+	if sym := e.exactGainSymbols; len(sym) == e.nSubframes {
+		// silk_encode_indices with the symbols silk_gains_quant produced.
+		if conditional {
+			enc.EncodeIcdf(sym[0], silkDeltaGainICDF[:], 8)
+		} else {
+			enc.EncodeIcdf(sym[0]>>3, silkGainICDF[signalType][:], 8)
+			enc.EncodeIcdf(sym[0]&7, silkUniform8ICDF[:], 8)
+		}
+		for sf := 1; sf < e.nSubframes; sf++ {
+			enc.EncodeIcdf(sym[sf], silkDeltaGainICDF[:], 8)
+		}
+		copy(absIndices, targetIndices)
+		return absIndices
+	}
 	prevIdx := e.prevGainIdx
 	targetIdx := gainTargetAt(targetIndices, 0)
 	if conditional {
@@ -2917,12 +2958,12 @@ func makePulseBlocks(pulses []int16, frameSize int) []pulseBlock {
 			}
 		}
 
+		// silk_encode_pulses: scale the block down until every level of the
+		// shell tree fits its table (pairs <= 8, quads <= 10, octets <= 12,
+		// total <= 16), not only the total.
 		for {
-			sum := 0
-			for _, p := range blocks[blockIdx].shellAbs {
-				sum += p
-			}
-			if sum <= silkMaxPulses {
+			sum, scaleDown := shellSumsFit(blocks[blockIdx].shellAbs[:])
+			if !scaleDown {
 				blocks[blockIdx].sum = sum
 				break
 			}
@@ -2933,6 +2974,26 @@ func makePulseBlocks(pulses []int16, frameSize int) []pulseBlock {
 		}
 	}
 	return blocks
+}
+
+// shellSumsFit combines the 16 absolute pulses pairwise like combine_and_check
+// with silk_max_pulses_table {8, 10, 12, 16}; it returns the block sum and
+// whether any level exceeded its limit (scale_down).
+func shellSumsFit(abs []int) (int, bool) {
+	limits := [4]int{8, 10, 12, 16}
+	cur := append([]int(nil), abs...)
+	scaleDown := false
+	for level := 0; level < 4; level++ {
+		next := make([]int, len(cur)/2)
+		for i := range next {
+			next[i] = cur[2*i] + cur[2*i+1]
+			if next[i] > limits[level] {
+				scaleDown = true
+			}
+		}
+		cur = next
+	}
+	return cur[0], scaleDown
 }
 
 func selectPulseRateLevel(row int, blocks []pulseBlock) int {

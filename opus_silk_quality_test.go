@@ -183,10 +183,14 @@ func TestEncoderSILKOnlyVoicedRateModeContract(t *testing.T) {
 		}
 	}
 
+	// In VBR the coded gains come from the libopus process_gains port (a
+	// single quantiser pass, like encode_frame_FLP with useCBR == 0), so the
+	// OPUS_SILK_RC_SNR A/B switch, which only steers the Go budget search,
+	// must not change the output.
 	snrVBRTotal := sum(packetSizes("1", true, false))
 	legacyVBRTotal := sum(packetSizes("0", true, false))
-	if snrVBRTotal >= legacyVBRTotal {
-		t.Fatalf("OPUS_SILK_RC_SNR=1 VBR bytes=%d, want below A/B legacy bytes=%d", snrVBRTotal, legacyVBRTotal)
+	if snrVBRTotal != legacyVBRTotal {
+		t.Fatalf("OPUS_SILK_RC_SNR=1 VBR bytes=%d, want the same as OPUS_SILK_RC_SNR=0 bytes=%d", snrVBRTotal, legacyVBRTotal)
 	}
 }
 

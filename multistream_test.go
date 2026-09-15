@@ -236,7 +236,7 @@ func TestMultistreamAggregateEncoderControls(t *testing.T) {
 		enc.LSBDepth() != 16 || !enc.PredictionDisabled() ||
 		!enc.PhaseInversionDisabled() || enc.MaxBandwidth() != BandwidthWideband ||
 		enc.Bandwidth() != BandwidthNarrowband || enc.GetBandwidth() != BandwidthNarrowband ||
-		enc.Lookahead() != 120 {
+		enc.Lookahead() != 312 {
 		t.Fatal("aggregate getters do not reflect the first elementary stream")
 	}
 

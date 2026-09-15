@@ -123,8 +123,8 @@ func TestCommonEncoderDecoderGetters(t *testing.T) {
 	if enc.Channels() != 2 || dec.Channels() != 2 {
 		t.Fatalf("channels = encoder %d decoder %d", enc.Channels(), dec.Channels())
 	}
-	if enc.Lookahead() != 120 {
-		t.Fatalf("lookahead = %d, want 120", enc.Lookahead())
+	if enc.Lookahead() != 312 {
+		t.Fatalf("lookahead = %d, want 312 (Fs/400 overlap + Fs/250 delay compensation)", enc.Lookahead())
 	}
 	if enc.VBRConstraint() {
 		t.Fatal("legacy CBR encoder reports constrained VBR")

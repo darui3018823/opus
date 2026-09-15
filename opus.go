@@ -74,6 +74,12 @@ type Encoder struct {
 	inputResampler *resampler.Resampler // inRate -> 48kHz
 	silkResampler  *resampler.Resampler // input sampleRate -> silkSampleRate
 
+	// delayBuffer holds the last delayCompensation() input samples
+	// (interleaved). CELT codes the input delayed by that amount while SILK
+	// codes the current frame, mirroring opus_encoder.c's delay_buffer /
+	// pcm_buf split (delay_compensation = Fs/250 outside restricted low delay).
+	delayBuffer []float64
+
 	// Configuration
 	bitrateSetting      int // requested bitrate or BitrateAuto/BitrateMax
 	bitrate             int // effective numeric bitrate for the current frame size
@@ -405,13 +411,16 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	if err := e.applyBitrateSetting(frameSize); err != nil {
 		return nil, err
 	}
+	// CELT sees the input delayed by delay_compensation; SILK and the
+	// bandwidth/mode analysis see the current frame (opus_encode_native).
+	celtPCM := e.delayedCELTInput(pcm)
 	if frameSize < e.frameSize {
-		return e.encodeShortCELTPacket(pcm)
+		return e.encodeShortCELTPacket(pcm, celtPCM)
 	}
 	nFrames := frameSize / e.frameSize
 	if e.shouldEncodeSILKOnly() {
 		celtToSilk := e.prevMode == framing.ModeCELTOnly
-		out, err := e.encodeSILKOnlyPacket(pcm, nFrames, celtToSilk)
+		out, err := e.encodeSILKOnlyPacket(pcm, celtPCM, nFrames, celtToSilk)
 		if err == nil {
 			e.prevMode = framing.ModeSILKOnly
 		}
@@ -441,7 +450,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	}
 
 	if hybrid {
-		out, redundancyEmitted, err := e.encodeHybridPacket(pcm, nFrames, bw, redundancy, celtToSilk)
+		out, redundancyEmitted, err := e.encodeHybridPacket(pcm, celtPCM, nFrames, bw, redundancy, celtToSilk)
 		if err == nil {
 			// to_celt: after the deferred frame the real switch happens, so the
 			// next packet's predecessor is CELT-only (opus_encode_native).
@@ -477,7 +486,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 
 	// Single-frame, no padding: compact code-0 packet (TOC + payload).
 	if nFrames == 1 && e.padBytes <= 0 {
-		compressed, err := e.encodeOneCELTFrame(pcm)
+		compressed, err := e.encodeOneCELTFrame(celtPCM)
 		if err != nil {
 			return nil, err
 		}
@@ -494,7 +503,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	frames := make([][]byte, 0, nFrames)
 	var rangeFinal uint32
 	for k := 0; k < nFrames; k++ {
-		chunk := pcm[k*chunkLen : (k+1)*chunkLen]
+		chunk := celtPCM[k*chunkLen : (k+1)*chunkLen]
 		f, err := e.encodeOneCELTFrame(chunk)
 		if err != nil {
 			return nil, err
@@ -518,14 +527,14 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	return append([]byte{toc | byte(code)}, payload...), nil
 }
 
-func (e *Encoder) encodeShortCELTPacket(pcm []float64) ([]byte, error) {
+func (e *Encoder) encodeShortCELTPacket(pcm, celtPCM []float64) ([]byte, error) {
 	bw := e.narrowAutoBandwidth(pcm, e.selectCeltBandwidth())
 	e.celtEncoder.SetEndBand(celtEndBandForFramingBW(bw))
 	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, bw, e.channels, e.internalFrameSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate short-frame TOC: %w", err)
 	}
-	compressed, err := e.encodeOneCELTFrame(pcm)
+	compressed, err := e.encodeOneCELTFrame(celtPCM)
 	if err != nil {
 		return nil, err
 	}
@@ -784,7 +793,7 @@ func (e *Encoder) narrowAutoHybridBandwidth(pcm []float64, bw int) int {
 	return bw
 }
 
-func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy, celtToSilk bool) ([]byte, bool, error) {
+func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, redundancy, celtToSilk bool) ([]byte, bool, error) {
 	toc, err := framing.GenerateTOCExt(framing.ModeHybrid, bw, e.channels, framing.FrameSize20ms)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to generate hybrid TOC: %w", err)
@@ -804,12 +813,13 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy,
 	redundancyEmitted := false
 	for k := 0; k < nFrames; k++ {
 		chunk := pcm[k*inputChunkLen : (k+1)*inputChunkLen]
+		celtChunk := celtPCM[k*inputChunkLen : (k+1)*inputChunkLen]
 		silkPCM := chunk
 		if e.silkResampler != nil {
 			silkPCM = e.silkResampler.Process(chunk)
 			silkPCM = padOrTrim(silkPCM, silkChunkLen)
 		}
-		celtInput := e.celtInputFrame(chunk)
+		celtInput := e.celtInputFrame(celtChunk)
 
 		// CELT->SILK redundancy is carried by the first frame; SILK->CELT
 		// redundancy is carried by the last frame (libopus frame_redundancy).
@@ -899,7 +909,7 @@ func (e *Encoder) encodeHybridPacket(pcm []float64, nFrames, bw int, redundancy,
 			e.celtEncoder.SetBitrate(e.hybridCELTBitrate(enc.ECTell()))
 		}
 		chosenBytes, celtErr := e.celtEncoder.EncodeHybrid(
-			celtInput, enc, targetBytes, 17, celtEnd, isSilentPCM(chunk),
+			celtInput, enc, targetBytes, 17, celtEnd, isSilentPCM(celtChunk),
 		)
 		e.celtEncoder.SetRateMode(e.rateMode)
 		e.celtEncoder.SetBitrate(e.bitrate)
@@ -988,7 +998,7 @@ func (e *Encoder) hybridCELTBitrate(silkBits int) int {
 	return celtBitrate
 }
 
-func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int, celtToSilk bool) ([]byte, error) {
+func (e *Encoder) encodeSILKOnlyPacket(pcm, celtPCM []float64, nFrames int, celtToSilk bool) ([]byte, error) {
 	bw, ok := nativeSilkFramingBandwidth(e.silkSampleRate)
 	if !ok {
 		return nil, fmt.Errorf("SILK-only encoding not available for %d Hz", e.sampleRate)
@@ -1067,7 +1077,7 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int, celtToSilk bo
 						sharedEnc.Shrink(mainBytes)
 						sharedEnc.Flush()
 						stream = sharedEnc.Bytes()
-						celtInput := e.celtInputFrame(pcm[pos : pos+inputChunkLen])
+						celtInput := e.celtInputFrame(celtPCM[pos : pos+inputChunkLen])
 						// CELT->SILK leading redundancy: seed the redundant frame from
 						// the previous CELT-only state (celtEncoder is untouched on the
 						// SILK-only path), matching the decoder which decodes it with its
@@ -1397,6 +1407,35 @@ func (e *Encoder) encodeOneCELTFrame(pcm []float64) ([]byte, error) {
 	return compressed, nil
 }
 
+// delayCompensation returns the Opus-layer input delay in samples at the
+// encoder rate: Fs/250 (4 ms) for every application except restricted low
+// delay, like opus_encoder_init.
+func (e *Encoder) delayCompensation() int {
+	if e.application == ApplicationRestrictedLowDelay {
+		return 0
+	}
+	return e.sampleRate / 250
+}
+
+// delayedCELTInput returns pcm delayed by delayCompensation() samples per
+// channel and advances the delay buffer, so the returned slice is the
+// pcm_buf[0:frame_size] region libopus hands to CELT (the SILK layer keeps
+// coding the undelayed pcm).
+func (e *Encoder) delayedCELTInput(pcm []float64) []float64 {
+	d := e.delayCompensation() * e.channels
+	if d == 0 {
+		return pcm
+	}
+	if len(e.delayBuffer) != d {
+		e.delayBuffer = make([]float64, d)
+	}
+	joined := make([]float64, d+len(pcm))
+	copy(joined, e.delayBuffer)
+	copy(joined[d:], pcm)
+	copy(e.delayBuffer, joined[len(pcm):])
+	return joined[:len(pcm)]
+}
+
 func (e *Encoder) celtInputFrame(pcm []float64) []float64 {
 	var celtInput []float64
 	if e.inputResampler != nil {
@@ -1445,11 +1484,11 @@ func (e *Encoder) SampleRate() int { return e.sampleRate }
 // Channels returns the encoder input channel count.
 func (e *Encoder) Channels() int { return e.channels }
 
-// Lookahead returns the codec lookahead in samples at the encoder input rate.
+// Lookahead returns the codec lookahead in samples at the encoder input rate:
+// the CELT overlap (Fs/400) plus the Opus-layer delay compensation (Fs/250,
+// zero for restricted low delay), like OPUS_GET_LOOKAHEAD.
 func (e *Encoder) Lookahead() int {
-	// CELT uses a 120-sample overlap at 48 kHz. The public encoder's current
-	// paths do not add a separate analysis delay beyond that overlap.
-	return e.sampleRate / 400
+	return e.sampleRate/400 + e.delayCompensation()
 }
 
 // FinalRange returns the XOR of the entropy coder final ranges for the most
@@ -2024,6 +2063,7 @@ func (e *Encoder) Reset() error {
 	e.prevMode = -1
 	e.lastFinalRange = 0
 	e.inDTX = false
+	clear(e.delayBuffer)
 	if e.forcedMono != nil {
 		if err := e.forcedMono.Reset(); err != nil {
 			return err

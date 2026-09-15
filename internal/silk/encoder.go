@@ -43,22 +43,28 @@ type Encoder struct {
 	noSpeechCounter int
 	inputQuality    float64
 	inputQualityB   [silkVADNBands]float64
-	prevEnergy      float64   // Previous frame energy for smoothing
-	prevLPC         []float64 // Previous LPC coefficients
-	prevNLSF        []float64 // Previous NLSF
-	prevNLSFQ15     []int16   // Previous quantized NLSF in Q15 (matches decoder prevNLSFQ15; used for interpolation search)
-	prevPitchLag    int       // Previous pitch lag
-	prevLagIndex    int       // Previous entropy-coded pitch lag index
-	prevSignalType  int       // Previous SILK signal type
-	prevGains       []float64 // Previous subframe gains
-	prevGainIdx     int       // Previous absolute gain index, matching decoder state
-	prevGainQ16     int32     // Previous synthesis gain, matching decoder state
-	lpcState        []int32   // Encoder-side LPC synthesis state, Q14
-	ltpState        []int32   // Encoder-side LTP output history, Q0
-	nsq             silkNSQState
-	nsqDelDec       [4]nsqDelayedDecision
-	nsqSeed         int32 // winning del-dec seed (silk_NSQ_del_dec writes this back to the bitstream)
-	lastFinalRange  uint32
+	// inputQualityBandQ15 keeps the fixed-point band quality of the current
+	// frame; hpVariableCutoff reads the previous frame's value from it.
+	inputQualityBandQ15 [silkVADNBands]int
+	// variableHPSmth1Q15 is silk_encoder_state.variable_HP_smth1_Q15, the
+	// smoothed log2 cutoff the Opus-layer high-pass follows.
+	variableHPSmth1Q15 int32
+	prevEnergy         float64   // Previous frame energy for smoothing
+	prevLPC            []float64 // Previous LPC coefficients
+	prevNLSF           []float64 // Previous NLSF
+	prevNLSFQ15        []int16   // Previous quantized NLSF in Q15 (matches decoder prevNLSFQ15; used for interpolation search)
+	prevPitchLag       int       // Previous pitch lag
+	prevLagIndex       int       // Previous entropy-coded pitch lag index
+	prevSignalType     int       // Previous SILK signal type
+	prevGains          []float64 // Previous subframe gains
+	prevGainIdx        int       // Previous absolute gain index, matching decoder state
+	prevGainQ16        int32     // Previous synthesis gain, matching decoder state
+	lpcState           []int32   // Encoder-side LPC synthesis state, Q14
+	ltpState           []int32   // Encoder-side LTP output history, Q0
+	nsq                silkNSQState
+	nsqDelDec          [4]nsqDelayedDecision
+	nsqSeed            int32 // winning del-dec seed (silk_NSQ_del_dec writes this back to the bitstream)
+	lastFinalRange     uint32
 	// useTrellisNSQ enables the FLP noise-shape analysis + delayed-decision
 	// trellis NSQ (Q3+Q4) for active frames. Voiced frames use the perceptual
 	// shaping path; unvoiced/stereo-component frames keep neutral shaping while
@@ -261,6 +267,7 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 	}
 	enc.useSNRTargetVBR = enc.snrTargetEnabled
 	enc.pitchHist = enc.xBuf[:enc.ltpMemLength()]
+	enc.variableHPSmth1Q15 = variableHPSmth1Initial()
 	for i := range enc.inputQualityB {
 		enc.inputQualityB[i] = 1.0
 	}
@@ -533,12 +540,16 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	// frame taken from the look-ahead buffer.
 	vadSA := e.frameVADResult(signal)
 	signal = e.pushInputFrame(signal)
+	// silk_HP_variable_cutoff runs before this frame's VAD result is
+	// installed, so it sees the previous frame's activity and quality.
+	e.hpVariableCutoff()
 	e.speechActivity = vadSA.speechActivity
 	e.inputTilt = vadSA.inputTilt
 	e.speechActivityQ8 = vadSA.speechActivityQ8
 	e.inputTiltQ15 = vadSA.inputTiltQ15
 	e.inputQuality = vadSA.inputQuality
 	e.inputQualityB = vadSA.inputQualityBand
+	e.inputQualityBandQ15 = vadSA.inputQualityBandQ15
 
 	signalType := SignalTypeInactive
 	pitchLag := e.prevPitchLag
@@ -3026,6 +3037,8 @@ func (e *Encoder) Reset() {
 	for i := range e.inputQualityB {
 		e.inputQualityB[i] = 1.0
 	}
+	e.inputQualityBandQ15 = [silkVADNBands]int{}
+	e.variableHPSmth1Q15 = variableHPSmth1Initial()
 	e.prevEnergy = 1.0
 	for i := range e.prevLPC {
 		e.prevLPC[i] = 0

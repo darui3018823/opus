@@ -108,7 +108,10 @@ func TestEncoderSILKOnlyQualityBaseline(t *testing.T) {
 							t.Fatalf("frame %d: last packet duration=%d, want %d", frame, got, frameSize)
 						}
 						totalPacketBytes += len(pkt)
-						in = append(in, pcm...)
+						// The VOIP encoder codes the high-pass conditioned input
+						// (opus_encode_native hp_cutoff), whose phase differs from
+						// the caller's samples; score against what was coded.
+						in = append(in, enc.lastConditionedInput...)
 						out = append(out, decoded...)
 					}
 

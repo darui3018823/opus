@@ -699,8 +699,12 @@ func TestEncoderHybridToCELTRedundancyStateContinuity(t *testing.T) {
 	decoded = append(decoded, out...)
 	frame++
 
-	// Genuine CELT-only run carrying a steady tone.
+	// Genuine CELT-only run carrying a steady tone. The reference is the
+	// high-pass conditioned input the encoder coded (the VOIP hp_cutoff shifts
+	// the tone's phase by a fraction of a sample, which would cap an
+	// integer-aligned SNR against the raw tone near 26 dB).
 	celtStart := frame
+	var ref []float64
 	for ; frame < celtStart+postFrames; frame++ {
 		pkt, err := enc.EncodeFloat(tone(frame*frameSize, frameSize), frameSize)
 		if err != nil {
@@ -714,13 +718,11 @@ func TestEncoderHybridToCELTRedundancyStateContinuity(t *testing.T) {
 			t.Fatalf("post-transition decode %d: %v", frame, err)
 		}
 		decoded = append(decoded, out...)
+		ref = append(ref, enc.lastConditionedInput...)
 	}
 
 	totalFrames := frame
-	ref := make([]float64, totalFrames*frameSize)
-	for f := celtStart; f < totalFrames; f++ {
-		copy(ref[f*frameSize:(f+1)*frameSize], tone(f*frameSize, frameSize))
-	}
+	ref = append(make([]float64, celtStart*frameSize), ref...)
 
 	// Skip the first few CELT-only frames (transition crossfade) and measure to the
 	// end of the run.

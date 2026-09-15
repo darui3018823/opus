@@ -80,6 +80,17 @@ type Encoder struct {
 	// pcm_buf split (delay_compensation = Fs/250 outside restricted low delay).
 	delayBuffer []float64
 
+	// Input high-pass state (opus_encoder.c hp_mem / variable_HP_smth2_Q15):
+	// the VOIP hp_cutoff biquad or the dc_reject blocker runs on every
+	// packet before SILK and the delay buffer see the samples.
+	hpMem              [4]float32
+	variableHPSmth2Q15 int32
+	// lastConditionedInput is the conditioned input of the most recent
+	// packet, the signal the codec actually coded; tests measure quality
+	// against it because the high-pass shifts phase relative to the caller's
+	// samples. Read-only after the call.
+	lastConditionedInput []float64
+
 	// Configuration
 	bitrateSetting      int // requested bitrate or BitrateAuto/BitrateMax
 	bitrate             int // effective numeric bitrate for the current frame size
@@ -202,6 +213,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		prevMode:            -1, // no previous packet yet
 		forceChannels:       ChannelsAuto,
 		lsbDepth:            LSBDepthDefault,
+		variableHPSmth2Q15:  variableHPSmth2Initial(),
 	}
 	enc.celtEncoders[3] = celtEnc
 
@@ -411,16 +423,22 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	if err := e.applyBitrateSetting(frameSize); err != nil {
 		return nil, err
 	}
-	// CELT sees the input delayed by delay_compensation; SILK and the
-	// bandwidth/mode analysis see the current frame (opus_encode_native).
+	// opus_encode_native: the input is high-pass conditioned, SILK codes the
+	// conditioned current frame, CELT sees it delayed by delay_compensation,
+	// and the bandwidth analysis reads the raw input.
+	raw := pcm
+	nFrames := 0
+	if frameSize >= e.frameSize {
+		nFrames = frameSize / e.frameSize
+	}
+	pcm = e.conditionInput(pcm, frameSize, nFrames)
 	celtPCM := e.delayedCELTInput(pcm)
 	if frameSize < e.frameSize {
-		return e.encodeShortCELTPacket(pcm, celtPCM)
+		return e.encodeShortCELTPacket(raw, celtPCM)
 	}
-	nFrames := frameSize / e.frameSize
 	if e.shouldEncodeSILKOnly() {
 		celtToSilk := e.prevMode == framing.ModeCELTOnly
-		out, err := e.encodeSILKOnlyPacket(pcm, celtPCM, nFrames, celtToSilk)
+		out, err := e.encodeSILKOnlyPacket(pcm, raw, celtPCM, nFrames, celtToSilk)
 		if err == nil {
 			e.prevMode = framing.ModeSILKOnly
 		}
@@ -429,7 +447,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	bw := -1
 	hybrid := false
 	if e.shouldEncodeHybrid(nFrames) {
-		bw = e.narrowAutoHybridBandwidth(pcm, e.selectHybridBandwidth())
+		bw = e.narrowAutoHybridBandwidth(raw, e.selectHybridBandwidth())
 		hybrid = bw == framing.BandwidthSuperwideband || bw == framing.BandwidthFullband
 	}
 
@@ -441,7 +459,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	redundancy := false
 	celtToSilk := false
 	if !hybrid && e.prevMode == framing.ModeHybrid && e.canDeferToHybrid(nFrames) {
-		bw = e.deferredHybridBandwidth(pcm)
+		bw = e.deferredHybridBandwidth(raw)
 		hybrid = true
 		redundancy = true
 	} else if hybrid && e.prevMode == framing.ModeCELTOnly {
@@ -473,7 +491,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	// narrower band rather than wasting bits. The detection runs once over the whole
 	// input PCM, so every frame in a packet still shares the same bandwidth/config.
 	if bw < 0 {
-		bw = e.narrowAutoBandwidth(pcm, e.selectCeltBandwidth())
+		bw = e.narrowAutoBandwidth(raw, e.selectCeltBandwidth())
 	}
 	e.celtEncoder.SetEndBand(celtEndBandForFramingBW(bw))
 	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, bw, e.channels, framing.FrameSize20ms)
@@ -998,7 +1016,11 @@ func (e *Encoder) hybridCELTBitrate(silkBits int) int {
 	return celtBitrate
 }
 
-func (e *Encoder) encodeSILKOnlyPacket(pcm, celtPCM []float64, nFrames int, celtToSilk bool) ([]byte, error) {
+// encodeSILKOnlyPacket codes the conditioned pcm; raw is the caller's input,
+// which decides the digital-silence shortcut (like libopus' is_digital_silence
+// on the unfiltered input) so a high-pass tail after active audio does not
+// turn a silent frame into a coded one; celtPCM feeds the redundant CELT frame.
+func (e *Encoder) encodeSILKOnlyPacket(pcm, raw, celtPCM []float64, nFrames int, celtToSilk bool) ([]byte, error) {
 	bw, ok := nativeSilkFramingBandwidth(e.silkSampleRate)
 	if !ok {
 		return nil, fmt.Errorf("SILK-only encoding not available for %d Hz", e.sampleRate)
@@ -1027,7 +1049,7 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm, celtPCM []float64, nFrames int, celt
 			silkPCM = e.silkResampler.Process(silkPCM)
 			silkPCM = padOrTrim(silkPCM, group*silkChunkLen)
 		}
-		silent := isSilentPCM(silkPCM)
+		silent := isSilentPCM(raw[pos : pos+inputSamples])
 		encodeSILK := !silent
 		if silent {
 			switch {
@@ -2064,6 +2086,8 @@ func (e *Encoder) Reset() error {
 	e.lastFinalRange = 0
 	e.inDTX = false
 	clear(e.delayBuffer)
+	e.hpMem = [4]float32{}
+	e.variableHPSmth2Q15 = variableHPSmth2Initial()
 	if e.forcedMono != nil {
 		if err := e.forcedMono.Reset(); err != nil {
 			return err

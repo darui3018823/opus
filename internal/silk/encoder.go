@@ -98,8 +98,14 @@ type Encoder struct {
 	// lands at xBuf[ltpMem+laShape:], so the coded frame trails the caller's
 	// frame by LA_SHAPE_MS (5 ms) exactly as in libopus. pitchHist aliases the
 	// history region.
-	xBuf                 []float64
-	pitchHist            []float64 // Past ltp_mem_length input samples, [-1,1]
+	xBuf      []float64
+	pitchHist []float64 // Past ltp_mem_length input samples, [-1,1]
+	// Front end (front_end.go): the Opus-layer input rate, the libopus
+	// resampler/inputBuf delay line, and the float32 x_buf snapshot of the
+	// most recently coded frame.
+	apiSampleRate        int
+	encInputDelay        []float64
+	lastXBuf             []float32
 	prevLagForPitch      int       // Previous frame pitch lag (0 if unvoiced)
 	ltpCorrState         float64   // Normalized LTP correlation from prev frame
 	pitchResidual        []float64 // res_pitch: whitened [history|frame|LTP_ORDER] from the pitch analysis
@@ -370,7 +376,9 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 	vadFlags := make([]bool, nFrames)
 	for frame := 0; frame < nFrames; frame++ {
 		start := frame * e.frameSize * e.channels
-		framePCM := pcm[start : start+e.frameSize*e.channels]
+		// int16 quantisation and the resampler/inputBuf delay come first,
+		// so the VAD and the coder see the same frame as silk_Encode.
+		framePCM := e.frontEndFrame(pcm[start:start+e.frameSize*e.channels], true)
 		frames[frame] = framePCM
 		vadFlags[frame] = e.runFrameVAD(frame, framePCM)
 	}
@@ -428,7 +436,22 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 	}
 	for frame := 0; frame < nFrames; frame++ {
 		base := frame * e.frameSize * 2
-		mid, side, predIx := e.stereoState.lrToMS(pcm[base:base+e.frameSize*2], e.sampleRate/1000, e.frameSize)
+		// Each channel passes the int16 quantisation and resampler delay
+		// before the mid/side conversion, which adds the inputBuf offset.
+		left := make([]float64, e.frameSize)
+		right := make([]float64, e.frameSize)
+		for i := 0; i < e.frameSize; i++ {
+			left[i] = pcm[base+2*i]
+			right[i] = pcm[base+2*i+1]
+		}
+		left = e.frontEndFrame(left, false)
+		right = e.side.frontEndFrame(right, false)
+		lr := make([]float64, e.frameSize*2)
+		for i := 0; i < e.frameSize; i++ {
+			lr[2*i] = left[i]
+			lr[2*i+1] = right[i]
+		}
+		mid, side, predIx := e.stereoState.lrToMS(lr, e.sampleRate/1000, e.frameSize)
 		midFrames[frame] = mid
 		sideFrames[frame] = side
 		stereoPredIx[frame] = predIx
@@ -494,7 +517,7 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 		if !onlyMiddle {
 			if e.prevOnlyMiddle {
-				e.side.Reset()
+				e.side.resetForSideReactivation()
 			}
 			e.side.curFrame = i
 			e.side.encodeRangeFrame(enc, sideFrames[i], vadFlags[1][i], i > 0 && !e.prevOnlyMiddle)
@@ -701,6 +724,14 @@ func (e *Encoder) pushInputFrame(input []float64) []float64 {
 	}
 	e.pitchHist = e.xBuf[:ltpMem]
 	copy(e.xBuf[ltpMem+la:], input[:e.frameSize])
+	e.addAntiDenormalOffsets()
+	if cap(e.lastXBuf) < len(e.xBuf) {
+		e.lastXBuf = make([]float32, len(e.xBuf))
+	}
+	e.lastXBuf = e.lastXBuf[:len(e.xBuf)]
+	for i, v := range e.xBuf {
+		e.lastXBuf[i] = float32(v * 32768)
+	}
 	return e.xBuf[ltpMem : ltpMem+e.frameSize]
 }
 
@@ -3024,6 +3055,15 @@ func encodePulseSigns(enc *entcode.Encoder, blocks []pulseBlock, signalType, qua
 }
 
 // Reset resets the encoder state
+// resetForSideReactivation resets the side encoder when side coding resumes
+// after mid-only frames. libopus (silk_Encode) clears the coding state but
+// keeps the channel's resampler, so the front-end delay line survives.
+func (e *Encoder) resetForSideReactivation() {
+	delay := e.encInputDelay
+	e.Reset()
+	e.encInputDelay = delay
+}
+
 func (e *Encoder) Reset() {
 	e.frameVAD = nil
 	e.curFrame = 0
@@ -3066,6 +3106,8 @@ func (e *Encoder) Reset() {
 	}
 	clear(e.xBuf)
 	e.pitchHist = e.xBuf[:e.ltpMemLength()]
+	e.encInputDelay = nil
+	e.lastXBuf = nil
 	e.prevLagForPitch = 0
 	e.ltpCorrState = 0
 	e.pitchResidual = nil

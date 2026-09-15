@@ -238,6 +238,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		}
 		_ = silkEnc.SetComplexity(enc.complexity)
 		silkEnc.SetRateMode(silk.RateModeCBR)
+		silkEnc.SetAPISampleRate(sampleRate)
 		enc.silkEncoder = silkEnc
 		enc.silkSampleRate = silkRate
 		if silkRate != sampleRate {

@@ -1289,7 +1289,7 @@ func TestStereoOnlyMiddleStatePersistsAcrossPackets(t *testing.T) {
 		enc.side.nsq.sLTPShpQ14[i] = int32(4000 - i)
 	}
 
-	reference.side.Reset()
+	reference.side.resetForSideReactivation()
 	reference.prevOnlyMiddle = false
 	sideActive := makeFrame(true)
 	packet, err = enc.Encode(sideActive)

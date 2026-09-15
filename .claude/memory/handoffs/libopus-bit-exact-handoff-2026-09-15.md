@@ -10,7 +10,8 @@ Supersedes: none. Extends
 ```text
 main (a37d852)
  └─ dev/libopus-bit-exact   (+73)  convergence branch; tip b70e7a0
-     └─ dev/silk-q1-oracle  (+17)  Q1 LPC/NLSF experiment; tip 2e40474, clean tree
+     └─ dev/silk-q1-oracle  (+20)  Q1 LPC/NLSF experiment + handoff docs + padding test fix
+         └─ dev/silk-plc-exact     SILK PLC/CNG port (2026-09-15, this session)
 ```
 
 The predecessor followed the plan's work loop: child experiment branch per
@@ -24,7 +25,7 @@ is complete at the oracle level but has **not** been merged back.
 | Decoder final range | 0 mismatches on all 12 official vectors (hard gate) |
 | CELT decoder, pure-CELT vectors (tv01/07/11) | every emitted scalar-source stage hash matches checked-in libopus 1.6.1 |
 | CELT decoder, mixed-mode vectors | not scanned at stage level; installed-libopus int16 equality tv09 96.4 %, tv10 85.0 % |
-| SILK decoder / PLC | parameter/range coverage only; PLC explicitly non-bit-exact |
+| SILK decoder / PLC | PLC, CNG, glue, one-byte payload handling sample-exact vs libopus (2026-09-15, `dev/silk-plc-exact`) |
 | SILK encoder Q1 (`LPC_in_pre` → `PredCoef_Q12`) | 13 fixtures exact vs C (`TestSILKQ1LPCNLSFOracle`, opusref) |
 | SILK encoder Q2–Q7, CELT encoder, mode/rate policy | not bit-exact |
 
@@ -74,17 +75,26 @@ carries code-3 padding and equal sizes; `60918f3` relaxed only the non-strict
 `TestCGOEncodeRefSILKOnly`. These look like stale test contracts rather than a
 codec regression, but that must be proven, not assumed.
 
-Phase 0 tasks:
+Phase 0 outcome (2026-09-15, 10:00-11:00 JST):
 
-- Triage the four padding-related failures: parse the padded packets, confirm
-  the LBRR flag is set in the FEC stream and that the SILK payload differs from
-  the no-FEC stream, then update the test contracts (unpad before LBRR mask
-  parsing, compare payload rather than packet size, accept code 3 for strict
-  durations under CBR). If LBRR is actually missing, that is a real regression
-  from the padding slice and takes priority over everything below.
-- Re-run the full `opusref` suite; the remaining failures must be exactly the
-  speech-like-harmonic loudness gates.
-- Escalate the open Q1 decision above by webhook. Do not block on it.
+- The four padding failures were stale contracts: LBRR is present after
+  `PacketUnpad` (+156 unpadded bytes on the 20 ms stream). Fixed in
+  `00e5af3 test(opusref): inspect unpadded SILK packets for LBRR and frame count`
+  on `dev/silk-q1-oracle`.
+- Fixing the LBRR-mask parser exposed a real gap: `TestCGODecodeFECMatchesLibopus/60ms`
+  diverged 0.4 dB on a PLC-filled LBRR subframe. Bisect: first bad commit is
+  the Q1 port `7226070` (the encoder now marks a fixture subframe inactive),
+  but the cause is the Go SILK PLC approximation. Ported libopus PLC/CNG/glue
+  on child branch `dev/silk-plc-exact` (`e26d926`, `909e55e`); SILK PLC, FEC
+  gaps, and one-byte payloads are now sample-exact (see the convergence plan's
+  2026-09-15 slice).
+- Full `opusref` suite after the port: only the speech-like-harmonic loudness
+  gates (8k/12k/16k) fail. Normal and race suites green.
+- Escalated the Q1 merge decision and the PLC-first reordering by webhook at
+  10:2x JST; no answer yet. Default remains option 1.
+
+Merge order proposal: `dev/silk-plc-exact` → `dev/silk-q1-oracle` (fast-forward),
+then the Q1 decision governs the merge into `dev/libopus-bit-exact`.
 
 ### Phase 1 — SILK encoder Q2: pitch/LTP exactness
 
@@ -124,10 +134,10 @@ Phase 0 tasks:
 
 - Mixed-mode vectors (tv08/09/10/12): reuse the vector-wide scalar stage scan
   on their CELT constituents; add SILK fixed-point decoder state checkpoints
-  (`silk_decode_core`, `silk_PLC`, resampler) to find the first divergent
-  sample in tv09/tv10.
-- SILK PLC and CELT PLC exactness (libopus fixed-point SILK is fully
-  deterministic; there is no float-build excuse here).
+  (`silk_decode_core`, resampler) to find the first divergent sample in
+  tv09/tv10.
+- SILK PLC exactness: done 2026-09-15 (`dev/silk-plc-exact`). CELT PLC
+  exactness remains (hybrid PLC oracles show 26-30 dB, not exact).
 
 ### Phase 6 — CELT encoder and mode/rate policy
 

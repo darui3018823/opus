@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-09-13
+Last reviewed: 2026-09-15
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -645,8 +645,16 @@ Current decoder behavior and limitations:
   libopus. The requested duration may be any positive 2.5 ms multiple through
   120 ms. Hybrid concealment sums the independently concealed SILK low band and
   CELT high band through the normal resampler/channel paths. Successful PLC sets
-  `FinalRange` to zero. SILK PLC is stateful and interoperable but is not
-  bit-exact with libopus PLC. A SILK-only or hybrid packet ending in trailing
+  `FinalRange` to zero. SILK PLC is a port of libopus `silk/PLC.c`,
+  `silk/CNG.c`, and the post-loss paths of `silk/decode_frame.c`,
+  `silk/decode_parameters.c`, and `silk/decode_core.c`; concealed frames,
+  comfort noise, the post-loss bandwidth expansion and LTP smoothing, and the
+  glue fade-in are sample-exact against libopus 1.6.1 at the SILK internal rate
+  (`TestCGOSILKPLCExact`, `TestCGOSILKFECGapExact`,
+  `TestCGOSILKOneBytePayloadExact`). CELT PLC is not bit-exact.
+  A SILK payload of at most one byte is treated as a lost frame and concealed,
+  reporting a zero final range, exactly as `opus_decode_frame` does; the
+  encoder reports zero for such frames too. A SILK-only or hybrid packet ending in trailing
   SILK-to-CELT redundancy marks the next loss for CELT-only concealment,
   matching libopus' independent `prev_redundancy` state; FEC eligibility
   continues to use the last received packet's framing mode.
@@ -964,6 +972,14 @@ go test -count=1 ./...
 go test -count=1 -tags opusref ./...
 ```
 
+Bit-exact convergence verification on 2026-09-15: SILK packet-loss
+concealment, comfort noise, and post-loss glue are sample-exact against
+libopus 1.6.1 for 8/12/16 kHz mono and stereo, 10-60 ms frames, single and
+repeated losses, in-band FEC with missing LBRR subframes, and one-byte
+payloads (`go test -count=1 -tags opusref -run 'TestCGOSILK' -v .`). The
+`opusref` encoder FEC and strict-duration tests now inspect unpadded packets
+so CBR padding cannot hide LBRR presence or the frame count.
+
 Bit-exact convergence verification on 2026-09-13: passing (`go vet ./...`,
 `go test -count=1 ./...`, `go test -count=1 -tags opusref ./...`, and
 `go test -race -count=1 ./...`). The libopus 1.6.1 official-vector oracle
@@ -998,12 +1014,12 @@ every tested mode with a 10 dB continuity floor. The mono 20/40/60 ms floor
 remains 6 dB. This is not a 60 ms-specific limitation: LBRR is intentionally not
 coded for VAD-inactive frames (matching libopus' single-VAD semantics), so a lost
 frame that was inactive has no redundant copy and is recovered via SILK PLC
-instead. SILK PLC is not bit-exact with libopus, and measuring aligned SNR on
-such a near-silent frame yields a small value. In the deterministic fixture the
-3 Hz amplitude-envelope trough makes exactly one 60 ms frame inactive, so its
-slot (subframe 0 of the recovered packet) is PLC-concealed by both Go and
-libopus rather than reconstructed from LBRR; the present-LBRR subframes match
-libopus closely (40 ms ~33 dB, present 60 ms subframes ~9-10 dB).
+instead. In the deterministic fixture the 3 Hz amplitude-envelope trough makes
+exactly one 60 ms frame inactive, so its slot (subframe 0 of the recovered
+packet) is PLC-concealed by both Go and libopus rather than reconstructed from
+LBRR. Since the 2026-09-15 SILK PLC port, that concealed slot, the LBRR
+subframes that follow it, and the normal frames after the recovery are
+sample-exact against libopus (`TestCGOSILKFECGapExact`).
 
 find_LPC FLP Phase 2 noise-shape input-boundary verification on 2026-06-29:
 passing (`go vet ./...`, `go test -count=1 ./...`,

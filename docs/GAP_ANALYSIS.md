@@ -1,6 +1,6 @@
 # Gap Analysis — libopus パリティに向けた残課題
 
-Last updated: 2026-09-13
+Last updated: 2026-09-15
 
 このドキュメントは `docs/CURRENT_IMPLEMENTATION.md` を読んだうえで、
 libopus 1.6.1 と比べて **現在まだ足りていないもの** を優先度ごとに整理したものです。
@@ -12,7 +12,7 @@ libopus 1.6.1 と比べて **現在まだ足りていないもの** を優先度
 
 | 領域 | 状態 |
 |---|---|
-| **デコーダ** | 完成。全 12 公式ベクター PASS、libopus 1.6.1 比較 PASS |
+| **デコーダ** | 完成。全 12 公式ベクター PASS、libopus 1.6.1 比較 PASS。SILK PLC/CNG/glue は 2026-09-15 に libopus 移植でサンプル一致。CELT PLC は未一致 |
 | **CELT エンコーダ** | 動作するが libopus 比 ~5–6 dB のギャップが一部 CELT 音楽セルに残る |
 | **SILK エンコーダ** | 構造完成。voiced/speech で libopus 比 2.3–6.6 dB のギャップが残る |
 | **SILK/hybrid モード選択** | 保守的な voice-gate のみ。libopus 統合制御ループに未達 |

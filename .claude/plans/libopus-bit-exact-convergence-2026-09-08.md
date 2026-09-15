@@ -1,6 +1,6 @@
 # libopus Bit-Exact Convergence Plan
 
-Last updated: 2026-09-13
+Last updated: 2026-09-15
 Status: Active
 
 ## Objective
@@ -62,7 +62,7 @@ state or entropy divergence.
 | Decoder framing/range | All 12 official vectors now have zero `FinalRange` mismatches against libopus 1.6.1 and their `.bit` records | Retain the all-vector zero-mismatch gate while localizing PCM divergence |
 | int16 decode conversion | Conversion semantics match `FLOAT2INT16`; direct `opus_decode` comparison now reports exact-sample percentage, first/max LSB delta, and range mismatch count | Raise mode-specific exact-sample coverage after range alignment |
 | CELT synthesis | Every normalized-energy, denormalized-spectrum, synthesis, post-filter, and PCM stage hash emitted for the three pure-CELT official vectors (01, 07, and 11) matches the checked-in scalar C source | Extend source-level localization to CELT portions of mixed-mode vectors without conflating SILK/CELT transition state or installed-libopus SIMD drift |
-| SILK synthesis/PLC | Parameter/range coverage exists; PLC is explicitly non-bit-exact | Compare fixed-point state and PCM on deterministic packet sequences |
+| SILK synthesis/PLC | Normal-frame synthesis, PLC, CNG, and post-loss glue are sample-exact on the SILK oracles (2026-09-15) | Extend exactness to mixed-mode official vectors and CELT PLC |
 | Encoder | Packets interoperate but are not byte-identical | Add mode-specific byte and first-symbol divergence traces |
 | Mode/rate policy | Known partial parity in `docs/MODE_RATE_POLICY_DIFF.md` | Compare decisions and state over identical PCM/control sequences |
 
@@ -303,3 +303,43 @@ test passes.
   78.914% to 84.982%, with every official-vector final range still exact.
 - Verified all three scalar sweeps, `go vet ./...`, the full normal and
   `opusref` suites, the full race suite, and the verbose all-vector CGO oracle.
+
+### 2026-09-15: SILK packet-loss concealment and comfort noise
+
+- Reference: checked-in libopus 1.6.1 `silk/PLC.c`, `silk/CNG.c`,
+  `silk/decode_frame.c`, `silk/decode_parameters.c`, `silk/decode_core.c`,
+  `silk/dec_API.c`, and `src/opus_decoder.c::opus_decode_frame`.
+- Re-established the baseline first: four `opusref` failures inherited from
+  the 2026-09-09 CBR-padding slice were stale test contracts (raw packet
+  sizes and count codes hid LBRR behind code-3 padding); the tests now inspect
+  unpadded packets and LBRR flags. The remaining
+  `TestCGODecodeFECMatchesLibopus/60ms` failure bisected to the Q1 encoder
+  port, which made a fixture subframe inactive and exposed the Go PLC
+  approximation on the LBRR gap.
+- Replaced the heuristic SILK concealment with a fixed-point port of
+  `silk_PLC_update`, `silk_PLC_conceal`, `silk_PLC_glue_frames`, `silk_CNG`,
+  the post-loss `BWE_AFTER_LOSS_Q16` bandwidth expansion, the voiced-to-unvoiced
+  LTP smoothing in `silk_decode_core`, the `LastGainIndex` reset on lost
+  packets, and the decoder-control conventions (zero pitch lags, LTP
+  coefficients, and LTP scale for non-voiced frames; `lagPrev` from the last
+  subframe). The decoder keeps the previous frame's `exc_Q14` and a
+  `MAX_FRAME_LENGTH` excitation buffer so the random-noise source indexes the
+  same stale samples as C.
+- A SILK payload of at most one byte is now concealed as a lost frame with a
+  zero final range, as `opus_decode_frame` does; the previous Go-specific
+  "digital silence" state was removed. The SILK-only encoder reports the last
+  constituent frame's range and zero for one-byte frames, matching
+  `opus_encode_native`, so encoder and decoder final ranges agree again on
+  silent LBRR carriers.
+- New oracles compare Go int16 output with libopus `opus_decode` sample for
+  sample at the SILK internal rate: whole-packet losses (8/12/16 kHz,
+  10/20/40/60 ms, single to triple losses, mono and stereo), in-band FEC with
+  PLC-filled LBRR gaps, and one-byte payloads followed by explicit loss. All
+  are exact. `TestCGORefSILKAndHybridPLC` now reports +Inf dB for SILK mono
+  and stereo; its absolute 10 dB target floor became a parity-with-libopus
+  check because the concealment quality is now libopus' own.
+- Hybrid PLC still differs through the CELT concealment path; CELT PLC is the
+  next decoder exactness gate.
+- Verified the focused SILK oracles, `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (only the pre-existing
+  speech-like-harmonic loudness gates fail), and `go test -race -count=1 ./...`.

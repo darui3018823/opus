@@ -972,12 +972,17 @@ go test -count=1 ./...
 go test -count=1 -tags opusref ./...
 ```
 
-Bit-exact convergence verification on 2026-09-15 (encoder): the SILK LTP
-correlation (`silk_find_LTP_FLP`) and LTP gain quantization
-(`silk_quant_LTP_gains`/`silk_VQ_WMat_EC`) are bit-exact against libopus 1.6.1
-on injected residuals (`go test -count=1 -tags opusref -run TestSILKQ2LTPOracle
--v ./internal/silk/`). The encoder still derives its own residual without
-look-ahead, so this exactness does not yet extend to packets.
+Bit-exact convergence verification on 2026-09-15 (encoder): on injected
+inputs the SILK VAD (`TestSILKVADOracle`), pitch analysis
+(`TestSILKQ2PitchOracle`), LTP correlation and gain quantization
+(`TestSILKQ2LTPOracle`), and LPC/NLSF analysis (`TestSILKQ1LPCNLSFOracle`) are
+bit-exact against libopus 1.6.1 (`go test -count=1 -tags opusref -run
+'TestSILK' -v ./internal/silk/`). Inside the production encoder these stages
+are wired like libopus (pitch residual feeds LTP and the quantizer-offset
+measure, one LTP quantization per frame, first frame after reset unvoiced),
+but the encoder still has no `LA_SHAPE_MS` look-ahead, no Opus-layer delay
+compensation, and no input high-pass filter, so packet bytes are not
+comparable yet (see `.claude/specs/encoder-input-pipeline-libopus.md`).
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

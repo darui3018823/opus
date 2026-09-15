@@ -27,7 +27,8 @@ is complete at the oracle level but has **not** been merged back.
 | CELT decoder, mixed-mode vectors | not scanned at stage level; installed-libopus int16 equality tv09 96.4 %, tv10 85.0 % |
 | SILK decoder / PLC | PLC, CNG, glue, one-byte payload handling sample-exact vs libopus (2026-09-15, `dev/silk-plc-exact`) |
 | SILK encoder Q1 (`LPC_in_pre` → `PredCoef_Q12`) | 13 fixtures exact vs C (`TestSILKQ1LPCNLSFOracle`, opusref) |
-| SILK encoder Q2–Q7, CELT encoder, mode/rate policy | not bit-exact |
+| SILK encoder VAD, pitch, LTP (Q2) | bit-exact on injected inputs (2026-09-15, `dev/silk-q2-ltp-oracle`); wired into the encoder |
+| SILK encoder Q3–Q7, CELT encoder, mode/rate policy, input pipeline | not bit-exact |
 
 ## Open decision (blocks Q1 merge-back)
 

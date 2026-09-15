@@ -50,6 +50,7 @@ SILK エンコーダの品質ギャップ根本原因はここにあります。
 - **実装済み：** `silk_find_pitch_lags_FLP` + `silk_pitch_analysis_core_FLP` によるピッチ検索は実装済み（float64 近似）。絶対ラグ/ピッチコンター符号化も実装。
 - **2026-09-15 完了：** `silk_find_LTP_FLP`（float32 演算順序・double 累算）と `silk_quant_LTP_gains` / `silk_VQ_WMat_EC`（Q17/Q15/Q8 固定小数点）を忠実移植。`TestSILKQ2LTPOracle`（opusref, 8 fixture）で XX/xX の float32 bit、periodicity/codebook index、`sum_log_gain_Q7`、`pred_gain_dB` が libopus 1.6.1 と完全一致。libopus は最後に評価したコードブックの残差エネルギーから pred gain を報告する癖も含めて一致
 - **2026-09-15 完了（pitch）：** `silk_find_pitch_lags_FLP` + `silk_pitch_analysis_core_FLP` を float32 忠実移植（`pitch_core_flp32.go`）。`TestSILKQ2PitchOracle`（opusref, 10 fixture）で autocorr/Schur/LPC/残差/閾値/LTPCorr/lag/contour/pitchL が完全一致。packet digest・scoreboard は不変
+- **2026-09-15 完了（quant offset）：** unvoiced の quantOffsetType 判定を `res_pitch` の 2 ms セグメント energy variation（silk_float）で行うよう libopus に合わせた
 - **未検証・残作業：**
   - encoder に `la_pitch`（2 ms）先読みが無く、LPC 窓が frame 境界で終わる（framing/delay スライスで解消）
   - (2026-09-15 解消) VAD は `silk_VAD_GetSA_Q8_c` の固定小数点移植（`TestSILKVADOracle` で 5×40 frame 全一致）。first frame after reset は libopus どおり pitch 解析を行わず unvoiced。副作用で 8k speech-harmonic loudness が -1.62 dB（gate ±1.5 を 0.12 dB 超過）に戻り、unvoiced first frame のビット消費（rate control 未忠実）が原因

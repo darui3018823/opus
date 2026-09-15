@@ -477,3 +477,20 @@ test passes.
 - Verified `TestSILKVADOracle`, the Q1/Q2 oracles, `go vet ./...`,
   `go test -count=1 ./...`, `go test -count=1 -tags opusref ./...` (only the
   8 kHz loudness gate fails), and `go test -race -count=1 ./...`.
+
+### 2026-09-15: quantizer-offset sparseness on the pitch residual
+
+- Reference: `silk/float/noise_shape_analysis_FLP.c` sparseness processing.
+- The unvoiced quantizer-offset decision now measures the 2 ms segment energy
+  variation of `res_pitch` in silk_float (`(float)nSamples + (float)energy`,
+  `silk_log2`, float accumulation) instead of a Go-specific LPC/LTP excitation.
+  Scoreboard moved marginally (8k speech-harmonic loudness -1.62 → -1.52 dB,
+  12k steady-voiced -0.15 → +0.86); the 8 kHz loudness gate still fails by
+  0.02 dB. Packet digests regenerated.
+- Recorded the encoder input pipeline (look-ahead, delay compensation,
+  high-pass conditioning, VAD flag semantics) as a specification in
+  `.claude/specs/encoder-input-pipeline-libopus.md`; it is the next slice and
+  a prerequisite for Q3 exactness and Phase 4.
+- Verified `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (only the 8 kHz loudness gate fails),
+  and `go test -race -count=1 ./...`.

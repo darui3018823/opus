@@ -64,8 +64,8 @@ func TestCGOEncodeRefSILKFEC(t *testing.T) {
 		}
 		pktsFEC[p] = a
 		pktsNo[p] = b
-		bytesFEC += len(a)
-		bytesNo += len(b)
+		bytesFEC += silkRefUnpaddedLen(t, a)
+		bytesNo += silkRefUnpaddedLen(t, b)
 
 		// Both must remain SILK-only WB 20 ms mono packets (config 9).
 		for _, pk := range [][]byte{a, b} {
@@ -73,14 +73,23 @@ func TestCGOEncodeRefSILKFEC(t *testing.T) {
 				t.Fatalf("packet %d: TOC config=%d, want SILK-only WB 20ms (9)", p, config)
 			}
 		}
+		// The no-FEC stream must never signal LBRR; the FEC stream must signal
+		// it once the encoder has a previous frame to protect.
+		if has, err := opus.PacketHasLBRR(b); err != nil || has {
+			t.Fatalf("packet %d: no-FEC packet LBRR=%v err=%v", p, has, err)
+		}
+		if has, err := opus.PacketHasLBRR(a); err != nil || (p > 0 && !has) {
+			t.Fatalf("packet %d: FEC packet LBRR=%v err=%v, want LBRR present", p, has, err)
+		}
 	}
 
-	// The redundancy must cost real bytes: the FEC stream is larger than the
-	// identical no-FEC stream (the LBRR frames are genuinely present).
+	// The redundancy must cost real bytes: the unpadded FEC stream is larger
+	// than the identical unpadded no-FEC stream (the LBRR frames are genuinely
+	// present, not hidden by CBR padding).
 	if bytesFEC <= bytesNo {
 		t.Fatalf("FEC stream not larger than no-FEC stream: fec=%d no=%d (LBRR absent?)", bytesFEC, bytesNo)
 	}
-	t.Logf("stream bytes: fec=%d no-fec=%d (+%d for LBRR)", bytesFEC, bytesNo, bytesFEC-bytesNo)
+	t.Logf("unpadded stream bytes: fec=%d no-fec=%d (+%d for LBRR)", bytesFEC, bytesNo, bytesFEC-bytesNo)
 
 	// 1) libopus must normal-decode the entire FEC stream without desync.
 	refDec, err := cgoref.NewDecoder(rate, channels)
@@ -203,7 +212,7 @@ func TestCGOEncodeRefSILKFECMultiFrame(t *testing.T) {
 
 			pktsFEC := make([][]byte, nPackets)
 			pktsNo := make([][]byte, nPackets)
-			var bytesFEC, bytesNo int
+			var bytesFEC, bytesNo, lbrrPackets int
 			for p := 0; p < nPackets; p++ {
 				in := silkRefSpeechFrame(rate, p*frameSize, frameSize, channels)
 				a, err := encFEC.EncodeFloat(in, frameSize)
@@ -219,11 +228,24 @@ func TestCGOEncodeRefSILKFECMultiFrame(t *testing.T) {
 				}
 				pktsFEC[p] = a
 				pktsNo[p] = b
-				bytesFEC += len(a)
-				bytesNo += len(b)
+				bytesFEC += silkRefUnpaddedLen(t, a)
+				bytesNo += silkRefUnpaddedLen(t, b)
+				has, err := opus.PacketHasLBRR(a)
+				if err != nil {
+					t.Fatalf("packet %d: PacketHasLBRR: %v", p, err)
+				}
+				if has {
+					lbrrPackets++
+				}
+			}
+			// Multi-frame LBRR is gated per frame by speech activity, so not
+			// every packet must carry it; the stream as a whole must.
+			t.Logf("%dms: %d/%d FEC packets signal LBRR; unpadded bytes fec=%d no=%d", packetMs, lbrrPackets, nPackets, bytesFEC, bytesNo)
+			if lbrrPackets < nPackets/2 {
+				t.Fatalf("only %d/%d FEC packets carry LBRR", lbrrPackets, nPackets)
 			}
 			if bytesFEC <= bytesNo {
-				t.Fatalf("FEC stream not larger: fec=%d no=%d", bytesFEC, bytesNo)
+				t.Fatalf("unpadded FEC stream not larger: fec=%d no=%d", bytesFEC, bytesNo)
 			}
 
 			// Grammar: libopus must normal-decode every packet (the per-frame LBRR
@@ -423,6 +445,19 @@ func TestCGODecodeFECMatchesLibopus(t *testing.T) {
 	}
 }
 
+// silkRefUnpaddedLen returns the packet length after removing RFC 6716
+// padding. The Go encoder defaults to CBR and, like libopus, expresses CBR
+// fill as code-3 packet padding rather than SILK frame body bytes, so raw
+// packet sizes no longer reveal whether LBRR frames are present.
+func silkRefUnpaddedLen(t *testing.T, packet []byte) int {
+	t.Helper()
+	unpadded, err := opus.PacketUnpad(packet)
+	if err != nil {
+		t.Fatalf("PacketUnpad: %v", err)
+	}
+	return len(unpadded)
+}
+
 func silkMonoLBRRPresent(packet []byte, nFrames int) ([]bool, error) {
 	if nFrames < 1 {
 		nFrames = 1
@@ -431,6 +466,13 @@ func silkMonoLBRRPresent(packet []byte, nFrames int) ([]bool, error) {
 	if len(packet) < 2 {
 		return present, nil
 	}
+	// Strip CBR padding so a code-3 padded single-frame packet is inspected
+	// through the same SILK header grammar as its compact form.
+	unpadded, err := opus.PacketUnpad(packet)
+	if err != nil {
+		return nil, err
+	}
+	packet = unpadded
 
 	countCode := int(packet[0] & 0x03)
 	if countCode != 0 {

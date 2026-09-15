@@ -249,8 +249,26 @@ func (e *Encoder) estimateQuantOffsetType(signal []float64, lpcQ12 []int16, sign
 	if nSamples <= 0 {
 		return 1
 	}
-	pitchRes := e.analysisExcitation(signal, lpcQ12, signalType, pitchLag, pitchGain)
 	nSegs := silkSubframeLengthMS * e.nSubframes / 2
+	// silk_noise_shape_analysis_FLP measures the sparseness of the
+	// pitch-analysis residual (res_pitch) over 2 ms segments in silk_float.
+	if len(e.pitchResidual) >= len(e.pitchHist)+nSegs*nSamples {
+		pitchRes := e.pitchResidual[len(e.pitchHist):]
+		energyVariation, logPrev := 0.0, 0.0
+		for k := 0; k < nSegs; k++ {
+			nrg := f32(float64(nSamples) + f32(silkEnergyFLP32(pitchRes[k*nSamples:(k+1)*nSamples])))
+			logEnergy := silkLog2FLP(nrg)
+			if k > 0 {
+				energyVariation = f32(energyVariation + f32(math.Abs(f32(logEnergy-logPrev))))
+			}
+			logPrev = logEnergy
+		}
+		if energyVariation > f32(f32(energyVariationQntOffset)*float64(nSegs-1)) {
+			return 0
+		}
+		return 1
+	}
+	pitchRes := e.analysisExcitation(signal, lpcQ12, signalType, pitchLag, pitchGain)
 	energyVariation, logPrev := 0.0, 0.0
 	for k := 0; k < nSegs; k++ {
 		start := k * nSamples

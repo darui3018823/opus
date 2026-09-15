@@ -44,8 +44,10 @@ func TestBuildLPCInPreVoicedLTPResidualAndInvGain(t *testing.T) {
 }
 
 func TestLPCMinInvGainFormula(t *testing.T) {
+	// silk_float arithmetic like find_pred_coefs_FLP: the result is the
+	// float32 rounding of pow(2, g/3) / 1e4 / (0.25 + 0.75 * cq).
 	got := lpcMinInvGain(6.0, 0.5, false)
-	want := math.Pow(2.0, 6.0/3.0) / maxPredictionPowerGain / (0.25 + 0.75*0.5)
+	want := float64(float32(float32(float32(math.Pow(2.0, 6.0/3.0))/float32(maxPredictionPowerGain)) / float32(0.25+0.75*0.5)))
 	if math.Abs(got-want) > 1e-15 {
 		t.Fatalf("minInvGain=%g, want %g", got, want)
 	}

@@ -120,6 +120,14 @@ type Encoder struct {
 	pendingShape32    silkNoiseShapeOutputs
 	haveShape32       bool
 	exactGainSymbols  []int
+	// find_LPC trace: the unquantised NLSF target and minInvGain of the last
+	// analyzeNLSF call.
+	traceNLSFTargetQ15 []int16
+	traceMinInvGain    float64
+	traceLPCInPre      []float32
+	traceInvGains      []float32
+	// frameCounter is silk_encoder_state.frameCounter (NSQ seed source).
+	frameCounter int
 	// libopus bit reservoir (target_rate.go).
 	nBitsExceeded        int
 	nBitsUsedLBRR        int
@@ -612,9 +620,12 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	pitchGain := 0.0
 	e.curPitchLagIndex = 0
 	e.curPitchContourIndex = 0
+	// silk_find_pitch_lags_FLP whitens every frame (the residual feeds the
+	// quantizer-offset measure and the LTP analysis); the pitch core only
+	// runs for frames with voice activity.
+	voiced, lagIndex, contourIndex, ltpCorr := e.silkFindPitchLags(signal, e.speechActivity, vadActive)
 	if vadActive {
 		signalType = SignalTypeUnvoiced
-		voiced, lagIndex, contourIndex, ltpCorr := e.silkFindPitchLags(signal, e.speechActivity)
 		if voiced {
 			signalType = SignalTypeVoiced
 			e.curPitchLagIndex = lagIndex
@@ -624,10 +635,12 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	}
 	quantOffset := 0
 
+	// libopus codes TYPE_NO_VOICE_ACTIVITY frames through the same analysis
+	// and quantizer as unvoiced frames; only the coded type differs.
 	cb := getNLSFCB(e.lpcOrder)
 	var domainGainTargets []int
 	var domainConfig []lpcInPreConfig
-	if signalType != SignalTypeInactive {
+	{
 		bootstrap := e.analyzeNLSF(signal, cb, signalType)
 		quantOffset = e.estimateQuantOffsetType(signal, bootstrap.lpcQ12, signalType, pitchLag, pitchGain)
 		pitchLags := make([]int, e.nSubframes)
@@ -719,12 +732,21 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	// Run the delayed-decision NSQ before encoding the seed: the trellis selects
 	// the winning state and its initial seed (e.nsqSeed), which libopus writes to
 	// the bitstream so the decoder reproduces the same sign sequence.
-	e.nsqSeed = 0
+	// silk_encode_frame_FLP: indices.Seed = frameCounter++ & 3 seeds the
+	// delayed-decision states; the winner's initial seed is what gets coded.
+	frameSeed := int32(e.frameCounter & 3)
+	e.frameCounter++
+	e.nsqSeed = frameSeed
 	e.traceNLSFQ15 = nlsf.nlsfQ15
 	pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, nlsf.lpcQ12Interp, gainIndices,
-		signalType, quantOffset, 0, pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale)
+		signalType, quantOffset, frameSeed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale)
 	e.pendingTrace.Seed = e.nsqSeed
 	e.pendingTrace.Shape32 = e.pendingShape32
+	e.pendingTrace.NLSFTargetQ15 = append([]int16(nil), e.traceNLSFTargetQ15...)
+	e.pendingTrace.InterpFactor = nlsf.interpFactor
+	e.pendingTrace.MinInvGain = e.traceMinInvGain
+	e.pendingTrace.LPCInPre = e.traceLPCInPre
+	e.pendingTrace.InvGains = e.traceInvGains
 	e.lastTrace = e.pendingTrace
 	enc.EncodeIcdf(int(e.nsqSeed), silkUniform4ICDF[:], 8)
 	e.encodePulses(enc, pulses, signalType, quantOffset)
@@ -1979,7 +2001,7 @@ func (e *Encoder) defaultNLSFIndex(signalType int, cb *nlsfCBParams) int {
 }
 
 func (e *Encoder) analyzeNLSF(signal []float64, cb *nlsfCBParams, signalType int, preConfig ...lpcInPreConfig) nlsfAnalysis {
-	if signalType == SignalTypeInactive {
+	if signalType == SignalTypeInactive && len(preConfig) == 0 {
 		cb1Idx := e.defaultNLSFIndex(signalType, cb)
 		rawIdx := make([]int, cb.order)
 		nlsfQ15 := reconstructNLSFQ15(cb, cb1Idx, rawIdx)
@@ -2017,7 +2039,13 @@ func (e *Encoder) analyzeNLSF(signal []float64, cb *nlsfCBParams, signalType int
 				}
 			}
 			if uniform && len(lpcInPre) >= sfLen*len(cfg.subframeLengths) {
-				x = lpcInPre
+				// silk_find_LPC_FLP runs on LPC_in_pre in int16 scale; Burg's
+				// absolute 1e-9f regulariser makes the analysis scale-dependent,
+				// so present the same values libopus sees.
+				x = make([]float64, len(lpcInPre))
+				for i, v := range lpcInPre {
+					x[i] = v * 32768
+				}
 				subfrLength = sfLen
 				nbSubfr = len(cfg.subframeLengths)
 				minInvGain = lpcMinInvGain(cfg.ltpPredCodGain, cfg.codingQuality, e.firstFrameAfterReset)
@@ -2027,6 +2055,8 @@ func (e *Encoder) analyzeNLSF(signal []float64, cb *nlsfCBParams, signalType int
 	}
 
 	targetNLSFQ15, interpFactor := silkFindLPCFLP(x, minInvGain, subfrLength, nbSubfr, cb.order, useInterpolated, e.firstFrameAfterReset, e.prevNLSFQ15)
+	e.traceNLSFTargetQ15 = append(e.traceNLSFTargetQ15[:0], targetNLSFQ15...)
+	e.traceMinInvGain = minInvGain
 	cb1Idx, rawIdx, nlsfQ15, predCoefQ12 := e.silkProcessNLSFs(cb, targetNLSFQ15, e.prevNLSFQ15, interpFactor, signalType)
 
 	var lpcQ12Interp []int16
@@ -2551,7 +2581,8 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 	switch signalType {
 	case SignalTypeVoiced:
 		useTrellis = e.voicedUsesTrellis()
-	case SignalTypeUnvoiced:
+	case SignalTypeUnvoiced, SignalTypeInactive:
+		// libopus quantizes TYPE_NO_VOICE_ACTIVITY frames like unvoiced ones.
 		useTrellis = e.unvoicedUsesTrellis()
 	}
 	if !useTrellis {
@@ -3211,6 +3242,7 @@ func (e *Encoder) Reset() {
 	e.nBitsExceeded = 0
 	e.nBitsUsedLBRR = 0
 	e.targetRateBps = 0
+	e.frameCounter = 0
 	e.prevLagForPitch = 0
 	e.ltpCorrState = 0
 	e.pitchResidual = nil

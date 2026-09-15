@@ -23,6 +23,14 @@ type FrameTrace struct {
 	// Shape32 is the libopus-faithful noise-shape analysis of the frame
 	// (float32 values), for comparison with the oracle's *_FLP dumps.
 	Shape32 silkNoiseShapeOutputs
+	// find_LPC outputs: unquantised NLSF target, interpolation index, minInvGain.
+	NLSFTargetQ15 []int16
+	InterpFactor  int
+	MinInvGain    float64
+	// LPCInPre is find_pred_coefs' LPC_in_pre (int16 scale, float32 values)
+	// and InvGains the 1/Gains it was scaled by.
+	LPCInPre []float32
+	InvGains []float32
 }
 
 // Shape32Values exposes the float32 noise-shape outputs for tests: AR rows,

@@ -22,11 +22,16 @@ func lpcMinInvGain(ltpPredCodGain, codingQuality float64, firstFrameAfterReset b
 	if firstFrameAfterReset {
 		return 1.0 / maxPredictionPowerGainAfterReset
 	}
-	denom := 0.25 + 0.75*codingQuality
+	// find_pred_coefs_FLP, in silk_float:
+	//   minInvGain = (silk_float)pow(2, LTPredCodGain / 3) / MAX_PREDICTION_POWER_GAIN;
+	//   minInvGain /= 0.25f + 0.75f * coding_quality;
+	g := f32(math.Pow(2.0, f32(ltpPredCodGain/3)))
+	g = f32(g / c32(maxPredictionPowerGain))
+	denom := f32(0.25 + f32(0.75*codingQuality))
 	if denom <= 0 {
 		denom = 0.25
 	}
-	return math.Pow(2.0, ltpPredCodGain/3.0) / maxPredictionPowerGain / denom
+	return f32(g / denom)
 }
 
 // buildLPCInPre builds the input domain used by libopus find_LPC_FLP. The input

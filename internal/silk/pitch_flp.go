@@ -344,7 +344,7 @@ func (e *Encoder) pitchEstParams() (peComplexity, order int, searchThres1 float6
 // encodable lag index and pitch contour index, and the normalized LTP
 // correlation. The per-subframe lags are reconstructed by the caller from the
 // encoded indices so the encoder and decoder stay in sync.
-func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64) (voiced bool, lagIndex, contourIndex int, ltpCorr float64) {
+func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64, vadActive bool) (voiced bool, lagIndex, contourIndex int, ltpCorr float64) {
 	fsKHz := e.sampleRate / 1000
 	nbSubfr := e.nSubframes
 
@@ -382,7 +382,7 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64) (v
 	// silk_find_pitch_lags_FLP whitens every active frame but runs the pitch
 	// estimator only when this is not the first frame after a reset; that
 	// first frame is always coded unvoiced.
-	runCore := !e.firstFrameAfterReset
+	runCore := !e.firstFrameAfterReset && vadActive
 	r := silkFindPitchLagsFLP32(buf, laPitch, winLen, order, fsKHz, nbSubfr, peComplexity,
 		e.speechActivityQ8, e.prevSignalType, e.inputTiltQ15, e.pitchEstimationThresholdQ16(),
 		e.prevLagForPitch, e.ltpCorrState, runCore)

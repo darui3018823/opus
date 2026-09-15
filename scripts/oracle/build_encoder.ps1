@@ -121,6 +121,16 @@ Set-Content "$bld\find_LPC_FLP_instr.c" $findLPC
 
 $findPred = Get-Content "$silk\float\find_pred_coefs_FLP.c" -Raw
 $findPred = $findPred.Replace("`r`n", "`n")
+$__old = "    /* LPC_in_pre contains the LTP-filtered input for voiced, and the unfiltered input for unvoiced */`n"
+$__new = @"
+    /* LPC_in_pre contains the LTP-filtered input for voiced, and the unfiltered input for unvoiced */
+    if( oracle_trace_enabled ) {
+        oracle_silk_dump_float("ENC_LPC_IN_PRE", LPC_in_pre, psEnc->sCmn.nb_subfr * ( psEnc->sCmn.subfr_length + psEnc->sCmn.predictLPCOrder ));
+        oracle_silk_dump_float("ENC_INV_GAINS", invGains, psEnc->sCmn.nb_subfr);
+    }
+
+"@
+$findPred = Replace-Checked $findPred $__old ($__new.Replace("`r`n", "`n")) "find_pred_coefs LPC_in_pre"
 $findPred = Replace-Checked $findPred '#include "main_FLP.h"' "#include `"main_FLP.h`"`r`n#include `"silk_trace.h`"" "stage anchor 6"
 $__old = "    silk_process_NLSFs_FLP( &psEnc->sCmn, psEncCtrl->PredCoef, NLSF_Q15, psEnc->sCmn.prev_NLSFq_Q15 );"
 $__new = @"

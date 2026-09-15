@@ -22,23 +22,28 @@ import (
 // encOracleStages holds the last analysis-stage dump of a frame (libopus
 // runs the NSQ several times inside its gain loop; the final call wins).
 type encOracleStages struct {
-	haveNSQ      bool
-	signalType   int
-	quantOffset  int
-	seed         int
-	lambdaQ10    int
-	ltpScaleQ14  int
-	nlsfQuantQ15 []int
-	predCoefQ12  [][]int // 2 rows
-	ltpCoefQ14   []int
-	arQ13        [][]int // nb_subfr rows
-	gainsQ16     []int
-	gainsIdx     []int
-	pitchL       []int
-	tiltQ14      []int
-	harmQ14      []int
-	lfQ14        []int
-	pulses       []int
+	haveNSQ       bool
+	signalType    int
+	quantOffset   int
+	seed          int
+	lambdaQ10     int
+	ltpScaleQ14   int
+	nlsfQuantQ15  []int
+	nlsfTargetQ15 []int
+	lpcInPre      []float32
+	invGains      []float32
+	nlsfInterp    int
+	findLPCMinInv float32
+	predCoefQ12   [][]int // 2 rows
+	ltpCoefQ14    []int
+	arQ13         [][]int // nb_subfr rows
+	gainsQ16      []int
+	gainsIdx      []int
+	pitchL        []int
+	tiltQ14       []int
+	harmQ14       []int
+	lfQ14         []int
+	pulses        []int
 	// noise_shape_analysis_FLP outputs (float32)
 	haveShape     bool
 	shapeInputQ   float32
@@ -86,6 +91,8 @@ var (
 	encOracleValuesRe = regexp.MustCompile(`v\[[\d,]+\]=(\S+)`)
 	encOracleNSQInRe  = regexp.MustCompile(`^\[SILK_ENC_NSQ_INPUT\] signalType=(\d+) quantOffset=(\d+) seed=(\d+) Lambda_Q10=(-?\d+) LTP_scale_Q14=(-?\d+)`)
 	encOracleRowsRe   = regexp.MustCompile(`rows=(\d+) cols=(\d+)`)
+	encOracleInterpRe = regexp.MustCompile(`interp=(\d+)`)
+	encOracleMinInvRe = regexp.MustCompile(`minInvGain=(\S+)`)
 	encOracleShapeRe  = regexp.MustCompile(`inputQuality=(\S+) codingQuality=(\S+) SNR_dB_Q7=(-?\d+) warping_Q16=(-?\d+) predGain=(\S+) LTPCorr=(\S+)`)
 )
 
@@ -248,6 +255,21 @@ func runEncOracle(t *testing.T, rate int, fixture string, frames, bitrate int, b
 			out[cur].stages.shapeTilt = parseFloat32Values(line)
 		case strings.HasPrefix(line, "[SILK_ENC_SHAPE_HARM_FLP]"):
 			out[cur].stages.shapeHarm = parseFloat32Values(line)
+		case strings.HasPrefix(line, "[SILK_ENC_LPC_IN_PRE]"):
+			out[cur].stages.lpcInPre = parseFloat32Values(line)
+		case strings.HasPrefix(line, "[SILK_ENC_INV_GAINS]"):
+			out[cur].stages.invGains = parseFloat32Values(line)
+		case strings.HasPrefix(line, "[SILK_ENC_NLSF_TARGET_Q15]"):
+			out[cur].stages.nlsfTargetQ15 = parseIntValues(line)
+		case strings.HasPrefix(line, "[SILK_ENC_NLSF_TARGET]"):
+			if m := encOracleInterpRe.FindStringSubmatch(line); m != nil {
+				out[cur].stages.nlsfInterp, _ = strconv.Atoi(m[1])
+			}
+		case strings.HasPrefix(line, "[SILK_ENC_FIND_LPC]"):
+			if m := encOracleMinInvRe.FindStringSubmatch(line); m != nil {
+				f, _ := strconv.ParseFloat(m[1], 64)
+				out[cur].stages.findLPCMinInv = float32(f)
+			}
 		case strings.HasPrefix(line, "[SILK_ENC_NLSF_QUANT_Q15]"):
 			out[cur].stages.nlsfQuantQ15 = parseIntValues(line)
 		case strings.HasPrefix(line, "[SILK_ENC_NSQ_PREDCOEF_Q12]"):
@@ -355,6 +377,26 @@ func stageDiffs(g silk.FrameTrace, c encOracleStages) []string {
 	var diffs []string
 	if g.SignalType != c.signalType || g.QuantOffset != c.quantOffset {
 		diffs = append(diffs, fmt.Sprintf("signalType/quantOffset (Go %d/%d, C %d/%d)", g.SignalType, g.QuantOffset, c.signalType, c.quantOffset))
+	}
+	if len(c.invGains) > 0 {
+		if i, ok := firstFloat32Mismatch(g.InvGains, c.invGains); !ok {
+			diffs = append(diffs, fmt.Sprintf("invGains[%d] (Go %v, C %v)", i, g.InvGains, c.invGains))
+		}
+	}
+	if len(c.lpcInPre) > 0 {
+		if i, ok := firstFloat32Mismatch(g.LPCInPre, c.lpcInPre); !ok {
+			gv, cv := float32(0), float32(0)
+			if i >= 0 && i < len(g.LPCInPre) {
+				gv = g.LPCInPre[i]
+			}
+			if i >= 0 && i < len(c.lpcInPre) {
+				cv = c.lpcInPre[i]
+			}
+			diffs = append(diffs, fmt.Sprintf("LPC_in_pre[%d] (Go %.9g, C %.9g; len Go %d C %d)", i, gv, cv, len(g.LPCInPre), len(c.lpcInPre)))
+		}
+	}
+	if !eqI16(g.NLSFTargetQ15, c.nlsfTargetQ15) || g.InterpFactor != c.nlsfInterp || math.Float32bits(float32(g.MinInvGain)) != math.Float32bits(c.findLPCMinInv) {
+		diffs = append(diffs, fmt.Sprintf("find_LPC (target Go %v C %v; interp Go %d C %d; minInvGain Go %.9g C %.9g)", g.NLSFTargetQ15, c.nlsfTargetQ15, g.InterpFactor, c.nlsfInterp, g.MinInvGain, c.findLPCMinInv))
 	}
 	if !eqI16(g.NLSFQ15, c.nlsfQuantQ15) {
 		diffs = append(diffs, "NLSF_Q15")

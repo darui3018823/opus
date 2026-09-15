@@ -1110,8 +1110,13 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm []float64, nFrames int, celtToSilk bo
 			}
 		}
 		streams = append(streams, stream)
+		// opus_encode_native reports the final range of the last constituent
+		// frame; a one-byte frame tells the decoder to run its PLC and reports
+		// zero, and opus_decode mirrors both rules.
 		if encodeSILK {
-			rangeFinal ^= e.silkEncoder.LastFinalRange()
+			rangeFinal = e.silkEncoder.LastFinalRange()
+		} else {
+			rangeFinal = 0
 		}
 		pos += inputSamples
 	}

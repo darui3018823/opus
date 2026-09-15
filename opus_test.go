@@ -935,8 +935,9 @@ func TestDecoderPLCAfterFEC(t *testing.T) {
 	}
 }
 
-// After digital-silence SILK packets, concealment must continue the silence
-// instead of replaying stale pre-silence speech from the synthesis history.
+// One-byte SILK payloads are concealed like lost frames (libopus semantics),
+// so a following explicit loss must continue that fade rather than restart
+// from the pre-silence synthesis history or drop to digital silence.
 func TestDecoderPLCAfterSILKSilence(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -979,12 +980,26 @@ func TestDecoderPLCAfterSILKSilence(t *testing.T) {
 					t.Fatalf("prime packet %d: %v", p, err)
 				}
 			}
-			// RFC 6716 digital silence: same TOC, single zero payload byte.
+			speechEnergy := signalEnergyI16(out)
+
+			// A one-byte SILK payload tells the decoder to run its PLC
+			// (libopus opus_decode_frame treats len <= 1 as a lost frame), so
+			// the concealment fades the pre-silence state instead of jumping
+			// to digital silence, and the following explicit loss keeps fading.
 			silence := []byte{packets[0][0] &^ 0x03, 0x00}
+			prevEnergy := speechEnergy
 			for i := 0; i < 2; i++ {
 				if _, err := dec.Decode(silence, out); err != nil {
 					t.Fatalf("silence packet %d: %v", i, err)
 				}
+				if dec.FinalRange() != 0 {
+					t.Fatalf("silence packet %d: final range %08x, want 0", i, dec.FinalRange())
+				}
+				energy := signalEnergyI16(out)
+				if energy > prevEnergy {
+					t.Fatalf("silence packet %d: concealed energy %g exceeds previous %g", i, energy, prevEnergy)
+				}
+				prevEnergy = energy
 			}
 
 			plc := make([]int16, frameSize*tc.channels)
@@ -992,8 +1007,8 @@ func TestDecoderPLCAfterSILKSilence(t *testing.T) {
 			if err != nil || n != frameSize {
 				t.Fatalf("DecodePLC = (%d, %v), want (%d, nil)", n, err, frameSize)
 			}
-			if energy := signalEnergyI16(plc); energy != 0 {
-				t.Fatalf("PLC after digital silence has energy %g, want continued silence", energy)
+			if energy := signalEnergyI16(plc); energy > prevEnergy || energy >= speechEnergy {
+				t.Fatalf("PLC after one-byte frames has energy %g (previous %g, speech %g), want continued fade", energy, prevEnergy, speechEnergy)
 			}
 		})
 	}

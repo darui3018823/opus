@@ -188,6 +188,81 @@ func TestCGOSILKPLCExact(t *testing.T) {
 	}
 }
 
+// TestCGOSILKOneBytePayloadExact feeds one-byte SILK payloads (the encoder's
+// "run the PLC" frames) followed by explicit loss. libopus treats a payload
+// of at most one byte as a lost frame, so concealment must continue the
+// pre-silence state exactly rather than switching to digital silence.
+func TestCGOSILKOneBytePayloadExact(t *testing.T) {
+	t.Logf("libopus version: %s", cgoref.Version())
+	const (
+		rate     = 16000
+		nPackets = 6
+	)
+	for _, channels := range []int{1, 2} {
+		channels := channels
+		t.Run(itoa(channels)+"ch", func(t *testing.T) {
+			frameSize := rate / 50
+			packets := silkPLCExactEncode(t, rate, channels, 20, nPackets, false)
+			silence := []byte{packets[0][0] &^ 0x03, 0x00}
+
+			goDec, err := opus.NewDecoder(rate, channels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			refDec, err := cgoref.NewDecoder(rate, channels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer refDec.Close()
+
+			sequence := append(append([][]byte{}, packets...), silence, silence, nil, silence)
+			for p, pkt := range sequence {
+				goPCM := make([]int16, frameSize*channels)
+				var n int
+				var refPCM []int16
+				label := "packet " + itoa(p)
+				switch {
+				case pkt == nil:
+					label += " (lost)"
+					n, err = goDec.DecodePLC(goPCM, frameSize)
+					if err != nil {
+						t.Fatalf("%s: Go DecodePLC: %v", label, err)
+					}
+					refPCM, err = refDec.Decode(nil, frameSize)
+				default:
+					if len(pkt) == 2 {
+						label += " (one-byte payload)"
+					}
+					n, err = goDec.Decode(pkt, goPCM)
+					if err != nil {
+						t.Fatalf("%s: Go Decode: %v", label, err)
+					}
+					refPCM, err = refDec.Decode(pkt, frameSize)
+				}
+				if err != nil {
+					t.Fatalf("%s: libopus decode: %v", label, err)
+				}
+				if n != frameSize {
+					t.Fatalf("%s: Go samples=%d, want %d", label, n, frameSize)
+				}
+				if len(pkt) == 2 {
+					if goDec.FinalRange() != 0 {
+						t.Fatalf("%s: Go final range %08x, want 0 for a one-byte payload", label, goDec.FinalRange())
+					}
+					refRange, err := refDec.FinalRange()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if refRange != 0 {
+						t.Fatalf("%s: libopus final range %08x, want 0", label, refRange)
+					}
+				}
+				silkPLCExactCompare(t, label, goPCM[:n*channels], refPCM)
+			}
+		})
+	}
+}
+
 // TestCGOSILKFECGapExact decodes in-band FEC for multi-frame packets whose
 // LBRR mask leaves some subframes to the PLC, and requires the reconstruction
 // and the following normal frames to be sample-exact against libopus.

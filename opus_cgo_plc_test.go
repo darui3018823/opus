@@ -153,7 +153,13 @@ func TestCGORefSILKAndHybridPLC(t *testing.T) {
 				if plcSNR < 10 {
 					t.Fatalf("Go/libopus PLC diverged: alignedSNR=%.2f dB", plcSNR)
 				}
-				if goTargetSNR < 10 {
+				// The SILK PLC is a libopus port, so its concealment quality is
+				// libopus' own (9.99 dB on the stereo fixture): require parity
+				// with the reference plus an absolute sanity floor.
+				if goTargetSNR < refTargetSNR-0.01 {
+					t.Fatalf("PLC reconstruction trails libopus: Go=%.2f dB libopus=%.2f dB", goTargetSNR, refTargetSNR)
+				}
+				if goTargetSNR < 6 {
 					t.Fatalf("PLC reconstruction quality too low: target alignedSNR=%.2f dB", goTargetSNR)
 				}
 			} else if goTargetSNR < 0 || goTargetSNR < refTargetSNR-3 {

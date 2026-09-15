@@ -57,6 +57,23 @@ different audio slice per frame and could never produce libopus' bytes.
   resampler before `inputBuf` (`silk/enc_API.c`), and the first frame after a
   reset is unvoiced.
 
+### VAD flags and packet header (`silk/enc_API.c`, `silk/float/encode_frame_FLP.c`)
+
+- At `nFramesEncoded == 0` libopus reserves `(nFramesPerPacket + 1) *
+  nChannelsInternal` bits with a placeholder `ec_enc_icdf` symbol, encodes the
+  LBRR data, then encodes each frame after running `silk_encode_do_VAD_FLP`
+  on that frame (fixed-point `silk_VAD_GetSA_Q8`; `speech_activity_Q8 <
+  SILK_FIX_CONST(SPEECH_ACTIVITY_DTX_THRES, 8)` marks the frame inactive and
+  drives `noSpeechCounter`/`inDTX`; an Opus-layer `VAD_NO_ACTIVITY` decision
+  lowers the activity just under the threshold). When the last frame is done,
+  `ec_enc_patch_initial_bits` writes the VAD and LBRR flags into the reserved
+  bits.
+- The Go encoder decides the per-frame VAD flags up front with a separate
+  detector (`e.vad.Detect`) and runs the fixed-point VAD again inside
+  `encodeRangeFrame`. For exactness the flags must come from the fixed-point
+  VAD's per-frame activity, computed in frame order once, and the inactive
+  path must follow `silk_encode_do_VAD_FLP`.
+
 ### Prefill on CELT→SILK switches
 
 `silk_Encode(..., prefill=1)` on the delay buffer primes the SILK state when
@@ -65,6 +82,10 @@ that must be reconciled when this pipeline lands.
 
 ## Go implementation plan
 
+0. **VAD flags from the fixed-point VAD.** Pre-pass the packet's frames
+   through `silkVADGetSAQ8` in order, store per-frame activity/tilt/quality,
+   derive the VAD flags and `inDTX` like `silk_encode_do_VAD_FLP`, and reuse
+   the stored values inside the frame encode instead of re-running the VAD.
 1. **SILK look-ahead buffer.** Give `internal/silk.Encoder` an `xBuf` with
    `ltp_mem + frame + la_shape` samples in silk_float scale; `EncodeMulti`
    appends the new frame at `x_frame + la_shape` and codes

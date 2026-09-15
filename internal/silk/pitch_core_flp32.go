@@ -132,7 +132,10 @@ func xcorrKernelFLP(x, y []float64, sum *[4]float64, length int) {
 // silkApplySineWindowFLP32 ports silk_apply_sine_window_FLP with float32
 // recursion state.
 func silkApplySineWindowFLP32(out, in []float64, winType, length int) {
-	freq := f32(math.Pi / float64(length+1))
+	// freq = PI / (length + 1) with PI the silk_float 3.1415926536f: a
+	// float32 division (the double quotient rounds differently for some
+	// lengths, e.g. the 12 kHz shaping slope of 72).
+	freq := float64(float32(3.1415926536) / float32(length+1))
 	c := f32(2.0 - f32(freq*freq))
 	var s0, s1 float64
 	if winType < 2 {

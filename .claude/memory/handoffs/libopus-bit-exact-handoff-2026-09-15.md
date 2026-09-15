@@ -98,6 +98,17 @@ then the Q1 decision governs the merge into `dev/libopus-bit-exact`.
 
 ### Phase 1 — SILK encoder Q2: pitch/LTP exactness
 
+Status 2026-09-15: LTP correlation + gain quantization exact
+(`dev/silk-q2-ltp-oracle`, `f38a13a`). Remaining: pitch analysis exactness
+(`silk_find_pitch_lags_FLP` + `silk_pitch_analysis_core_FLP` in float32,
+`celt_pitch_xcorr` float kernel order, nearest-even `float2short`, `la_pitch`
+look-ahead) and feeding the LTP stage libopus' `res_pitch`.
+
+Blocking finding for Phase 4: the Go encoder has no SILK `LA_SHAPE_MS` (5 ms)
+look-ahead delay and no Opus-layer `delay_compensation` (Fs/250), so its frame
+boundaries do not contain the same audio as libopus'. A dedicated
+framing/delay slice is required before packet-level byte comparison.
+
 - Reference: `silk/float/find_pitch_lags_FLP.c`, `pitch_analysis_core_FLP.c`,
   `find_LTP_FLP.c`, `LTP_analysis_filter_FLP.c`, `quant_LTP_gains.c`.
 - Extend the Q1 opusref harness upstream: inject identical pre-pitch state,

@@ -972,6 +972,13 @@ go test -count=1 ./...
 go test -count=1 -tags opusref ./...
 ```
 
+Bit-exact convergence verification on 2026-09-15 (encoder): the SILK LTP
+correlation (`silk_find_LTP_FLP`) and LTP gain quantization
+(`silk_quant_LTP_gains`/`silk_VQ_WMat_EC`) are bit-exact against libopus 1.6.1
+on injected residuals (`go test -count=1 -tags opusref -run TestSILKQ2LTPOracle
+-v ./internal/silk/`). The encoder still derives its own residual without
+look-ahead, so this exactness does not yet extend to packets.
+
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against
 libopus 1.6.1 for 8/12/16 kHz mono and stereo, 10-60 ms frames, single and

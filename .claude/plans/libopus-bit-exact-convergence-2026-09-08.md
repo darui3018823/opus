@@ -343,3 +343,39 @@ test passes.
 - Verified the focused SILK oracles, `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (only the pre-existing
   speech-like-harmonic loudness gates fail), and `go test -race -count=1 ./...`.
+
+### 2026-09-15: SILK LTP correlation and gain quantization
+
+- Reference: checked-in libopus 1.6.1 `silk/float/find_LTP_FLP.c`,
+  `silk/float/corrMatrix_FLP.c`, `silk/float/wrappers_FLP.c::silk_quant_LTP_gains_FLP`,
+  `silk/quant_LTP_gains.c`, `silk/VQ_WMat_EC.c`, and `silk/lin2log.c`.
+- Added `internal/cgoref/silk_q2_opusref.go`, which calls the C
+  `silk_find_LTP_FLP` and `silk_quant_LTP_gains_FLP` on injected float32
+  residuals, lags, and cumulative-gain state, and
+  `TestSILKQ2LTPOracle` in `internal/silk`, which compares XX/xX by float32
+  bits and every index, gain, and `sum_log_gain_Q7` by exact integer.
+- Replaced the float64 approximation of the LTP VQ with exact ports: the
+  correlation matrix updates multiply and subtract in float before joining the
+  double accumulator, the normalisation floor and scaling are float32, the
+  correlations are converted to Q17 with nearest-even `float2int`, and the
+  codebook search runs the Q24/Q15/Q8 fixed-point arithmetic of
+  `silk_VQ_WMat_EC_c` including the gain-penalty and `lin2log` bit-cost. The
+  reported prediction gain uses the residual energy of the last codebook
+  evaluated, as libopus does. `ltpSumLogGainQ7` is now an `int32`.
+- All eight fixtures (8/12/16 kHz, 2 and 4 subframes, strong/weak/noisy
+  voicing, long lags, gain-capped state) are exact. The production encoder's
+  packets changed, so the perf-regression digests were regenerated; the
+  libopus AB scoreboard moved in both directions (8 kHz steady-voiced and
+  16 kHz steady-voiced lost margin, 8 kHz speech-harmonic and 16 kHz onset
+  gained) and the matched-loudness gate now fails only at 12 kHz instead of
+  8/12/16 kHz. The Go encoder still feeds this stage its own LPC residual
+  without look-ahead rather than libopus' `res_pitch`, which is the next
+  exactness gate.
+- Finding recorded for Phase 4: libopus' SILK encoder codes each frame with a
+  5 ms `LA_SHAPE_MS` look-ahead delay and the Opus layer adds `Fs/250` delay
+  compensation, so the audio slice inside each libopus frame is offset from
+  the Go encoder's. Encoder byte-exactness therefore needs a framing/delay
+  restructuring slice before any full-packet comparison can be exact.
+- Verified the Q1 and Q2 oracles, `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (only the 12 kHz speech-like-harmonic
+  loudness gate fails), and `go test -race -count=1 ./...`.

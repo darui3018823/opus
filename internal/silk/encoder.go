@@ -363,8 +363,16 @@ func (e *Encoder) EncodeMulti(pcm []float64, nFrames int) ([]byte, error) {
 		return nil, err
 	}
 	e.lastFinalRange = enc.GetRng()
+	// opus_encode_native sizes a SILK-only payload as (ec_tell + 7) >> 3 before
+	// ec_enc_done; the carry byte ec_enc_done may emit past that is dropped
+	// (the range decoder pads with zeros).
+	n := (enc.ECTell() + 7) >> 3
 	enc.Flush()
-	return enc.Bytes(), nil
+	out := enc.Bytes()
+	if len(out) > n && n >= 2 {
+		out = out[:n]
+	}
+	return out, nil
 }
 
 // EncodeMultiWithEncoder writes n consecutive SILK frames into an existing

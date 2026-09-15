@@ -1123,6 +1123,11 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm, raw, celtPCM []float64, nFrames int,
 					stream = sharedEnc.Bytes()
 				} else {
 					stream, err = e.silkEncoder.EncodeMulti(silkPCM, group)
+					// SILK-only without redundancy: libopus strips trailing
+					// zero bytes (the decoder fills them in), keeping >= 2.
+					for len(stream) > 2 && stream[len(stream)-1] == 0 {
+						stream = stream[:len(stream)-1]
+					}
 				}
 			}
 			if conservativeNSQ {

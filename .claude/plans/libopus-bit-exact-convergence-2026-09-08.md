@@ -722,3 +722,29 @@ test passes.
   the `OPUS_SILK_RC_SNR` A/B switch to leave VBR output unchanged (it only
   steers the CBR search). Packet digests regenerated. Full opusref suite
   passes.
+
+### 2026-09-16: SILK-only VBR packets byte-identical to libopus (`9b4d0d0`, `179e7f6`, `51d24d4`)
+
+- `9b4d0d0` fix(encoder): a SILK-only payload is sized `(ec_tell + 7) >> 3`
+  before the range coder flush (opus_encode_native drops the carry byte
+  `ec_enc_done` may add) and trailing zero bytes are stripped down to two
+  bytes when no redundancy follows.
+- `179e7f6` fix(silk): the NSQ is seeded with `frameCounter++ & 3` like
+  `silk_encode_frame_FLP`; `silk_find_LPC_FLP` runs on LPC_in_pre in int16
+  scale (Burg's absolute `1e-9f` regulariser is scale-dependent, so the
+  [-1,1] domain analysis was not exact); `minInvGain` in silk_float order;
+  inactive (`TYPE_NO_VOICE_ACTIVITY`) frames go through the same pitch
+  whitening, LPC/NLSF, gains, shaping and delayed-decision NSQ as unvoiced
+  frames (only the coded type differs) instead of the Go zero-pulse shortcut.
+- `51d24d4` fix(silk): the pulse rate level is chosen with
+  `silk_rate_levels_BITS_Q5` / `silk_pulses_per_block_BITS_Q5` (first minimum
+  wins) instead of float ICDF costs.
+- Result (`TestSILKEncoderInputPipelineOracle`, 24 kbps CVBR, 12 frames,
+  8/12/16/24/48 kHz mono): **all 12 packets byte-identical to libopus on all
+  15 fixtures whose encoder state stays shared** (steady-voiced,
+  speech-like-harmonic, unvoiced-noise); the test now fails on any packet
+  difference for those fixtures. The `onset` fixture still diverges at the
+  Go digital-silence shortcut (frames 0–1 silent) — the remaining policy
+  item before the SILK-only VBR encoder can be called byte-exact.
+- Verified `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (all pass), `go test -race`.

@@ -1001,12 +1001,16 @@ differ from the first frame on: the oracle's stage trace shows NLSF, LPC,
 and the noise-shape analysis (AR/tilt/LF/harmonic shaping, Lambda — a
 float32 port of `noise_shape_analysis_FLP` fed by the libopus target rate)
 matching, and in VBR the gains too (`process_gains_FLP` / `silk_gains_quant`
-ports): the first SILK packet after a reset is byte-identical to libopus on
-13 of 16 oracle cells (8/12/16/24/48 kHz mono fixtures). Later frames still
-diverge through state-dependent NLSF and the NSQ seed; the Go
-digital-silence shortcut also diverges from libopus (see
-`.claude/specs/encoder-input-pipeline-libopus.md`). The SILK AB loudness
-gate passes at 8/12/16 kHz since the shaping port.
+ports). With the frame-counter NSQ seed, int16-scale Burg analysis, the
+libopus rate-level tables and payload sizing, **mono SILK-only VBR/CVBR
+packets are byte-identical to libopus 1.6.1** for all 12 frames of every
+shared-state oracle fixture (steady-voiced, speech-like-harmonic,
+unvoiced-noise at 8/12/16/24/48 kHz input); `TestSILKEncoderInputPipelineOracle`
+fails on any difference. Digitally silent input still takes the Go one-byte
+shortcut (libopus codes such frames), so streams containing silence diverge
+from there (see `.claude/specs/encoder-input-pipeline-libopus.md`). LBRR,
+stereo, CBR and the hybrid/CELT paths are not yet under the oracle. The SILK
+AB loudness gate passes at 8/12/16 kHz since the shaping port.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

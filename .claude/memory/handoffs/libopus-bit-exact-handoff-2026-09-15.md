@@ -30,8 +30,8 @@ is complete at the oracle level but has **not** been merged back.
 | SILK encoder VAD, pitch, LTP (Q2) | bit-exact on injected inputs (2026-09-15, `dev/silk-q2-ltp-oracle`); wired into the encoder |
 | SILK encoder input pipeline | complete (2026-09-16, `dev/encoder-input-pipeline`): VAD flags, 5 ms look-ahead, Fs/250 CELT delay, high-pass, int16 front end, libopus encoder resampler; conditioned input / x_buf / VAD / HP state bit-exact vs the instrumented libopus encoder at 8/12/16/24/48 kHz; silence-shortcut policy open |
 | SILK encoder Q3 noise shaping | bit-exact vs the instrumented libopus encoder on shared inputs (2026-09-16, `ad81c1f`) |
-| SILK encoder Q5 gains (VBR) | exact process_gains/gains_quant; first packet byte-identical on 13/16 oracle cells (2026-09-16, `d0e2532`) |
-| SILK encoder Q4/Q6/Q7 state carry-over, CBR loop, CELT encoder, mode/rate policy | not bit-exact |
+| SILK-only encoder, mono VBR/CVBR 20 ms | **byte-identical to libopus 1.6.1** on all shared-state oracle cells, 12 frames, 8–48 kHz input (2026-09-16, `51d24d4`); onset/silence blocked by the Go silence shortcut |
+| SILK encoder: silence shortcut, LBRR/FEC, stereo, CBR loop; hybrid/CELT encoder; mode/rate policy | not verified / not bit-exact |
 
 ## Open decision (blocks Q1 merge-back)
 
@@ -149,11 +149,15 @@ oracle on shared inputs and driving the NSQ; libopus target rate / bit
 reservoir / TOC-adjusted SILK bit rate ported; loudness gate passes at all
 rates (8k -0.64 / 12k -0.25 / 16k -0.01 dB). Q5 VBR done (`d0e2532`):
 exact process_gains / gains_quant / residual energy, shell scale-down fix,
-48 kHz homebrew-NSQ fallback removed → **first SILK packet byte-identical to
-libopus on 13/16 oracle cells**. Remaining: the ±1-byte entropy-coding
-corner on 8k noise / 12k steady / 24k harmonic frame 0, frame-1+ NLSF
-(state-dependent LPC input) and NSQ seed, the CBR gain loop, the
-digital-silence shortcut policy, a phase-insensitive scoreboard distance. Merge-back: `dev/libopus-bit-exact` was fast-forwarded to
+48 kHz homebrew-NSQ fallback removed; `9b4d0d0`/`179e7f6`/`51d24d4` payload
+sizing, frame-counter NSQ seed, int16-scale Burg, inactive frames on the
+exact path, Q5 rate-level tables → **SILK-only VBR: all 12 packets
+byte-identical to libopus on all 15 shared-state oracle cells** (8/12/16/24/48
+kHz × steady-voiced / harmonic / noise; gated by
+`TestSILKEncoderInputPipelineOracle`). Remaining: the digital-silence
+shortcut policy (onset fixture; libopus codes silent frames), LBRR/FEC and
+stereo paths under the oracle, the CBR gain loop, hybrid/CELT, a
+phase-insensitive scoreboard distance. Merge-back: `dev/libopus-bit-exact` was fast-forwarded to
 `08c4201` (Q1/Q2/PLC) on 2026-09-16; the child branches
 `dev/silk-plc-exact`, `dev/silk-q1-oracle`, `dev/silk-q2-ltp-oracle` were
 deleted.

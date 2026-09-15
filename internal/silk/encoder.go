@@ -3035,48 +3035,28 @@ func shellSumsFit(abs []int) (int, bool) {
 	return cur[0], scaleDown
 }
 
+// selectPulseRateLevel mirrors silk_encode_pulses' rate-level search: the
+// integer Q5 bit costs of silk_rate_levels_BITS_Q5 and
+// silk_pulses_per_block_BITS_Q5 (scaled-down blocks cost the escape entry),
+// with the first minimum winning ties.
 func selectPulseRateLevel(row int, blocks []pulseBlock) int {
 	bestLevel := 0
-	bestCost := math.Inf(1)
+	minSumBitsQ5 := int32(math.MaxInt32)
 	for rateLevelIdx := 0; rateLevelIdx < nRateLevels-1; rateLevelIdx++ {
-		cost := icdfCost(silkRateLevelsICDF[row][:], rateLevelIdx)
+		sumBitsQ5 := silkRateLevelsBitsQ5[row][rateLevelIdx]
 		for _, block := range blocks {
-			if block.nLShifts == 0 {
-				cost += icdfCost(silkPulsesPerBlockICDF[rateLevelIdx][:], block.sum)
-				continue
+			if block.nLShifts > 0 {
+				sumBitsQ5 += silkPulsesPerBlockBitsQ5[rateLevelIdx][silkMaxPulses+1]
+			} else {
+				sumBitsQ5 += silkPulsesPerBlockBitsQ5[rateLevelIdx][block.sum]
 			}
-			cost += icdfCost(silkPulsesPerBlockICDF[rateLevelIdx][:], silkMaxPulses+1)
-			for shift := 1; shift < block.nLShifts; shift++ {
-				cost += icdfCost(silkPulsesPerBlockICDF[nRateLevels-1][:], silkMaxPulses+1)
-			}
-			offset := 0
-			if block.nLShifts == 10 {
-				offset = 1
-			}
-			cost += icdfCost(silkPulsesPerBlockICDF[nRateLevels-1][offset:], block.sum)
 		}
-		if cost < bestCost {
-			bestCost = cost
+		if sumBitsQ5 < minSumBitsQ5 {
+			minSumBitsQ5 = sumBitsQ5
 			bestLevel = rateLevelIdx
 		}
 	}
 	return bestLevel
-}
-
-func icdfCost(icdf []uint8, symbol int) float64 {
-	if symbol < 0 || symbol >= len(icdf) {
-		return math.Inf(1)
-	}
-	var freq int
-	if symbol == 0 {
-		freq = 256 - int(icdf[0])
-	} else {
-		freq = int(icdf[symbol-1]) - int(icdf[symbol])
-	}
-	if freq <= 0 {
-		return math.Inf(1)
-	}
-	return -math.Log2(float64(freq) / 256.0)
 }
 
 func encodePulseBlockSum(enc *entcode.Encoder, rateLevelIdx int, block pulseBlock) {

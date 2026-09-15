@@ -500,8 +500,10 @@ func firstFloat32Mismatch(got, want []float32) (int, bool) {
 //
 // Gates: the conditioned input, the SILK x_buf, and the cutoff state must be
 // bit-exact for every frame up to (and including) the first frame whose
-// packet bytes differ — until then the two encoders share all state. Later
-// frames are reported for diagnosis only.
+// packet bytes differ — until then the two encoders share all state — and,
+// for every fixture that never hits the Go digital-silence shortcut, all
+// packets must be byte-identical to libopus. Later frames of a diverged
+// fixture are reported for diagnosis only.
 func TestSILKEncoderInputPipelineOracle(t *testing.T) {
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
@@ -651,6 +653,11 @@ func TestSILKEncoderInputPipelineOracle(t *testing.T) {
 				}
 				if firstPacketDiff < 0 && !diverged {
 					t.Logf("all %d packets byte-identical to libopus", frames)
+				} else if !diverged {
+					// Byte-exactness is the contract for every fixture whose
+					// encoder state stays shared (the onset fixture diverges at
+					// the Go digital-silence shortcut, a known policy gap).
+					t.Fatalf("packet %d differs from libopus; SILK-only VBR packets must be byte-identical", firstPacketDiff)
 				}
 			})
 		}

@@ -599,3 +599,32 @@ test passes.
 - Verified `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (only the 8/12 kHz loudness gates
   fail), and `go test -race -count=1 ./...`.
+
+### 2026-09-16: SILK int16 front end and the encoder input oracle (input pipeline step 4)
+
+- Reference: `silk/enc_API.c` (`RES2INT16` = `FLOAT2INT16`, `silk_resampler`
+  encoder direction with `delay_matrix_enc`, `inputBuf + 1`),
+  `silk/float/encode_frame_FLP.c` (eight ±1e-6f anti-denormal offsets).
+- `internal/silk/front_end.go`: each input frame is quantised to the int16
+  grid (float32 ×32768, saturate, round-half-even) and delayed by the
+  equal-rate resampler delay plus one sample (mono; stereo applies the
+  offset inside `lrToMS`), then pushed into `x_buf` with the float32 offsets.
+  Values stay int16/32768 (or (int16 ± 1e-6f)/32768) in float64, so the
+  ×32768 conversions downstream recover the libopus float32 values exactly.
+  The side encoder keeps its delay line across the mid-only reactivation
+  reset (libopus keeps the resampler state).
+- Oracle: `scripts/oracle/build_encoder.ps1` + `scripts/oracle/enc_oracle.c`
+  build the checked-in libopus 1.6.1 (scalar, `-ffp-contract=off`) with
+  `opus_encoder.c`/`encode_frame_FLP.c` instrumented to dump `pcm_buf`,
+  `inputBuf`, `x_buf`, `speech_activity_Q8`, the HP smoothers, and the packet
+  bytes per frame. `TestSILKEncoderInputPipelineOracle` (opusref; skips
+  without the exe) runs it on the mono AB fixtures and gates bit-exactness
+  of the conditioned input, `x_buf`, VAD activity, and HP state for every
+  frame up to the first packet difference.
+- Result: steady-voiced, speech-like-harmonic, and (LCG) unvoiced-noise at
+  8/12/16 kHz are exact through frame 0 (first packet difference at frame 0:
+  the remaining analysis/rate-control stages). `onset` exposes the Go
+  digital-silence shortcut (spec "Open items"). Packet digests regenerated.
+- Verified `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (only the 8 kHz loudness gate
+  fails, -2.61 dB), and `go test -race -count=1 ./...`.

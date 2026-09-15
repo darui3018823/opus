@@ -4,8 +4,13 @@ Status: In progress on `dev/encoder-input-pipeline` (2026-09-16); step 0
 landed in `5e6482f`, step 1 (SILK look-ahead buffer) in `70cae26`, step 2
 (Opus-layer delay compensation, `Lookahead()` = Fs/400 + Fs/250) in
 `f7de2bf`, step 3 (hp_cutoff / dc_reject / variable_HP_smth1+2 / float-API
-guard, unit-exact against the libopus float bodies) in `a04f4ce`. Step 4
-(end-to-end oracle on the real encoder) is open.
+guard, unit-exact against the libopus float bodies) in `a04f4ce`, step 4
+(instrumented libopus 1.6.1 encoder oracle + SILK int16 front end) in
+`81444af`. Verified end to end: on the 8/12/16 kHz mono AB fixtures the
+conditioned input, the SILK `x_buf`, `speech_activity_Q8`, and both
+high-pass smoothers are bit-exact with libopus for the first frame; packet
+bytes still differ there (later analysis stages), so frames after the first
+are reported, not gated, until those stages are exact.
 Prerequisite for encoder byte-exactness (convergence plan Phase 4) and for
 exact SILK noise-shape analysis (Q3), whose windows extend into the
 look-ahead.
@@ -95,6 +100,13 @@ that must be reconciled when this pipeline lands.
 
 ## Open items
 
+- **Digital-silence shortcut.** The Go encoder emits a one-byte SILK frame
+  for digitally silent input without DTX; libopus codes the frame (6–8
+  bytes) and its state (x_buf offsets, VAD noise floor, gains, NSQ) keeps
+  evolving. After such a frame the two encoders no longer share state
+  (`TestSILKEncoderInputPipelineOracle` on the `onset` fixture: x_buf differs
+  by the ±1e-6 offsets, speech_activity_Q8 by 3–4). Removing the shortcut is
+  a packet-policy decision for Phase 4.
 - **Scoreboard reference.** `TestOpusSILKABAgainstLibopusEncoder` scores
   both encoders against the raw input. With the high-pass in place the
   achievable integer-aligned SNR of a fixture whose fundamental sits near the
@@ -102,9 +114,12 @@ that must be reconciled when this pipeline lands.
   the SNR gaps are now a noisier instrument than the byte ratios and the
   RMS loudness; a phase-insensitive (spectral) distance is the fix.
 - **SILK API resampler.** libopus resamples the Opus-rate input to `fs_kHz`
-  with `silk_resampler` (fixed-point, ~1.5 ms encoder+decoder delay); the Go
-  encoder uses `internal/resampler` with a shorter delay. Hybrid alignment
-  and any byte comparison at 24/48 kHz input need the libopus resampler.
+  with `silk_resampler` (fixed-point). The equal-rate path (a pure
+  `delay_matrix_enc` delay of 6/7/10 samples at 8/12/16 kHz) plus the
+  `inputBuf + 1` offset and the int16 quantisation are reproduced by
+  `internal/silk/front_end.go`; the down-sampling FIR path for 24/48 kHz
+  input is not ported, so at those rates only the one-sample offset applies
+  and the hybrid low band still leads the high band by ~34 samples.
 - **CELT prefill on mode switches.** libopus primes CELT with
   `tmp_prefill` (the Fs/400 samples preceding the frame from `delay_buffer`)
   when switching into CELT/hybrid; the Go transition logic does not.

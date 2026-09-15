@@ -28,7 +28,7 @@ is complete at the oracle level but has **not** been merged back.
 | SILK decoder / PLC | PLC, CNG, glue, one-byte payload handling sample-exact vs libopus (2026-09-15, `dev/silk-plc-exact`) |
 | SILK encoder Q1 (`LPC_in_pre` → `PredCoef_Q12`) | 13 fixtures exact vs C (`TestSILKQ1LPCNLSFOracle`, opusref) |
 | SILK encoder VAD, pitch, LTP (Q2) | bit-exact on injected inputs (2026-09-15, `dev/silk-q2-ltp-oracle`); wired into the encoder |
-| SILK encoder input pipeline | VAD flags, 5 ms look-ahead framing, Fs/250 CELT delay, high-pass conditioning landed (2026-09-16, `dev/encoder-input-pipeline`); end-to-end oracle and SILK resampler open |
+| SILK encoder input pipeline | VAD flags, 5 ms look-ahead, Fs/250 CELT delay, high-pass, int16 front end landed (2026-09-16, `dev/encoder-input-pipeline`); bit-exact through frame 0 vs the instrumented libopus encoder at 8/12/16 kHz; 24/48 kHz resampler FIR and silence-shortcut policy open |
 | SILK encoder Q3–Q7, CELT encoder, mode/rate policy | not bit-exact |
 
 ## Open decision (blocks Q1 merge-back)
@@ -135,11 +135,13 @@ Status 2026-09-16: steps 0–3 landed on `dev/encoder-input-pipeline`
 (`5e6482f` VAD flags, `70cae26` SILK 5 ms look-ahead buffer, `f7de2bf`
 Opus-layer Fs/250 CELT delay; `Lookahead()` = 312 at 48 kHz; `a04f4ce`
 hp_cutoff/dc_reject/variable_HP smoothing, unit-exact vs the libopus float
-bodies). Remaining: step 4 end-to-end oracle on the real encoder, the SILK
-API resampler port (Go SILK path is 34 samples less delayed than libopus at
-48 kHz; hybrid low band leads by that much), and a phase-insensitive
-scoreboard distance. Loudness gate after step 3: 8k -2.33 / 12k -1.87 /
-16k -0.59 dB. Merge-back: `dev/libopus-bit-exact` was fast-forwarded to
+bodies; `81444af` int16 front end + instrumented libopus encoder oracle:
+conditioned input, x_buf, VAD, HP state bit-exact through frame 0 on the
+mono AB fixtures). Remaining: libopus down-sampling FIR for 24/48 kHz input
+(hybrid low band leads by ~34 samples at 48 kHz), the digital-silence
+shortcut policy, a phase-insensitive scoreboard distance, then Q3 with the
+oracle's NSQ-input dumps as the next gate. Loudness gate: 8k -2.61 dB fails,
+12k/16k pass. Merge-back: `dev/libopus-bit-exact` was fast-forwarded to
 `08c4201` (Q1/Q2/PLC) on 2026-09-16; the child branches
 `dev/silk-plc-exact`, `dev/silk-q1-oracle`, `dev/silk-q2-ltp-oracle` were
 deleted.

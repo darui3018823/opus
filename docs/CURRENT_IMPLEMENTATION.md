@@ -988,9 +988,15 @@ at 48 kHz, Fs/400 for restricted low delay), and every packet's input is
 high-pass conditioned first (VOIP: `hp_cutoff` following the SILK
 pitch-driven cutoff; otherwise the 3 Hz `dc_reject`; unit-exact against the
 libopus float bodies, `TestCGOInputConditioningExact`,
-`TestSILKHPVariableCutoffOracle`). The libopus SILK resampler is still
-missing (the SILK path is 34 samples less delayed than libopus at 48 kHz),
-so packet bytes are not comparable yet (see
+`TestSILKHPVariableCutoffOracle`), and the SILK front end quantises to
+int16 and applies the libopus equal-rate resampler delay and `inputBuf + 1`
+offset (`internal/silk/front_end.go`). Against the instrumented libopus
+1.6.1 encoder (`scripts/oracle/build_encoder.ps1`,
+`TestSILKEncoderInputPipelineOracle`) the conditioned input, SILK `x_buf`,
+VAD activity, and high-pass state are bit-exact through the first frame on
+the 8/12/16 kHz mono fixtures; packet bytes still differ from the first
+frame on (analysis and rate control), the 24/48 kHz down-sampling FIR is not
+ported, and the Go digital-silence shortcut diverges from libopus (see
 `.claude/specs/encoder-input-pipeline-libopus.md`).
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss

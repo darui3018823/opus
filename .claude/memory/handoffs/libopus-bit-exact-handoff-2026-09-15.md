@@ -123,6 +123,12 @@ framing/delay slice is required before packet-level byte comparison.
 - Expected side effect: voiced byte counts move toward libopus; re-measure the
   speech-harmonic loudness gate here.
 
+### Phase 1b — Encoder input pipeline (framing, delay, high-pass)
+
+Spec: `.claude/specs/encoder-input-pipeline-libopus.md`. Must land before
+Q3 exactness (shaping windows read the look-ahead) and before Phase 4.
+Changes public latency (`Lookahead()` → 6.5 ms like libopus).
+
 ### Phase 2 — SILK encoder Q3/Q4: noise shaping and NSQ
 
 - Reference: `silk/float/noise_shape_analysis_FLP.c`, `silk/NSQ_del_dec.c`.

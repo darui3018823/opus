@@ -72,7 +72,10 @@ type Encoder struct {
 
 	// Resampler for non-48kHz input rates
 	inputResampler *resampler.Resampler // inRate -> 48kHz
-	silkResampler  *resampler.Resampler // input sampleRate -> silkSampleRate
+	// silkInputResamplers are the bit-exact libopus SILK resamplers
+	// (encoder direction, one per channel like silk_encoder_state.resampler_state)
+	// from the input rate to silkSampleRate; nil when the rates are equal.
+	silkInputResamplers []*silk.Resampler
 
 	// delayBuffer holds the last delayCompensation() input samples
 	// (interleaved). CELT codes the input delayed by that amount while SILK
@@ -242,11 +245,13 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		enc.silkEncoder = silkEnc
 		enc.silkSampleRate = silkRate
 		if silkRate != sampleRate {
-			r, err := resampler.NewResampler(sampleRate, silkRate, channels, resampler.QualityDefault)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create SILK input resampler: %w", err)
+			for ch := 0; ch < channels; ch++ {
+				r, err := silk.NewEncoderResampler(sampleRate, silkRate)
+				if err != nil {
+					return nil, fmt.Errorf("failed to create SILK input resampler: %w", err)
+				}
+				enc.silkInputResamplers = append(enc.silkInputResamplers, r)
 			}
-			enc.silkResampler = r
 		}
 	}
 
@@ -833,11 +838,7 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 	for k := 0; k < nFrames; k++ {
 		chunk := pcm[k*inputChunkLen : (k+1)*inputChunkLen]
 		celtChunk := celtPCM[k*inputChunkLen : (k+1)*inputChunkLen]
-		silkPCM := chunk
-		if e.silkResampler != nil {
-			silkPCM = e.silkResampler.Process(chunk)
-			silkPCM = padOrTrim(silkPCM, silkChunkLen)
-		}
+		silkPCM := e.silkInput(chunk, silkChunkLen)
 		celtInput := e.celtInputFrame(celtChunk)
 
 		// CELT->SILK redundancy is carried by the first frame; SILK->CELT
@@ -1045,11 +1046,7 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm, raw, celtPCM []float64, nFrames int,
 	pos := 0
 	for gi, group := range groups {
 		inputSamples := group * inputChunkLen
-		silkPCM := pcm[pos : pos+inputSamples]
-		if e.silkResampler != nil {
-			silkPCM = e.silkResampler.Process(silkPCM)
-			silkPCM = padOrTrim(silkPCM, group*silkChunkLen)
-		}
+		silkPCM := e.silkInput(pcm[pos:pos+inputSamples], group*silkChunkLen)
 		silent := isSilentPCM(raw[pos : pos+inputSamples])
 		encodeSILK := !silent
 		if silent {
@@ -1428,6 +1425,39 @@ func (e *Encoder) encodeOneCELTFrame(pcm []float64) ([]byte, error) {
 		return nil, fmt.Errorf("CELT encoding failed: %w", err)
 	}
 	return compressed, nil
+}
+
+// silkInput returns the SILK-rate input for the conditioned Opus-rate pcm:
+// libopus converts each channel to int16 (RES2INT16) and runs it through the
+// channel's silk_resampler; at equal rates the samples pass through and the
+// SILK front end applies the resampler's delay itself. The result holds
+// int16/32768 values and has exactly want samples (interleaved).
+func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
+	if len(e.silkInputResamplers) == 0 {
+		return pcm
+	}
+	ch := e.channels
+	n := len(pcm) / ch
+	out := make([]float64, 0, want)
+	perChannel := make([][]int16, ch)
+	for c := 0; c < ch; c++ {
+		in := make([]int16, n)
+		for i := 0; i < n; i++ {
+			in[i] = silk.Float2Int16Sample(pcm[i*ch+c])
+		}
+		perChannel[c] = e.silkInputResamplers[c].Process(in)
+	}
+	m := want / ch
+	for i := 0; i < m; i++ {
+		for c := 0; c < ch; c++ {
+			v := 0.0
+			if i < len(perChannel[c]) {
+				v = float64(perChannel[c][i]) / 32768
+			}
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // delayCompensation returns the Opus-layer input delay in samples at the
@@ -2079,8 +2109,8 @@ func (e *Encoder) Reset() error {
 	if e.inputResampler != nil {
 		e.inputResampler.Reset()
 	}
-	if e.silkResampler != nil {
-		e.silkResampler.Reset()
+	for _, r := range e.silkInputResamplers {
+		r.Reset()
 	}
 	e.lastDetectedBW = -1
 	e.prevMode = -1

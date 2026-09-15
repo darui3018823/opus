@@ -334,14 +334,41 @@ func TestEncoderHybrid24kUnvoicedNoiseDoesNotCollapse(t *testing.T) {
 
 	snr, _, _, scale := opusSILKAlignedSNR(in, out, frameSize)
 	outRMS, peak, _ := opusSILKQualityStats(out)
-	t.Logf("24k hybrid unvoiced-noise: SNR=%.2fdB scale=%.4f RMS=%.5f peak=%.4f",
-		snr, scale, outRMS, peak)
-	if scale <= 0.25 {
-		t.Fatalf("hybrid unvoiced-noise alignment scale %.4f indicates low-band collapse or polarity reversal", scale)
+	// Neither SILK's unvoiced coding nor CELT's noise coding preserves the
+	// waveform of white noise, so the aligned scale is not a collapse
+	// detector (its sign is chance); compare the low-band energy that the
+	// SILK layer carries instead, and the overall level.
+	inLow := opusSILKLowBandRMS(in)
+	outLow := opusSILKLowBandRMS(out)
+	t.Logf("24k hybrid unvoiced-noise: SNR=%.2fdB scale=%.4f RMS=%.5f peak=%.4f lowband in=%.5f out=%.5f",
+		snr, scale, outRMS, peak, inLow, outLow)
+	if outLow < 0.5*inLow || outLow > 2*inLow {
+		t.Fatalf("hybrid unvoiced-noise low-band RMS %.5f vs input %.5f indicates low-band collapse", outLow, inLow)
 	}
 	if outRMS < 0.07 {
 		t.Fatalf("hybrid unvoiced-noise output RMS %.5f indicates energy collapse", outRMS)
 	}
+}
+
+// opusSILKLowBandRMS returns the RMS of x after an 8-tap moving average (a
+// crude low-pass whose first null sits at rate/8, i.e. 3 kHz at 24 kHz).
+func opusSILKLowBandRMS(x []float64) float64 {
+	const taps = 8
+	var sum float64
+	n := 0
+	for i := taps; i < len(x); i++ {
+		var acc float64
+		for k := 0; k < taps; k++ {
+			acc += x[i-k]
+		}
+		acc /= taps
+		sum += acc * acc
+		n++
+	}
+	if n == 0 {
+		return 0
+	}
+	return math.Sqrt(sum / float64(n))
 }
 
 func TestEncoderSILKOnlyStereoQualityBaseline(t *testing.T) {

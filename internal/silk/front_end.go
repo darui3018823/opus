@@ -54,9 +54,9 @@ func (e *Encoder) frontEndDelay(mono bool) int {
 	return d
 }
 
-// float2Int16Sample is FLOAT2INT16: scale by 32768 in float32, saturate, and
-// round to nearest even like lrintf.
-func float2Int16Sample(v float64) int16 {
+// Float2Int16Sample is FLOAT2INT16 (RES2INT16 in the float build): scale by
+// 32768 in float32, saturate, and round to nearest even like lrintf.
+func Float2Int16Sample(v float64) int16 {
 	x := float64(float32(v) * 32768)
 	if x > 32767 {
 		x = 32767
@@ -73,7 +73,7 @@ func (e *Encoder) frontEndFrame(input []float64, mono bool) []float64 {
 	n := len(input)
 	q := make([]float64, n)
 	for i, v := range input {
-		q[i] = float64(float2Int16Sample(v)) / 32768
+		q[i] = float64(Float2Int16Sample(v)) / 32768
 	}
 	d := e.frontEndDelay(mono)
 	if d == 0 {

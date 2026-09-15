@@ -52,9 +52,9 @@ func encOraclePath() string {
 }
 
 // runEncOracle runs the oracle on one fixture and returns the per-frame traces.
-func runEncOracle(t *testing.T, rate int, fixture string, frames, bitrate int) []encOracleFrame {
+func runEncOracle(t *testing.T, rate int, fixture string, frames, bitrate int, bandwidth string) []encOracleFrame {
 	t.Helper()
-	cmd := exec.Command(encOraclePath(), "--silk-enc", strconv.Itoa(rate), fixture, "-1", strconv.Itoa(frames), strconv.Itoa(bitrate))
+	cmd := exec.Command(encOraclePath(), "--silk-enc", strconv.Itoa(rate), fixture, "-1", strconv.Itoa(frames), strconv.Itoa(bitrate), bandwidth)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -185,14 +185,20 @@ func TestSILKEncoderInputPipelineOracle(t *testing.T) {
 		gens[sig.name] = sig.gen
 	}
 	gens["unvoiced-noise"] = encOracleNoiseFrame
-	for _, rate := range []int{8000, 12000, 16000} {
+	// 24/48 kHz input exercises the libopus encoder-direction resampler in
+	// front of the 16 kHz SILK encoder (wideband forced on both sides).
+	for _, rate := range []int{8000, 12000, 16000, 24000, 48000} {
 		for _, fixture := range []string{"steady-voiced", "speech-like-harmonic", "onset", "unvoiced-noise"} {
 			gen := gens[fixture]
 			if gen == nil {
 				t.Fatalf("no Go generator for fixture %s", fixture)
 			}
 			t.Run(fmt.Sprintf("%dk/%s", rate/1000, fixture), func(t *testing.T) {
-				ref := runEncOracle(t, rate, fixture, frames, bitrate)
+				bandwidth := "auto"
+				if rate > 16000 {
+					bandwidth = "wb"
+				}
+				ref := runEncOracle(t, rate, fixture, frames, bitrate, bandwidth)
 				frameSize := rate / 50
 				enc, err := NewEncoder(rate, 1, ApplicationVOIP)
 				if err != nil {
@@ -207,6 +213,11 @@ func TestSILKEncoderInputPipelineOracle(t *testing.T) {
 				enc.SetVBR(true)
 				enc.SetVBRConstraint(true)
 				enc.SetSignalType(SignalVoice)
+				if rate > 16000 {
+					if err := enc.SetBandwidth(BandwidthWideband); err != nil {
+						t.Fatal(err)
+					}
+				}
 
 				var prevCond []float64
 				firstPacketDiff := -1

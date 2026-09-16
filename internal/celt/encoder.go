@@ -193,12 +193,14 @@ func NewEncoder(frameSize, sampleRate, channels int, config *EncoderConfig) (*En
 	return e, nil
 }
 
-// targetBytes returns the fixed packet size (bytes) for this frame. The decoder
+// targetBytes returns the fixed payload size (bytes) for this frame. The decoder
 // uses len(packet)*8 as its bit-allocation budget, so the encoder commits to this
 // size up front, runs the whole allocation against it, and pads the output to it.
+// opus_encode_native: a CBR packet is cbr_bytes = (bitrate_to_bits + 4) / 8
+// including the TOC, so the CELT payload is one byte less.
 func (e *Encoder) targetBytes() int {
-	frameDuration := float64(e.mode.FrameSize) / float64(e.mode.SampleRate)
-	tb := int(float64(e.bitrate) * frameDuration / 8.0)
+	frameBits := e.bitrate * 6 / (6 * e.mode.SampleRate / e.mode.FrameSize)
+	tb := (frameBits+4)/8 - 1
 	if tb < 2 {
 		tb = 2
 	}

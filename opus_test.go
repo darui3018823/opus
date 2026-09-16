@@ -494,8 +494,10 @@ func TestEncoderBitratePolicies(t *testing.T) {
 	if got, want := mono.EffectiveBitrate(), 510000; got != want {
 		t.Fatalf("maximum effective bitrate = %d, want %d", got, want)
 	}
-	if len(packet) != MaxFrameBytes+1 {
-		t.Fatalf("maximum bitrate packet size = %d, want %d", len(packet), MaxFrameBytes+1)
+	// opus_encode_native: cbr_bytes = (bitrate_to_bits + 4) / 8 including the
+	// TOC = (10200 + 4) / 8 = 1275 at the maximum 20 ms rate.
+	if len(packet) != MaxFrameBytes {
+		t.Fatalf("maximum bitrate packet size = %d, want %d", len(packet), MaxFrameBytes)
 	}
 }
 

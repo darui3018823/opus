@@ -1523,9 +1523,10 @@ func TestEncoderSILKOnlyCBRPacketSizeTracksBitrateAndDuration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Encode: %v", err)
 			}
-			wantPayload := tc.bitrate * (20 * tc.mult) / 1000 / 8
-			if want := 1 + wantPayload; len(pkt) < want {
-				t.Fatalf("packet bytes=%d, want at least %d for active %d bps/%d ms CBR SILK", len(pkt), want, tc.bitrate, 20*tc.mult)
+			// opus_encode_native: a CBR packet is padded to cbr_bytes =
+			// (bitrate_to_bits + 4) / 8 including the TOC.
+			if want := (tc.bitrate*(20*tc.mult)/1000 + 4) / 8; len(pkt) != want {
+				t.Fatalf("packet bytes=%d, want %d for active %d bps/%d ms CBR SILK", len(pkt), want, tc.bitrate, 20*tc.mult)
 			}
 			if config := int(pkt[0] >> 3); config != 9 && config != 11 {
 				t.Fatalf("TOC config=%d, want SILK WB 20/60ms config", config)
@@ -1534,7 +1535,7 @@ func TestEncoderSILKOnlyCBRPacketSizeTracksBitrateAndDuration(t *testing.T) {
 	}
 }
 
-func TestEncoderSILKOnlyStereoSingleFrameCBRKeepsCode0(t *testing.T) {
+func TestEncoderSILKOnlyStereoSingleFrameCBRPadsToCBRBytes(t *testing.T) {
 	const (
 		rate      = 16000
 		channels  = 2
@@ -1576,8 +1577,10 @@ func TestEncoderSILKOnlyStereoSingleFrameCBRKeepsCode0(t *testing.T) {
 		if err != nil {
 			t.Fatalf("frame %d EncodeFloat: %v", i, err)
 		}
-		if code := int(pkt[0] & 0x03); code != 0 {
-			t.Fatalf("frame %d count code=%d, want compact single-frame code 0", i, code)
+		// opus_packet_pad: the stereo CBR packet is padded to cbr_bytes (code 3
+		// with padding unless the frame already fills the packet).
+		if want := (bitrate*20/1000 + 4) / 8; len(pkt) != want {
+			t.Fatalf("frame %d packet=%d bytes, want cbr_bytes %d", i, len(pkt), want)
 		}
 		if _, err := dec.DecodeFloat(pkt); err != nil {
 			t.Fatalf("frame %d DecodeFloat: %v", i, err)

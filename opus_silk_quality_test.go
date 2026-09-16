@@ -158,7 +158,7 @@ func TestEncoderSILKOnlyVoicedRateModeContract(t *testing.T) {
 		return sizes
 	}
 
-	const nominalPacketBytes = 1 + 24000*20/1000/8
+	const nominalPacketBytes = (24000*20/1000 + 4) / 8 // cbr_bytes, TOC included
 	cbrSizes := packetSizes("1", false, true)
 	for frame, size := range cbrSizes {
 		if size != nominalPacketBytes {

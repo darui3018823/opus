@@ -849,6 +849,29 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		if err := e.silkEncoder.SetBitrate(silkRate); err != nil {
 			return nil, false, err
 		}
+		// silk_mode.maxBits: the frame's byte ceiling minus the TOC. In CBR
+		// SILK runs as VBR capped so that it can steal up to 25 % of the bits
+		// left after its rate; in VBR the cap is the SILK share of the ceiling.
+		maxDataBytes := MaxFrameBytes
+		if e.rateMode == celt.RateModeCBR {
+			maxDataBytes = e.hybridFrameTargetBytes()
+		}
+		silkMaxBits := (maxDataBytes - 1) * 8
+		if e.rateMode == celt.RateModeCBR {
+			otherBits := silkMaxBits - silkRate*e.frameSize/e.sampleRate
+			if otherBits < 0 {
+				otherBits = 0
+			}
+			silkMaxBits -= otherBits * 3 / 4
+			if silkMaxBits < 0 {
+				silkMaxBits = 0
+			}
+		} else {
+			maxRate := computeSILKRateForHybrid(silkMaxBits*e.sampleRate/e.frameSize, bw, true, true, e.lbrrCoded, e.channels)
+			silkMaxBits = bitrateToBits(maxRate, e.sampleRate, e.frameSize)
+		}
+		e.silkEncoder.SetMaxBits(silkMaxBits)
+		defer e.silkEncoder.SetMaxBits(0)
 	}
 	nominalBytes := e.hybridFrameTargetBytes()
 	// CBR keeps every hybrid frame at the full per-frame ceiling. In VBR/CVBR,
@@ -878,7 +901,14 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		}
 		enc := entcode.NewEncoder(maxBytes)
 		e.silkEncoder.SetHybridMode(true)
+		if cbr {
+			// libopus switches SILK to VBR-with-cap inside a CBR hybrid packet.
+			e.silkEncoder.SetRateMode(silk.RateModeCVBR)
+		}
 		err := e.silkEncoder.EncodeMultiWithEncoder(enc, silkPCM, 1)
+		if cbr {
+			e.silkEncoder.SetRateMode(silk.RateModeCBR)
+		}
 		e.silkEncoder.SetHybridMode(false)
 		if err != nil {
 			return nil, false, fmt.Errorf("SILK hybrid encoding failed: %w", err)
@@ -1067,10 +1097,39 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm, raw, celtPCM []float64, nFrames int,
 	streams := make([][]byte, 0, len(groups))
 	var rangeFinal uint32
 	pos := 0
+	cbrBytes := 0
 	for gi, group := range groups {
 		inputSamples := group * inputChunkLen
 		silkPCM := e.silkInput(pcm[pos:pos+inputSamples], group*silkChunkLen)
 		silent := isSilentPCM(raw[pos : pos+inputSamples])
+		// opus_encode_native: max_data_bytes bounds the packet; in CBR it is
+		// cbr_bytes = (bitrate_to_bits + 4) / 8, the SILK rate follows that
+		// size (bits_to_bitrate(cbr_bytes * 8 - 8)) and the packet is padded
+		// to it. silk_mode.maxBits = (max_data_bytes - 1) * 8 drives the
+		// encode_frame_FLP quantiser loop.
+		maxDataBytes := MaxFrameBytes
+		if e.rateMode == celt.RateModeCBR {
+			groupSamples := group * e.frameSize
+			cbrBytes = (bitrateToBits(e.bitrate, e.sampleRate, groupSamples) + 4) / 8
+			if cbrBytes > maxDataBytes {
+				cbrBytes = maxDataBytes
+			}
+			if cbrBytes < 1 {
+				cbrBytes = 1
+			}
+			maxDataBytes = cbrBytes
+			silkRate := bitsToBitrate(cbrBytes*8-8, e.sampleRate, groupSamples)
+			if silkRate > 80000 {
+				silkRate = 80000
+			}
+			if silkRate < 5000 {
+				silkRate = 5000
+			}
+			if err := e.silkEncoder.SetBitrate(silkRate); err != nil {
+				return nil, err
+			}
+		}
+		e.silkEncoder.SetMaxBits((maxDataBytes - 1) * 8)
 		encodeSILK := !silent
 		if silent {
 			switch {
@@ -1178,10 +1237,18 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm, raw, celtPCM []float64, nFrames int,
 		}
 		pos += inputSamples
 	}
+	e.silkEncoder.SetMaxBits(0)
 	payload, code, err := packOpusFramesPadded(streams, true, e.padBytes)
 	if err == nil && e.shouldPadSILKPacket(streams, celtToSilk) {
+		// opus_packet_pad to cbr_bytes (a single group packet); multi-group
+		// packets keep the former per-frame estimate.
 		targetBytes := 1 + e.bitrate*(20*nFrames)/1000/8
-		payload, code, err = packOpusFramesToPacketSize(streams, true, targetBytes)
+		if len(groups) == 1 && cbrBytes > 0 {
+			targetBytes = cbrBytes
+		}
+		// opus_packet_pad: the repacketizer picks the layout from the frame
+		// sizes alone (a single frame is CBR-laid-out code 3 with padding).
+		payload, code, err = packOpusFramesToPacketSize(streams, false, targetBytes)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to pack SILK stream: %w", err)
@@ -1209,11 +1276,6 @@ func (e *Encoder) shouldPadSILKPacket(streams [][]byte, celtToSilk bool) bool {
 		if len(stream) <= 1 {
 			return false
 		}
-	}
-	if len(streams) == 1 && e.channels == 2 && e.silkEncoder != nil && e.silkEncoder.TrellisNSQ() {
-		// Stereo trellis already spends its natural budget without zero-filling,
-		// so retain the compact single-frame code-0 representation.
-		return false
 	}
 	return true
 }

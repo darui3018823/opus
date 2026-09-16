@@ -181,13 +181,10 @@ func TestCGOEncodeRefSILKFEC(t *testing.T) {
 	t.Logf("mean recovery over %d frames: FEC=%.2fdB PLC=%.2fdB", frames, meanFEC, meanPLC)
 
 	// On average the redundancy must clearly beat the PLC extrapolation libopus
-	// falls back to with no redundancy. This stream is CBR: the LBRR copy is
-	// quantised from silk_process_gains' gains like libopus, but the regular
-	// frame still goes through the Go CBR budget search rather than the
-	// encode_frame_FLP gain loop, so the measured gain (~18.8 dB vs ~15.7 dB)
-	// is below libopus' own (~20.5 dB vs ~16.4 dB) on this fixture. CVBR
-	// streams are byte-identical to libopus (TestCGOEncodeRefSILKByteExact).
-	if meanFEC < meanPLC+2.0 {
+	// falls back to with no redundancy (this CBR stream measures ~19.7 dB vs
+	// ~15.6 dB; the Go encoder's CBR and CVBR SILK packets are byte-identical
+	// to libopus, see TestCGOEncodeRefSILKByteExact).
+	if meanFEC < meanPLC+3.0 {
 		t.Fatalf("FEC did not improve over PLC baseline: mean FEC=%.2fdB PLC=%.2fdB", meanFEC, meanPLC)
 	}
 }

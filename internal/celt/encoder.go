@@ -61,7 +61,37 @@ const patchTransientVoiceThreshold = 0.5
 // in this package: the encode path is the structural mirror of decodeCELTRange,
 // emitting the same range-coder symbol sequence in the same order so that the
 // (RFC-conformant) decoder reconstructs the signal.
+// preemphCoef0 is mode->preemph[0] of the 48 kHz CELT mode
+// (QCONST16(0.8500061035f, 15) in the float build).
+const preemphCoef0 = float32(0.8500061035)
+
+// FrameTrace records the analysis of the most recently coded CELT frame in
+// the layouts the instrumented libopus encoder dumps ([CELT_ENC_*]), for
+// the encoder oracle: the pre-emphasised analysis buffers (`in`, per channel
+// overlap + frame), the MDCT coefficients (`freq`, interleaved short blocks
+// on transients), band amplitudes and log energies, the frame decisions and
+// the range coder position after tf_encode.
+type FrameTrace struct {
+	In          [][]float64
+	Freq        [][]float64
+	BandE       []float64 // channel-major, NBands per channel
+	BandLogE    []float64
+	IsTransient bool
+	ShortBlocks int
+	TFEstimate  float64
+	TFChan      int
+	Intra       bool
+	TFRes       []int
+	TFSelect    int
+	TellCoarse  int // ec_tell after the coarse energies
+	TellTF      int // ec_tell after tf_encode
+}
+
+// LastFrameTrace returns the trace of the most recently coded frame.
+func (e *Encoder) LastFrameTrace() FrameTrace { return e.lastTrace }
+
 type Encoder struct {
+	lastTrace     FrameTrace
 	mode          *Mode
 	celtMode      *dsp.CELTMode // forward (analysis) MDCT, N-point long block
 	shortCeltMode *dsp.CELTMode // forward MDCT for transient short blocks (NBase-point)
@@ -324,9 +354,12 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			} else {
 				s = samples[i*ch+c]
 			}
-			xin := s * 32768.0
-			pe[i] = xin - mem
-			mem = 0.85 * xin
+			// celt_preemphasis (float build): x = CELT_SIG_SCALE * pcm,
+			// inp = x - m, m = coef0 * x, all in float32 with the 48 kHz
+			// mode's coef0 = 0.8500061035f.
+			xin := float64(float32(s) * 32768)
+			pe[i] = float64(float32(xin - mem))
+			mem = float64(float32(preemphCoef0) * float32(xin))
 		}
 		e.preemphMem[c] = mem
 
@@ -364,6 +397,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// logE for the given block type. The overlap-state copy reads the unchanged
 	// analysis buffer, so calling this twice (after patch_transient_decision
 	// promotes the frame to transient) advances the overlap exactly once.
+	traceCoeffs := make([][]float64, ch)
 	computeSpectrum := func(transient bool) {
 		for c := 0; c < ch; c++ {
 			buf := bufs[c]
@@ -383,6 +417,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 				coeffs = e.celtMode.CLTMDCTForward(buf)
 			}
 			copy(e.overlap[c], buf[frameSize:frameSize+ov])
+			traceCoeffs[c] = coeffs
 
 			base := c * frameLen
 			for i := 0; i < numBands; i++ {
@@ -613,6 +648,23 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	quantLogE := QuantizeCoarseEnergy(enc, logE, e.prevBandEnergies, nil,
 		intra, numBands, start, end, lm, ch, totalBits)
 	etr(enc, "coarse")
+	{
+		tr := FrameTrace{IsTransient: isTransient, TFEstimate: tfEstimate, TFChan: tfChan, Intra: intra, TellCoarse: enc.ECTell()}
+		if isTransient {
+			tr.ShortBlocks = M
+		}
+		for c := 0; c < ch; c++ {
+			tr.In = append(tr.In, append([]float64(nil), bufs[c]...))
+			tr.Freq = append(tr.Freq, append([]float64(nil), traceCoeffs[c]...))
+		}
+		tr.BandE = make([]float64, ch*nbEBands)
+		tr.BandLogE = make([]float64, ch*numBands)
+		for c := 0; c < ch; c++ {
+			copy(tr.BandE[c*nbEBands:(c+1)*nbEBands], bandE[c*nbEBands:(c+1)*nbEBands])
+			copy(tr.BandLogE[c*numBands:(c+1)*numBands], logE[c*numBands:(c+1)*numBands])
+		}
+		e.lastTrace = tr
+	}
 
 	// Dynamic-allocation analysis (masking follower → per-band boosts and the
 	// per-band importance weights consumed by tf_analysis). Only the DECISIONS are
@@ -640,6 +692,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 	tfEncode(enc, start, end, isTransient, tfRes, lm, tfSelect, totalBits)
 	etr(enc, "tf_encode")
+	e.lastTrace.TFRes = append([]int(nil), tfRes...)
+	e.lastTrace.TFSelect = tfSelect
+	e.lastTrace.TellTF = enc.ECTell()
 
 	// Spread decision (tonality-based). Complexity 0 forces SPREAD_NONE; otherwise
 	// spreading_decision measures per-band tonality from the normalised spectrum.

@@ -137,11 +137,20 @@ that must be reconciled when this pipeline lands.
   history, first_frame_after_reset) and `CODE_INDEPENDENTLY_NO_LTP_SCALING`
   on the first coded side frame after a mid-only frame; stereo packets are
   byte-identical to libopus (`TestSILKEncoderStereoOracle`).
-- **Stream channel / bandwidth policy.** libopus downmixes a stereo input to
-  one SILK stream when the equivalent rate is below the stereo threshold
-  (16 kbps here; 20 kbps with FEC) and, with `decide_fec`, narrows the
-  bandwidth; the Go encoder keeps the input channel count and the
-  input-rate bandwidth, so those cells differ from packet 0.
+- **Stream channel decision — done (`38072d0`, `8a93b3e`).** A stereo
+  input is coded as a mono SILK stream below the stereo threshold, with
+  libopus' toMono transition and the mono↔stereo state hand-over
+  (`TestCGOEncodeRefSILKStreamChannels`). `voice_est` follows the signal
+  hint / application only: libopus' tonality analysis (complexity ≥ 7)
+  is not ported, so AUTO signal at complexity ≥ 7 can decide differently.
+- **Bandwidth / mode policy.** libopus picks the bandwidth from
+  `equiv_rate` (mono/stereo voice/music threshold tables with hysteresis,
+  `st->first`, `allowBandwidthSwitch`) and switches SILK's internal rate
+  (`silk_control_audio_bandwidth`, the variable LP transition filter);
+  with `decide_fec` it narrows the bandwidth to fit FEC. The Go SILK rate
+  follows the input rate (8/12/≥16 kHz → NB/MB/WB) and the mode decision is
+  the Go heuristic, so libopus' hybrid choice for 24/48 kHz mono voice input
+  (SWB/FB at ≥ 15 kbps) and its NB/MB choices below ~10 kbps are not mirrored.
 
 ## Go implementation plan
 

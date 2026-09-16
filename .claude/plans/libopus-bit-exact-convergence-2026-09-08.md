@@ -864,3 +864,32 @@ test passes.
 - Verified `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (all pass); SILK/hybrid perf
   digests regenerated (CBR packets are now cbr_bytes long).
+
+### 2026-09-17: Stream channel decision and mono-stream coding of stereo input (`38072d0`, `8a93b3e`, `93e4b68`)
+
+- Reference: `src/opus_encoder.c` (stream_channels from
+  `stereo_music_threshold` / `stereo_voice_threshold` interpolated by
+  `voice_est`, ±1000 hysteresis, the delayed stereo→mono transition via
+  `silk_mode.toMono`), `silk/enc_API.c` (nChannelsAPI 2 / nChannelsInternal
+  1: `RES2INT16(L + R)` halved with rounding before the mono channel's
+  resampler, first-mono-frame averaging with the side resampler, mono→stereo
+  re-init of the side channel with the resampler copied from the mono
+  channel and the stereo predictor/norm/width state restarted, LBRR flags
+  cleared on a channel transition).
+- `38072d0` feat(silk): `SetStreamChannels` / `DownmixToMono` and the
+  transition rules (`front_end.go`); per-channel SNR rate divides by the
+  stream channel count.
+- `8a93b3e` feat(encoder): `decideStreamChannels` (`encoder_fec.go`) with
+  `voiceEst` (127 voice / 0 music / 115 VOIP / 48 other — libopus' tonality
+  analysis, which only runs at complexity ≥ 7, is not ported), TOC and
+  resampler handling in `encodeSILKOnlyPacket` / `silkInput`.
+- `93e4b68` test(opusref): `TestCGOEncodeRefSILKStreamChannels` — stereo
+  input at 16/20 kbps and a 32→16→32 kbps schedule at 8/16/48 kHz:
+  stereo → toMono → mono → stereo, all packets byte-identical.
+- `TestCGOEncodeRefSILKByteExact`: **84 of 99 cells byte-identical**
+  (CVBR, CVBR+FEC, CBR × mono 8–48 kHz × 16/24/32 kbps, stereo 8/12/16 kHz
+  × 16–48 kbps); the 15 remaining are libopus policy the Go encoder does not
+  mirror yet: hybrid for 24/48 kHz mono input (14) and `decide_fec`'s
+  bandwidth narrowing to MB at 16 kHz / 20 kbps stereo with FEC (1).
+- Verified `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (all pass).

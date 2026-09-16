@@ -30,8 +30,8 @@ is complete at the oracle level but has **not** been merged back.
 | SILK encoder VAD, pitch, LTP (Q2) | bit-exact on injected inputs (2026-09-15, `dev/silk-q2-ltp-oracle`); wired into the encoder |
 | SILK encoder input pipeline | complete (2026-09-16, `dev/encoder-input-pipeline`): VAD flags, 5 ms look-ahead, Fs/250 CELT delay, high-pass, int16 front end, libopus encoder resampler; conditioned input / x_buf / VAD / HP state bit-exact vs the instrumented libopus encoder at 8/12/16/24/48 kHz; silence-shortcut policy open |
 | SILK encoder Q3 noise shaping | bit-exact vs the instrumented libopus encoder on shared inputs (2026-09-16, `ad81c1f`) |
-| SILK-only encoder, mono and stereo, CVBR and CBR 20 ms, with and without in-band FEC | **byte-identical to libopus 1.6.1** on all shared-state oracle cells (mono 24/32 kbps, +20 % loss, CBR; stereo 8/12/16 kHz), and against the real libopus encoder on 90/119 auto-mode cells = every SILK-only same-channel-count cell (2026-09-16, `e16f983`); onset/silence blocked by the Go silence shortcut |
-| SILK encoder: silence shortcut; mode/channel/bandwidth policy (hybrid for 24/48 kHz input, stereo→mono downmix, decide_fec narrowing); hybrid/CELT encoder | not verified / not bit-exact |
+| SILK-only encoder, mono and stereo (incl. stereo input coded as a mono stream and the transitions), CVBR and CBR 20 ms, with and without in-band FEC | **byte-identical to libopus 1.6.1** on all shared-state oracle cells and against the real libopus encoder on 84/99 auto-mode cells (2026-09-17, `93e4b68`); onset/silence blocked by the Go silence shortcut |
+| SILK encoder: silence shortcut; mode/bandwidth policy (hybrid for 24/48 kHz input, SILK internal-rate switching, decide_fec narrowing), tonality analysis (complexity ≥ 7); hybrid/CELT encoder | not verified / not bit-exact |
 
 ## Open decision (blocks Q1 merge-back)
 
@@ -168,11 +168,13 @@ i.e. every cell libopus codes as SILK-only with the same channel count**.
 `46c8703`/`8798be9`/`e16f983` (2026-09-16 night): encode_frame_FLP
 quantiser loop + cbr_bytes sizing/padding → **CBR mono and stereo SILK
 packets byte-identical too (90/119 cgoref cells = every SILK-only
-same-channel-count cell in CVBR, CVBR+FEC and CBR)**. Remaining: the
+same-channel-count cell in CVBR, CVBR+FEC and CBR)**. `38072d0`/`8a93b3e`/`93e4b68`
+(2026-09-17): stream channel decision + mono-stream coding of stereo
+input with exact transitions → **84/99 cgoref cells**. Remaining: the
 digital-silence shortcut policy (onset fixture; libopus codes silent
-frames), mode/channel/bandwidth policy (hybrid for 24/48 kHz input,
-stereo→mono downmix, decide_fec narrowing), hybrid/CELT, a
-phase-insensitive scoreboard distance. Merge-back: `dev/libopus-bit-exact` was fast-forwarded to
+frames), mode/bandwidth policy (hybrid for 24/48 kHz input, SILK internal
+rate switching, decide_fec narrowing), the tonality analysis (complexity
+≥ 7), hybrid/CELT, a phase-insensitive scoreboard distance. Merge-back: `dev/libopus-bit-exact` was fast-forwarded to
 `08c4201` (Q1/Q2/PLC) on 2026-09-16; the child branches
 `dev/silk-plc-exact`, `dev/silk-q1-oracle`, `dev/silk-q2-ltp-oracle` were
 deleted.

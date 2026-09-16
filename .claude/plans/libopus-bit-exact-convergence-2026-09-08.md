@@ -999,3 +999,29 @@ side exposes a `celt.FrameTrace` like `silk.FrameTrace`):
 Blocked-on-CELT items from the SILK side: hybrid mode policy for 24/48 kHz
 input, SILK internal-rate switching (needs the CELT redundancy frame),
 `decide_fec` bandwidth narrowing in hybrid.
+
+### 2026-09-17: Phase 5 step 1 started — CELT oracle + exact pre-emphasis (`c34af75`, `63e5128`)
+
+- `63e5128` test(opusref): `--celt-enc` oracle mode and the
+  `celt_encode_with_ec` instrumentation (`[CELT_ENC_FRAME]`, `_IN`, `_FREQ`,
+  `_BANDE`, `_BANDLOGE`, `_COARSE`, `_TF_RES`); `celt.FrameTrace` on the Go
+  encoder; `TestCELTEncoderOracle` reports per-stage float32 statistics and
+  decisions (framing gated only).
+- `c34af75` fix(celt): `celt_preemphasis` in float32 with
+  `preemph[0] = 0.8500061035f` → the CELT analysis input (`in`) is
+  **bit-identical** to libopus on every frame (complexity 0, where no
+  prefilter runs).
+- Baseline after the fix (complexity 0, 64 kbps CBR, ref-speech): MDCT
+  coefficients differ at float32 rounding level (maxAbs ≈ 1e-4 on the int16
+  scale, 1–5 % of coefficients bit-equal) — the float64 MDCT vs libopus'
+  float32 `clt_mdct_forward` + KISS FFT; band energies follow (maxAbs ≈
+  1e-4). Coarse-energy `tell` differs (Go 51 vs C 53 on frame 0): the intra
+  decision (Go: first frame only; libopus: two-pass inside
+  `quant_coarse_energy` at complexity ≥ 4 plus `delayedIntra`) and Laplace
+  coding must be checked once the energies match. At complexity 5 libopus
+  enables the pitch prefilter (`pf_on`, `tell` 17) which the Go encoder
+  lacks entirely.
+- Next: float32-faithful `clt_mdct_forward` (window, pre-rotation, KISS FFT
+  `kf_bfly*` order, post-rotation) with the oracle's `[CELT_ENC_FREQ]`, then
+  `compute_band_energies`/`amp2Log2` (`celt_sqrt`/`celt_log2` float32
+  approximations), then `quant_coarse_energy`.

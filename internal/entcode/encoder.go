@@ -174,6 +174,30 @@ func (enc *Encoder) TellFrac() int {
 	return nbits - l
 }
 
+// PatchInitialBits overwrites the first nbits (<= 8) of the stream with val,
+// like ec_enc_patch_initial_bits: the SILK encoder reserves them with a
+// placeholder symbol and fills in the VAD/LBRR flags once every frame of the
+// packet has been analysed. It returns false when fewer than nbits have been
+// encoded so far.
+func (enc *Encoder) PatchInitialBits(val uint32, nbits uint) bool {
+	shift := SymBits - nbits
+	mask := uint32((1<<nbits)-1) << shift
+	switch {
+	case len(enc.buf) > 0:
+		// The first byte has been finalized.
+		enc.buf[0] = byte((uint32(enc.buf[0]) &^ mask) | val<<shift)
+	case enc.rem >= 0:
+		// The first byte is still awaiting carry propagation.
+		enc.rem = int((uint32(enc.rem) &^ mask) | val<<shift)
+	case enc.rng <= CodeTop>>nbits:
+		// The renormalization loop has never been run.
+		enc.val = (enc.val &^ (mask << CodeShift)) | val<<(CodeShift+shift)
+	default:
+		return false
+	}
+	return true
+}
+
 // carryOut handles carry propagation - matches ec_enc_carry_out in libopus.
 func (enc *Encoder) carryOut(c uint32) {
 	if c != SymMax {

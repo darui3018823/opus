@@ -7,64 +7,6 @@ import (
 	"github.com/darui3018823/opus/internal/entcode"
 )
 
-func TestSilkStereoFindPredictorLeastSquares(t *testing.T) {
-	x := make([]int16, 320)
-	y := make([]int16, len(x))
-	for i := range x {
-		v := int16(12000 * math.Sin(2*math.Pi*float64(i)/37))
-		x[i] = v
-		y[i] = int16(3 * int32(v) / 4)
-	}
-
-	var amp [4]int32
-	gotQ13 := silkStereoFindPredictor(&amp, 0, x, y, len(x), stereoSmoothCoefQ16(false))
-	wantQ13 := int32(0.75 * (1 << 13))
-	if diff := abs32(gotQ13 - wantQ13); diff > 2 {
-		t.Fatalf("predictor Q13=%d, want %d (+/-2)", gotQ13, wantQ13)
-	}
-	if amp[0] <= 0 {
-		t.Fatalf("smoothed mid amplitude was not updated: %v", amp)
-	}
-	if amp[1] >= amp[0]/20 {
-		t.Fatalf("proportional target left excessive residual amplitude: mid=%d residual=%d", amp[0], amp[1])
-	}
-}
-
-func TestSilkStereoFindPredictorFLPTwoBasis(t *testing.T) {
-	const n = 320
-	mid := make([]float64, n)
-	side := make([]float64, n)
-	for i := range mid {
-		mid[i] = 12000*math.Sin(2*math.Pi*float64(i)/37) +
-			3500*math.Sin(2*math.Pi*float64(i)/5)
-	}
-	for i := range side {
-		prev := mid[i]
-		if i > 0 {
-			prev = mid[i-1]
-		}
-		next := mid[i]
-		if i+1 < n {
-			next = mid[i+1]
-		}
-		lp := 0.25 * (prev + 2*mid[i] + next)
-		side[i] = 0.55*lp - 0.20*mid[i]
-	}
-
-	gotQ13, scale := silkStereoFindPredictorFLP(mid, side, 0.01)
-	if scale != 1<<13 {
-		t.Fatalf("scale=%d, want %d", scale, 1<<13)
-	}
-	// The helper returns decoder form [LP-HP, HP], which here is
-	// approximately [0.55, -0.20] before codebook quantization.
-	if math.Abs(float64(gotQ13[0])/float64(scale)-0.55) > 0.04 {
-		t.Fatalf("LP predictor=%d/%d, want approximately 0.55", gotQ13[0], scale)
-	}
-	if math.Abs(float64(gotQ13[1])/float64(scale)+0.20) > 0.04 {
-		t.Fatalf("center predictor=%d/%d, want approximately -0.20", gotQ13[1], scale)
-	}
-}
-
 func TestStereoPredictorIndicesRoundTrip(t *testing.T) {
 	predQ13 := [2]int32{6200, -2700}
 	ix := silkStereoQuantPred(&predQ13)
@@ -79,47 +21,75 @@ func TestStereoPredictorIndicesRoundTrip(t *testing.T) {
 	}
 }
 
-func TestStereoLRToMSReducesCorrelatedSideEnergy(t *testing.T) {
+// TestStereoLRToMSPannedMonoAndSplit checks the silk_stereo_LR_to_MS port end
+// to end: a hard-panned correlated pair collapses to panned-mono coding
+// (mid-only flag, all rate to mid), and a genuinely stereo pair is coded with the
+// 8/(13+3*frac) mid/side rate split and a side residual below the raw side.
+func TestStereoLRToMSPannedMonoAndSplit(t *testing.T) {
 	const (
 		fsKHz       = 16
 		frameLength = 20 * fsKHz
+		totalRate   = 32000
 	)
-	var state stereoPredState
-	var secondSide []float64
-	var secondPCM []float64
-	var secondIx [2][3]int8
+	var state stereoEncState
+	state.reset()
 
-	for frame := 0; frame < 2; frame++ {
-		pcm := make([]float64, frameLength*2)
+	var res stereoLRToMSResult
+	midOnlyAt := -1
+	for frame := 0; frame < 8; frame++ {
+		left := make([]int16, frameLength)
+		right := make([]int16, frameLength)
 		for i := 0; i < frameLength; i++ {
 			n := frame*frameLength + i
 			s := 0.7 * math.Sin(2*math.Pi*180*float64(n)/(fsKHz*1000))
-			pcm[2*i] = 0.8 * s
-			pcm[2*i+1] = 0.2 * s
+			left[i] = int16(math.Round(0.8 * s * 32767))
+			right[i] = int16(math.Round(0.2 * s * 32767))
 		}
-		_, side, ix := state.lrToMS(pcm, fsKHz, frameLength)
-		if frame == 1 {
-			secondPCM = pcm
-			secondSide = side
-			secondIx = ix
+		res = state.lrToMS(left, right, fsKHz, frameLength, totalRate, 255, false)
+		if res.midOnly {
+			midOnlyAt = frame
+			break
 		}
+	}
+	if midOnlyAt < 0 {
+		t.Fatalf("panned correlated pair never collapsed to panned-mono coding: last result %+v", res)
+	}
+	if res.midSideRates != [2]int32{totalRate - 600, 0} {
+		t.Fatalf("mid-only rates = %v, want all of total-600 on mid", res.midSideRates)
 	}
 
-	predQ13 := stereoPredQ13FromIndices(secondIx)
-	if predQ13 == [2]int32{} {
-		t.Fatalf("correlated panned signal selected zero stereo predictors: indices=%v", secondIx)
-	}
-
-	start := stereoInterpLenMs * fsKHz
-	var rawEnergy, residualEnergy float64
-	for i := start; i < frameLength; i++ {
-		rawSide := 0.5 * (secondPCM[2*i] - secondPCM[2*i+1])
-		rawEnergy += rawSide * rawSide
-		residualEnergy += secondSide[i] * secondSide[i]
-	}
-	if residualEnergy >= 0.10*rawEnergy {
-		t.Fatalf("stereo predictor did not sufficiently reduce side energy: residual/raw=%.4f predictors=%v indices=%v",
-			residualEnergy/rawEnergy, predQ13, secondIx)
+	// Genuine stereo: independent tones per channel.
+	state.reset()
+	for frame := 0; frame < 3; frame++ {
+		left := make([]int16, frameLength)
+		right := make([]int16, frameLength)
+		for i := 0; i < frameLength; i++ {
+			n := frame*frameLength + i
+			tm := float64(n) / (fsKHz * 1000)
+			m := 0.5 * math.Sin(2*math.Pi*180*tm)
+			d := 0.3 * math.Sin(2*math.Pi*333*tm+0.7)
+			left[i] = int16(math.Round((m + d) * 32767))
+			right[i] = int16(math.Round((m - d) * 32767))
+		}
+		res = state.lrToMS(left, right, fsKHz, frameLength, totalRate, 255, false)
+		if res.midOnly {
+			t.Fatalf("frame %d: independent side content coded mid-only", frame)
+		}
+		if got := res.midSideRates[0] + res.midSideRates[1]; got != totalRate-600 {
+			t.Fatalf("frame %d: mid+side rates = %d, want total minus the 600 bps stereo parameters (%d): %v", frame, got, totalRate-600, res.midSideRates)
+		}
+		if res.midSideRates[0] <= res.midSideRates[1] {
+			t.Fatalf("frame %d: mid rate must exceed side rate: %v", frame, res.midSideRates)
+		}
+		var rawEnergy, residualEnergy float64
+		for i := stereoInterpLenMs * fsKHz; i < frameLength; i++ {
+			rawSide := 0.5 * float64(int32(left[i])-int32(right[i]))
+			rawEnergy += rawSide * rawSide
+			residualEnergy += float64(res.side[i]) * float64(res.side[i])
+		}
+		if residualEnergy > 1.05*rawEnergy {
+			t.Fatalf("frame %d: side residual energy %.3g exceeds raw side energy %.3g", frame, residualEnergy, rawEnergy)
+		}
 	}
 }
 

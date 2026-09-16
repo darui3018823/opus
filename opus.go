@@ -1744,8 +1744,11 @@ func (e *Encoder) applyBitrateSetting(frameSize int) error {
 		// - 8), i.e. the packet rate minus the TOC byte amortised over the
 		// packet (24000 bps at 20 ms -> 23600 bps), which selects SNR_dB_Q7.
 		silkBitrate := bitsToBitrate(bitrateToBits(e.bitrate, e.sampleRate, frameSize)-8, e.sampleRate, frameSize)
-		if silkBitrate > 40000 {
-			silkBitrate = 40000
+		if silkBitrate > 80000 {
+			silkBitrate = 80000
+		}
+		if silkBitrate < 5000 {
+			silkBitrate = 5000
 		}
 		if err := e.silkEncoder.SetBitrate(silkBitrate); err != nil {
 			return err

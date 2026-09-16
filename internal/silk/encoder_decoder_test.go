@@ -109,8 +109,9 @@ func TestEncoderSetBitrate(t *testing.T) {
 	}{
 		{"Valid 8kbps", 8000, false},
 		{"Valid 24kbps", 24000, false},
-		{"Too low", 5000, true},
-		{"Too high", 50000, true},
+		{"Valid 48kbps stereo packet rate", 48000, false},
+		{"Too low", 4000, true},
+		{"Too high", 90000, true},
 	}
 
 	for _, tt := range tests {
@@ -1252,20 +1253,27 @@ func TestStereoOnlyMiddleStatePersistsAcrossPackets(t *testing.T) {
 		return pcm
 	}
 
+	// silk_stereo_LR_to_MS switches to panned-mono coding only once its
+	// smoothed residual/mid ratio has fallen (the first frame is unsmoothed
+	// and the width first has to collapse), so feed identical mid-only frames
+	// until the encoder reports a mid-only packet.
 	middleOnly := makeFrame(false)
-	packet, err := enc.Encode(middleOnly)
-	if err != nil {
-		t.Fatalf("middle-only Encode: %v", err)
-	}
-	referencePacket, err := reference.Encode(middleOnly)
-	if err != nil {
-		t.Fatalf("middle-only reference Encode: %v", err)
-	}
-	if string(packet) != string(referencePacket) {
-		t.Fatal("identical middle-only encoders produced different packets")
+	var packet, referencePacket []byte
+	for p := 0; p < 8 && !enc.prevOnlyMiddle; p++ {
+		packet, err = enc.Encode(middleOnly)
+		if err != nil {
+			t.Fatalf("middle-only Encode: %v", err)
+		}
+		referencePacket, err = reference.Encode(middleOnly)
+		if err != nil {
+			t.Fatalf("middle-only reference Encode: %v", err)
+		}
+		if string(packet) != string(referencePacket) {
+			t.Fatal("identical middle-only encoders produced different packets")
+		}
 	}
 	if !enc.prevOnlyMiddle {
-		t.Fatal("middle-only state was not retained at the packet boundary")
+		t.Fatal("middle-only state was not reached / retained at the packet boundary")
 	}
 
 	// Model stale side synthesis/noise-shaping history from before the

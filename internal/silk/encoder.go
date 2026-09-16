@@ -90,7 +90,7 @@ type Encoder struct {
 	shapeTiltSmooth float64
 	noiseShapeBuf   []float64
 	side            *Encoder // side-channel encoder for stereo packets
-	stereoState     stereoPredState
+	stereoState     stereoEncState
 	prevOnlyMiddle  bool // previous stereo frame omitted the side channel
 
 	// Input buffer (silk_encoder_state_FLP.x_buf): [ltp_mem_length history |
@@ -183,6 +183,17 @@ type Encoder struct {
 	// and lastGainSymbols the gain symbols encodeGains wrote for the frame.
 	curLTPScaleIndex int
 	lastGainSymbols  []int
+	// codeNoLTPScaling marks CODE_INDEPENDENTLY_NO_LTP_SCALING: the side
+	// channel frame after a mid-only frame is coded independently but without
+	// LTP scaling (no LTP_scaleIndex symbol).
+	codeNoLTPScaling bool
+	// channelRateBps is this channel's TargetRate_bps when the stereo layer
+	// has split the packet rate (MStargetRates_bps); 0 means the packet rate
+	// divided by the channel count.
+	channelRateBps int
+	// pendingLBRRStereoMidOnly carries the mid-only flags for the frames in
+	// pendingLBRR (coded with an LBRR mid frame whose side LBRR is absent).
+	pendingLBRRStereoMidOnly []bool
 }
 
 type nlsfAnalysis struct {
@@ -279,7 +290,7 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		bitrate:          sampleRate * channels * 16 / 8,
 		silkVAD:          newSilkVADState(),
 		speechActivity:   1.0,
-		speechActivityQ8: 255,
+		speechActivityQ8: 0,
 		inputQuality:     1.0,
 		prevEnergy:       1.0,
 		prevLPC:          make([]float64, lpcOrder),
@@ -321,6 +332,7 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		enc.stereoComponent = true
 		side.stereoComponent = true
 		enc.side = side
+		enc.stereoState.reset()
 	}
 	return enc, nil
 }
@@ -339,8 +351,10 @@ func (e *Encoder) SetComplexity(complexity int) error {
 
 // SetBitrate sets the target bitrate in bps
 func (e *Encoder) SetBitrate(bitrate int) error {
-	if bitrate < 6000 || bitrate > 40000 {
-		return fmt.Errorf("bitrate must be between 6000 and 40000 bps, got %d", bitrate)
+	// MIN_TARGET_RATE_BPS .. MAX_TARGET_RATE_BPS (silk/define.h); the Opus
+	// layer passes the whole packet rate for stereo streams too.
+	if bitrate < 5000 || bitrate > 80000 {
+		return fmt.Errorf("bitrate must be between 5000 and 80000 bps, got %d", bitrate)
 	}
 	e.bitrate = bitrate
 	if e.side != nil {
@@ -469,55 +483,41 @@ func (e *Encoder) encodeMultiStereo(pcm []float64, nFrames int) ([]byte, error) 
 	return enc.Bytes(), nil
 }
 
+// encodeMultiStereoWithEncoder codes a stereo SILK packet like silk_Encode
+// with nChannelsInternal == 2: both channels pass the front end, the VAD/LBRR
+// flag bits are reserved with a placeholder symbol and patched in at the end
+// (the side VAD depends on the per-frame mid-only decision), and every frame
+// runs silk_stereo_LR_to_MS with the packet's TargetRate_bps, codes the
+// predictor indices (and the mid-only flag when the side VAD is inactive),
+// then the mid frame and — unless mid-only — the side frame.
 func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float64, nFrames int) error {
 	if e.side == nil {
 		return fmt.Errorf("missing SILK side-channel encoder")
 	}
+	fsKHz := e.sampleRate / 1000
 
-	midFrames := make([][]float64, nFrames)
-	sideFrames := make([][]float64, nFrames)
-	stereoPredIx := make([][2][3]int8, nFrames)
-	vadFlags := [2][]bool{
-		make([]bool, nFrames),
-		make([]bool, nFrames),
-	}
+	left := make([][]int16, nFrames)
+	right := make([][]int16, nFrames)
 	for frame := 0; frame < nFrames; frame++ {
 		base := frame * e.frameSize * 2
 		// Each channel passes the int16 quantisation and resampler delay
-		// before the mid/side conversion, which adds the inputBuf offset.
-		left := make([]float64, e.frameSize)
-		right := make([]float64, e.frameSize)
+		// before the mid/side conversion (which adds the inputBuf offset).
+		l := make([]float64, e.frameSize)
+		r := make([]float64, e.frameSize)
 		for i := 0; i < e.frameSize; i++ {
-			left[i] = pcm[base+2*i]
-			right[i] = pcm[base+2*i+1]
+			l[i] = pcm[base+2*i]
+			r[i] = pcm[base+2*i+1]
 		}
-		left = e.frontEndFrame(left, false)
-		right = e.side.frontEndFrame(right, false)
-		lr := make([]float64, e.frameSize*2)
-		for i := 0; i < e.frameSize; i++ {
-			lr[2*i] = left[i]
-			lr[2*i+1] = right[i]
-		}
-		mid, side, predIx := e.stereoState.lrToMS(lr, e.sampleRate/1000, e.frameSize)
-		midFrames[frame] = mid
-		sideFrames[frame] = side
-		stereoPredIx[frame] = predIx
-		vadFlags[0][frame] = e.runFrameVAD(frame, mid)
-		vadFlags[1][frame] = e.side.runFrameVAD(frame, side)
+		left[frame] = floatFrameToInt16(e.frontEndFrame(l, false))
+		right[frame] = floatFrameToInt16(e.side.frontEndFrame(r, false))
 	}
 
 	e.setupLBRR()
 	e.side.setupLBRR()
-	for ch := 0; ch < 2; ch++ {
-		for _, active := range vadFlags[ch] {
-			enc.EncodeBitLogp(active, 1)
-		}
-		symbol := e.pendingLBRRSymbol(nFrames)
-		if ch == 1 {
-			symbol = e.side.pendingLBRRSymbol(nFrames)
-		}
-		enc.EncodeBitLogp(symbol != 0, 1)
-	}
+	// Placeholder for the VAD and LBRR flags of both channels.
+	flagBits := uint((nFrames + 1) * 2)
+	placeholder := 256 - (256 >> flagBits) // iCDF[0] = 256 - silk_RSHIFT(256, (nFramesPerPacket + 1) * nChannelsInternal)
+	enc.EncodeIcdf(0, []uint8{uint8(placeholder), 0}, 8)
 	lbrrSymbols := [2]int{
 		e.pendingLBRRSymbol(nFrames),
 		e.side.pendingLBRRSymbol(nFrames),
@@ -533,8 +533,8 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		component.writePendingLBRRMask(enc, nFrames, symbol)
 	}
 	// libopus writes stereo LBRR frame-major. A mid-channel redundant frame is
-	// preceded by its stereo predictor and, when side LBRR is absent, the
-	// mid-only flag. The channel bodies then follow mid before side.
+	// preceded by the frame's stereo predictor and, when side LBRR is absent,
+	// its mid-only flag. The channel bodies then follow mid before side.
 	var midEC, sideEC lbrrECState
 	for frame := 0; frame < nFrames; frame++ {
 		midPresent := lbrrSymbols[0]&(1<<uint(frame)) != 0
@@ -546,7 +546,11 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 			}
 			encodeStereoPred(enc, pred)
 			if !sidePresent {
-				enc.EncodeIcdf(1, silkStereoOnlyCodeMidICDF[:], 8)
+				midOnly := 0
+				if frame < len(e.pendingLBRRStereoMidOnly) && e.pendingLBRRStereoMidOnly[frame] {
+					midOnly = 1
+				}
+				enc.EncodeIcdf(midOnly, silkStereoOnlyCodeMidICDF[:], 8)
 			}
 			e.writeLBRRFrame(enc, e.pendingLBRR[frame], frame > 0 && lbrrSymbols[0]&(1<<uint(frame-1)) != 0, &midEC)
 		}
@@ -554,40 +558,107 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 			e.side.writeLBRRFrame(enc, e.side.pendingLBRR[frame], frame > 0 && lbrrSymbols[1]&(1<<uint(frame-1)) != 0, &sideEC)
 		}
 	}
-	e.updateLBRRUsage(enc.ECTell() - lbrrStartBits)
+	lbrrBits := enc.ECTell() - lbrrStartBits
+	e.updateLBRRUsage(lbrrBits)
 
 	e.beginLBRRPacket()
 	e.side.beginLBRRPacket()
 	e.lastSNRVBRStream = false
+	vadFlags := [2][]bool{make([]bool, nFrames), make([]bool, nFrames)}
+	predIx := make([][2][3]int8, nFrames)
+	midOnly := make([]bool, nFrames)
 	for i := 0; i < nFrames; i++ {
-		e.targetRateBps = e.frameTargetRate(nFrames, i, enc.ECTell())
-		e.side.targetRateBps = e.targetRateBps
-		encodeStereoPred(enc, stereoPredIx[i])
-		onlyMiddle := false
-		if !vadFlags[1][i] {
-			onlyMiddle = true
-			enc.EncodeIcdf(1, silkStereoOnlyCodeMidICDF[:], 8)
-		}
-		e.curFrame = i
-		e.encodeRangeFrame(enc, midFrames[i], vadFlags[0][i], i > 0)
-		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
-		if !onlyMiddle {
+		tell := enc.ECTell()
+		total := e.frameTargetRate(nFrames, i, tell)
+		e.targetRateBps = total
+		e.side.targetRateBps = total
+		// silk_stereo_LR_to_MS with the mid channel's previous speech activity.
+		ms := e.stereoState.lrToMS(left[i], right[i], fsKHz, e.frameSize, int32(total), e.speechActivityQ8, false)
+		predIx[i] = ms.ix
+		midOnly[i] = ms.midOnly
+		mid := int16FrameToFloat(ms.mid)
+		side := int16FrameToFloat(ms.side)
+		if !ms.midOnly {
 			if e.prevOnlyMiddle {
+				// Reset side channel encoder memory for first frame with side coding.
 				e.side.resetForSideReactivation()
 			}
+			vadFlags[1][i] = e.side.runFrameVAD(i, side)
+		} else {
+			vadFlags[1][i] = false
+		}
+		encodeStereoPred(enc, ms.ix)
+		if !vadFlags[1][i] {
+			flag := 0
+			if ms.midOnly {
+				flag = 1
+			}
+			enc.EncodeIcdf(flag, silkStereoOnlyCodeMidICDF[:], 8)
+		}
+		vadFlags[0][i] = e.runFrameVAD(i, mid)
+
+		e.curFrame = i
+		e.channelRateBps = int(ms.midSideRates[0])
+		e.encodeRangeFrame(enc, mid, vadFlags[0][i], i > 0)
+		e.recordRateTrace(nFrames, tell, lbrrBits)
+		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
+		if ms.midSideRates[1] > 0 {
 			e.side.curFrame = i
-			e.side.encodeRangeFrame(enc, sideFrames[i], vadFlags[1][i], i > 0 && !e.prevOnlyMiddle)
+			e.side.channelRateBps = int(ms.midSideRates[1])
+			// CODE_INDEPENDENTLY for the first frame, CODE_INDEPENDENTLY_NO_LTP_SCALING
+			// after a skipped side frame, CODE_CONDITIONALLY otherwise.
+			e.side.codeNoLTPScaling = i > 0 && e.prevOnlyMiddle
+			e.side.encodeRangeFrame(enc, side, vadFlags[1][i], i > 0 && !e.prevOnlyMiddle)
+			e.side.codeNoLTPScaling = false
 			e.lastSNRVBRStream = e.lastSNRVBRStream || e.side.lastSNRVBRFrame
 		} else {
 			e.side.appendMissingLBRRFrame()
 		}
-		e.prevOnlyMiddle = onlyMiddle
+		e.prevOnlyMiddle = ms.midOnly
 	}
+	e.channelRateBps = 0
+	e.side.channelRateBps = 0
+
+	// Insert the VAD and LBRR flags at the beginning of the bitstream.
+	var flags uint32
+	for ch := 0; ch < 2; ch++ {
+		for i := 0; i < nFrames; i++ {
+			flags <<= 1
+			if vadFlags[ch][i] {
+				flags |= 1
+			}
+		}
+		flags <<= 1
+		if lbrrSymbols[ch] != 0 {
+			flags |= 1
+		}
+	}
+	enc.PatchInitialBits(flags, flagBits)
+
 	e.finishLBRRPacket(nFrames)
 	e.side.finishLBRRPacket(nFrames)
 	e.finishPacketBitReservoir(nFrames, enc.ECTell())
-	e.pendingLBRRStereoPred = append(e.pendingLBRRStereoPred[:0], stereoPredIx...)
+	e.pendingLBRRStereoPred = append(e.pendingLBRRStereoPred[:0], predIx...)
+	e.pendingLBRRStereoMidOnly = append(e.pendingLBRRStereoMidOnly[:0], midOnly...)
 	return nil
+}
+
+// floatFrameToInt16 converts front-end output (exact int16/32768 values) back
+// to int16 samples; int16FrameToFloat is the inverse.
+func floatFrameToInt16(x []float64) []int16 {
+	out := make([]int16, len(x))
+	for i, v := range x {
+		out[i] = floatToInt16Sample(v)
+	}
+	return out
+}
+
+func int16FrameToFloat(x []int16) []float64 {
+	out := make([]float64, len(x))
+	for i, v := range x {
+		out[i] = float64(v) / 32768.0
+	}
+	return out
 }
 
 func encodeStereoPred(enc *entcode.Encoder, ix [2][3]int8) {
@@ -697,7 +768,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	}
 	e.curLTPScaleIndex = 0
 	if signalType == SignalTypeVoiced && len(domainConfig) == 1 {
-		e.curLTPScaleIndex = silkLTPScaleCtrl(!conditionalGain, domainConfig[0].ltpPredCodGain,
+		e.curLTPScaleIndex = silkLTPScaleCtrl(!conditionalGain && !e.codeNoLTPScaling, domainConfig[0].ltpPredCodGain,
 			e.packetLossPerc, e.packetFrames, e.lbrrFlag, e.frameSNRdBQ7())
 	}
 
@@ -1314,9 +1385,10 @@ func (e *Encoder) encodePitchAndLTP(enc *entcode.Encoder, signal []float64, lpcQ
 		}
 	}
 	// silk_LTP_scale_ctrl_FLP: the scale index is coded for independently
-	// coded frames only and is 0 otherwise.
+	// coded frames only (CODE_INDEPENDENTLY, not the NO_LTP_SCALING variant)
+	// and is 0 otherwise.
 	ltpScaleIndex := 0
-	if !conditionalGain {
+	if !conditionalGain && !e.codeNoLTPScaling {
 		ltpScaleIndex = e.curLTPScaleIndex
 		enc.EncodeIcdf(ltpScaleIndex, silkLTPScaleICDF[:], 8)
 	}
@@ -3198,10 +3270,32 @@ func encodePulseSigns(enc *entcode.Encoder, blocks []pulseBlock, signalType, qua
 // resetForSideReactivation resets the side encoder when side coding resumes
 // after mid-only frames. libopus (silk_Encode) clears the coding state but
 // keeps the channel's resampler, so the front-end delay line survives.
+// resetForSideReactivation is silk_Encode's partial reset of the side channel
+// for the first frame with side coding after mid-only frames: the shaping
+// state, the NSQ state, the previous NLSFs, the pitch lag and gain history and
+// first_frame_after_reset. Everything else (VAD, input buffers, high-pass,
+// frame counter, LTP correlation) carries on.
 func (e *Encoder) resetForSideReactivation() {
-	delay := e.encInputDelay
-	e.Reset()
-	e.encInputDelay = delay
+	e.shapeHarmSmooth32 = 0
+	e.shapeTiltSmooth32 = 0
+	e.shapeHarmSmooth = 0
+	e.shapeTiltSmooth = 0
+	e.prevGainIdx = 10
+	e.nsq = newSilkNSQState(e.frameSize, silkLTPMemLengthMs*(e.sampleRate/1000))
+	for i := range e.lpcState {
+		e.lpcState[i] = 0
+	}
+	for i := range e.ltpState {
+		e.ltpState[i] = 0
+	}
+	for i := range e.prevNLSFQ15 {
+		e.prevNLSFQ15[i] = 0
+	}
+	e.prevNLSF = nlsfQ15ToRadians(e.prevNLSFQ15)
+	e.prevPitchLag = 100
+	e.prevGainQ16 = 65536
+	e.prevSignalType = SignalTypeInactive
+	e.firstFrameAfterReset = true
 }
 
 func (e *Encoder) Reset() {
@@ -3211,7 +3305,7 @@ func (e *Encoder) Reset() {
 	e.silkVAD.reset()
 	e.speechActivity = 1.0
 	e.inputTilt = 0
-	e.speechActivityQ8 = 255
+	e.speechActivityQ8 = 0
 	e.inputTiltQ15 = 0
 	e.inputQuality = 1.0
 	for i := range e.inputQualityB {
@@ -3286,6 +3380,9 @@ func (e *Encoder) Reset() {
 	e.capLTPScaleIndex = 0
 	e.curLTPScaleIndex = 0
 	e.lastGainSymbols = nil
+	e.codeNoLTPScaling = false
+	e.channelRateBps = 0
+	e.pendingLBRRStereoMidOnly = nil
 	e.stereoState.reset()
 	e.prevOnlyMiddle = false
 	if e.side != nil {

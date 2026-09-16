@@ -77,6 +77,9 @@ func (e *Encoder) recordRateTrace(nFrames, tell, lbrrBits int) {
 // frameSNRdBQ7 returns the frame's SNR_dB_Q7 (silk_control_SNR of the
 // per-channel target rate).
 func (e *Encoder) frameSNRdBQ7() int {
+	if e.channelRateBps > 0 {
+		return silkControlSNR(e.channelRateBps, e.sampleRate/1000, e.nSubframes)
+	}
 	targetRate := e.targetRateBps
 	if targetRate == 0 {
 		targetRate = e.bitrate

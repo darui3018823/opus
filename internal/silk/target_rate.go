@@ -84,8 +84,8 @@ func (e *Encoder) frameSNRdBQ7() int {
 	if targetRate == 0 {
 		targetRate = e.bitrate
 	}
-	if e.channels > 0 {
-		targetRate /= e.channels
+	if n := e.StreamChannels(); n > 0 {
+		targetRate /= n
 	}
 	return silkControlSNR(targetRate, e.sampleRate/1000, e.nSubframes)
 }

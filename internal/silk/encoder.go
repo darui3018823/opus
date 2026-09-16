@@ -92,6 +92,13 @@ type Encoder struct {
 	side            *Encoder // side-channel encoder for stereo packets
 	stereoState     stereoEncState
 	prevOnlyMiddle  bool // previous stereo frame omitted the side channel
+	// streamChannels is nChannelsInternal for a stereo (API) encoder: 1 codes
+	// the caller's L/R downmix as a mono stream; prevStreamChannels is
+	// nPrevChannelsInternal (0 before the first packet). toMono marks the
+	// last stereo frame before a stereo->mono transition.
+	streamChannels     int
+	prevStreamChannels int
+	toMono             bool
 
 	// Input buffer (silk_encoder_state_FLP.x_buf): [ltp_mem_length history |
 	// frame_length coded frame | LA_SHAPE_MS look-ahead] in [-1,1]. New input
@@ -347,6 +354,7 @@ func NewEncoderWithFrameMs(sampleRate, channels, frameMs int) (*Encoder, error) 
 		enc.side = side
 		enc.stereoState.reset()
 	}
+	enc.streamChannels = channels
 	return enc, nil
 }
 
@@ -457,12 +465,21 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 	if nFrames < 1 {
 		return fmt.Errorf("invalid frame count: %d", nFrames)
 	}
-	expected := e.frameSize * e.channels * nFrames
+	streamChannels := e.StreamChannels()
+	expected := e.frameSize * streamChannels * nFrames
 	if len(pcm) != expected {
 		return fmt.Errorf("invalid PCM length: got %d, expected %d", len(pcm), expected)
 	}
-	if e.channels == 2 {
+	if streamChannels == 2 {
+		defer func() { e.prevStreamChannels = 2 }()
 		return e.encodeMultiStereoWithEncoder(enc, pcm, nFrames)
+	}
+	if e.channels == 2 {
+		// A stereo encoder coding a mono stream (nChannelsInternal == 1).
+		if e.prevStreamChannels == 2 {
+			e.enterMonoStream()
+		}
+		defer func() { e.prevStreamChannels = 1 }()
 	}
 	prevPacketFrames := e.packetFrames
 	e.packetFrames = nFrames
@@ -473,12 +490,15 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 	frames := make([][]float64, nFrames)
 	vadFlags := make([]bool, nFrames)
 	for frame := 0; frame < nFrames; frame++ {
-		start := frame * e.frameSize * e.channels
+		start := frame * e.frameSize
 		// int16 quantisation and the resampler/inputBuf delay come first,
 		// so the VAD and the coder see the same frame as silk_Encode.
-		framePCM := e.frontEndFrame(pcm[start:start+e.frameSize*e.channels], true)
+		framePCM := e.frontEndFrame(pcm[start:start+e.frameSize], true)
 		frames[frame] = framePCM
 		vadFlags[frame] = e.runFrameVAD(frame, framePCM)
+		if e.channels == 2 {
+			e.trackMonoStreamHistory(framePCM)
+		}
 	}
 
 	for _, active := range vadFlags {
@@ -538,6 +558,9 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		return fmt.Errorf("missing SILK side-channel encoder")
 	}
 	fsKHz := e.sampleRate / 1000
+	if e.prevStreamChannels == 1 {
+		e.enterStereoStream()
+	}
 	// nFramesPerPacket for both channels (silk_LTP_scale_ctrl's round_loss).
 	prevPacketFrames, prevSidePacketFrames := e.packetFrames, e.side.packetFrames
 	e.packetFrames, e.side.packetFrames = nFrames, nFrames
@@ -624,7 +647,7 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		e.side.targetRateBps = total
 		st := StereoFrameTrace{PrevDecodeOnlyMiddle: e.prevOnlyMiddle, TotalRate: total, PrevSpeechActQ8: e.speechActivityQ8}
 		// silk_stereo_LR_to_MS with the mid channel's previous speech activity.
-		ms := e.stereoState.lrToMS(left[i], right[i], fsKHz, e.frameSize, int32(total), e.speechActivityQ8, false)
+		ms := e.stereoState.lrToMS(left[i], right[i], fsKHz, e.frameSize, int32(total), e.speechActivityQ8, e.toMono)
 		st.Ix, st.MidOnly, st.Rates = ms.ix, ms.midOnly, ms.midSideRates
 		st.WidthPrev, st.SmthWidth, st.SilentSideLen, st.PredPrev = e.stereoState.widthPrevQ14, e.stereoState.smthWidthQ14, e.stereoState.silentSideLen, e.stereoState.predPrevQ13
 		predIx[i] = ms.ix
@@ -3456,6 +3479,9 @@ func (e *Encoder) Reset() {
 	e.haveLambda32 = false
 	e.frameMaxBits = 0
 	e.frameUseCBR = false
+	e.streamChannels = e.channels
+	e.prevStreamChannels = 0
+	e.toMono = false
 	e.stereoState.reset()
 	e.prevOnlyMiddle = false
 	if e.side != nil {

@@ -94,6 +94,120 @@ func (e *Encoder) frontEndFrame(input []float64, mono bool) []float64 {
 	return out
 }
 
+// SetStreamChannels sets nChannelsInternal for a stereo encoder (1 or 2).
+// With 1 the caller hands EncodeMulti the L/R downmix (silk_Encode's
+// RES2INT16(L + R) halved with rounding) as a mono frame per SILK frame and
+// the packet is a mono SILK stream. toMono marks the last stereo frame before
+// a stereo->mono transition (silk_stereo_LR_to_MS collapses the width and
+// predictors). Mono encoders ignore both.
+func (e *Encoder) SetStreamChannels(n int, toMono bool) {
+	if e.channels != 2 {
+		return
+	}
+	if n < 1 || n > 2 {
+		n = 2
+	}
+	e.streamChannels = n
+	e.toMono = toMono
+}
+
+// StreamChannels returns nChannelsInternal (1 or 2).
+func (e *Encoder) StreamChannels() int {
+	if e.channels != 2 || e.streamChannels == 0 {
+		return e.channels
+	}
+	return e.streamChannels
+}
+
+// DownmixToMono is silk_Encode's nChannelsAPI == 2 / nChannelsInternal == 1
+// input combination: L + R summed in float, converted with RES2INT16 and
+// halved with rounding, returned in the [-1,1] int16 grid.
+func DownmixToMono(lr []float64) []float64 {
+	n := len(lr) / 2
+	mono := make([]float64, n)
+	for i := 0; i < n; i++ {
+		sum := Float2Int16Sample(float64(float32(lr[2*i]) + float32(lr[2*i+1])))
+		mono[i] = float64(silkRShiftRound(int64(sum), 1)) / 32768
+	}
+	return mono
+}
+
+// enterMonoStream continues a stereo encoder as a mono stream: silk_Encode
+// runs the mono channel's resampler on the downmix and, for the first mono
+// frame, averages it with the side channel's resampler output
+// (silk_RSHIFT(a + b, 1)); at the SILK rate both resamplers are pure delay
+// lines, so their pending samples are averaged. inputBuf + 1 keeps the
+// buffered sMid[1] sample in front of the frame.
+func (e *Encoder) enterMonoStream() {
+	if e.side == nil {
+		return
+	}
+	d := e.frontEndDelay(false)
+	line := make([]float64, d+1)
+	line[0] = float64(e.stereoState.sMid[1]) / 32768
+	for i := 0; i < d; i++ {
+		var a, b int32
+		if i < len(e.encInputDelay) {
+			a = int32(silkFloat2Int(e.encInputDelay[i] * 32768))
+		}
+		if i < len(e.side.encInputDelay) {
+			b = int32(silkFloat2Int(e.side.encInputDelay[i] * 32768))
+		}
+		line[i+1] = float64((a+b)>>1) / 32768
+	}
+	e.encInputDelay = line
+	e.clearTransitionLBRR()
+}
+
+// clearTransitionLBRR is silk_Encode's `transition` rule: a change of the
+// internal channel count clears both channels' pending LBRR flags, so the
+// transition packet carries no redundancy.
+func (e *Encoder) clearTransitionLBRR() {
+	e.pendingLBRR = nil
+	e.pendingLBRRFrames = 0
+	e.pendingLBRRStereoPred = nil
+	e.pendingLBRRStereoMidOnly = nil
+	if e.side != nil {
+		e.side.pendingLBRR = nil
+		e.side.pendingLBRRFrames = 0
+	}
+}
+
+// trackMonoStreamHistory keeps stereo_enc_state.sMid in step while a stereo
+// encoder codes a mono stream (silk_Encode buffers the two samples following
+// the coded frame), so a later stereo frame starts from the right history.
+func (e *Encoder) trackMonoStreamHistory(frame []float64) {
+	if len(frame) == 0 || len(e.encInputDelay) == 0 {
+		return
+	}
+	e.stereoState.sMid[0] = Float2Int16Sample(frame[len(frame)-1])
+	e.stereoState.sMid[1] = Float2Int16Sample(e.encInputDelay[0])
+}
+
+// enterStereoStream continues a stereo encoder after mono frames:
+// silk_Encode re-initialises the side channel encoder and starts its
+// resampler from the mid channel's state; the mono line's leading inputBuf +
+// 1 sample is already held in sMid.
+func (e *Encoder) enterStereoStream() {
+	if e.side == nil {
+		return
+	}
+	e.side.Reset()
+	e.side.stereoComponent = true
+	if len(e.encInputDelay) > 0 {
+		e.encInputDelay = append([]float64(nil), e.encInputDelay[1:]...)
+	}
+	e.side.encInputDelay = append([]float64(nil), e.encInputDelay...)
+	// Mono -> stereo: the predictor history, side buffer, norms and width
+	// restart (sMid and silent_side_len carry on).
+	e.stereoState.predPrevQ13 = [2]int16{}
+	e.stereoState.sSide = [2]int16{}
+	e.stereoState.midSideAmpQ0 = [4]int32{0, 1, 0, 1}
+	e.stereoState.widthPrevQ14 = 0
+	e.stereoState.smthWidthQ14 = 1 << 14
+	e.clearTransitionLBRR()
+}
+
 // addAntiDenormalOffsets applies encode_frame_FLP's eight ±1e-6f offsets to
 // the new input region of xBuf (x_frame + LA_SHAPE_MS*fs_kHz), in float32
 // like libopus.

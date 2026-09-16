@@ -221,8 +221,70 @@ static int run_silk_encoder_oracle(int argc, char **argv)
     return 0;
 }
 
+/* --celt-enc <rate> <fixture> <frames> <bitrate> <complexity> <vbr> <channels>:
+   CELT-only (RESTRICTED_LOWDELAY, fullband forced) encoder trace. */
+static int run_celt_encoder_oracle(int argc, char **argv)
+{
+    int rate, frames, bitrate, complexity, vbr, channels, frame_size, err, frame;
+    const char *fixture;
+    OpusEncoder *enc;
+    float pcm[960 * 2];
+    unsigned char packet[1500];
+
+    if (argc < 4) {
+        fprintf(stderr, "usage: %s --celt-enc <rate> <fixture> [frames] [bitrate] [complexity] [vbr] [channels]\n", argv[0]);
+        return 2;
+    }
+    rate = atoi(argv[2]);
+    fixture = argv[3];
+    frames = (argc >= 5) ? atoi(argv[4]) : 8;
+    bitrate = (argc >= 6) ? atoi(argv[5]) : 64000;
+    complexity = (argc >= 7) ? atoi(argv[6]) : 5;
+    vbr = (argc >= 8) ? atoi(argv[7]) : 0;
+    channels = (argc >= 9) ? atoi(argv[8]) : 1;
+    if (rate != 48000) {
+        fprintf(stderr, "--celt-enc rate must be 48000\n");
+        return 2;
+    }
+    frame_size = rate / 50;
+    enc = opus_encoder_create(rate, channels, OPUS_APPLICATION_RESTRICTED_LOWDELAY, &err);
+    if (enc == NULL || err != OPUS_OK) {
+        fprintf(stderr, "opus_encoder_create failed: %d\n", err);
+        return 2;
+    }
+    opus_encoder_ctl(enc, OPUS_SET_BITRATE(bitrate));
+    opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(complexity));
+    opus_encoder_ctl(enc, OPUS_SET_VBR(vbr ? 1 : 0));
+    opus_encoder_ctl(enc, OPUS_SET_BANDWIDTH(OPUS_BANDWIDTH_FULLBAND));
+    fprintf(stderr, "CELT_ENC_ORACLE rate=%d frame_size=%d fixture=%s frames=%d bitrate=%d complexity=%d vbr=%d channels=%d\n",
+            rate, frame_size, fixture, frames, bitrate, complexity, vbr, channels);
+    for (frame = 0; frame < frames; frame++) {
+        int n, b;
+        if (channels == 2) fill_silk_fixture_stereo(pcm, rate, frame_size, frame, fixture);
+        else fill_silk_fixture(pcm, rate, frame_size, frame, fixture);
+        oracle_trace_enabled = 1;
+        fprintf(stderr, "[CELT_ENC_INPUT_FRAME] frame=%d\n", frame);
+        n = opus_encode_float(enc, pcm, frame_size, packet, (opus_int32)sizeof(packet));
+        if (n < 0) {
+            fprintf(stderr, "encode frame %d failed: %d\n", frame, n);
+            opus_encoder_destroy(enc);
+            return 1;
+        }
+        fprintf(stderr, "ENC_RESULT frame=%d bytes=%d toc=0x%02x config=%d traced=1\n", frame, n, packet[0], (packet[0] >> 3) & 0x1f);
+        fprintf(stderr, "[ENC_PACKET] n=%d", n);
+        for (b = 0; b < n; b++) fprintf(stderr, " %02x", packet[b]);
+        fprintf(stderr, "\n");
+    }
+    oracle_trace_enabled = 0;
+    opus_encoder_destroy(enc);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "--celt-enc") == 0) {
+        return run_celt_encoder_oracle(argc, argv);
+    }
     if (argc < 2 || strcmp(argv[1], "--silk-enc") != 0) {
         fprintf(stderr, "usage: %s --silk-enc <rate> <fixture> [targetFrame|-1] [frames] [bitrate] [bandwidth]\n", argv[0]);
         return 2;

@@ -337,7 +337,49 @@ $chDump = @'
 $encAPI = Replace-Checked $encAPI "                if( channelRate_bps > 0 ) {`n" ($chDump.Replace("`r`n", "`n") + "`n") "enc_API channel dump"
 Set-Content "$bld\enc_API_instr.c" $encAPI -NoNewline
 
-$celtSrcs = Get-ChildItem "$celt\*.c" | Where-Object { $_.Name -notmatch '^(opus_custom_demo|dump_modes|.*_test.*)' } | ForEach-Object { $_.FullName }
+# celt_encoder.c: dump the pre-emphasised input, the MDCT, the band log
+# energies, the frame decisions and the coarse energy result.
+$celtEnc = (Get-Content "$celt\celt_encoder.c" -Raw).Replace("`r`n", "`n")
+$celtEnc = Replace-Checked $celtEnc '#include "stack_alloc.h"' "#include `"stack_alloc.h`"`n#include `"silk_trace.h`"" "celt_encoder include"
+$celtMdctDump = @'
+   compute_mdcts(mode, shortBlocks, in, freq, C, CC, LM, st->upsample, st->arch);
+   if( oracle_trace_enabled ) {
+       fprintf(stderr, "[CELT_ENC_FRAME] N=%d LM=%d C=%d CC=%d overlap=%d silence=%d isTransient=%d shortBlocks=%d tf_estimate=%.9g tf_chan=%d pf_on=%d pitch_index=%d gain1=%.9g tapset=%d tell=%d total_bits=%d nbAvailableBytes=%d complexity=%d start=%d end=%d effEnd=%d\n",
+           N, LM, C, CC, overlap, silence, isTransient, shortBlocks, (double)tf_estimate, tf_chan, pf_on, pitch_index, (double)gain1, prefilter_tapset, ec_tell(enc), total_bits, nbAvailableBytes, st->complexity, start, end, effEnd);
+       oracle_silk_dump_float("CELT_ENC_IN", in, CC*(N+overlap));
+       oracle_silk_dump_float("CELT_ENC_FREQ", freq, CC*N);
+   }
+'@
+$celtEnc = Replace-Checked $celtEnc "   compute_mdcts(mode, shortBlocks, in, freq, C, CC, LM, st->upsample, st->arch);`n   /* This should catch any NaN in the CELT input." ($celtMdctDump.Replace("`r`n", "`n") + "   /* This should catch any NaN in the CELT input.") "celt_encoder mdct dump"
+$celtBandDump = @'
+   amp2Log2(mode, effEnd, end, bandE, bandLogE, C);
+
+   if( oracle_trace_enabled ) {
+       oracle_silk_dump_float("CELT_ENC_BANDE", bandE, nbEBands*C);
+       oracle_silk_dump_float("CELT_ENC_BANDLOGE", bandLogE, nbEBands*C);
+   }
+   ALLOC(surround_dynalloc, C*nbEBands, celt_glog);
+'@
+$celtEnc = Replace-Checked $celtEnc "   amp2Log2(mode, effEnd, end, bandE, bandLogE, C);`n`n   ALLOC(surround_dynalloc, C*nbEBands, celt_glog);`n" ($celtBandDump.Replace("`r`n", "`n") + "`n") "celt_encoder band dump"
+$celtCoarseDump = @'
+   tf_encode(start, end, isTransient, tf_res, LM, tf_select, enc);
+   if( oracle_trace_enabled ) {
+       fprintf(stderr, "[CELT_ENC_COARSE] tell=%d intra=%d tf_select=%d\n", ec_tell(enc), st->delayedIntra != 0 ? 1 : 0, tf_select);
+       oracle_silk_dump_float("CELT_ENC_OLDBANDE", oldBandE, nbEBands*CC);
+       oracle_silk_dump_float("CELT_ENC_ERROR", error, nbEBands*C);
+       {
+           int __i;
+           fprintf(stderr, "[CELT_ENC_TF_RES] n=%d", end);
+           for (__i = 0; __i < end; __i++) fprintf(stderr, " v[%d]=%d", __i, tf_res[__i]);
+           fprintf(stderr, "\n");
+       }
+   }
+'@
+$celtEnc = Replace-Checked $celtEnc "   tf_encode(start, end, isTransient, tf_res, LM, tf_select, enc);`n" ($celtCoarseDump.Replace("`r`n", "`n") + "`n") "celt_encoder coarse dump"
+Set-Content "$bld\celt_encoder_instr.c" $celtEnc -NoNewline
+
+$celtSrcs = Get-ChildItem "$celt\*.c" | Where-Object { $_.Name -notmatch '^(opus_custom_demo|dump_modes|.*_test.*|celt_encoder)' } | ForEach-Object { $_.FullName }
+$celtSrcs += "$bld\celt_encoder_instr.c"
 $silkSrcs = Get-ChildItem "$silk\*.c" | ForEach-Object { $_.FullName }
 $instrFloat = @('encode_frame_FLP.c','find_LPC_FLP.c','find_pred_coefs_FLP.c','noise_shape_analysis_FLP.c','process_gains_FLP.c','wrappers_FLP.c')
 $silkSrcs = $silkSrcs | Where-Object { $_ -notmatch 'NSQ_del_dec\.c$' -and $_ -notmatch 'enc_API\.c$' }

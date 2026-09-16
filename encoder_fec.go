@@ -84,6 +84,62 @@ func decideFEC(useInbandFEC bool, lossPerc int, lastFEC bool, mode, bandwidth, r
 	}
 }
 
+// hybridSILKRateTable is compute_silk_rate_for_hybrid's rate_table:
+// total rate, then the SILK share for {10 ms, 20 ms} x {no FEC, FEC}.
+var hybridSILKRateTable = [...][5]int{
+	{0, 0, 0, 0, 0},
+	{12000, 10000, 10000, 11000, 11000},
+	{16000, 13500, 13500, 15000, 15000},
+	{20000, 16000, 16000, 18000, 18000},
+	{24000, 18000, 18000, 21000, 21000},
+	{32000, 22000, 22000, 28000, 28000},
+	{64000, 38000, 38000, 50000, 50000},
+}
+
+// computeSILKRateForHybrid ports compute_silk_rate_for_hybrid: the SILK
+// bitrate of a hybrid packet, interpolated per channel from the table, with
+// the CBR, superwideband and stereo adjustments.
+func computeSILKRateForHybrid(rate, bandwidth int, frame20ms, vbr, fec bool, channels int) int {
+	rate /= channels
+	entry := 1
+	if frame20ms {
+		entry++
+	}
+	if fec {
+		entry += 2
+	}
+	n := len(hybridSILKRateTable)
+	i := 1
+	for ; i < n; i++ {
+		if hybridSILKRateTable[i][0] > rate {
+			break
+		}
+	}
+	var silkRate int
+	if i == n {
+		silkRate = hybridSILKRateTable[i-1][entry]
+		// For now, just give 50% of the extra bits to SILK.
+		silkRate += (rate - hybridSILKRateTable[i-1][0]) / 2
+	} else {
+		lo, hi := hybridSILKRateTable[i-1][entry], hybridSILKRateTable[i][entry]
+		x0, x1 := hybridSILKRateTable[i-1][0], hybridSILKRateTable[i][0]
+		silkRate = (lo*(x1-rate) + hi*(rate-x0)) / (x1 - x0)
+	}
+	if !vbr {
+		// Tiny boost to SILK for CBR.
+		silkRate += 100
+	}
+	if bandwidth == framing.BandwidthSuperwideband {
+		silkRate += 300
+	}
+	silkRate *= channels
+	// Small adjustment for stereo (calibrated for 32 kb/s).
+	if channels == 2 && rate >= 12000 {
+		silkRate -= 1000
+	}
+	return silkRate
+}
+
 // updateLBRRCoded runs the per-packet FEC decision for a SILK-only or
 // hybrid packet coded at bandwidth and pushes LBRR_coded to the SILK encoder.
 func (e *Encoder) updateLBRRCoded(mode, bandwidth, frameRate int) {

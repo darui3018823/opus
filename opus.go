@@ -834,6 +834,22 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 	silkFrameSize := e.silkSampleRate * 20 / 1000
 	silkChunkLen := silkFrameSize * e.channels
 	celtEnd := celtEndBandForFramingBW(bw)
+	// opus_encode_native: in hybrid mode SILK gets compute_silk_rate_for_hybrid's
+	// share of the TOC-adjusted packet rate (the SILK-only path passes the
+	// whole rate, set by applyBitrateSetting).
+	if e.silkEncoder != nil {
+		total := bitsToBitrate(bitrateToBits(e.bitrate, e.sampleRate, e.frameSize)-8, e.sampleRate, e.frameSize)
+		silkRate := computeSILKRateForHybrid(total, bw, true, e.rateMode != celt.RateModeCBR, e.lbrrCoded, e.channels)
+		if silkRate > 80000 {
+			silkRate = 80000
+		}
+		if silkRate < 5000 {
+			silkRate = 5000
+		}
+		if err := e.silkEncoder.SetBitrate(silkRate); err != nil {
+			return nil, false, err
+		}
+	}
 	nominalBytes := e.hybridFrameTargetBytes()
 	// CBR keeps every hybrid frame at the full per-frame ceiling. In VBR/CVBR,
 	// CELT selects the final shared payload size immediately before allocation.

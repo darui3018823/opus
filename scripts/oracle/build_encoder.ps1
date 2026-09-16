@@ -291,6 +291,26 @@ $targetDump = @'
             }
 '@
 $encAPI = Replace-Checked $encAPI "            TargetRate_bps = silk_LIMIT( TargetRate_bps, encControl->bitRate, 5000 );`n" ($targetDump.Replace("`r`n", "`n") + "`n") "enc_API target rate"
+$stereoDump = @'
+                    if( oracle_trace_enabled ) {
+                        const opus_int8 *ix = &psEnc->sStereo.predIx[ psEnc->state_Fxx[ 0 ].sCmn.nFramesEncoded ][ 0 ][ 0 ];
+                        fprintf(stderr, "[SILK_ENC_STEREO] frame=%d ix=%d,%d,%d,%d,%d,%d midOnly=%d rates=%d,%d width_prev=%d smth_width=%d silent_side_len=%d pred_prev=%d,%d prev_decode_only_middle=%d\n",
+                            psEnc->state_Fxx[ 0 ].sCmn.nFramesEncoded, ix[0], ix[1], ix[2], ix[3], ix[4], ix[5],
+                            psEnc->sStereo.mid_only_flags[ psEnc->state_Fxx[ 0 ].sCmn.nFramesEncoded ], MStargetRates_bps[0], MStargetRates_bps[1],
+                            psEnc->sStereo.width_prev_Q14, psEnc->sStereo.smth_width_Q14, psEnc->sStereo.silent_side_len,
+                            psEnc->sStereo.pred_prev_Q13[0], psEnc->sStereo.pred_prev_Q13[1], psEnc->prev_decode_only_middle);
+                    }
+                if( psEnc->sStereo.mid_only_flags[ psEnc->state_Fxx[ 0 ].sCmn.nFramesEncoded ] == 0 ) {
+'@
+$encAPI = Replace-Checked $encAPI "                if( psEnc->sStereo.mid_only_flags[ psEnc->state_Fxx[ 0 ].sCmn.nFramesEncoded ] == 0 ) {`n" ($stereoDump.Replace("`r`n", "`n") + "`n") "enc_API stereo dump"
+$chDump = @'
+                if( channelRate_bps > 0 ) {
+                    if( oracle_trace_enabled ) {
+                        fprintf(stderr, "[SILK_ENC_CH] n=%d channelRate_bps=%d tell=%d speech_activity_Q8=%d first_frame_after_reset=%d\n",
+                            n, channelRate_bps, ec_tell( psRangeEnc ), psEnc->state_Fxx[ n ].sCmn.speech_activity_Q8, psEnc->state_Fxx[ n ].sCmn.first_frame_after_reset);
+                    }
+'@
+$encAPI = Replace-Checked $encAPI "                if( channelRate_bps > 0 ) {`n" ($chDump.Replace("`r`n", "`n") + "`n") "enc_API channel dump"
 Set-Content "$bld\enc_API_instr.c" $encAPI -NoNewline
 
 $celtSrcs = Get-ChildItem "$celt\*.c" | Where-Object { $_.Name -notmatch '^(opus_custom_demo|dump_modes|.*_test.*)' } | ForEach-Object { $_.FullName }

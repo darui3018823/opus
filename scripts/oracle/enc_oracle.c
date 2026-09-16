@@ -39,6 +39,31 @@ static float noise_sample(unsigned int *state, double *prev)
     return (float)y;
 }
 
+static void fill_silk_fixture_stereo(float *pcm, int rate, int frame_size, int frame, const char *fixture)
+{
+    int i;
+    int start = frame * frame_size;
+    if (strcmp(fixture, "ref-speech") == 0) {
+        /* silkRefSpeechFrame (opus_cgo_silk_encode_test.go), channels = 2. */
+        for (i = 0; i < frame_size; i++) {
+            double tm = (double)(start + i) / (double)rate;
+            double env = 0.55 + 0.35 * sin(2.0 * M_PI * 3.0 * tm);
+            double s = 0.32 * sin(2.0 * M_PI * 180.0 * tm) +
+                0.12 * sin(2.0 * M_PI * 360.0 * tm + 0.4) +
+                0.06 * sin(2.0 * M_PI * 720.0 * tm + 0.9) +
+                0.025 * sin(2.0 * M_PI * 1100.0 * tm + 1.7);
+            double r = 0.30 * sin(2.0 * M_PI * 185.0 * tm + 0.2) +
+                0.10 * sin(2.0 * M_PI * 370.0 * tm + 0.7) +
+                0.05 * sin(2.0 * M_PI * 740.0 * tm + 1.1);
+            pcm[2 * i] = (float)(env * s);
+            pcm[2 * i + 1] = (float)(env * r);
+        }
+        return;
+    }
+    fprintf(stderr, "unknown stereo fixture %s\n", fixture);
+    exit(2);
+}
+
 static void fill_silk_fixture(float *pcm, int rate, int frame_size, int frame, const char *fixture)
 {
     int i;
@@ -112,10 +137,10 @@ static int parse_bandwidth(const char *s)
 
 static int run_silk_encoder_oracle(int argc, char **argv)
 {
-    int rate, target, frames, bitrate, bandwidth, frame_size, err, frame, lossPerc;
+    int rate, target, frames, bitrate, bandwidth, frame_size, err, frame, lossPerc, channels;
     const char *fixture;
     OpusEncoder *enc;
-    float pcm[960 * 5];
+    float pcm[960 * 5 * 2];
     unsigned char packet[1500];
 
     if (argc < 4) {
@@ -130,6 +155,11 @@ static int run_silk_encoder_oracle(int argc, char **argv)
     bitrate = (argc >= 7) ? atoi(argv[6]) : 24000;
     bandwidth = (argc >= 8) ? parse_bandwidth(argv[7]) : OPUS_AUTO;
     lossPerc = (argc >= 9) ? atoi(argv[8]) : 0; /* > 0 enables in-band FEC with that loss percentage */
+    channels = (argc >= 10) ? atoi(argv[9]) : 1;
+    if (channels != 1 && channels != 2) {
+        fprintf(stderr, "channels must be 1 or 2\n");
+        return 2;
+    }
     frame_size = rate / 50;
     if (rate != 8000 && rate != 12000 && rate != 16000 && rate != 24000 && rate != 48000) {
         fprintf(stderr, "--silk-enc rate must be 8000, 12000, 16000, 24000 or 48000\n");
@@ -140,7 +170,7 @@ static int run_silk_encoder_oracle(int argc, char **argv)
         return 2;
     }
 
-    enc = opus_encoder_create(rate, 1, OPUS_APPLICATION_VOIP, &err);
+    enc = opus_encoder_create(rate, channels, OPUS_APPLICATION_VOIP, &err);
     if (enc == NULL || err != OPUS_OK) {
         fprintf(stderr, "opus_encoder_create failed: %d\n", err);
         return 2;
@@ -157,11 +187,12 @@ static int run_silk_encoder_oracle(int argc, char **argv)
         opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1));
     }
 
-    fprintf(stderr, "SILK_ENC_ORACLE rate=%d frame_size=%d fixture=%s target=%d frames=%d bitrate=%d bandwidth=%d\n",
-            rate, frame_size, fixture, target, frames, bitrate, bandwidth);
+    fprintf(stderr, "SILK_ENC_ORACLE rate=%d frame_size=%d fixture=%s target=%d frames=%d bitrate=%d bandwidth=%d channels=%d\n",
+            rate, frame_size, fixture, target, frames, bitrate, bandwidth, channels);
     for (frame = 0; frame < frames; frame++) {
         int n, config;
-        fill_silk_fixture(pcm, rate, frame_size, frame, fixture);
+        if (channels == 2) fill_silk_fixture_stereo(pcm, rate, frame_size, frame, fixture);
+        else fill_silk_fixture(pcm, rate, frame_size, frame, fixture);
         oracle_trace_enabled = target < 0 || frame == target;
         if (oracle_trace_enabled) {
             fprintf(stderr, "[SILK_ENC_FRAME] frame=%d rate=%d frame_size=%d fixture=%s\n",

@@ -90,6 +90,27 @@ type encOracleFrame struct {
 	haveXBuf     bool
 	havePacketOK bool
 	stages       encOracleStages
+	// stereo: [SILK_ENC_STEREO] and [SILK_ENC_CH] (channels == 2); stagesMid
+	// holds the mid channel's stage dumps once the side channel starts (stages
+	// then accumulates the side channel's).
+	haveStereo bool
+	stereo     encOracleStereo
+	stagesMid  encOracleStages
+}
+
+type encOracleStereo struct {
+	ix                   [6]int
+	midOnly              bool
+	rates                [2]int
+	widthPrev, smthWidth int
+	silentSideLen        int
+	predPrev             [2]int
+	prevDecodeOnlyMiddle bool
+	chRate               [2]int
+	chTell               [2]int
+	chAct                [2]int
+	chFirst              [2]bool
+	sideCoded            bool
 }
 
 var (
@@ -97,6 +118,8 @@ var (
 	encOracleInputRe  = regexp.MustCompile(`^\[ENC_INPUT\] frame_size=(\d+) total_buffer=(\d+) channels=(\d+) mode=(-?\d+) cutoff_Hz=(-?\d+) smth2=(-?\d+) hp_freq_smth1=(-?\d+)`)
 	encOracleXInfoRe  = regexp.MustCompile(`speech_activity_Q8=(-?\d+) variable_HP_smth1_Q15=(-?\d+)`)
 	encOracleValuesRe = regexp.MustCompile(`v\[[\d,]+\]=(\S+)`)
+	encOracleStereoRe = regexp.MustCompile(`^\[SILK_ENC_STEREO\] frame=(\d+) ix=(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+) midOnly=(\d) rates=(-?\d+),(-?\d+) width_prev=(-?\d+) smth_width=(-?\d+) silent_side_len=(-?\d+) pred_prev=(-?\d+),(-?\d+) prev_decode_only_middle=(\d)`)
+	encOracleChRe     = regexp.MustCompile(`^\[SILK_ENC_CH\] n=(\d) channelRate_bps=(-?\d+) tell=(\d+) speech_activity_Q8=(-?\d+) first_frame_after_reset=(\d)`)
 	encOracleNSQInRe  = regexp.MustCompile(`^\[SILK_ENC_NSQ_INPUT\] signalType=(\d+) quantOffset=(\d+) seed=(\d+) Lambda_Q10=(-?\d+) LTP_scale_Q14=(-?\d+)`)
 	encOracleRowsRe   = regexp.MustCompile(`rows=(\d+) cols=(\d+)`)
 	encOracleInterpRe = regexp.MustCompile(`interp=(\d+)`)
@@ -170,7 +193,12 @@ func encOraclePath() string {
 // runEncOracle runs the oracle on one fixture and returns the per-frame traces.
 func runEncOracle(t *testing.T, rate int, fixture string, frames, bitrate int, bandwidth string, lossPerc int) []encOracleFrame {
 	t.Helper()
-	cmd := exec.Command(encOraclePath(), "--silk-enc", strconv.Itoa(rate), fixture, "-1", strconv.Itoa(frames), strconv.Itoa(bitrate), bandwidth, strconv.Itoa(lossPerc))
+	return runEncOracleChannels(t, rate, fixture, frames, bitrate, bandwidth, lossPerc, 1)
+}
+
+func runEncOracleChannels(t *testing.T, rate int, fixture string, frames, bitrate int, bandwidth string, lossPerc, channels int) []encOracleFrame {
+	t.Helper()
+	cmd := exec.Command(encOraclePath(), "--silk-enc", strconv.Itoa(rate), fixture, "-1", strconv.Itoa(frames), strconv.Itoa(bitrate), bandwidth, strconv.Itoa(lossPerc), strconv.Itoa(channels))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -212,6 +240,41 @@ func runEncOracle(t *testing.T, rate int, fixture string, frames, bitrate int, b
 			f.haveInput = true
 		case strings.HasPrefix(line, "[ENC_PCM_BUF]"):
 			out[cur].pcmBuf = parseFloats(line)
+		case strings.HasPrefix(line, "[SILK_ENC_STEREO]"):
+			m := encOracleStereoRe.FindStringSubmatch(line)
+			if m == nil {
+				t.Fatalf("bad STEREO line: %s", line)
+			}
+			st := &out[cur].stereo
+			out[cur].haveStereo = true
+			for k := 0; k < 6; k++ {
+				st.ix[k], _ = strconv.Atoi(m[2+k])
+			}
+			st.midOnly = m[8] == "1"
+			st.rates[0], _ = strconv.Atoi(m[9])
+			st.rates[1], _ = strconv.Atoi(m[10])
+			st.widthPrev, _ = strconv.Atoi(m[11])
+			st.smthWidth, _ = strconv.Atoi(m[12])
+			st.silentSideLen, _ = strconv.Atoi(m[13])
+			st.predPrev[0], _ = strconv.Atoi(m[14])
+			st.predPrev[1], _ = strconv.Atoi(m[15])
+			st.prevDecodeOnlyMiddle = m[16] == "1"
+		case strings.HasPrefix(line, "[SILK_ENC_CH]"):
+			m := encOracleChRe.FindStringSubmatch(line)
+			if m == nil {
+				t.Fatalf("bad CH line: %s", line)
+			}
+			n, _ := strconv.Atoi(m[1])
+			st := &out[cur].stereo
+			st.chRate[n], _ = strconv.Atoi(m[2])
+			st.chTell[n], _ = strconv.Atoi(m[3])
+			st.chAct[n], _ = strconv.Atoi(m[4])
+			st.chFirst[n] = m[5] == "1"
+			if n == 1 {
+				st.sideCoded = true
+				out[cur].stagesMid = out[cur].stages
+				out[cur].stages = encOracleStages{}
+			}
 		case strings.HasPrefix(line, "[SILK_ENC_XFRAME_INFO]"):
 			m := encOracleXInfoRe.FindStringSubmatch(line)
 			if m == nil {
@@ -725,4 +788,115 @@ func runSILKEncoderOracle(t *testing.T, lossPerc, bitrate int) {
 			})
 		}
 	}
+}
+
+// TestSILKEncoderStereoOracle compares stereo SILK-only packets (ref-speech
+// stereo fixture, CVBR, complexity 5) with the instrumented libopus encoder
+// and, at the first differing packet, reports the silk_stereo_LR_to_MS
+// decisions and per-channel entry states of both encoders.
+func TestSILKEncoderStereoOracle(t *testing.T) {
+	if _, err := os.Stat(encOraclePath()); err != nil {
+		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
+	}
+	const frames = 14
+	for _, tc := range []struct{ rate, bitrate, lossPerc int }{
+		{8000, 24000, 0}, {16000, 32000, 0}, {8000, 24000, 20}, {16000, 32000, 20}, {12000, 40000, 20},
+	} {
+		t.Run(fmt.Sprintf("%dk/%dkbps/loss%d", tc.rate/1000, tc.bitrate/1000, tc.lossPerc), func(t *testing.T) {
+			bandwidth := "auto"
+			if tc.rate > 16000 {
+				bandwidth = "wb"
+			}
+			ref := runEncOracleChannels(t, tc.rate, "ref-speech", frames, tc.bitrate, bandwidth, tc.lossPerc, 2)
+			enc, err := NewEncoder(tc.rate, 2, ApplicationVOIP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := enc.SetBitrate(tc.bitrate); err != nil {
+				t.Fatal(err)
+			}
+			enc.SetVBR(true)
+			enc.SetVBRConstraint(true)
+			if err := enc.SetComplexity(5); err != nil {
+				t.Fatal(err)
+			}
+			enc.SetSignalType(SignalVoice)
+			if tc.lossPerc > 0 {
+				enc.SetPacketLossPerc(tc.lossPerc)
+				enc.SetInbandFEC(true)
+			}
+			frameSize := tc.rate / 50
+			for f := 0; f < frames; f++ {
+				pcm := silkRefSpeechFrameStereo(tc.rate, f*frameSize, frameSize)
+				pkt, err := enc.EncodeFloat(pcm, frameSize)
+				if err != nil {
+					t.Fatalf("frame %d: %v", f, err)
+				}
+				r := ref[f]
+				if !r.havePacketOK {
+					t.Fatalf("frame %d: incomplete oracle trace", f)
+				}
+				tr := enc.silkEncoder.LastStereoTrace()
+				if bytes.Equal(pkt, r.packet) {
+					continue
+				}
+				t.Logf("frame %d: first packet difference (Go %d bytes, libopus %d bytes)", f, len(pkt), len(r.packet))
+				if r.haveStereo && len(tr) == 1 {
+					g, c := tr[0], r.stereo
+					t.Logf("  LR_to_MS: ix Go %v C %v; midOnly Go %v C %v; rates Go %v C %v; width_prev Go %d C %d; smth_width Go %d C %d; silent_side_len Go %d C %d; pred_prev Go %v C %v; prev_decode_only_middle Go %v C %v; total Go %d; prevAct Go %d",
+						g.Ix, c.ix, g.MidOnly, c.midOnly, g.Rates, c.rates, g.WidthPrev, c.widthPrev, g.SmthWidth, c.smthWidth, g.SilentSideLen, c.silentSideLen, g.PredPrev, c.predPrev, g.PrevDecodeOnlyMiddle, c.prevDecodeOnlyMiddle, g.TotalRate, g.PrevSpeechActQ8)
+					t.Logf("  mid: tell Go %d C %d; act Go %d C %d; first_frame_after_reset Go %v C %v", g.Tell[0], c.chTell[0], g.SpeechActQ8[0], c.chAct[0], g.FirstAfterRst[0], c.chFirst[0])
+					t.Logf("  side: coded Go %v C %v; tell Go %d C %d; act Go %d C %d; first_frame_after_reset Go %v C %v", g.SideCoded, c.sideCoded, g.Tell[1], c.chTell[1], g.SpeechActQ8[1], c.chAct[1], g.FirstAfterRst[1], c.chFirst[1])
+					midStages := r.stages
+					if c.sideCoded {
+						midStages = r.stagesMid
+					}
+					if d := stageDiffs(enc.silkEncoder.LastFrameTrace(), midStages); len(d) > 0 {
+						t.Logf("  mid stages differ: %s", strings.Join(d, "; "))
+					} else {
+						t.Logf("  mid stages match")
+					}
+					if len(midStages.shapeAR) > 0 {
+						if d := shapeDiffs(enc.silkEncoder.LastFrameTrace(), midStages, len(midStages.shapeAR), len(midStages.shapeAR[0])); len(d) > 0 {
+							t.Logf("  mid noise shape differs: %s", strings.Join(d, "; "))
+						}
+					}
+					if c.sideCoded && g.SideCoded {
+						if d := stageDiffs(enc.silkEncoder.SideEncoder().LastFrameTrace(), r.stages); len(d) > 0 {
+							t.Logf("  side stages differ: %s", strings.Join(d, "; "))
+						} else {
+							t.Logf("  side stages match")
+						}
+						if len(r.stages.shapeAR) > 0 {
+							if d := shapeDiffs(enc.silkEncoder.SideEncoder().LastFrameTrace(), r.stages, len(r.stages.shapeAR), len(r.stages.shapeAR[0])); len(d) > 0 {
+								t.Logf("  side noise shape differs: %s", strings.Join(d, "; "))
+							}
+						}
+					}
+				}
+				t.Fatalf("packet %d differs from libopus", f)
+			}
+			t.Logf("all %d stereo packets byte-identical to libopus", frames)
+		})
+	}
+}
+
+// silkRefSpeechFrameStereo is the stereo silkRefSpeechFrame fixture
+// (opus_cgo_silk_encode_test.go), interleaved L/R.
+func silkRefSpeechFrameStereo(rate, start, n int) []float64 {
+	out := make([]float64, n*2)
+	for i := 0; i < n; i++ {
+		t := float64(start+i) / float64(rate)
+		env := 0.55 + 0.35*math.Sin(2*math.Pi*3*t)
+		s := 0.32*math.Sin(2*math.Pi*180*t) +
+			0.12*math.Sin(2*math.Pi*360*t+0.4) +
+			0.06*math.Sin(2*math.Pi*720*t+0.9) +
+			0.025*math.Sin(2*math.Pi*1100*t+1.7)
+		r := 0.30*math.Sin(2*math.Pi*185*t+0.2) +
+			0.10*math.Sin(2*math.Pi*370*t+0.7) +
+			0.05*math.Sin(2*math.Pi*740*t+1.1)
+		out[2*i] = env * s
+		out[2*i+1] = env * r
+	}
+	return out
 }

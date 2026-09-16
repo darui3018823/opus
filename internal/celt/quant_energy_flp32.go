@@ -141,9 +141,10 @@ func (e *Encoder) quantCoarseEnergy(enc *entcode.Encoder, start, end, effEnd int
 	}
 
 	maxDecay := float32(16)
-	if end-start > 10 && float32(nbAvailableBytes) < maxDecay {
-		// SHL32(nbAvailableBytes, DB_SHIFT-3) is the identity in the float build.
-		maxDecay = float32(nbAvailableBytes)
+	if end-start > 10 {
+		if d := float32(0.125) * float32(nbAvailableBytes); d < maxDecay {
+			maxDecay = d
+		}
 	}
 	encStart := enc.Clone()
 

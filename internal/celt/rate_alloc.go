@@ -308,20 +308,24 @@ func computeAllocation(
 	numBands, start, end, lm, ch, allocTrim, available int,
 	offsets []int,
 ) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
-	return computeAllocationShared(dec, nil, end, false, numBands, start, end, lm, ch, allocTrim, available, offsets)
+	return computeAllocationShared(dec, nil, end, false, numBands, start, end, lm, ch, allocTrim, available, offsets, 0, end-1)
 }
 
 // computeAllocationEncode is the encoder-side entry point. encIntensity and
 // encDualStereo are the encoder's chosen stereo parameters (written to the
 // stream); they are returned (possibly clamped) so quant_all_bands uses the same
 // values the decoder will read.
+// computeAllocationEncode is clt_compute_allocation(encode=1). prev is the
+// previous frame's coded band count (st->lastCodedBands, 0 on the first
+// frame) and signalBandwidth the last band the signal analysis considers
+// worth coding (end-1 without analysis); both steer the skip decision.
 func computeAllocationEncode(
 	enc *entcode.Encoder,
 	encIntensity int, encDualStereo bool,
 	numBands, start, end, lm, ch, allocTrim, available int,
-	offsets []int,
+	offsets []int, prev, signalBandwidth int,
 ) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
-	return computeAllocationShared(nil, enc, encIntensity, encDualStereo, numBands, start, end, lm, ch, allocTrim, available, offsets)
+	return computeAllocationShared(nil, enc, encIntensity, encDualStereo, numBands, start, end, lm, ch, allocTrim, available, offsets, prev, signalBandwidth)
 }
 
 func computeAllocationShared(
@@ -329,7 +333,7 @@ func computeAllocationShared(
 	enc *entcode.Encoder,
 	encIntensity int, encDualStereo bool,
 	numBands, start, end, lm, ch, allocTrim, available int,
-	offsets []int,
+	offsets []int, prev, signalBandwidth int,
 ) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
 	encode := enc != nil
 	pulses = make([]int, numBands)
@@ -623,10 +627,22 @@ func computeAllocationShared(
 			skipThresh = allocFloor + 8
 		}
 		if bandBitsJ >= skipThresh {
-			// Encode/decode a 1-bit skip signal. The encoder keeps every band
-			// that reaches the threshold (no rate-driven skipping yet).
+			// Encode/decode a 1-bit skip signal. The encoder keeps the band
+			// when few bands are left, or when it gets enough bits per
+			// coefficient (7/16 bit if it was coded last frame, 9/16 otherwise,
+			// with no depth requirement once 17 or fewer bands remain) and lies
+			// within the signal bandwidth (libopus 1.6.1 interp_bits2pulses).
 			keepBand := true
 			if encode {
+				depthThreshold := 0
+				if codedBands > 17 {
+					depthThreshold = 9
+					if j < prev {
+						depthThreshold = 7
+					}
+				}
+				keepBand = codedBands <= start+2 ||
+					(bandBitsJ > (depthThreshold*bandWidthN0<<uint(lm)<<3)>>4 && j <= signalBandwidth)
 				enc.EncodeBitLogp(keepBand, 1)
 			} else if dec != nil {
 				keepBand = dec.DecodeBitLogp(1)

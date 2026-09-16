@@ -376,6 +376,48 @@ $celtCoarseDump = @'
    }
 '@
 $celtEnc = Replace-Checked $celtEnc "   tf_encode(start, end, isTransient, tf_res, LM, tf_select, enc);`n" ($celtCoarseDump.Replace("`r`n", "`n") + "`n") "celt_encoder coarse dump"
+# After the allocation trim: spread, dynalloc boosts, trim, then the
+# allocation result and the PVQ / final position.
+$celtTrimDump = @'
+      ec_enc_icdf(enc, alloc_trim, trim_icdf, 7);
+      tell = ec_tell_frac(enc);
+   }
+   if( oracle_trace_enabled ) {
+       int __i;
+       fprintf(stderr, "[CELT_ENC_TRIM] tell_frac=%d spread=%d alloc_trim=%d total_boost=%d effectiveBytes=%d nbCompressedBytes=%d intensity=%d dual_stereo=%d\n",
+           (int)ec_tell_frac(enc), st->spread_decision, alloc_trim, total_boost, effectiveBytes, nbCompressedBytes, st->intensity, dual_stereo);
+       fprintf(stderr, "[CELT_ENC_OFFSETS] n=%d", end);
+       for (__i = 0; __i < end; __i++) fprintf(stderr, " v[%d]=%d", __i, offsets[__i]);
+       fprintf(stderr, "\n");
+   }
+'@
+$celtEnc = Replace-Checked $celtEnc "      ec_enc_icdf(enc, alloc_trim, trim_icdf, 7);`n      tell = ec_tell_frac(enc);`n   }`n" ($celtTrimDump.Replace("`r`n", "`n")) "celt_encoder trim dump"
+$celtAllocDump = @'
+   quant_fine_energy(mode, start, end, oldBandE, error, NULL, fine_quant, enc, C);
+   if( oracle_trace_enabled ) {
+       int __i;
+       fprintf(stderr, "[CELT_ENC_ALLOC] tell=%d bits=%d anti_collapse_rsv=%d codedBands=%d intensity=%d dual_stereo=%d balance=%d nbCompressedBytes=%d vbr_reservoir=%d vbr_drift=%d vbr_offset=%d\n",
+           ec_tell(enc), bits, anti_collapse_rsv, codedBands, st->intensity, dual_stereo, balance, nbCompressedBytes, st->vbr_reservoir, st->vbr_drift, st->vbr_offset);
+       fprintf(stderr, "[CELT_ENC_PULSES] n=%d", end);
+       for (__i = 0; __i < end; __i++) fprintf(stderr, " v[%d]=%d", __i, pulses[__i]);
+       fprintf(stderr, "\n");
+       fprintf(stderr, "[CELT_ENC_FINE_QUANT] n=%d", end);
+       for (__i = 0; __i < end; __i++) fprintf(stderr, " v[%d]=%d", __i, fine_quant[__i]);
+       fprintf(stderr, "\n");
+       fprintf(stderr, "[CELT_ENC_FINE_PRIORITY] n=%d", end);
+       for (__i = 0; __i < end; __i++) fprintf(stderr, " v[%d]=%d", __i, fine_priority[__i]);
+       fprintf(stderr, "\n");
+   }
+'@
+$celtEnc = Replace-Checked $celtEnc "   quant_fine_energy(mode, start, end, oldBandE, error, NULL, fine_quant, enc, C);`n" ($celtAllocDump.Replace("`r`n", "`n")) "celt_encoder alloc dump"
+$celtPvqDump = @'
+   if (qext_bytes == 0)
+      quant_energy_finalise(mode, start, end, oldBandE, error, fine_quant, fine_priority, nbCompressedBytes*8-ec_tell(enc), enc, C);
+   if( oracle_trace_enabled ) {
+       fprintf(stderr, "[CELT_ENC_FINAL] tell=%d rng=%u\n", ec_tell(enc), (unsigned)enc->rng);
+   }
+'@
+$celtEnc = Replace-Checked $celtEnc "   if (qext_bytes == 0)`n      quant_energy_finalise(mode, start, end, oldBandE, error, fine_quant, fine_priority, nbCompressedBytes*8-ec_tell(enc), enc, C);`n" ($celtPvqDump.Replace("`r`n", "`n")) "celt_encoder final dump"
 Set-Content "$bld\celt_encoder_instr.c" $celtEnc -NoNewline
 
 $celtSrcs = Get-ChildItem "$celt\*.c" | Where-Object { $_.Name -notmatch '^(opus_custom_demo|dump_modes|.*_test.*|celt_encoder)' } | ForEach-Object { $_.FullName }

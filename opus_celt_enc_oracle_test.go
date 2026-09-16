@@ -39,19 +39,52 @@ type celtOracleFrame struct {
 	tellCoarse  int
 	tfSelect    int
 	tfRes       []int
-	in          []float32
-	freq        []float32
-	bandE       []float32
-	bandLogE    []float32
-	packet      []byte
-	havePacket  bool
+	// [CELT_ENC_TRIM] / [CELT_ENC_OFFSETS]
+	tellFracTrim int
+	spread       int
+	allocTrim    int
+	totalBoost   int
+	offsets      []int
+	// [CELT_ENC_ALLOC] and the per-band arrays
+	tellFine        int
+	bits            int
+	antiCollapseRsv int
+	codedBands      int
+	intensity       int
+	dualStereo      bool
+	balance         int
+	pulses          []int
+	fineQuant       []int
+	finePriority    []int
+	// [CELT_ENC_FINAL]
+	tellFinal  int
+	oldBandE   []float32
+	errorE     []float32
+	in         []float32
+	freq       []float32
+	bandE      []float32
+	bandLogE   []float32
+	packet     []byte
+	havePacket bool
 }
 
 var (
 	celtOracleFrameRe  = regexp.MustCompile(`^\[CELT_ENC_FRAME\] N=(\d+) LM=(\d+) C=(\d+) CC=(\d+) overlap=(\d+) silence=(\d) isTransient=(\d) shortBlocks=(\d+) tf_estimate=(\S+) tf_chan=(\d+) pf_on=(\d) pitch_index=(-?\d+) gain1=(\S+) tapset=(\d+) tell=(\d+)`)
 	celtOracleCoarseRe = regexp.MustCompile(`^\[CELT_ENC_COARSE\] tell=(\d+) intra=(\d) tf_select=(\d)`)
 	celtOracleIntRe    = regexp.MustCompile(`v\[\d+\]=(-?\d+)`)
+	celtOracleTrimRe   = regexp.MustCompile(`^\[CELT_ENC_TRIM\] tell_frac=(\d+) spread=(\d+) alloc_trim=(\d+) total_boost=(\d+)`)
+	celtOracleAllocRe  = regexp.MustCompile(`^\[CELT_ENC_ALLOC\] tell=(\d+) bits=(-?\d+) anti_collapse_rsv=(\d+) codedBands=(\d+) intensity=(\d+) dual_stereo=(\d+) balance=(-?\d+)`)
+	celtOracleFinalRe  = regexp.MustCompile(`^\[CELT_ENC_FINAL\] tell=(\d+)`)
 )
+
+func celtOracleInts(line string) []int {
+	var out []int
+	for _, m := range celtOracleIntRe.FindAllStringSubmatch(line, -1) {
+		v, _ := strconv.Atoi(m[1])
+		out = append(out, v)
+	}
+	return out
+}
 
 func runCELTEncOracle(t *testing.T, fixture string, frames, bitrate, complexity int, vbr bool, channels int) []celtOracleFrame {
 	t.Helper()
@@ -125,11 +158,47 @@ func runCELTEncOracle(t *testing.T, fixture string, frames, bitrate, complexity 
 			}
 			out[cur].tellCoarse, _ = strconv.Atoi(m[1])
 			out[cur].tfSelect, _ = strconv.Atoi(m[3])
+		case strings.HasPrefix(line, "[SILK_CELT_ENC_OLDBANDE]"):
+			out[cur].oldBandE = parseFloats(line)
+		case strings.HasPrefix(line, "[SILK_CELT_ENC_ERROR]"):
+			out[cur].errorE = parseFloats(line)
 		case strings.HasPrefix(line, "[CELT_ENC_TF_RES]"):
-			for _, m := range celtOracleIntRe.FindAllStringSubmatch(line, -1) {
-				v, _ := strconv.Atoi(m[1])
-				out[cur].tfRes = append(out[cur].tfRes, v)
+			out[cur].tfRes = celtOracleInts(line)
+		case strings.HasPrefix(line, "[CELT_ENC_TRIM]"):
+			m := celtOracleTrimRe.FindStringSubmatch(line)
+			if m == nil {
+				t.Fatalf("bad CELT_ENC_TRIM line: %s", line)
 			}
+			out[cur].tellFracTrim, _ = strconv.Atoi(m[1])
+			out[cur].spread, _ = strconv.Atoi(m[2])
+			out[cur].allocTrim, _ = strconv.Atoi(m[3])
+			out[cur].totalBoost, _ = strconv.Atoi(m[4])
+		case strings.HasPrefix(line, "[CELT_ENC_OFFSETS]"):
+			out[cur].offsets = celtOracleInts(line)
+		case strings.HasPrefix(line, "[CELT_ENC_ALLOC]"):
+			m := celtOracleAllocRe.FindStringSubmatch(line)
+			if m == nil {
+				t.Fatalf("bad CELT_ENC_ALLOC line: %s", line)
+			}
+			out[cur].tellFine, _ = strconv.Atoi(m[1])
+			out[cur].bits, _ = strconv.Atoi(m[2])
+			out[cur].antiCollapseRsv, _ = strconv.Atoi(m[3])
+			out[cur].codedBands, _ = strconv.Atoi(m[4])
+			out[cur].intensity, _ = strconv.Atoi(m[5])
+			out[cur].dualStereo = m[6] == "1"
+			out[cur].balance, _ = strconv.Atoi(m[7])
+		case strings.HasPrefix(line, "[CELT_ENC_PULSES]"):
+			out[cur].pulses = celtOracleInts(line)
+		case strings.HasPrefix(line, "[CELT_ENC_FINE_QUANT]"):
+			out[cur].fineQuant = celtOracleInts(line)
+		case strings.HasPrefix(line, "[CELT_ENC_FINE_PRIORITY]"):
+			out[cur].finePriority = celtOracleInts(line)
+		case strings.HasPrefix(line, "[CELT_ENC_FINAL]"):
+			m := celtOracleFinalRe.FindStringSubmatch(line)
+			if m == nil {
+				t.Fatalf("bad CELT_ENC_FINAL line: %s", line)
+			}
+			out[cur].tellFinal, _ = strconv.Atoi(m[1])
 		case strings.HasPrefix(line, "[ENC_PACKET]"):
 			fields := strings.Fields(line)[2:]
 			pkt, err := hex.DecodeString(strings.Join(fields, ""))
@@ -168,66 +237,148 @@ func float32Stats(g []float64, c []float32) (maxAbs, maxRel float64, equal, n in
 	return
 }
 
+type celtOracleCase struct {
+	name       string
+	frames     int
+	bitrate    int
+	complexity int
+	vbr        bool
+	channels   int
+	exact      bool // gate: every packet must be byte-identical
+}
+
+func runCELTOracleCase(t *testing.T, tc celtOracleCase) {
+	t.Helper()
+	const rate = 48000
+	ref := runCELTEncOracle(t, "ref-speech", tc.frames, tc.bitrate, tc.complexity, tc.vbr, tc.channels)
+	enc, err := NewEncoder(rate, tc.channels, ApplicationRestrictedLowDelay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetBitrate(tc.bitrate); err != nil {
+		t.Fatal(err)
+	}
+	enc.SetVBR(tc.vbr)
+	if err := enc.SetComplexity(tc.complexity); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetBandwidth(BandwidthFullband); err != nil {
+		t.Fatal(err)
+	}
+	frameSize := rate / 50
+	identical := 0
+	firstDiff := -1
+	for f := 0; f < tc.frames; f++ {
+		var pcm []float64
+		if tc.channels == 2 {
+			pcm = silkRefSpeechFrameStereo(rate, f*frameSize, frameSize)
+		} else {
+			pcm = encOracleRefSpeechFrame(rate, f*frameSize, frameSize)
+		}
+		pkt, err := enc.EncodeFloat(pcm, frameSize)
+		if err != nil {
+			t.Fatalf("frame %d: %v", f, err)
+		}
+		r := ref[f]
+		if !r.havePacket || len(r.in) == 0 {
+			t.Fatalf("frame %d: incomplete oracle trace", f)
+		}
+		same := bytes.Equal(pkt, r.packet)
+		if same {
+			identical++
+		} else if firstDiff < 0 {
+			firstDiff = f
+		}
+		tr := enc.celtEncoder.LastFrameTrace()
+		prefix := 0
+		for prefix < len(pkt) && prefix < len(r.packet) && pkt[prefix] == r.packet[prefix] {
+			prefix++
+		}
+		if !same || testing.Verbose() {
+			inAbs, _, inEq, inN := float32Stats(tr.In[0], r.in)
+			fqAbs, _, fqEq, fqN := float32Stats(tr.Freq[0], r.freq)
+			beAbs, _, beEq, beN := float32Stats(tr.BandE, r.bandE)
+			blAbs, _, blEq, blN := float32Stats(tr.BandLogE, r.bandLogE)
+			t.Logf("frame %d: identical=%v prefix=%d Go %d B / C %d B | in: eq %d/%d maxAbs %.3g | freq: eq %d/%d maxAbs %.3g | bandE: eq %d/%d maxAbs %.3g | bandLogE: eq %d/%d maxAbs %.3g",
+				f, same, prefix, len(pkt), len(r.packet), inEq, inN, inAbs, fqEq, fqN, fqAbs, beEq, beN, beAbs, blEq, blN, blAbs)
+			t.Logf("frame %d: decisions Go{transient %v short %d tfEst %.6g tfChan %d intra %v tellCoarse %d tfSelect %d tellTF %d} C{transient %v short %d tfEst %.6g tfChan %d pf_on %v tell %d tellCoarse+tf %d tfSelect %d}",
+				f, tr.IsTransient, tr.ShortBlocks, tr.TFEstimate, tr.TFChan, tr.Intra, tr.TellCoarse, tr.TFSelect, tr.TellTF,
+				r.isTransient, r.shortBlocks, r.tfEstimate, r.tfChan, r.pfOn, r.tell, r.tellCoarse, r.tfSelect)
+			t.Logf("frame %d: trim Go{tellFrac %d spread %d trim %d boost %d} C{tellFrac %d spread %d trim %d boost %d} | alloc Go{bits %d rsv %d coded %d bal %d tellFine %d tellFinal %d} C{bits %d rsv %d coded %d bal %d tellFine %d tellFinal %d}",
+				f, tr.TellFracTrim, tr.Spread, tr.AllocTrim, tr.TotalBoost, r.tellFracTrim, r.spread, r.allocTrim, r.totalBoost,
+				tr.Bits, tr.AntiCollapseRsv, tr.CodedBands, tr.Balance, tr.TellFine, tr.TellFinal,
+				r.bits, r.antiCollapseRsv, r.codedBands, r.balance, r.tellFine, r.tellFinal)
+			if os.Getenv("CELT_ORACLE_DUMP") != "" {
+				t.Logf("frame %d: oldBandE Go %v C %v", f, tr.OldBandE, r.oldBandE)
+				t.Logf("frame %d: error Go %v C %v", f, tr.CoarseError, r.errorE)
+			}
+			if _, _, eq, n := float32Stats(tr.OldBandE, r.oldBandE); eq != n {
+				t.Logf("frame %d: oldBandE after coarse differs (%d/%d equal): Go %v C %v", f, eq, n, tr.OldBandE, r.oldBandE)
+			}
+			if _, _, eq, n := float32Stats(tr.CoarseError, r.errorE); eq != n {
+				t.Logf("frame %d: coarse error differs (%d/%d equal): Go %v C %v", f, eq, n, tr.CoarseError, r.errorE)
+			}
+			if !intsEqual(tr.Offsets, r.offsets) {
+				t.Logf("frame %d: offsets Go %v C %v", f, tr.Offsets, r.offsets)
+			}
+			if !intsEqual(tr.TFRes, r.tfRes) {
+				t.Logf("frame %d: tf_res Go %v C %v", f, tr.TFRes, r.tfRes)
+			}
+			if !intsEqual(tr.Pulses, r.pulses) {
+				t.Logf("frame %d: pulses Go %v C %v", f, tr.Pulses, r.pulses)
+			}
+			if !intsEqual(tr.FineQuant, r.fineQuant) {
+				t.Logf("frame %d: fine_quant Go %v C %v", f, tr.FineQuant, r.fineQuant)
+			}
+		}
+	}
+	t.Logf("%s: %d/%d packets byte-identical (first difference at frame %d)", tc.name, identical, tc.frames, firstDiff)
+	if tc.exact && identical != tc.frames {
+		t.Errorf("%s: %d/%d packets byte-identical, want all", tc.name, identical, tc.frames)
+	}
+}
+
+func intsEqual(a, b []int) bool {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestCELTEncoderOracle compares the Go CELT-only encoder with the
+// instrumented libopus encoder over a matrix of bitrate, rate mode and
+// complexity. Cells marked exact are gated; the others report progress.
 func TestCELTEncoderOracle(t *testing.T) {
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
 	}
-	const (
-		frames  = 6
-		rate    = 48000
-		bitrate = 64000
-	)
-	for _, complexity := range []int{0, 5} {
-		t.Run(fmt.Sprintf("complexity%d", complexity), func(t *testing.T) {
-			ref := runCELTEncOracle(t, "ref-speech", frames, bitrate, complexity, false, 1)
-			enc, err := NewEncoder(rate, 1, ApplicationRestrictedLowDelay)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := enc.SetBitrate(bitrate); err != nil {
-				t.Fatal(err)
-			}
-			enc.SetVBR(false)
-			if err := enc.SetComplexity(complexity); err != nil {
-				t.Fatal(err)
-			}
-			if err := enc.SetBandwidth(BandwidthFullband); err != nil {
-				t.Fatal(err)
-			}
-			frameSize := rate / 50
-			identical := 0
-			for f := 0; f < frames; f++ {
-				pcm := encOracleRefSpeechFrame(rate, f*frameSize, frameSize)
-				pkt, err := enc.EncodeFloat(pcm, frameSize)
-				if err != nil {
-					t.Fatalf("frame %d: %v", f, err)
+	var cases []celtOracleCase
+	for _, complexity := range []int{0, 1, 2, 3, 4, 5, 10} {
+		for _, bitrate := range []int{24000, 64000, 128000} {
+			for _, vbr := range []bool{false, true} {
+				mode := "cbr"
+				if vbr {
+					mode = "vbr"
 				}
-				r := ref[f]
-				if !r.havePacket || len(r.in) == 0 {
-					t.Fatalf("frame %d: incomplete oracle trace", f)
-				}
-				if len(pkt) != len(r.packet) || pkt[0] != r.packet[0] {
-					t.Fatalf("frame %d: framing differs: Go %d bytes TOC %#x, libopus %d bytes TOC %#x", f, len(pkt), pkt[0], len(r.packet), r.packet[0])
-				}
-				if bytes.Equal(pkt, r.packet) {
-					identical++
-				}
-				tr := enc.celtEncoder.LastFrameTrace()
-				prefix := 0
-				for prefix < len(pkt) && pkt[prefix] == r.packet[prefix] {
-					prefix++
-				}
-				inAbs, inRel, inEq, inN := float32Stats(tr.In[0], r.in)
-				fqAbs, fqRel, fqEq, fqN := float32Stats(tr.Freq[0], r.freq)
-				beAbs, beRel, beEq, beN := float32Stats(tr.BandE, r.bandE)
-				blAbs, blRel, blEq, blN := float32Stats(tr.BandLogE, r.bandLogE)
-				t.Logf("frame %d: identical=%v prefix=%d/%d | in: eq %d/%d maxAbs %.3g maxRel %.3g | freq: eq %d/%d maxAbs %.3g maxRel %.3g | bandE: eq %d/%d maxAbs %.3g maxRel %.3g | bandLogE: eq %d/%d maxAbs %.3g maxRel %.3g",
-					f, bytes.Equal(pkt, r.packet), prefix, len(pkt), inEq, inN, inAbs, inRel, fqEq, fqN, fqAbs, fqRel, beEq, beN, beAbs, beRel, blEq, blN, blAbs, blRel)
-				t.Logf("frame %d: decisions Go{transient %v short %d tfEst %.6g tfChan %d intra %v tellCoarse %d tfSelect %d tellTF %d} C{transient %v short %d tfEst %.6g tfChan %d pf_on %v tell %d tellCoarse %d tfSelect %d}",
-					f, tr.IsTransient, tr.ShortBlocks, tr.TFEstimate, tr.TFChan, tr.Intra, tr.TellCoarse, tr.TFSelect, tr.TellTF,
-					r.isTransient, r.shortBlocks, r.tfEstimate, r.tfChan, r.pfOn, r.tell, r.tellCoarse, r.tfSelect)
+				cases = append(cases, celtOracleCase{
+					name:       fmt.Sprintf("mono/%s/%dk/c%d", mode, bitrate/1000, complexity),
+					frames:     20,
+					bitrate:    bitrate,
+					complexity: complexity,
+					vbr:        vbr,
+					channels:   1,
+					exact:      complexity == 0 && !vbr,
+				})
 			}
-			t.Logf("%d/%d packets byte-identical", identical, frames)
-		})
+		}
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) { runCELTOracleCase(t, tc) })
 	}
 }

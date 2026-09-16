@@ -83,8 +83,31 @@ type FrameTrace struct {
 	Intra       bool
 	TFRes       []int
 	TFSelect    int
-	TellCoarse  int // ec_tell after the coarse energies
-	TellTF      int // ec_tell after tf_encode
+	TellCoarse  int       // ec_tell after the coarse energies
+	TellTF      int       // ec_tell after tf_encode
+	OldBandE    []float64 // oldBandE right after the coarse quantisation
+	CoarseError []float64 // the coarse residual (error) right after the coarse quantisation
+	// After the allocation trim: ec_tell_frac, the spread decision, the
+	// coded dynalloc boosts, the trim and the stereo decisions.
+	TellFracTrim int
+	Spread       int
+	Offsets      []int
+	AllocTrim    int
+	TotalBoost   int
+	// The allocation result and the range coder position after the fine
+	// energies, the PVQ and the final fine bits.
+	Bits            int
+	AntiCollapseRsv int
+	CodedBands      int
+	Intensity       int
+	DualStereo      bool
+	Balance         int
+	Pulses          []int
+	FineQuant       []int
+	FinePriority    []int
+	TellFine        int
+	TellFinal       int
+	PacketBytes     int
 }
 
 // LastFrameTrace returns the trace of the most recently coded frame.
@@ -697,6 +720,8 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	etr(enc, "coarse")
 	{
 		tr := FrameTrace{IsTransient: isTransient, TFEstimate: tfEstimate, TFChan: tfChan, Intra: intra, TellCoarse: enc.ECTell()}
+		tr.OldBandE = append([]float64(nil), quantLogE...)
+		tr.CoarseError = append([]float64(nil), coarseError...)
 		if isTransient {
 			tr.ShortBlocks = M
 		}
@@ -751,6 +776,13 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		enc.EncodeIcdf(allocTrim, TrimICDF[:], 7)
 	}
 	etr(enc, "alloc_trim")
+	e.lastTrace.TellFracTrim = enc.TellFrac()
+	e.lastTrace.Spread = spread
+	e.lastTrace.Offsets = append([]int(nil), offsets...)
+	e.lastTrace.AllocTrim = allocTrim
+	for i := start; i < end; i++ {
+		e.lastTrace.TotalBoost += offsets[i]
+	}
 
 	// libopus selects the hybrid VBR size only after coarse energy, TF,
 	// spreading, dynamic allocation, and allocation trim have been coded. The
@@ -854,8 +886,17 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 	pulses, eBits, finePriority, balance, intensity, codedBands, dualStereo :=
 		computeAllocationEncode(enc, encIntensity, encDualStereo,
-			numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets)
+			numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets, e.lastCodedBands, end-1)
 	e.lastCodedBands = codedBands
+	e.lastTrace.Bits = bitsQ3
+	e.lastTrace.AntiCollapseRsv = antiCollapseRsv
+	e.lastTrace.CodedBands = codedBands
+	e.lastTrace.Intensity = intensity
+	e.lastTrace.DualStereo = dualStereo
+	e.lastTrace.Balance = balance
+	e.lastTrace.Pulses = append([]int(nil), pulses...)
+	e.lastTrace.FineQuant = append([]int(nil), eBits...)
+	e.lastTrace.FinePriority = append([]int(nil), finePriority...)
 
 	if encDebug && e.frameCount == 10 {
 		fmt.Fprintf(os.Stderr, "[ENC] bitsQ3=%d codedBands=%d\n", bitsQ3, codedBands)
@@ -870,6 +911,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// Fine energy (quant_fine_energy) — raw bits, forward band order, on the
 	// coarse residual; oldBandE follows the decoder's reconstruction.
 	quantFineEnergy(enc, start, end, quantLogE, coarseError, eBits, ch, numBands, totalBits)
+	e.lastTrace.TellFine = enc.ECTell()
 
 	// PVQ for all bands.
 	var Y []float64
@@ -909,6 +951,8 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			e.energyError[idx] = v
 		}
 	}
+	e.lastTrace.TellFinal = enc.ECTell()
+	e.lastTrace.PacketBytes = targetBytes
 
 	e.finalRange = enc.GetRng()
 

@@ -117,6 +117,12 @@ type Encoder struct {
 	streamChannels     int
 	prevStreamChannels int
 	toMono             bool
+	// autoBandwidth is st->auto_bandwidth (the hysteresis memory of the
+	// automatic bandwidth decision); silkFramesCoded marks that the SILK
+	// encoder has coded frames since (re)initialisation, after which the
+	// internal rate is not changed.
+	autoBandwidth   int
+	silkFramesCoded bool
 
 	// Bandwidth control (CELT-only path). maxBandwidth caps the automatic
 	// selection; forcedBandwidth pins an exact bandwidth (BandwidthAuto means
@@ -244,27 +250,43 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 	enc.celtEncoder.SetSignalType(signalTypeForApplication(application))
 
 	if silkRate, ok := silkEncodeSampleRate(sampleRate); ok {
-		silkEnc, err := silk.NewEncoder(silkRate, channels)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create SILK encoder: %w", err)
+		if err := enc.rebuildSILKEncoder(silkRate); err != nil {
+			return nil, err
 		}
-		_ = silkEnc.SetComplexity(enc.complexity)
-		silkEnc.SetRateMode(silk.RateModeCBR)
-		silkEnc.SetAPISampleRate(sampleRate)
-		enc.silkEncoder = silkEnc
-		enc.silkSampleRate = silkRate
-		if silkRate != sampleRate {
-			for ch := 0; ch < channels; ch++ {
-				r, err := silk.NewEncoderResampler(sampleRate, silkRate)
-				if err != nil {
-					return nil, fmt.Errorf("failed to create SILK input resampler: %w", err)
-				}
-				enc.silkInputResamplers = append(enc.silkInputResamplers, r)
-			}
-		}
+		enc.silkEncoder.SetRateMode(silk.RateModeCBR)
 	}
 
 	return enc, nil
+}
+
+// rebuildSILKEncoder creates the SILK encoder (and the input resamplers)
+// for the given internal rate, carrying the encoder-level settings over.
+func (e *Encoder) rebuildSILKEncoder(silkRate int) error {
+	silkEnc, err := silk.NewEncoder(silkRate, e.channels)
+	if err != nil {
+		return fmt.Errorf("failed to create SILK encoder: %w", err)
+	}
+	_ = silkEnc.SetComplexity(e.complexity)
+	silkEnc.SetAPISampleRate(e.sampleRate)
+	if e.silkEncoder != nil {
+		silkEnc.SetRateMode(e.silkEncoder.RateMode())
+		silkEnc.SetTrellisNSQ(e.silkEncoder.TrellisNSQ())
+	}
+	var resamplers []*silk.Resampler
+	if silkRate != e.sampleRate {
+		for ch := 0; ch < e.channels; ch++ {
+			r, err := silk.NewEncoderResampler(e.sampleRate, silkRate)
+			if err != nil {
+				return fmt.Errorf("failed to create SILK input resampler: %w", err)
+			}
+			resamplers = append(resamplers, r)
+		}
+	}
+	e.silkEncoder = silkEnc
+	e.silkSampleRate = silkRate
+	e.silkInputResamplers = resamplers
+	e.syncSILKFEC()
+	return nil
 }
 
 // NewEncoderWithProfile creates an encoder with an explicit defaults profile.
@@ -454,6 +476,9 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	if e.shouldEncodeSILKOnly() {
 		celtToSilk := e.prevMode == framing.ModeCELTOnly
 		e.decideStreamChannels(frameSize, framing.ModeSILKOnly)
+		if err := e.selectSILKInternalRate(frameSize); err != nil {
+			return nil, err
+		}
 		if silkBW, ok := nativeSilkFramingBandwidth(e.silkSampleRate); ok {
 			e.updateLBRRCoded(framing.ModeSILKOnly, silkBW, e.sampleRate/frameSize)
 		}
@@ -461,6 +486,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		if err == nil {
 			e.prevMode = framing.ModeSILKOnly
 			e.prevStreamChannels = e.streamChannels
+			e.silkFramesCoded = true
 		}
 		return out, err
 	}
@@ -2268,6 +2294,8 @@ func (e *Encoder) Reset() error {
 	}
 	e.lastDetectedBW = -1
 	e.prevMode = -1
+	e.silkFramesCoded = false
+	e.autoBandwidth = 0
 	e.lastFinalRange = 0
 	e.inDTX = false
 	clear(e.delayBuffer)

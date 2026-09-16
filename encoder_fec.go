@@ -204,6 +204,118 @@ func (e *Encoder) decideStreamChannels(frameSize, mode int) {
 	}
 }
 
+// Bandwidth transition tables (opus_encoder.c): the middle (memoryless)
+// threshold and the hysteresis for NB<->MB, MB<->WB, WB<->SWB, SWB<->FB.
+var (
+	monoVoiceBandwidthThresholds   = [8]int{9000, 700, 9000, 700, 13500, 1000, 14000, 2000}
+	monoMusicBandwidthThresholds   = [8]int{9000, 700, 9000, 700, 11000, 1000, 12000, 2000}
+	stereoVoiceBandwidthThresholds = [8]int{9000, 700, 9000, 700, 13500, 1000, 14000, 2000}
+	stereoMusicBandwidthThresholds = [8]int{9000, 700, 9000, 700, 11000, 1000, 12000, 2000}
+)
+
+// decideAutoBandwidth is opus_encode_native's rate-dependent bandwidth
+// selection for the automatic setting: the thresholds are interpolated by
+// voice_est, walked down from fullband with hysteresis against the previous
+// automatic choice (none on the first packet), mediumband is promoted to
+// wideband, and the result is capped by the input rate. It returns a framing
+// bandwidth constant.
+func (e *Encoder) decideAutoBandwidth(equivRate int, first bool) int {
+	voice, music := &monoVoiceBandwidthThresholds, &monoMusicBandwidthThresholds
+	if e.channels == 2 && e.forceChannels != ChannelsMono {
+		voice, music = &stereoVoiceBandwidthThresholds, &stereoMusicBandwidthThresholds
+	}
+	ve := e.voiceEst()
+	var thresholds [8]int
+	for i := range thresholds {
+		thresholds[i] = music[i] + ((ve * ve * (voice[i] - music[i])) >> 14)
+	}
+	bandwidth := framing.BandwidthFullband
+	for {
+		threshold := thresholds[2*(bandwidth-framing.BandwidthMediumband)]
+		hysteresis := thresholds[2*(bandwidth-framing.BandwidthMediumband)+1]
+		if !first {
+			if e.autoBandwidth >= bandwidth {
+				threshold -= hysteresis
+			} else {
+				threshold += hysteresis
+			}
+		}
+		if equivRate >= threshold {
+			break
+		}
+		bandwidth--
+		if bandwidth <= framing.BandwidthNarrowband {
+			break
+		}
+	}
+	// We don't use mediumband anymore, except when explicitly requested or
+	// during mode transitions.
+	if bandwidth == framing.BandwidthMediumband {
+		bandwidth = framing.BandwidthWideband
+	}
+	e.autoBandwidth = bandwidth
+	// Prevents Opus from wasting bits on frequencies that are above the
+	// Nyquist rate of the input signal.
+	switch {
+	case e.sampleRate <= 8000 && bandwidth > framing.BandwidthNarrowband:
+		bandwidth = framing.BandwidthNarrowband
+	case e.sampleRate <= 12000 && bandwidth > framing.BandwidthMediumband:
+		bandwidth = framing.BandwidthMediumband
+	case e.sampleRate <= 16000 && bandwidth > framing.BandwidthWideband:
+		bandwidth = framing.BandwidthWideband
+	case e.sampleRate <= 24000 && bandwidth > framing.BandwidthSuperwideband:
+		bandwidth = framing.BandwidthSuperwideband
+	}
+	return bandwidth
+}
+
+// silkInternalRateForBandwidth is desiredInternalSampleRate: NB -> 8 kHz,
+// MB -> 12 kHz, WB and above -> 16 kHz, never above the input rate.
+func (e *Encoder) silkInternalRateForBandwidth(bandwidth int) int {
+	rate := 16000
+	switch bandwidth {
+	case framing.BandwidthNarrowband:
+		rate = 8000
+	case framing.BandwidthMediumband:
+		rate = 12000
+	}
+	if rate > e.sampleRate {
+		rate = e.sampleRate
+	}
+	return rate
+}
+
+// selectSILKInternalRate applies the automatic bandwidth decision to the
+// SILK internal rate before the first SILK packet after (re)initialisation
+// (silk_control_audio_bandwidth with fs_kHz == 0: min(desired, API rate)).
+// Once frames have been coded the rate stays: libopus' mid-stream switching
+// (the sLP transition filter and its redundancy) is not ported.
+func (e *Encoder) selectSILKInternalRate(frameSize int) error {
+	if e.silkEncoder == nil || e.forcedBandwidth != BandwidthAuto || e.silkFramesCoded {
+		return nil
+	}
+	equiv := computeEquivRate(e.bitrate, e.streamChannelsOrInput(), e.sampleRate/frameSize, e.rateMode != celt.RateModeCBR, -1, e.complexity, e.packetLossPerc)
+	bw := e.decideAutoBandwidth(equiv, e.prevMode < 0)
+	if publicBW := silkFramingBWToPublic(bw); bandwidthRank(publicBW) > bandwidthRank(e.maxBandwidth) {
+		bw = publicToCeltFramingBW(e.maxBandwidth)
+	}
+	rate := e.silkInternalRateForBandwidth(bw)
+	if rate == e.silkSampleRate {
+		return nil
+	}
+	if err := e.rebuildSILKEncoder(rate); err != nil {
+		return err
+	}
+	return e.applyBitrateSetting(frameSize)
+}
+
+func (e *Encoder) streamChannelsOrInput() int {
+	if e.channels == 2 && e.streamChannels == 1 {
+		return 1
+	}
+	return e.channels
+}
+
 // updateLBRRCoded runs the per-packet FEC decision for a SILK-only or
 // hybrid packet coded at bandwidth and pushes LBRR_coded to the SILK encoder.
 func (e *Encoder) updateLBRRCoded(mode, bandwidth, frameRate int) {

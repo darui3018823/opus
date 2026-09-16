@@ -413,6 +413,9 @@ func (e *Encoder) frameBitBudget(nFrames, frame int) (maxBits int, useCBR bool) 
 	return maxBits, useCBR
 }
 
+// RateMode returns the current rate mode.
+func (e *Encoder) RateMode() RateMode { return e.rateMode }
+
 // SetRateMode supplies the top-level Opus packet-size contract. The
 // SNR-target natural-size path is available only in VBR/CVBR and remains
 // independently disableable with OPUS_SILK_RC_SNR=0.

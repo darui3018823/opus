@@ -934,3 +934,26 @@ test passes.
   cannot lower a 16 kHz input below WB, so those cells match as well.
 - Verified `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (all pass).
+
+### 2026-09-17: CELT-only baseline measurement (`2cca199`)
+
+- `2cca199` fix(celt): CBR CELT payload = `cbr_bytes - 1` (packets were one
+  byte long; the CBR size tests follow the libopus convention now).
+- First CELT-only comparison against the real libopus encoder
+  (RESTRICTED_LOWDELAY, 48 kHz mono, CBR, fullband forced, harmonic
+  fixture): packet sizes and TOC match; **no packet is byte-identical
+  yet**. At complexity 0 several packets share long prefixes (62 bytes of
+  160 at 64 kbps, 12 bytes on another) while others diverge at byte 1 —
+  i.e. the frame-level decisions coded first (transient / tf / silence,
+  first-frame state) differ on some frames and the band coding is close on
+  the others. At complexity 5 and 10 every packet diverges at byte 1 (the
+  pitch pre/postfilter decision and gains come first).
+- Bandwidth policy note: with the automatic bandwidth the Go CELT path
+  narrowed this fixture to SWB (`narrowAutoBandwidth` analyses the signal)
+  while libopus stays FB below complexity 7 (rate-based decision only; the
+  tonality analysis narrows only at complexity ≥ 7). Whether to keep the Go
+  analysis-based narrowing is a policy decision (quality feature vs libopus
+  fidelity) — raised with the user.
+- Next for CELT exactness: an instrumented `celt_encode_with_ec` oracle
+  (transient_analysis, tf_analysis, band energies, alloc, PVQ) following
+  the SILK oracle pattern (`scripts/oracle/build_encoder.ps1`).

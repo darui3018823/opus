@@ -893,3 +893,22 @@ test passes.
   bandwidth narrowing to MB at 16 kHz / 20 kbps stereo with FEC (1).
 - Verified `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (all pass).
+
+### 2026-09-17: Automatic bandwidth decision → SILK internal rate (`d683ded`, `8e60c26`)
+
+- Reference: `src/opus_encoder.c` (`mono/stereo_voice/music_bandwidth_thresholds`,
+  the FB→NB walk with hysteresis against `auto_bandwidth`, MB→WB promotion,
+  the input-rate Nyquist caps, `max_bandwidth`), `silk/control_audio_bandwidth.c`
+  (`fs_kHz == 0`: internal rate = min(desiredInternal, API rate)).
+- `d683ded` feat(encoder): `decideAutoBandwidth` / `selectSILKInternalRate`
+  (`encoder_fec.go`) choose the SILK internal rate before the first SILK
+  packet after (re)initialisation and rebuild the SILK encoder + encoder
+  resamplers at that rate (`rebuildSILKEncoder`). Not ported: mid-stream
+  switching (`allowBandwidthSwitch`, the sLP transition filter, its
+  redundancy frame) — the rate stays once frames were coded.
+- `8e60c26` test(opusref): `TestCGOEncodeRefSILKAutoBandwidth` — 12/16/48 kHz
+  mono voice at 6/8/9/10/12 kbps: NB below the 9 kbps threshold (SILK at
+  8 kHz through the 12/16/48→8 kHz resampler), WB above; all 12 packets
+  byte-identical to the real libopus encoder.
+- Verified `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (all pass).

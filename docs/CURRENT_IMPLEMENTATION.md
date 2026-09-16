@@ -1025,12 +1025,14 @@ re-quantises a frame against `silk_mode.maxBits`, CBR packets are sized to
 channel decision is ported as well: a stereo input below the stereo
 threshold is coded as a mono SILK stream (libopus' L/R downmix, the delayed
 toMono transition and the mono↔stereo state hand-over), so 84 of the 99
-mono+stereo CVBR/FEC/CBR cells are byte-identical. The remaining cells are
-policy the Go encoder does not mirror: libopus picks hybrid for 24/48 kHz
-mono input and narrows the bandwidth for FEC; SILK internal-rate switching,
-the tonality analysis (complexity ≥ 7) and the hybrid/CELT paths are not
-yet exact. The SILK AB loudness gate passes at 8/12/16 kHz since the
-shaping port.
+mono+stereo CVBR/FEC/CBR cells are byte-identical, and the automatic
+bandwidth decision sets the SILK internal rate before the first packet (NB
+at low bitrates through the encoder resampler, `TestCGOEncodeRefSILKAutoBandwidth`).
+The remaining cells are policy the Go encoder does not mirror: libopus
+picks hybrid for 24/48 kHz mono input and narrows the bandwidth for FEC;
+mid-stream SILK internal-rate switching, the tonality analysis
+(complexity ≥ 7) and the hybrid/CELT paths are not yet exact. The SILK AB
+loudness gate passes at 8/12/16 kHz since the shaping port.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

@@ -170,11 +170,13 @@ quantiser loop + cbr_bytes sizing/padding → **CBR mono and stereo SILK
 packets byte-identical too (90/119 cgoref cells = every SILK-only
 same-channel-count cell in CVBR, CVBR+FEC and CBR)**. `38072d0`/`8a93b3e`/`93e4b68`
 (2026-09-17): stream channel decision + mono-stream coding of stereo
-input with exact transitions → **84/99 cgoref cells**. Remaining: the
+input with exact transitions → **84/99 cgoref cells**. `d683ded`/`8e60c26`
+(2026-09-17): static automatic bandwidth decision → SILK internal rate
+(NB at low bitrates through the resampler) byte-identical. Remaining: the
 digital-silence shortcut policy (onset fixture; libopus codes silent
-frames), mode/bandwidth policy (hybrid for 24/48 kHz input, SILK internal
-rate switching, decide_fec narrowing), the tonality analysis (complexity
-≥ 7), hybrid/CELT, a phase-insensitive scoreboard distance. Merge-back: `dev/libopus-bit-exact` was fast-forwarded to
+frames), mode policy (hybrid for 24/48 kHz input), mid-stream SILK
+internal-rate switching + decide_fec narrowing, the tonality analysis
+(complexity ≥ 7), hybrid/CELT, a phase-insensitive scoreboard distance. Merge-back: `dev/libopus-bit-exact` was fast-forwarded to
 `08c4201` (Q1/Q2/PLC) on 2026-09-16; the child branches
 `dev/silk-plc-exact`, `dev/silk-q1-oracle`, `dev/silk-q2-ltp-oracle` were
 deleted.

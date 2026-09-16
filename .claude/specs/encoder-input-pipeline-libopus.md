@@ -143,14 +143,18 @@ that must be reconciled when this pipeline lands.
   (`TestCGOEncodeRefSILKStreamChannels`). `voice_est` follows the signal
   hint / application only: libopus' tonality analysis (complexity ≥ 7)
   is not ported, so AUTO signal at complexity ≥ 7 can decide differently.
-- **Bandwidth / mode policy.** libopus picks the bandwidth from
-  `equiv_rate` (mono/stereo voice/music threshold tables with hysteresis,
-  `st->first`, `allowBandwidthSwitch`) and switches SILK's internal rate
-  (`silk_control_audio_bandwidth`, the variable LP transition filter);
-  with `decide_fec` it narrows the bandwidth to fit FEC. The Go SILK rate
-  follows the input rate (8/12/≥16 kHz → NB/MB/WB) and the mode decision is
-  the Go heuristic, so libopus' hybrid choice for 24/48 kHz mono voice input
-  (SWB/FB at ≥ 15 kbps) and its NB/MB choices below ~10 kbps are not mirrored.
+- **Bandwidth policy — static part done (`d683ded`).** The automatic
+  bandwidth decision sets the SILK internal rate before the first SILK
+  packet (NB below ~9 kbps voice, WB above; `TestCGOEncodeRefSILKAutoBandwidth`).
+  Not ported: mid-stream switching (`allowBandwidthSwitch`,
+  `silk_control_audio_bandwidth`'s transition state machine, the sLP
+  variable LP filter and the redundancy frame) — a bitrate change across a
+  threshold keeps the Go rate while libopus switches — and `decide_fec`'s
+  bandwidth narrowing for FEC.
+- **Mode policy.** libopus picks hybrid (SWB/FB) for 24/48 kHz mono voice
+  input at ≥ ~15 kbps (`mode_thresholds`, then bandwidth > WB → hybrid); the
+  Go mode decision is its own heuristic and stays SILK WB there. Exactness
+  needs the CELT/hybrid encoder first.
 
 ## Go implementation plan
 

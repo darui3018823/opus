@@ -912,3 +912,25 @@ test passes.
   byte-identical to the real libopus encoder.
 - Verified `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (all pass).
+
+### 2026-09-17: All complexity settings byte-identical — plain silk_NSQ (`16fcef8`, `899e978`)
+
+- `16fcef8` test(opusref): the encoder oracle takes a complexity argument
+  (mono comparison also at complexity 8); `TestCGOEncodeRefSILKComplexity`
+  sweeps complexity 0–10 at 8/12/16 kHz against the real libopus encoder.
+  Result: 0 and 2–10 identical, 1 diverged from frame 4 in the pulses only.
+- Cause: `silk_NSQ_wrapper_FLP` runs the plain `silk_NSQ` when
+  `nStatesDelayedDecision == 1 && warping_Q16 == 0` (complexity 0 and 1);
+  the Go single-state delayed-decision quantiser differs in Q-format and
+  rounding (Q14 saturating combination vs Q12 with `RSHIFT_ROUND`, Q20 vs
+  Q10 rate-distortion comparison), which happened to coincide at
+  complexity 0 (12th-order shaping, 3 ms look-ahead) but not at 1.
+- `899e978` fix(silk): `internal/silk/nsq_plain.go` ports `silk_NSQ`,
+  `silk_nsq_scale_states`, `silk_NSQ_noise_shape_feedback_loop_c` and
+  `silk_noise_shape_quantizer`; the wrapper dispatch follows libopus.
+  **Every complexity setting is now byte-identical** (36 cells × 12 packets).
+  At complexity ≥ 7 libopus also runs the tonality analysis for ≥ 16 kHz
+  input; with a voice signal hint it only feeds `detected_bandwidth`, which
+  cannot lower a 16 kHz input below WB, so those cells match as well.
+- Verified `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (all pass).

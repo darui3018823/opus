@@ -172,7 +172,8 @@ same-channel-count cell in CVBR, CVBR+FEC and CBR)**. `38072d0`/`8a93b3e`/`93e4b
 (2026-09-17): stream channel decision + mono-stream coding of stereo
 input with exact transitions → **84/99 cgoref cells**. `d683ded`/`8e60c26`
 (2026-09-17): static automatic bandwidth decision → SILK internal rate
-(NB at low bitrates through the resampler) byte-identical. Remaining: the
+(NB at low bitrates through the resampler) byte-identical; `899e978`: plain
+`silk_NSQ` port → every complexity 0–10 byte-identical. Remaining: the
 digital-silence shortcut policy (onset fixture; libopus codes silent
 frames), mode policy (hybrid for 24/48 kHz input), mid-stream SILK
 internal-rate switching + decide_fec narrowing, the tonality analysis

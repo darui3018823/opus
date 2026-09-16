@@ -1027,7 +1027,10 @@ threshold is coded as a mono SILK stream (libopus' L/R downmix, the delayed
 toMono transition and the mono↔stereo state hand-over), so 84 of the 99
 mono+stereo CVBR/FEC/CBR cells are byte-identical, and the automatic
 bandwidth decision sets the SILK internal rate before the first packet (NB
-at low bitrates through the encoder resampler, `TestCGOEncodeRefSILKAutoBandwidth`).
+at low bitrates through the encoder resampler, `TestCGOEncodeRefSILKAutoBandwidth`),
+and every complexity setting 0–10 is byte-identical (the plain `silk_NSQ`
+for one delayed-decision state is ported next to the delayed-decision
+quantiser, `TestCGOEncodeRefSILKComplexity`).
 The remaining cells are policy the Go encoder does not mirror: libopus
 picks hybrid for 24/48 kHz mono input and narrows the bandwidth for FEC;
 mid-stream SILK internal-rate switching, the tonality analysis

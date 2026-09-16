@@ -957,3 +957,45 @@ test passes.
 - Next for CELT exactness: an instrumented `celt_encode_with_ec` oracle
   (transient_analysis, tf_analysis, band energies, alloc, PVQ) following
   the SILK oracle pattern (`scripts/oracle/build_encoder.ps1`).
+
+## Phase 5 (next): CELT encoder exactness — plan (written 2026-09-17 02:40)
+
+State of the Go CELT encoder relevant to exactness: float64 throughout
+(libopus float build is float32 `opus_val32`/`celt_sig`, KISS FFT in
+float32), no pitch prefilter (`pf_on` is always 0; libopus runs
+`run_prefilter` from complexity 5), own transient/tf/alloc heuristics that
+follow libopus structurally but not arithmetically.
+
+Ordered steps, each gated by an instrumented `celt_encode_with_ec` oracle
+(extend `scripts/oracle/build_encoder.ps1` to patch `celt/celt_encoder.c`,
+`celt/bands.c`, `celt/quant_bands.c`, `celt/vq.c`, dumping per frame; Go
+side exposes a `celt.FrameTrace` like `silk.FrameTrace`):
+
+1. Input path: `celt_preemphasis` (float32, `coef[0]` 0.85, upsample
+   scaling), `compute_mdcts` (`clt_mdct_forward_c` with the float32 KISS
+   FFT, window `mode->window`), `compute_band_energies` / `amp2Log2` —
+   compare `bandLogE` bit for bit. Fixture: RESTRICTED_LOWDELAY 48 kHz mono
+   (no delay buffer / HP interplay), then VOIP.
+2. `transient_analysis` (float32, `tf_estimate`, `tf_chan`, weak
+   transients, tone detection in 1.6.1), `patch_transient_decision`,
+   `secondMdct` at complexity ≥ 8.
+3. `quant_coarse_energy` (two-pass with `intra` decision, `budget`,
+   Laplace coding) — first integer checkpoint: identical coarse energy
+   symbols and `tell`.
+4. `tf_analysis` / `tf_encode`, `alloc_trim_analysis`, `dynalloc_analysis`
+   (`spread_decision`, `stereo_analysis`), `clt_compute_allocation` — the
+   allocation is integer once its float inputs match.
+5. `quant_all_bands`: `alg_quant` (float32 PVQ search, `op_pvq_search_c`),
+   `quant_band` recursion, `haar1`, `intensity`/`dual_stereo`,
+   `anti_collapse`, `quant_fine_energy`, `quant_energy_finalise`.
+6. `run_prefilter` (pitch downsample, `pitch_search`, `remove_doubling`,
+   comb filter, tapset decision, gain quantisation) for complexity ≥ 5.
+7. VBR: `compute_vbr`, the `st->vbr_reservoir` / `vbr_drift` / `nbCompressedBytes`
+   loop and `ec_enc_shrink`; CBR done (`2cca199`).
+8. Stereo (`compute_stereo_width` also drives the Opus-layer mode/threshold
+   interpolation), intensity/dual-stereo decisions, then hybrid (SILK exact
+   + CELT exact + `compute_silk_rate_for_hybrid` already done).
+
+Blocked-on-CELT items from the SILK side: hybrid mode policy for 24/48 kHz
+input, SILK internal-rate switching (needs the CELT redundancy frame),
+`decide_fec` bandwidth narrowing in hybrid.

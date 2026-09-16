@@ -194,6 +194,8 @@ type Encoder struct {
 	// pendingLBRRStereoMidOnly carries the mid-only flags for the frames in
 	// pendingLBRR (coded with an LBRR mid frame whose side LBRR is absent).
 	pendingLBRRStereoMidOnly []bool
+	// lastStereoTrace holds the per-frame stereo decisions of the last packet.
+	lastStereoTrace []StereoFrameTrace
 }
 
 type nlsfAnalysis struct {
@@ -495,6 +497,12 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		return fmt.Errorf("missing SILK side-channel encoder")
 	}
 	fsKHz := e.sampleRate / 1000
+	// nFramesPerPacket for both channels (silk_LTP_scale_ctrl's round_loss).
+	prevPacketFrames, prevSidePacketFrames := e.packetFrames, e.side.packetFrames
+	e.packetFrames, e.side.packetFrames = nFrames, nFrames
+	defer func() {
+		e.packetFrames, e.side.packetFrames = prevPacketFrames, prevSidePacketFrames
+	}()
 
 	left := make([][]int16, nFrames)
 	right := make([][]int16, nFrames)
@@ -567,13 +575,17 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 	vadFlags := [2][]bool{make([]bool, nFrames), make([]bool, nFrames)}
 	predIx := make([][2][3]int8, nFrames)
 	midOnly := make([]bool, nFrames)
+	e.lastStereoTrace = e.lastStereoTrace[:0]
 	for i := 0; i < nFrames; i++ {
 		tell := enc.ECTell()
 		total := e.frameTargetRate(nFrames, i, tell)
 		e.targetRateBps = total
 		e.side.targetRateBps = total
+		st := StereoFrameTrace{PrevDecodeOnlyMiddle: e.prevOnlyMiddle, TotalRate: total, PrevSpeechActQ8: e.speechActivityQ8}
 		// silk_stereo_LR_to_MS with the mid channel's previous speech activity.
 		ms := e.stereoState.lrToMS(left[i], right[i], fsKHz, e.frameSize, int32(total), e.speechActivityQ8, false)
+		st.Ix, st.MidOnly, st.Rates = ms.ix, ms.midOnly, ms.midSideRates
+		st.WidthPrev, st.SmthWidth, st.SilentSideLen, st.PredPrev = e.stereoState.widthPrevQ14, e.stereoState.smthWidthQ14, e.stereoState.silentSideLen, e.stereoState.predPrevQ13
 		predIx[i] = ms.ix
 		midOnly[i] = ms.midOnly
 		mid := int16FrameToFloat(ms.mid)
@@ -599,10 +611,13 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 
 		e.curFrame = i
 		e.channelRateBps = int(ms.midSideRates[0])
+		st.Tell[0], st.SpeechActQ8[0], st.FirstAfterRst[0] = enc.ECTell(), e.frameVAD[i].speechActivityQ8, e.firstFrameAfterReset
 		e.encodeRangeFrame(enc, mid, vadFlags[0][i], i > 0)
 		e.recordRateTrace(nFrames, tell, lbrrBits)
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 		if ms.midSideRates[1] > 0 {
+			st.SideCoded = true
+			st.Tell[1], st.SpeechActQ8[1], st.FirstAfterRst[1] = enc.ECTell(), e.side.frameVAD[i].speechActivityQ8, e.side.firstFrameAfterReset
 			e.side.curFrame = i
 			e.side.channelRateBps = int(ms.midSideRates[1])
 			// CODE_INDEPENDENTLY for the first frame, CODE_INDEPENDENTLY_NO_LTP_SCALING
@@ -615,6 +630,7 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 			e.side.appendMissingLBRRFrame()
 		}
 		e.prevOnlyMiddle = ms.midOnly
+		e.lastStereoTrace = append(e.lastStereoTrace, st)
 	}
 	e.channelRateBps = 0
 	e.side.channelRateBps = 0

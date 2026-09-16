@@ -41,9 +41,10 @@ func c32(x float64) float64 { return float64(float32(x)) }
 // silkLog2FLP32 is silk_log2: (silk_float)(3.32192809488736 * log10(x)).
 func silkLog2FLP32(x float64) float64 { return f32(3.32192809488736 * math.Log10(x)) }
 
-// silkSigmoidFLP32 is silk_sigmoid: 1.0f / (1.0f + (silk_float)exp(-x)).
+// silkSigmoidFLP32 is silk_sigmoid: (silk_float)(1.0 / (1.0 + exp(-x))),
+// evaluated in double and rounded once.
 func silkSigmoidFLP32(x float64) float64 {
-	return f32(1.0 / f32(1.0+f32(math.Exp(-x))))
+	return f32(1.0 / (1.0 + math.Exp(-x)))
 }
 
 // silkWarpedAutocorrelationFLP32 ports silk_warped_autocorrelation_FLP: double

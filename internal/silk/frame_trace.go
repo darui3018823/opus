@@ -38,6 +38,37 @@ type FrameTrace struct {
 	NBits, TargetRateBps, NBitsExceeded, NBitsUsedLBRR, LBRRBits, Tell int
 }
 
+// StereoFrameTrace records one frame of the stereo packet flow (silk_Encode
+// with nChannelsInternal == 2) in the values the instrumented libopus dumps
+// as [SILK_ENC_STEREO] / [SILK_ENC_CH].
+type StereoFrameTrace struct {
+	Ix                   [2][3]int8
+	MidOnly              bool
+	Rates                [2]int32
+	WidthPrev, SmthWidth int16 // stereo state after silk_stereo_LR_to_MS
+	SilentSideLen        int16
+	PredPrev             [2]int16
+	PrevDecodeOnlyMiddle bool // before the frame
+	TotalRate            int
+	PrevSpeechActQ8      int
+	// Per channel (mid, side): ec_tell before the channel's frame, its
+	// speech_activity_Q8 and first_frame_after_reset at that point; SideCoded
+	// is false when the side rate is zero.
+	Tell          [2]int
+	SpeechActQ8   [2]int
+	FirstAfterRst [2]bool
+	SideCoded     bool
+}
+
+// SideEncoder returns the side-channel encoder of a stereo encoder (nil for
+// mono), for tests that inspect its traces.
+func (e *Encoder) SideEncoder() *Encoder { return e.side }
+
+// LastStereoTrace returns the stereo traces of the most recent stereo packet.
+func (e *Encoder) LastStereoTrace() []StereoFrameTrace {
+	return e.lastStereoTrace
+}
+
 // Shape32Values exposes the float32 noise-shape outputs for tests: AR rows,
 // gains, LF_MA, LF_AR, tilt, harmonic gain, input/coding quality.
 func (t FrameTrace) Shape32Values(nbSubfr, order int) (ar [][]float32, gains, lfMA, lfAR, tilt, harm []float32, inputQuality, codingQuality float32) {

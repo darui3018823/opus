@@ -99,8 +99,8 @@ func TestPerfPredictivePacketRegression(t *testing.T) {
 	want := map[string]string{
 		"silk/mono/48k/20ms":     "7713796b32e32b50fd70f03911838675530579c35afaf0575230b006c4a4fbf7",
 		"silk/stereo/48k/20ms":   "1732a6b5b6f4179f1ab6e5340aaea6e42a272bc1b968ca72f97bcc3553a389e2",
-		"hybrid/mono/48k/20ms":   "2e7e4a1b20c8c58b019b9acdb941b3327cb02e4ca5b5ac16d789ea3f01ba6a5c",
-		"hybrid/stereo/48k/20ms": "4f5fa17996b5cffb14cb10a3e4dd4d9ff323ae0f4c7172c155f5f5a920bab4a5",
+		"hybrid/mono/48k/20ms":   "8556f915c090445b86424882beab2aa3f79a4f3111d3760c42c7f4e656716a77",
+		"hybrid/stereo/48k/20ms": "ec43cece6df6f0ea32325fa5101a2e193ae33f5c9bd77cf17fb4ad1b0997eb16",
 	}
 	for _, wl := range perfWorkloads() {
 		wantDigest, ok := want[wl.name]

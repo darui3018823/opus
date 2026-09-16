@@ -311,6 +311,7 @@ func runCELTOracleCase(t *testing.T, tc celtOracleCase) {
 			if os.Getenv("CELT_ORACLE_DUMP") != "" {
 				t.Logf("frame %d: oldBandE Go %v C %v", f, tr.OldBandE, r.oldBandE)
 				t.Logf("frame %d: error Go %v C %v", f, tr.CoarseError, r.errorE)
+				t.Logf("frame %d: tf_res Go %v C %v | pulses Go %v C %v", f, tr.TFRes, r.tfRes, tr.Pulses, r.pulses)
 			}
 			if _, _, eq, n := float32Stats(tr.OldBandE, r.oldBandE); eq != n {
 				t.Logf("frame %d: oldBandE after coarse differs (%d/%d equal): Go %v C %v", f, eq, n, tr.OldBandE, r.oldBandE)
@@ -373,7 +374,7 @@ func TestCELTEncoderOracle(t *testing.T) {
 					complexity: complexity,
 					vbr:        vbr,
 					channels:   1,
-					exact:      complexity == 0 && !vbr,
+					exact:      complexity <= 4 && !vbr,
 				})
 			}
 		}

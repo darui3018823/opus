@@ -339,29 +339,67 @@ func (ctx *bandCtx) tellFrac() int {
 	return ctx.dec.TellFrac()
 }
 
-// stereoIthetaF is the float port of libopus stereo_itheta (vq.c), returning the
-// pre-quantization angle in [0,16384]. For a mono split (stereo=false) X and Y
-// are the two halves; for a stereo band they are the L/R channels.
+// celtAtanNorm is libopus celt_atan_norm (float build): a Remez
+// approximation of 2/pi*atan(x) for x in [0, 1], evaluated in float32.
+func celtAtanNorm(x float32) float32 {
+	const (
+		a03 = float32(-3.3331659436225891113281250000e-01)
+		a05 = float32(1.99627041816711425781250000000e-01)
+		a07 = float32(-1.3976582884788513183593750000e-01)
+		a09 = float32(9.79423448443412780761718750000e-02)
+		a11 = float32(-5.7773590087890625000000000000e-02)
+		a13 = float32(2.30401363223791122436523437500e-02)
+		a15 = float32(-4.3554059229791164398193359375e-03)
+	)
+	xSq := x * x
+	p := a13 + xSq*a15
+	p = a11 + xSq*p
+	p = a09 + xSq*p
+	p = a07 + xSq*p
+	p = a05 + xSq*p
+	p = a03 + xSq*p
+	return float32(0.636619772367581) * (x + x*xSq*p)
+}
+
+// celtAtan2pNorm is libopus celt_atan2p_norm (float build): atan2(y, x)
+// normalised to [0, 1] for non-negative arguments.
+func celtAtan2pNorm(y, x float32) float32 {
+	if x*x+y*y < 1e-18 {
+		return 0
+	}
+	if y < x {
+		return celtAtanNorm(y / x)
+	}
+	return 1 - celtAtanNorm(x/y)
+}
+
+// stereoIthetaF is the float32 port of libopus stereo_itheta (vq.c),
+// returning the pre-quantization angle in [0,16384] (stereo_itheta's Q30
+// value shifted down by 16). For a mono split (stereo=false) X and Y are
+// the two halves; for a stereo band they are the L/R channels.
 func stereoIthetaF(X, Y []float64, stereo bool, n int) int {
-	Emid, Eside := 1e-15, 1e-15
+	var Emid, Eside float32
 	if stereo {
 		for i := 0; i < n; i++ {
-			m := X[i] + Y[i]
-			s := X[i] - Y[i]
-			Emid += m * m
-			Eside += s * s
+			m := float32(X[i]) + float32(Y[i])
+			s := float32(X[i]) - float32(Y[i])
+			Emid += float32(m * m)
+			Eside += float32(s * s)
 		}
 	} else {
 		for i := 0; i < n; i++ {
-			Emid += X[i] * X[i]
+			x := float32(X[i])
+			Emid += float32(x * x)
 		}
 		for i := 0; i < n; i++ {
-			Eside += Y[i] * Y[i]
+			y := float32(Y[i])
+			Eside += float32(y * y)
 		}
 	}
-	mid := math.Sqrt(Emid)
-	side := math.Sqrt(Eside)
-	return int(math.Floor(0.5 + 16384.0*0.63662*math.Atan2(side, mid)))
+	mid := float32(math.Sqrt(float64(Emid)))
+	side := float32(math.Sqrt(float64(Eside)))
+	ithetaQ30 := int32(math.Floor(float64(float32(0.5) + float32(65536.0*16384)*celtAtan2pNorm(side, mid))))
+	return int(ithetaQ30 >> 16)
 }
 
 // intensityStereo collapses Y into X using the band's stereo energy ratio

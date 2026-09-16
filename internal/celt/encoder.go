@@ -166,6 +166,17 @@ type Encoder struct {
 	// the previous frame's decision, used for hysteresis.
 	tonalAverage int
 	lastSpread   int
+	// hfAverage / tapsetDecision are libopus st->hf_average and
+	// st->tapset_decision: the high-frequency flatness follower and the
+	// prefilter tapset it selects (spreading_decision).
+	hfAverage      int
+	tapsetDecision int
+	// lsbDepth is OPUS_SET_LSB_DEPTH (24 for float input, 16 for int16),
+	// used by the dynalloc noise floor.
+	lsbDepth int
+	// analysisScratch is the float32 work buffer shared by tone_detect and
+	// transient_analysis (frame + overlap samples).
+	analysisScratch []float32
 
 	// consecTransient counts consecutive transient frames (libopus
 	// st->consec_transient). It gates the anti-collapse decision: anti-collapse
@@ -248,6 +259,7 @@ func NewEncoder(frameSize, sampleRate, channels int, config *EncoderConfig) (*En
 		// libopus opus_custom_encoder_init defaults.
 		tonalAverage: 256,
 		lastSpread:   spreadNormal,
+		lsbDepth:     24,
 	}
 	for c := 0; c < channels; c++ {
 		e.overlap[c] = make([]float64, overlap)
@@ -413,11 +425,22 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// isTransient flag is only coded for LM>0; the bit's budget guard below is
 	// satisfied for every non-degenerate packet (the symbols before it cost only
 	// a couple of bits), so committing to short blocks here cannot desync.
+	// tone_detect first: a dominant pure tone disables the transient detector
+	// near DC, biases dynalloc and gates tf_analysis and the prefilter.
+	if len(e.analysisScratch) < frameSize+ov {
+		e.analysisScratch = make([]float32, frameSize+ov)
+	}
+	toneFreq, toneishness := toneDetect(bufs, frameSize+ov, e.mode.SampleRate, e.analysisScratch)
 	isTransient := false
 	tfChan := 0
 	tfEstimate := 0.0
-	if lm > 0 && e.complexity >= 1 {
-		isTransient, tfChan, tfEstimate = transientAnalysis(bufs, frameSize+ov, ch)
+	if e.complexity >= 1 {
+		var tfEst32 float32
+		isTransient, tfEst32, tfChan, _ = transientAnalysis32(bufs, frameSize+ov, ch, false, toneFreq, toneishness, e.analysisScratch)
+		tfEstimate = float64(tfEst32)
+	}
+	if v := float32(1) - float32(tfEstimate); v < toneishness {
+		toneishness = v
 	}
 	// Pass 2: forward MDCT (M interleaved short blocks on transients, else one
 	// long block), band energy, and per-band normalisation.
@@ -674,21 +697,37 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// (dynallocEncode), after spread, to keep the bitstream in decoder order.
 	vbrOn := e.rateMode != RateModeCBR
 	constrainedVBR := e.rateMode == RateModeCVBR
-	offsets, importance := dynallocAnalysis(logE, logE2, numBands, end, ch, lm, isTransient, vbrOn, constrainedVBR)
+	// libopus nbFilledBytes / effectiveBytes: the bytes SILK already used and
+	// the bytes this frame can spend (the CBR packet, or the VBR nominal rate).
+	nbFilledBytes := 0
+	if shared {
+		nbFilledBytes = (tell0 + 4) >> 3
+	}
+	effectiveBytes := targetBytes - nbFilledBytes
+	if vbrOn {
+		effectiveBytes = (e.bitrate * 6 / (6 * e.mode.SampleRate / frameSize)) >> 3
+	}
+	dyn := dynallocAnalysis32(logE, logE2, e.prevBandEnergies, numBands, start, end, ch, e.lsbDepth, lm,
+		isTransient, vbrOn, constrainedVBR, effectiveBytes, nil, toneFreq, toneishness)
+	offsets, importance := dyn.offsets, dyn.importance
 
 	// Time-frequency resolution. tf_analysis runs a Viterbi search over per-band
-	// L1 sparsity to pick tfRes[]/tf_select; libopus disables it (tf_res =
-	// isTransient) at very low bitrate or below complexity 2.
+	// L1 sparsity to pick tfRes[]/tf_select; libopus disables it for hybrid, at
+	// very low bitrate, below complexity 2 and on pure tones.
 	tfRes := make([]int, numBands)
 	tfSelect := 0
-	if targetBytes >= 15*ch && e.complexity >= 2 {
-		lambda := 20480/targetBytes + 2
+	enableTFAnalysis := effectiveBytes >= 15*ch && !shared && e.complexity >= 2 && toneishness < 0.98
+	if enableTFAnalysis {
+		lambda := 20480/effectiveBytes + 2
 		if lambda < 80 {
 			lambda = 80
 		}
 		tfSelect = tfAnalysis(end, isTransient, tfRes, lambda, X, frameLen, lm, tfChan, tfEstimate, importance)
+		for i := end; i < numBands; i++ {
+			tfRes[i] = tfRes[end-1]
+		}
 	} else if isTransient {
-		for i := start; i < end; i++ {
+		for i := 0; i < end; i++ {
 			tfRes[i] = 1
 		}
 	}
@@ -709,10 +748,6 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// Coarse band energies (quant_coarse_energy): the intra decision, the
 	// intra flag and the per-band Laplace residuals. oldBandE is updated in
 	// place; coarseError feeds the fine quantiser and the next frame's bias.
-	nbFilledBytes := 0
-	if shared {
-		nbFilledBytes = (tell0 + 4) >> 3
-	}
 	quantLogE := e.prevBandEnergies
 	coarseError := make([]float64, ch*numBands)
 	intra := e.quantCoarseEnergy(enc, start, end, end, logE, quantLogE, totalBits, coarseError,
@@ -744,16 +779,33 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	e.lastTrace.TFSelect = tfSelect
 	e.lastTrace.TellTF = enc.ECTell()
 
-	// Spread decision (tonality-based). Complexity 0 forces SPREAD_NONE; otherwise
-	// spreading_decision measures per-band tonality from the normalised spectrum.
-	spread := spreadNormal
-	if e.complexity == 0 {
-		spread = spreadNone
-	} else {
-		spread = spreadingDecision(X, frameLen, end, ch, M, &e.tonalAverage, e.lastSpread)
-	}
+	// Spread decision. Hybrid frames, short blocks, complexity < 3 and tiny
+	// budgets use fixed choices; otherwise spreading_decision measures the
+	// per-band tonality of the normalised spectrum (and updates the tapset).
+	spread := e.lastSpread
 	if enc.ECTell()+4 <= totalBits {
+		switch {
+		case shared:
+			if e.complexity == 0 {
+				spread = spreadNone
+			} else if isTransient {
+				spread = spreadNormal
+			} else {
+				spread = spreadAggressive
+			}
+		case isTransient || e.complexity < 3 || targetBytes-nbFilledBytes < 10*ch:
+			if e.complexity == 0 {
+				spread = spreadNone
+			} else {
+				spread = spreadNormal
+			}
+		default:
+			spread = spreadingDecision32(X, frameLen, end, ch, M, &e.tonalAverage, e.lastSpread,
+				&e.hfAverage, &e.tapsetDecision, false, dyn.spreadWeight)
+		}
 		enc.EncodeIcdf(spread, spreadIcdf[:], 5)
+	} else {
+		spread = spreadNormal
 	}
 	e.lastSpread = spread
 	etr(enc, "spread")
@@ -1120,6 +1172,8 @@ func (e *Encoder) Reset() {
 	e.frameCount = 0
 	e.tonalAverage = 256
 	e.lastSpread = spreadNormal
+	e.hfAverage = 0
+	e.tapsetDecision = 0
 	e.consecTransient = 0
 	e.intensity = 0
 	e.lastCodedBands = 0
@@ -1212,6 +1266,8 @@ func (e *Encoder) CopyStateFrom(src *Encoder) {
 	e.frameCount = src.frameCount
 	e.tonalAverage = src.tonalAverage
 	e.lastSpread = src.lastSpread
+	e.hfAverage = src.hfAverage
+	e.tapsetDecision = src.tapsetDecision
 	e.consecTransient = src.consecTransient
 	e.intensity = src.intensity
 	e.lastCodedBands = src.lastCodedBands

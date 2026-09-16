@@ -140,6 +140,70 @@ func computeSILKRateForHybrid(rate, bandwidth int, frame20ms, vbr, fec bool, cha
 	return silkRate
 }
 
+// stereoVoiceThreshold / stereoMusicThreshold are stereo_voice_threshold and
+// stereo_music_threshold: the equivalent rates above which a stereo input is
+// coded as two stream channels.
+const (
+	stereoVoiceThreshold = 19000
+	stereoMusicThreshold = 17000
+)
+
+// voiceEst is opus_encode_native's voice_est without the tonality analysis
+// (which libopus only runs at complexity >= 7): 127 for a voice signal hint,
+// 0 for music, 115 for VOIP and 48 otherwise.
+func (e *Encoder) voiceEst() int {
+	switch e.signalSetting {
+	case SignalVoice:
+		return 127
+	case SignalMusic:
+		return 0
+	}
+	if e.application == ApplicationVOIP {
+		return 115
+	}
+	return 48
+}
+
+// decideStreamChannels is the rate-dependent mono/stereo decision for a
+// stereo input (st->stream_channels) with its 1000 bps hysteresis, followed
+// by the toMono rule: the first packet after a stereo->mono decision is still
+// coded stereo with the width collapsed so SILK can downmix smoothly.
+func (e *Encoder) decideStreamChannels(frameSize, mode int) {
+	if e.channels != 2 {
+		e.streamChannels = 1
+		e.toMono = false
+		return
+	}
+	if e.streamChannels == 0 {
+		e.streamChannels = 2
+	}
+	if e.forceChannels != ChannelsAuto {
+		e.streamChannels = e.forceChannels
+	} else {
+		equiv := computeEquivRate(e.bitrate, e.channels, e.sampleRate/frameSize, e.rateMode != celt.RateModeCBR, -1, e.complexity, e.packetLossPerc)
+		ve := e.voiceEst()
+		threshold := stereoMusicThreshold + ((ve * ve * (stereoVoiceThreshold - stereoMusicThreshold)) >> 14)
+		if e.streamChannels == 2 {
+			threshold -= 1000
+		} else {
+			threshold += 1000
+		}
+		if equiv > threshold {
+			e.streamChannels = 2
+		} else {
+			e.streamChannels = 1
+		}
+	}
+	if e.streamChannels == 1 && e.prevStreamChannels == 2 && !e.toMono &&
+		mode != framing.ModeCELTOnly && e.prevMode != framing.ModeCELTOnly {
+		// Delay the stereo->mono transition by one packet.
+		e.toMono = true
+		e.streamChannels = 2
+	} else {
+		e.toMono = false
+	}
+}
+
 // updateLBRRCoded runs the per-packet FEC decision for a SILK-only or
 // hybrid packet coded at bandwidth and pushes LBRR_coded to the SILK encoder.
 func (e *Encoder) updateLBRRCoded(mode, bandwidth, frameRate int) {
@@ -147,6 +211,9 @@ func (e *Encoder) updateLBRRCoded(mode, bandwidth, frameRate int) {
 		return
 	}
 	channels := e.channels
+	if channels == 2 && e.streamChannels == 1 {
+		channels = 1
+	}
 	equiv := computeEquivRate(e.bitrate, channels, frameRate, e.rateMode != celt.RateModeCBR, mode, e.complexity, e.packetLossPerc)
 	coded, _ := decideFEC(e.useInbandFEC, e.packetLossPerc, e.lbrrCoded, mode, bandwidth, equiv)
 	e.lbrrCoded = coded

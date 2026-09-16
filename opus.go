@@ -111,6 +111,12 @@ type Encoder struct {
 	// lbrrCoded is the previous packet's LBRR_coded decision (decide_fec
 	// hysteresis).
 	lbrrCoded bool
+	// streamChannels / prevStreamChannels mirror st->stream_channels and
+	// st->prev_channels (the rate-dependent mono/stereo decision for a stereo
+	// input); toMono is silk_mode.toMono.
+	streamChannels     int
+	prevStreamChannels int
+	toMono             bool
 
 	// Bandwidth control (CELT-only path). maxBandwidth caps the automatic
 	// selection; forcedBandwidth pins an exact bandwidth (BandwidthAuto means
@@ -447,12 +453,14 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	}
 	if e.shouldEncodeSILKOnly() {
 		celtToSilk := e.prevMode == framing.ModeCELTOnly
+		e.decideStreamChannels(frameSize, framing.ModeSILKOnly)
 		if silkBW, ok := nativeSilkFramingBandwidth(e.silkSampleRate); ok {
 			e.updateLBRRCoded(framing.ModeSILKOnly, silkBW, e.sampleRate/frameSize)
 		}
 		out, err := e.encodeSILKOnlyPacket(pcm, raw, celtPCM, nFrames, celtToSilk)
 		if err == nil {
 			e.prevMode = framing.ModeSILKOnly
+			e.prevStreamChannels = e.streamChannels
 		}
 		return out, err
 	}
@@ -1081,19 +1089,29 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm, raw, celtPCM []float64, nFrames int,
 		return nil, fmt.Errorf("SILK-only encoding not available for %d Hz", e.sampleRate)
 	}
 
-	groupSize, groups, err := silkPacketGroupsForChannels(nFrames, e.channels)
+	streamChannels := e.channels
+	if e.channels == 2 && e.streamChannels == 1 {
+		streamChannels = 1
+	}
+	if e.channels == 2 && streamChannels == 2 && e.prevStreamChannels == 1 && len(e.silkInputResamplers) > 1 {
+		// Mono -> stereo: the side channel's resampler restarts from the
+		// mono channel's state (silk_Encode).
+		e.silkInputResamplers[1].CopyStateFrom(e.silkInputResamplers[0])
+	}
+	e.silkEncoder.SetStreamChannels(streamChannels, e.toMono)
+	groupSize, groups, err := silkPacketGroupsForChannels(nFrames, streamChannels)
 	if err != nil {
 		return nil, err
 	}
 	tocFrameSize := groupSize * framing.FrameSize20ms
-	toc, err := framing.GenerateTOCExt(framing.ModeSILKOnly, bw, e.channels, tocFrameSize)
+	toc, err := framing.GenerateTOCExt(framing.ModeSILKOnly, bw, streamChannels, tocFrameSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate SILK TOC: %w", err)
 	}
 
 	inputChunkLen := e.frameSize * e.channels
 	silkFrameSize := e.silkSampleRate * 20 / 1000
-	silkChunkLen := silkFrameSize * e.channels
+	silkChunkLen := silkFrameSize * streamChannels
 	streams := make([][]byte, 0, len(groups))
 	var rangeFinal uint32
 	pos := 0
@@ -1524,6 +1542,35 @@ func (e *Encoder) encodeOneCELTFrame(pcm []float64) ([]byte, error) {
 // SILK front end applies the resampler's delay itself. The result holds
 // int16/32768 values and has exactly want samples (interleaved).
 func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
+	if e.channels == 2 && e.streamChannels == 1 {
+		// nChannelsAPI == 2, nChannelsInternal == 1: combine L/R before the
+		// mono channel's resampler; on the first mono frame after a stereo
+		// packet both resamplers run and their outputs are averaged.
+		mono := silk.DownmixToMono(pcm)
+		if len(e.silkInputResamplers) == 0 {
+			return mono
+		}
+		in := make([]int16, len(mono))
+		for i, v := range mono {
+			in[i] = silk.Float2Int16Sample(v)
+		}
+		out0 := e.silkInputResamplers[0].Process(in)
+		if e.prevStreamChannels == 2 && len(e.silkInputResamplers) > 1 {
+			out1 := e.silkInputResamplers[1].Process(in)
+			for i := range out0 {
+				if i < len(out1) {
+					out0[i] = int16((int32(out0[i]) + int32(out1[i])) >> 1)
+				}
+			}
+		}
+		out := make([]float64, want)
+		for i := range out {
+			if i < len(out0) {
+				out[i] = float64(out0[i]) / 32768
+			}
+		}
+		return out
+	}
 	if len(e.silkInputResamplers) == 0 {
 		return pcm
 	}

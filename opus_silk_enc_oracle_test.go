@@ -222,11 +222,16 @@ func runEncOracleChannels(t *testing.T, rate int, fixture string, frames, bitrat
 
 func runEncOracleFull(t *testing.T, rate int, fixture string, frames, bitrate int, bandwidth string, lossPerc, channels int, vbr bool) []encOracleFrame {
 	t.Helper()
+	return runEncOracleComplexity(t, rate, fixture, frames, bitrate, bandwidth, lossPerc, channels, vbr, 5)
+}
+
+func runEncOracleComplexity(t *testing.T, rate int, fixture string, frames, bitrate int, bandwidth string, lossPerc, channels int, vbr bool, complexity int) []encOracleFrame {
+	t.Helper()
 	vbrArg := "1"
 	if !vbr {
 		vbrArg = "0"
 	}
-	cmd := exec.Command(encOraclePath(), "--silk-enc", strconv.Itoa(rate), fixture, "-1", strconv.Itoa(frames), strconv.Itoa(bitrate), bandwidth, strconv.Itoa(lossPerc), strconv.Itoa(channels), vbrArg)
+	cmd := exec.Command(encOraclePath(), "--silk-enc", strconv.Itoa(rate), fixture, "-1", strconv.Itoa(frames), strconv.Itoa(bitrate), bandwidth, strconv.Itoa(lossPerc), strconv.Itoa(channels), vbrArg, strconv.Itoa(complexity))
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -700,6 +705,17 @@ func runSILKEncoderOracle(t *testing.T, lossPerc, bitrate int) {
 }
 
 func runSILKEncoderOracleMode(t *testing.T, lossPerc, bitrate int, vbr bool) {
+	runSILKEncoderOracleComplexity(t, lossPerc, bitrate, vbr, 5)
+}
+
+// TestSILKEncoderInputPipelineOracleComplexity8 runs the mono comparison at
+// complexity 8 (four delayed-decision states, 24th-order shaping, 16 NLSF
+// survivors, maximum pitch complexity).
+func TestSILKEncoderInputPipelineOracleComplexity8(t *testing.T) {
+	runSILKEncoderOracleComplexity(t, 0, 24000, true, 8)
+}
+
+func runSILKEncoderOracleComplexity(t *testing.T, lossPerc, bitrate int, vbr bool, complexity int) {
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
 	}
@@ -723,7 +739,7 @@ func runSILKEncoderOracleMode(t *testing.T, lossPerc, bitrate int, vbr bool) {
 				if rate > 16000 {
 					bandwidth = "wb"
 				}
-				ref := runEncOracleFull(t, rate, fixture, frames, bitrate, bandwidth, lossPerc, 1, vbr)
+				ref := runEncOracleComplexity(t, rate, fixture, frames, bitrate, bandwidth, lossPerc, 1, vbr, complexity)
 				frameSize := rate / 50
 				enc, err := NewEncoder(rate, 1, ApplicationVOIP)
 				if err != nil {
@@ -732,7 +748,7 @@ func runSILKEncoderOracleMode(t *testing.T, lossPerc, bitrate int, vbr bool) {
 				if err := enc.SetBitrate(bitrate); err != nil {
 					t.Fatal(err)
 				}
-				if err := enc.SetComplexity(5); err != nil {
+				if err := enc.SetComplexity(complexity); err != nil {
 					t.Fatal(err)
 				}
 				enc.SetVBR(vbr)

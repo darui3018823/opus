@@ -11,10 +11,9 @@ import (
 )
 
 // TestCGOEncodeRefSILKComplexity encodes 8/12/16 kHz mono voice at 24 kbps
-// CVBR at every complexity against the real libopus encoder. All complexity
-// settings must be byte-identical except 1, whose plain silk_NSQ (one
-// delayed-decision state, no warping, 14th-order shaping) the Go encoder
-// still runs through the delayed-decision quantiser; that cell is logged.
+// CVBR at every complexity setting against the real libopus encoder; every
+// cell must be byte-identical (complexities 0 and 1 exercise the plain
+// silk_NSQ, the others the delayed-decision quantiser with 2-4 states).
 func TestCGOEncodeRefSILKComplexity(t *testing.T) {
 	for _, rate := range []int{8000, 12000, 16000} {
 		for cplx := 0; cplx <= 10; cplx++ {
@@ -53,12 +52,9 @@ func TestCGOEncodeRefSILKComplexity(t *testing.T) {
 					sizes = [2]int{len(a), len(b)}
 				}
 			}
-			switch {
-			case eq == nPackets:
+			if eq == nPackets {
 				t.Logf("rate %d complexity %d: all %d packets byte-identical", rate, cplx, nPackets)
-			case cplx == 1:
-				t.Logf("rate %d complexity 1: %d/%d packets identical (first diff %d, sizes Go/C %v): plain silk_NSQ not yet ported", rate, eq, nPackets, first, sizes)
-			default:
+			} else {
 				t.Errorf("rate %d complexity %d: %d/%d packets identical (first diff %d, sizes Go/C %v)", rate, cplx, eq, nPackets, first, sizes)
 			}
 			ref.Close()

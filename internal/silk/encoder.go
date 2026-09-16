@@ -2842,8 +2842,16 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 		lambdaQ10 = 64
 	}
 
-	pulses := e.silkNSQDelDec(x16, lpcQ12, lpcQ12Interp, ltpCoeffsQ14, shape, gainsQ16, pitchL,
-		lambdaQ10, ltpScaleQ14, signalType, quantOffset, seed)
+	// silk_NSQ_wrapper_FLP: the delayed-decision quantizer runs with more than
+	// one state or with warping; otherwise the plain silk_NSQ.
+	var pulses []int16
+	if cfg := e.silkComplexityConfig(); cfg.nStatesDelayedDecision <= 1 && shape.Warping_Q16 == 0 {
+		pulses = e.silkNSQPlain(x16, lpcQ12, lpcQ12Interp, ltpCoeffsQ14, shape, gainsQ16, pitchL,
+			lambdaQ10, ltpScaleQ14, signalType, quantOffset, seed)
+	} else {
+		pulses = e.silkNSQDelDec(x16, lpcQ12, lpcQ12Interp, ltpCoeffsQ14, shape, gainsQ16, pitchL,
+			lambdaQ10, ltpScaleQ14, signalType, quantOffset, seed)
+	}
 	e.recordNSQTrace(lpcQ12, lpcQ12Interp, e.traceNLSFQ15, gainIndices, gainsQ16, pitchL, shape, lambdaQ10,
 		ltpCoeffsQ14, ltpScaleQ14, signalType, quantOffset, seed, pulses)
 	return pulses

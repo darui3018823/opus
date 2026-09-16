@@ -1018,11 +1018,14 @@ encoder (automatic mode, VOIP, CVBR, complexity 5) for 8–48 kHz input at
 is exact as well: `silk_stereo_LR_to_MS` (fixed point, with its own cgoref
 oracle), the stereo packet flow (flag placeholder + patch, per-frame
 mid/side rate split, mid-only coding, the partial side reset) and
-`compute_silk_rate_for_hybrid` are ported, so 49 of the 66 mono+stereo cells
-are byte-identical — every cell libopus codes as SILK-only with the same
-stream channel count. The remaining cells are policy: libopus picks hybrid
-for 24/48 kHz mono input and downmixes stereo to one stream at 16–20 kbps.
-The CBR gain loop, those mode/channel/bandwidth decisions and the
+`compute_silk_rate_for_hybrid` are ported. CBR is exact as well: the
+`encode_frame_FLP` quantiser loop (`internal/silk/encode_frame_loop.go`)
+re-quantises a frame against `silk_mode.maxBits`, CBR packets are sized to
+`cbr_bytes` and padded like `opus_packet_pad`, so 90 of the 119 mono+stereo
+CVBR/FEC/CBR cells are byte-identical — every cell libopus codes as
+SILK-only with the same stream channel count. The remaining cells are
+policy: libopus picks hybrid for 24/48 kHz mono input and downmixes stereo
+to one stream at 16–20 kbps. Those mode/channel/bandwidth decisions and the
 hybrid/CELT paths are not yet exact. The SILK AB loudness gate passes at
 8/12/16 kHz since the shaping port.
 

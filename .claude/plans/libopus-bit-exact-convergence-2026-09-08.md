@@ -834,3 +834,33 @@ test passes.
 - Verified `go vet ./...`, `go test -count=1 ./...`,
   `go test -count=1 -tags opusref ./...` (all pass); hybrid/stereo perf
   digests regenerated.
+
+### 2026-09-16: CBR SILK packets byte-identical — encode_frame_FLP quantiser loop (`46c8703`, `8798be9`, `e16f983`)
+
+- Reference: `silk/float/encode_frame_FLP.c` (the loop: gainMult_Q8
+  bracketing/interpolation, gain locks, Lambda × 1.5 + quantOffsetType 0
+  after two busted passes, damage control, restore of the fitting pass,
+  `useCBR`/`bits_margin`), `silk/enc_API.c` (per-frame maxBits scaling
+  2/5 · 3/4 · 3/5, useCBR on the last frame, mid channel half budget),
+  `src/opus_encoder.c` (`cbr_bytes = (bitrate_to_bits + 4) / 8`, SILK rate
+  `bits_to_bitrate(cbr_bytes*8 - 8)`, `maxBits = (max_data_bytes - 1) * 8`,
+  hybrid CBR steal-25 % rule with SILK in VBR, CVBR hybrid cap via
+  `compute_silk_rate_for_hybrid`), `src/repacketizer.c` (`opus_packet_pad`:
+  code 3 with padding, CBR layout when frame sizes are equal).
+- `46c8703` fix(silk): `internal/silk/encode_frame_loop.go` replaces the Go
+  CBR budget search whenever process_gains is available; `entcode.Encoder`
+  Clone/Restore; Lambda captured once per frame (`lambda32`); `SetMaxBits`.
+- `8798be9` fix(encoder): CBR packet sizing/padding and hybrid SILK maxBits.
+- `e16f983` test(opusref): `--silk-enc ... <channels> <vbr>`,
+  `[SILK_ENC_LOOP]`/`[SILK_ENC_LOOP_DAMAGE]`/`[SILK_ENC_LOOP_RESTORE]` dumps,
+  `TestSILKEncoderInputPipelineOracleCBR` (20 cells, 12 packets, loop
+  passes identical), CBR cells in `TestCGOEncodeRefSILKByteExact`.
+- Results against the real libopus encoder: **CBR mono 8/12/16/24/48 kHz ×
+  16/24/32 kbps and CBR stereo 8/12/16 kHz × 20–48 kbps all 14 packets
+  byte-identical** (90 identical cells overall across CVBR/FEC/CBR; the
+  remaining 29 are libopus' hybrid / mono-downmix policy). The CBR FEC test
+  now measures the same recovery as libopus (~19.7 dB vs ~15.6 dB) and its
+  +3 dB gate is back.
+- Verified `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (all pass); SILK/hybrid perf
+  digests regenerated (CBR packets are now cbr_bytes long).

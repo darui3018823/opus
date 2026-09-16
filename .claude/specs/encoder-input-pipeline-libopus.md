@@ -124,10 +124,11 @@ that must be reconciled when this pipeline lands.
   is below the threshold; the Go encoder mirrors the LBRR_coded decision
   (`encoder_fec.go`) but its SILK bandwidth follows the input rate, so such
   streams stay at the wider bandwidth (with FEC).
-- **CBR gain loop.** `encode_frame_FLP` iterates `gainMult_Q8` to hit
-  `maxBits` in CBR; the Go CBR path still uses its own budget search (the
-  LBRR copy already starts from `silk_process_gains_FLP`'s gains as in
-  libopus). CVBR/VBR streams are byte-identical.
+- **CBR gain loop — done (`46c8703`, `8798be9`).** The
+  `encode_frame_FLP` quantiser loop is ported (`encode_frame_loop.go`), the
+  Opus layer sizes CBR packets to `cbr_bytes` and pads them like
+  `opus_packet_pad`; CBR mono and stereo SILK packets are byte-identical
+  (`TestSILKEncoderInputPipelineOracleCBR`, `TestCGOEncodeRefSILKByteExact`).
 - **CELT prefill on mode switches.** libopus primes CELT with
   `tmp_prefill` (the Fs/400 samples preceding the frame from `delay_buffer`)
   when switching into CELT/hybrid; the Go transition logic does not.

@@ -117,6 +117,19 @@ type Encoder struct {
 	// Inter-frame coarse-energy predictor state (oldBandE), channel-major
 	// mean-subtracted log2-amplitude. Mirrors the decoder's prevEnergies.
 	prevBandEnergies []float64
+	// energyError is libopus st->energyError: the residual left after the
+	// fine energy quantisation of the previous frame, clamped to ±0.5. When a
+	// band's energy is stable it biases the next coarse quantisation towards
+	// the previous error so the gain stays constant.
+	energyError []float64
+	// delayedIntra is libopus st->delayedIntra, the leaky sum of the
+	// coarse-energy loss distortion that triggers intra coding without the
+	// two-pass search (complexity < 4). forceIntra mirrors
+	// OPUS_SET_PREDICTION_DISABLED; lossRate is the packet loss percentage
+	// (OPUS_SET_PACKET_LOSS_PERC) that biases the two-pass decision.
+	delayedIntra float32
+	forceIntra   bool
+	lossRate     int
 	// foldSeed mirrors the decoder's lastFinalRange (the range value used to seed
 	// PVQ noise folding). Because the range register evolves identically in the
 	// encoder and decoder for the same symbols, storing enc.GetRng() before flush
@@ -219,6 +232,8 @@ func NewEncoder(frameSize, sampleRate, channels int, config *EncoderConfig) (*En
 
 	// oldBandE history is zeroed by libopus OPUS_RESET_STATE.
 	e.prevBandEnergies = make([]float64, channels*mode.Bands.NumBands)
+	e.energyError = make([]float64, channels*mode.Bands.NumBands)
+	e.delayedIntra = 1
 
 	return e, nil
 }
@@ -296,7 +311,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	ov := e.mode.Overlap
 	shared := sharedEnc != nil
 	tell0Frac := 1
+	tell0 := 1
 	if shared {
+		tell0 = sharedEnc.ECTell()
 		tell0Frac = sharedEnc.TellFrac()
 	}
 	start, end := startBand, numBands
@@ -629,40 +646,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		}
 	}
 
-	// intra/inter flag for coarse energy.
-	intra := e.frameCount == 0
-	if enc.ECTell()+3 <= totalBits {
-		enc.EncodeBitLogp(intra, 3)
-	}
-
-	etr(enc, "intra")
-
-	// Coarse band energies.
-	quantLogE := QuantizeCoarseEnergy(enc, logE, e.prevBandEnergies, nil,
-		intra, numBands, start, end, lm, ch, totalBits)
-	etr(enc, "coarse")
-	{
-		tr := FrameTrace{IsTransient: isTransient, TFEstimate: tfEstimate, TFChan: tfChan, Intra: intra, TellCoarse: enc.ECTell()}
-		if isTransient {
-			tr.ShortBlocks = M
-		}
-		for c := 0; c < ch; c++ {
-			tr.In = append(tr.In, append([]float64(nil), bufs[c]...))
-			tr.Freq = append(tr.Freq, append([]float64(nil), traceCoeffs[c]...))
-		}
-		tr.BandE = make([]float64, ch*nbEBands)
-		tr.BandLogE = make([]float64, ch*numBands)
-		for c := 0; c < ch; c++ {
-			copy(tr.BandE[c*nbEBands:(c+1)*nbEBands], bandE[c*nbEBands:(c+1)*nbEBands])
-			copy(tr.BandLogE[c*numBands:(c+1)*numBands], logE[c*numBands:(c+1)*numBands])
-		}
-		e.lastTrace = tr
-	}
-
-	// Dynamic-allocation analysis (masking follower → per-band boosts and the
-	// per-band importance weights consumed by tf_analysis). Only the DECISIONS are
-	// computed here; the boost symbols are written later (dynallocEncode), after
-	// spread, to keep the bitstream in decoder order.
+	// Dynamic allocation analysis (libopus dynalloc_analysis) reads the
+	// unbiased band energies; the boost symbols are written later
+	// (dynallocEncode), after spread, to keep the bitstream in decoder order.
 	vbrOn := e.rateMode != RateModeCBR
 	constrainedVBR := e.rateMode == RateModeCVBR
 	offsets, importance := dynallocAnalysis(logE, logE2, numBands, end, ch, lm, isTransient, vbrOn, constrainedVBR)
@@ -683,6 +669,50 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			tfRes[i] = 1
 		}
 	}
+
+	// When the energy is stable, slightly bias energy quantization towards
+	// the previous error to make the gain more stable (a constant offset is
+	// better than fluctuations). The trace keeps the unbiased amp2Log2 output.
+	traceBandLogE := append([]float64(nil), logE...)
+	for c := 0; c < ch; c++ {
+		for i := start; i < end; i++ {
+			idx := c*numBands + i
+			if d := float32(logE[idx]) - float32(e.prevBandEnergies[idx]); d < 2 && d > -2 {
+				logE[idx] = float64(float32(logE[idx]) - float32(float32(0.25)*float32(e.energyError[idx])))
+			}
+		}
+	}
+
+	// Coarse band energies (quant_coarse_energy): the intra decision, the
+	// intra flag and the per-band Laplace residuals. oldBandE is updated in
+	// place; coarseError feeds the fine quantiser and the next frame's bias.
+	nbFilledBytes := 0
+	if shared {
+		nbFilledBytes = (tell0 + 4) >> 3
+	}
+	quantLogE := e.prevBandEnergies
+	coarseError := make([]float64, ch*numBands)
+	intra := e.quantCoarseEnergy(enc, start, end, end, logE, quantLogE, totalBits, coarseError,
+		ch, lm, targetBytes-nbFilledBytes, e.complexity >= 4, numBands)
+	etr(enc, "coarse")
+	{
+		tr := FrameTrace{IsTransient: isTransient, TFEstimate: tfEstimate, TFChan: tfChan, Intra: intra, TellCoarse: enc.ECTell()}
+		if isTransient {
+			tr.ShortBlocks = M
+		}
+		for c := 0; c < ch; c++ {
+			tr.In = append(tr.In, append([]float64(nil), bufs[c]...))
+			tr.Freq = append(tr.Freq, append([]float64(nil), traceCoeffs[c]...))
+		}
+		tr.BandE = make([]float64, ch*nbEBands)
+		tr.BandLogE = make([]float64, ch*numBands)
+		for c := 0; c < ch; c++ {
+			copy(tr.BandE[c*nbEBands:(c+1)*nbEBands], bandE[c*nbEBands:(c+1)*nbEBands])
+			copy(tr.BandLogE[c*numBands:(c+1)*numBands], traceBandLogE[c*numBands:(c+1)*numBands])
+		}
+		e.lastTrace = tr
+	}
+
 	tfEncode(enc, start, end, isTransient, tfRes, lm, tfSelect, totalBits)
 	etr(enc, "tf_encode")
 	e.lastTrace.TFRes = append([]int(nil), tfRes...)
@@ -837,34 +867,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		}
 	}
 
-	// Fine energy — raw bits to packet end, FORWARD band order. Track the
-	// residual error so the final-fine pass and the next-frame predictor match
-	// what the decoder reconstructs.
-	fineError := make([]float64, ch*numBands)
-	for idx := range fineError {
-		fineError[idx] = logE[idx] - quantLogE[idx]
-	}
-	for i := start; i < end; i++ {
-		fb := eBits[i]
-		if fb <= 0 {
-			continue
-		}
-		frac := 1 << uint(fb)
-		for c := 0; c < ch; c++ {
-			idx := c*numBands + i
-			q2 := int(math.Floor((fineError[idx] + 0.5) * float64(frac)))
-			if q2 > frac-1 {
-				q2 = frac - 1
-			}
-			if q2 < 0 {
-				q2 = 0
-			}
-			enc.EncodeBits(uint32(q2), uint(fb))
-			offset := (float64(q2)+0.5)/float64(frac) - 0.5
-			quantLogE[idx] += offset
-			fineError[idx] -= offset
-		}
-	}
+	// Fine energy (quant_fine_energy) — raw bits, forward band order, on the
+	// coarse residual; oldBandE follows the decoder's reconstruction.
+	quantFineEnergy(enc, start, end, quantLogE, coarseError, eBits, ch, numBands, totalBits)
 
 	// PVQ for all bands.
 	var Y []float64
@@ -889,37 +894,33 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		enc.EncodeBits(antiCollapseOn, 1)
 	}
 
-	// Final fine energy — one extra bit per (band,channel) by priority.
-	bitsLeft := totalBits - enc.ECTell()
-	for prio := 0; prio < 2; prio++ {
-		for i := start; i < end && bitsLeft >= ch; i++ {
-			if eBits[i] >= MaxFineEnergy || finePriority[i] != prio {
-				continue
+	// Final fine energy (quant_energy_finalise) — one extra bit per
+	// (band,channel) by priority, then remember the clamped residual.
+	quantEnergyFinalise(enc, start, end, quantLogE, coarseError, eBits, finePriority, totalBits-enc.ECTell(), ch, numBands)
+	for c := 0; c < ch; c++ {
+		for i := start; i < end; i++ {
+			idx := c*numBands + i
+			v := coarseError[idx]
+			if v > 0.5 {
+				v = 0.5
+			} else if v < -0.5 {
+				v = -0.5
 			}
-			for c := 0; c < ch; c++ {
-				idx := c*numBands + i
-				q2 := 0
-				if fineError[idx] >= 0 {
-					q2 = 1
-				}
-				enc.EncodeBits(uint32(q2), 1)
-				offset := (float64(q2) - 0.5) * math.Exp2(float64(-eBits[i]-1))
-				quantLogE[idx] += offset
-				fineError[idx] -= offset
-				bitsLeft--
-			}
+			e.energyError[idx] = v
 		}
 	}
 
 	e.finalRange = enc.GetRng()
 
-	// Update the inter-frame predictor with the fine-corrected energies.
-	for idx := range quantLogE {
-		v := quantLogE[idx]
-		if v < -28.0 {
-			v = -28.0
+	// In case start or end were to change (libopus zeroes the bands outside
+	// the coded range).
+	for c := 0; c < ch; c++ {
+		for i := 0; i < start; i++ {
+			e.prevBandEnergies[c*numBands+i] = 0
 		}
-		e.prevBandEnergies[idx] = v
+		for i := end; i < numBands; i++ {
+			e.prevBandEnergies[c*numBands+i] = 0
+		}
 	}
 	e.frameCount++
 	// Advance the consecutive-transient run (libopus updates consec_transient at
@@ -1036,6 +1037,7 @@ func (e *Encoder) encodeSilenceFrame(maxTargetBytes int) ([]byte, error) {
 	e.finalRange = enc.GetRng()
 	for idx := range e.prevBandEnergies {
 		e.prevBandEnergies[idx] = -28.0
+		e.energyError[idx] = 0
 	}
 	e.frameCount++
 	// A silent frame is non-transient: reset the run.
@@ -1067,7 +1069,9 @@ func (e *Encoder) Reset() {
 	}
 	for i := range e.prevBandEnergies {
 		e.prevBandEnergies[i] = 0
+		e.energyError[i] = 0
 	}
+	e.delayedIntra = 1
 	e.foldSeed = 0
 	e.frameCount = 0
 	e.tonalAverage = 256
@@ -1140,11 +1144,14 @@ func (e *Encoder) CopyStateFrom(src *Encoder) {
 			di := c*dstBands + i
 			if i >= srcBands || sc < 0 {
 				e.prevBandEnergies[di] = 0
+				e.energyError[di] = 0
 				continue
 			}
 			e.prevBandEnergies[di] = src.prevBandEnergies[sc*srcBands+i]
+			e.energyError[di] = src.energyError[sc*srcBands+i]
 		}
 	}
+	e.delayedIntra = src.delayedIntra
 
 	for c := range e.preemphMem {
 		sc := c

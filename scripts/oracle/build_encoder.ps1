@@ -68,6 +68,30 @@ $xbufDump = @'
     }
 '@
 $encFrame = Replace-Checked $encFrame "        x_frame[ LA_SHAPE_MS * psEnc->sCmn.fs_kHz + i * ( psEnc->sCmn.frame_length >> 3 ) ] += ( 1 - ( i & 2 ) ) * 1e-6f;`n    }`n" ($xbufDump.Replace("`r`n", "`n") + "`n") "encode_frame x_buf"
+$loopDump = @'
+                nBits = ec_tell( psRangeEnc );
+                if( oracle_trace_enabled ) {
+                    fprintf(stderr, "[SILK_ENC_LOOP] iter=%d nBits=%d maxBits=%d useCBR=%d gainMult_Q8=%d gainsID=%d found_lower=%d found_upper=%d Lambda=%.9g quantOffset=%d gains=%d,%d,%d,%d\n",
+                        iter, nBits, maxBits, useCBR, gainMult_Q8, gainsID, found_lower, found_upper, sEncCtrl.Lambda, psEnc->sCmn.indices.quantOffsetType,
+                        psEnc->sCmn.indices.GainsIndices[0], psEnc->sCmn.indices.GainsIndices[1], psEnc->sCmn.indices.GainsIndices[2], psEnc->sCmn.indices.GainsIndices[3]);
+                }
+'@
+$encFrame = Replace-Checked $encFrame "                nBits = ec_tell( psRangeEnc );`n`n                /* If we still bust after the last iteration, do some damage control. */`n" ($loopDump.Replace("`r`n", "`n") + "`n                /* If we still bust after the last iteration, do some damage control. */`n") "encode_frame loop dump"
+$damageDump = @'
+                    nBits = ec_tell( psRangeEnc );
+                    if( oracle_trace_enabled ) {
+                        fprintf(stderr, "[SILK_ENC_LOOP_DAMAGE] iter=%d nBits=%d maxBits=%d\n", iter, nBits, maxBits);
+                    }
+                }
+'@
+$encFrame = Replace-Checked $encFrame "                    nBits = ec_tell( psRangeEnc );`n                }`n" ($damageDump.Replace("`r`n", "`n") + "`n") "encode_frame damage dump"
+$restoreDump = @'
+                if( found_lower && ( gainsID == gainsID_lower || nBits > maxBits ) ) {
+                    if( oracle_trace_enabled ) {
+                        fprintf(stderr, "[SILK_ENC_LOOP_RESTORE] nBits_lower=%d gainMult_lower=%d\n", nBits_lower, gainMult_lower);
+                    }
+'@
+$encFrame = Replace-Checked $encFrame "                if( found_lower && ( gainsID == gainsID_lower || nBits > maxBits ) ) {`n" ($restoreDump.Replace("`r`n", "`n") + "`n") "encode_frame restore dump"
 Set-Content "$bld\encode_frame_FLP_instr.c" $encFrame -NoNewline
 
 # SILK encoder analysis-stage instrumentation (shared with the legacy build.ps1

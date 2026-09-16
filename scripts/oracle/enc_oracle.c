@@ -137,7 +137,7 @@ static int parse_bandwidth(const char *s)
 
 static int run_silk_encoder_oracle(int argc, char **argv)
 {
-    int rate, target, frames, bitrate, bandwidth, frame_size, err, frame, lossPerc, channels;
+    int rate, target, frames, bitrate, bandwidth, frame_size, err, frame, lossPerc, channels, vbr;
     const char *fixture;
     OpusEncoder *enc;
     float pcm[960 * 5 * 2];
@@ -156,6 +156,7 @@ static int run_silk_encoder_oracle(int argc, char **argv)
     bandwidth = (argc >= 8) ? parse_bandwidth(argv[7]) : OPUS_AUTO;
     lossPerc = (argc >= 9) ? atoi(argv[8]) : 0; /* > 0 enables in-band FEC with that loss percentage */
     channels = (argc >= 10) ? atoi(argv[9]) : 1;
+    vbr = (argc >= 11) ? atoi(argv[10]) : 1; /* 0 = CBR, 1 = constrained VBR */
     if (channels != 1 && channels != 2) {
         fprintf(stderr, "channels must be 1 or 2\n");
         return 2;
@@ -177,7 +178,7 @@ static int run_silk_encoder_oracle(int argc, char **argv)
     }
     opus_encoder_ctl(enc, OPUS_SET_BITRATE(bitrate));
     opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(5));
-    opus_encoder_ctl(enc, OPUS_SET_VBR(1));
+    opus_encoder_ctl(enc, OPUS_SET_VBR(vbr ? 1 : 0));
     opus_encoder_ctl(enc, OPUS_SET_VBR_CONSTRAINT(1));
     opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
     if (bandwidth != OPUS_AUTO) opus_encoder_ctl(enc, OPUS_SET_BANDWIDTH(bandwidth));

@@ -96,6 +96,22 @@ type encOracleFrame struct {
 	haveStereo bool
 	stereo     encOracleStereo
 	stagesMid  encOracleStages
+	// encode_frame_FLP quantiser loop ([SILK_ENC_LOOP*]) of the last channel
+	loop        []encOracleLoopIter
+	loopRestore bool
+}
+
+type encOracleLoopIter struct {
+	iter, nBits, maxBits int
+	useCBR               bool
+	gainMultQ8           int
+	gainsID              int
+	foundLower           bool
+	foundUpper           bool
+	lambda               float32
+	quantOffset          int
+	gains                [4]int
+	damage               bool
 }
 
 type encOracleStereo struct {
@@ -120,12 +136,15 @@ var (
 	encOracleValuesRe = regexp.MustCompile(`v\[[\d,]+\]=(\S+)`)
 	encOracleStereoRe = regexp.MustCompile(`^\[SILK_ENC_STEREO\] frame=(\d+) ix=(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+) midOnly=(\d) rates=(-?\d+),(-?\d+) width_prev=(-?\d+) smth_width=(-?\d+) silent_side_len=(-?\d+) pred_prev=(-?\d+),(-?\d+) prev_decode_only_middle=(\d)`)
 	encOracleChRe     = regexp.MustCompile(`^\[SILK_ENC_CH\] n=(\d) channelRate_bps=(-?\d+) tell=(\d+) speech_activity_Q8=(-?\d+) first_frame_after_reset=(\d)`)
-	encOracleNSQInRe  = regexp.MustCompile(`^\[SILK_ENC_NSQ_INPUT\] signalType=(\d+) quantOffset=(\d+) seed=(\d+) Lambda_Q10=(-?\d+) LTP_scale_Q14=(-?\d+)`)
-	encOracleRowsRe   = regexp.MustCompile(`rows=(\d+) cols=(\d+)`)
-	encOracleInterpRe = regexp.MustCompile(`interp=(\d+)`)
-	encOracleTargetRe = regexp.MustCompile(`nBits=(-?\d+) TargetRate_bps=(-?\d+) nBitsExceeded=(-?\d+) nBitsUsedLBRR=(-?\d+) curr_nBitsUsedLBRR=(-?\d+) nFramesEncoded=\d+ nFramesPerPacket=\d+ tell=(\d+)`)
-	encOracleMinInvRe = regexp.MustCompile(`minInvGain=(\S+)`)
-	encOracleShapeRe  = regexp.MustCompile(`inputQuality=(\S+) codingQuality=(\S+) SNR_dB_Q7=(-?\d+) warping_Q16=(-?\d+) predGain=(\S+) LTPCorr=(\S+)`)
+	encOracleLoopRe   = regexp.MustCompile(`^\[SILK_ENC_LOOP\] iter=(\d+) nBits=(\d+) maxBits=(-?\d+) useCBR=(\d) gainMult_Q8=(-?\d+) gainsID=(-?\d+) found_lower=(\d) found_upper=(\d) Lambda=(\S+) quantOffset=(\d) gains=(-?\d+),(-?\d+),(-?\d+),(-?\d+)`)
+
+	encOracleLoopDamageRe = regexp.MustCompile(`^\[SILK_ENC_LOOP_DAMAGE\] iter=(\d+) nBits=(\d+) maxBits=(-?\d+)`)
+	encOracleNSQInRe      = regexp.MustCompile(`^\[SILK_ENC_NSQ_INPUT\] signalType=(\d+) quantOffset=(\d+) seed=(\d+) Lambda_Q10=(-?\d+) LTP_scale_Q14=(-?\d+)`)
+	encOracleRowsRe       = regexp.MustCompile(`rows=(\d+) cols=(\d+)`)
+	encOracleInterpRe     = regexp.MustCompile(`interp=(\d+)`)
+	encOracleTargetRe     = regexp.MustCompile(`nBits=(-?\d+) TargetRate_bps=(-?\d+) nBitsExceeded=(-?\d+) nBitsUsedLBRR=(-?\d+) curr_nBitsUsedLBRR=(-?\d+) nFramesEncoded=\d+ nFramesPerPacket=\d+ tell=(\d+)`)
+	encOracleMinInvRe     = regexp.MustCompile(`minInvGain=(\S+)`)
+	encOracleShapeRe      = regexp.MustCompile(`inputQuality=(\S+) codingQuality=(\S+) SNR_dB_Q7=(-?\d+) warping_Q16=(-?\d+) predGain=(\S+) LTPCorr=(\S+)`)
 )
 
 func parseFloat32Values(line string) []float32 {
@@ -198,7 +217,16 @@ func runEncOracle(t *testing.T, rate int, fixture string, frames, bitrate int, b
 
 func runEncOracleChannels(t *testing.T, rate int, fixture string, frames, bitrate int, bandwidth string, lossPerc, channels int) []encOracleFrame {
 	t.Helper()
-	cmd := exec.Command(encOraclePath(), "--silk-enc", strconv.Itoa(rate), fixture, "-1", strconv.Itoa(frames), strconv.Itoa(bitrate), bandwidth, strconv.Itoa(lossPerc), strconv.Itoa(channels))
+	return runEncOracleFull(t, rate, fixture, frames, bitrate, bandwidth, lossPerc, channels, true)
+}
+
+func runEncOracleFull(t *testing.T, rate int, fixture string, frames, bitrate int, bandwidth string, lossPerc, channels int, vbr bool) []encOracleFrame {
+	t.Helper()
+	vbrArg := "1"
+	if !vbr {
+		vbrArg = "0"
+	}
+	cmd := exec.Command(encOraclePath(), "--silk-enc", strconv.Itoa(rate), fixture, "-1", strconv.Itoa(frames), strconv.Itoa(bitrate), bandwidth, strconv.Itoa(lossPerc), strconv.Itoa(channels), vbrArg)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -259,6 +287,45 @@ func runEncOracleChannels(t *testing.T, rate int, fixture string, frames, bitrat
 			st.predPrev[0], _ = strconv.Atoi(m[14])
 			st.predPrev[1], _ = strconv.Atoi(m[15])
 			st.prevDecodeOnlyMiddle = m[16] == "1"
+		case strings.HasPrefix(line, "[SILK_ENC_LOOP]"):
+			m := encOracleLoopRe.FindStringSubmatch(line)
+			if m == nil {
+				t.Fatalf("bad LOOP line: %s", line)
+			}
+			var it encOracleLoopIter
+			it.iter, _ = strconv.Atoi(m[1])
+			it.nBits, _ = strconv.Atoi(m[2])
+			it.maxBits, _ = strconv.Atoi(m[3])
+			it.useCBR = m[4] == "1"
+			it.gainMultQ8, _ = strconv.Atoi(m[5])
+			it.gainsID, _ = strconv.Atoi(m[6])
+			it.foundLower = m[7] == "1"
+			it.foundUpper = m[8] == "1"
+			f, _ := strconv.ParseFloat(m[9], 64)
+			it.lambda = float32(f)
+			it.quantOffset, _ = strconv.Atoi(m[10])
+			for k := 0; k < 4; k++ {
+				it.gains[k], _ = strconv.Atoi(m[11+k])
+			}
+			if it.iter == 0 && len(out[cur].loop) > 0 && !out[cur].loop[0].damage {
+				// A second channel's loop starts over.
+				out[cur].loop = nil
+				out[cur].loopRestore = false
+			}
+			out[cur].loop = append(out[cur].loop, it)
+		case strings.HasPrefix(line, "[SILK_ENC_LOOP_DAMAGE]"):
+			m := encOracleLoopDamageRe.FindStringSubmatch(line)
+			if m == nil {
+				t.Fatalf("bad LOOP_DAMAGE line: %s", line)
+			}
+			var it encOracleLoopIter
+			it.iter, _ = strconv.Atoi(m[1])
+			it.nBits, _ = strconv.Atoi(m[2])
+			it.maxBits, _ = strconv.Atoi(m[3])
+			it.damage = true
+			out[cur].loop = append(out[cur].loop, it)
+		case strings.HasPrefix(line, "[SILK_ENC_LOOP_RESTORE]"):
+			out[cur].loopRestore = true
 		case strings.HasPrefix(line, "[SILK_ENC_CH]"):
 			m := encOracleChRe.FindStringSubmatch(line)
 			if m == nil {
@@ -629,6 +696,10 @@ func TestSILKEncoderInputPipelineOracle32k(t *testing.T) {
 }
 
 func runSILKEncoderOracle(t *testing.T, lossPerc, bitrate int) {
+	runSILKEncoderOracleMode(t, lossPerc, bitrate, true)
+}
+
+func runSILKEncoderOracleMode(t *testing.T, lossPerc, bitrate int, vbr bool) {
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
 	}
@@ -652,7 +723,7 @@ func runSILKEncoderOracle(t *testing.T, lossPerc, bitrate int) {
 				if rate > 16000 {
 					bandwidth = "wb"
 				}
-				ref := runEncOracle(t, rate, fixture, frames, bitrate, bandwidth, lossPerc)
+				ref := runEncOracleFull(t, rate, fixture, frames, bitrate, bandwidth, lossPerc, 1, vbr)
 				frameSize := rate / 50
 				enc, err := NewEncoder(rate, 1, ApplicationVOIP)
 				if err != nil {
@@ -664,7 +735,7 @@ func runSILKEncoderOracle(t *testing.T, lossPerc, bitrate int) {
 				if err := enc.SetComplexity(5); err != nil {
 					t.Fatal(err)
 				}
-				enc.SetVBR(true)
+				enc.SetVBR(vbr)
 				enc.SetVBRConstraint(true)
 				enc.SetSignalType(SignalVoice)
 				if lossPerc > 0 {
@@ -774,6 +845,9 @@ func runSILKEncoderOracle(t *testing.T, lossPerc, bitrate int) {
 							t.Logf("frame %d: differing analysis stages: %s", f, strings.Join(d, "; "))
 						} else {
 							t.Logf("frame %d: all traced analysis stages match; difference is in the entropy coding / rate control", f)
+						}
+						if len(r.loop) > 0 {
+							t.Logf("frame %d: quantiser loop: %s", f, loopDiffs(enc.silkEncoder.LastFrameTrace(), r))
 						}
 					}
 				}
@@ -899,4 +973,34 @@ func silkRefSpeechFrameStereo(rate, start, n int) []float64 {
 		out[2*i+1] = env * r
 	}
 	return out
+}
+
+// loopDiffs renders the encode_frame_FLP loop iterations of both encoders
+// side by side.
+func loopDiffs(g silk.FrameTrace, r encOracleFrame) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Go %d passes (restore %v), C %d passes (restore %v)", len(g.Loop), g.LoopRestore, len(r.loop), r.loopRestore)
+	n := len(g.Loop)
+	if len(r.loop) > n {
+		n = len(r.loop)
+	}
+	for i := 0; i < n; i++ {
+		fmt.Fprintf(&b, "\n    pass %d:", i)
+		if i < len(g.Loop) {
+			it := g.Loop[i]
+			fmt.Fprintf(&b, " Go{iter %d nBits %d max %d cbr %v mult %d gains %v lower %v upper %v lambda %.9g qoff %d damage %v}", it.Iter, it.NBits, it.MaxBits, it.UseCBR, it.GainMultQ8, it.GainSymbols, it.FoundLower, it.FoundUpper, it.Lambda, it.QuantOffset, it.Damage)
+		}
+		if i < len(r.loop) {
+			it := r.loop[i]
+			fmt.Fprintf(&b, " C{iter %d nBits %d max %d cbr %v mult %d gains %v lower %v upper %v lambda %.9g qoff %d damage %v}", it.iter, it.nBits, it.maxBits, it.useCBR, it.gainMultQ8, it.gains, it.foundLower, it.foundUpper, it.lambda, it.quantOffset, it.damage)
+		}
+	}
+	return b.String()
+}
+
+// TestSILKEncoderInputPipelineOracleCBR runs the mono comparison in CBR: the
+// packet is sized to cbr_bytes and the encode_frame_FLP quantiser loop must
+// take the same iterations as libopus.
+func TestSILKEncoderInputPipelineOracleCBR(t *testing.T) {
+	runSILKEncoderOracleMode(t, 0, 24000, false)
 }

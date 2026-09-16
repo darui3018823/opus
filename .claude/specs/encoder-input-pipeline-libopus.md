@@ -131,10 +131,16 @@ that must be reconciled when this pipeline lands.
 - **CELT prefill on mode switches.** libopus primes CELT with
   `tmp_prefill` (the Fs/400 samples preceding the frame from `delay_buffer`)
   when switching into CELT/hybrid; the Go transition logic does not.
-- **Stereo side channel.** libopus skips `silk_encode_frame_FLP` for the
-  side channel of a mid-only frame (its `x_buf` does not advance); the Go
-  side encoder likewise skips the push but resets its whole state on the
-  next coded side frame instead of the partial reset in `silk_Encode`.
+- **Stereo side channel — done (`8fdbcf6`).** The side encoder now gets
+  `silk_Encode`'s partial reset (shaping, NSQ, previous NLSFs, lag/gain
+  history, first_frame_after_reset) and `CODE_INDEPENDENTLY_NO_LTP_SCALING`
+  on the first coded side frame after a mid-only frame; stereo packets are
+  byte-identical to libopus (`TestSILKEncoderStereoOracle`).
+- **Stream channel / bandwidth policy.** libopus downmixes a stereo input to
+  one SILK stream when the equivalent rate is below the stereo threshold
+  (16 kbps here; 20 kbps with FEC) and, with `decide_fec`, narrows the
+  bandwidth; the Go encoder keeps the input channel count and the
+  input-rate bandwidth, so those cells differ from packet 0.
 
 ## Go implementation plan
 

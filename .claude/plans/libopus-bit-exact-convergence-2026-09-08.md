@@ -794,3 +794,43 @@ test passes.
   CBR gain loop is the remaining gap); the multistream FEC and fuzz-seed
   tests use 28 kbps so `decide_fec` codes LBRR. Verified `go vet ./...`,
   `go test -count=1 ./...`, `go test -count=1 -tags opusref ./...`.
+
+### 2026-09-16: Stereo SILK packets byte-identical to libopus (`8fdbcf6`, `77a88dd`, `81e0c48`, `1bc9021`)
+
+- Reference: `silk/stereo_LR_to_MS.c`, `silk/stereo_find_predictor.c`,
+  `silk/stereo_quant_pred.c`, `silk/enc_API.c` (stereo flow: VAD/LBRR flag
+  placeholder + `ec_enc_patch_initial_bits`, LR_to_MS per frame with the
+  packet `TargetRate_bps` and the mid channel's previous
+  `speech_activity_Q8`, mid-only flag coded only when the side VAD is 0, side
+  frame skipped only when `MStargetRates_bps[1] == 0`, partial side reset +
+  `CODE_INDEPENDENTLY_NO_LTP_SCALING` after a mid-only frame, LBRR mid-only
+  flag = previous packet's value), `silk/float/SigProc_FLP.h`
+  (`silk_sigmoid` in double), `src/opus_encoder.c`
+  (`compute_silk_rate_for_hybrid`).
+- `8fdbcf6` fix(silk): fixed-point `silk_stereo_LR_to_MS` port
+  (`internal/silk/stereo_pred.go`), gated by a cgoref oracle of the libopus
+  function itself (`TestSILKStereoLRToMSOpusRef`, 160 frames × 8/12/16 kHz ×
+  10/20 ms); `entcode.Encoder.PatchInitialBits`; the stereo packet flow
+  above; the SILK bitrate follows the whole packet rate (5–80 kbps, the
+  40 kbps cap removed); `speech_activity_Q8` starts at 0 like
+  `silk_init_encoder`.
+- `77a88dd` fix(silk): `silk_sigmoid` evaluated in double (one ulp of
+  coding_quality flipped at the mid/side rates); `nFramesPerPacket` set on
+  both stereo channels (LTP_scaleIndex was 0 for stereo frames with FEC).
+- `81e0c48` fix(encoder): hybrid SILK rate = `compute_silk_rate_for_hybrid`
+  (the lifted cap had passed the whole rate to SILK in hybrid mode, which
+  desynchronised `TestCGOHybridTrellisFinalRange`).
+- `1bc9021` test(opusref): stereo encoder oracle (`--silk-enc ... <channels>`,
+  `[SILK_ENC_STEREO]`, `[SILK_ENC_CH]`, per-channel stage split) and 18
+  stereo cells in `TestCGOEncodeRefSILKByteExact`.
+- Results: `TestSILKEncoderStereoOracle` — 8k/24k, 16k/32k, 8k/24k+FEC,
+  16k/32k+FEC, 12k/40k+FEC: all 14 packets byte-identical.
+  `TestCGOEncodeRefSILKByteExact` against the real libopus encoder: **49 of
+  66 cells byte-identical (14 packets)** — every mono and stereo cell that
+  libopus codes as SILK-only with the same channel count; the other 17 are
+  policy: libopus picks hybrid for 24/48 kHz mono input (all rates without
+  FEC, 32 kbps with FEC) and downmixes stereo to one stream at 16 kbps
+  (20 kbps with FEC, then also MB at 16 kHz).
+- Verified `go vet ./...`, `go test -count=1 ./...`,
+  `go test -count=1 -tags opusref ./...` (all pass); hybrid/stereo perf
+  digests regenerated.

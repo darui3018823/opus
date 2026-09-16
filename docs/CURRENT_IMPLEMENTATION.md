@@ -1014,11 +1014,17 @@ Opus-layer `decide_fec` are ported, so the oracle is byte-identical at
 24 kbps with 20 % loss and at 32 kbps, and `TestCGOEncodeRefSILKByteExact`
 shows the Go encoder producing the same packets as the real libopus 1.6.1
 encoder (automatic mode, VOIP, CVBR, complexity 5) for 8–48 kHz input at
-16/24/32 kbps with and without FEC wherever libopus stays SILK-only (24 of
-30 cells; libopus picks hybrid at 32 kbps for 24/48 kHz input). Stereo, the
-CBR gain loop, decide_fec's bandwidth narrowing and the hybrid/CELT paths
-are not yet exact. The SILK AB loudness gate passes at 8/12/16 kHz since the
-shaping port.
+16/24/32 kbps with and without FEC wherever libopus stays SILK-only. Stereo
+is exact as well: `silk_stereo_LR_to_MS` (fixed point, with its own cgoref
+oracle), the stereo packet flow (flag placeholder + patch, per-frame
+mid/side rate split, mid-only coding, the partial side reset) and
+`compute_silk_rate_for_hybrid` are ported, so 49 of the 66 mono+stereo cells
+are byte-identical — every cell libopus codes as SILK-only with the same
+stream channel count. The remaining cells are policy: libopus picks hybrid
+for 24/48 kHz mono input and downmixes stereo to one stream at 16–20 kbps.
+The CBR gain loop, those mode/channel/bandwidth decisions and the
+hybrid/CELT paths are not yet exact. The SILK AB loudness gate passes at
+8/12/16 kHz since the shaping port.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

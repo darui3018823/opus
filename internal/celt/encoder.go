@@ -423,16 +423,13 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			for i := 0; i < numBands; i++ {
 				lo := M * int(EBands48000[i])
 				hi := M * int(EBands48000[i+1])
-				sumsq := 1e-27
-				for j := lo; j < hi; j++ {
-					sumsq += coeffs[j] * coeffs[j]
-				}
-				amp := math.Sqrt(sumsq)
+				// compute_band_energies / amp2Log2 / normalise_bands in float32.
+				amp := bandEnergy32(coeffs[lo:hi])
 				bandE[c*nbEBands+i] = amp
-				logE[c*numBands+i] = math.Log2(amp) - EMean(i)
-				inv := 1.0 / amp
+				logE[c*numBands+i] = amp2Log2Band(amp, i)
+				g := float32(normaliseGain32(amp))
 				for j := lo; j < hi; j++ {
-					X[base+j] = coeffs[j] * inv
+					X[base+j] = float64(float32(coeffs[j]) * g)
 				}
 			}
 		}
@@ -448,11 +445,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			for i := 0; i < numBands; i++ {
 				lo := M * int(EBands48000[i])
 				hi := M * int(EBands48000[i+1])
-				sumsq := 1e-27
-				for j := lo; j < hi; j++ {
-					sumsq += longCoeffs[j] * longCoeffs[j]
-				}
-				logE2[c*numBands+i] = math.Log2(math.Sqrt(sumsq)) - EMean(i) + corr
+				logE2[c*numBands+i] = float64(float32(amp2Log2Band(bandEnergy32(longCoeffs[lo:hi]), i)) + float32(corr))
 			}
 		}
 	}

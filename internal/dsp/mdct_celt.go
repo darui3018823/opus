@@ -125,31 +125,28 @@ func libopusMDCTTwiddle(n, index int) float32 {
 }
 
 // CLTMDCTForward performs the CELT forward MDCT, the analysis counterpart of
-// CLTMDCTBackward. It is a faithful float port of libopus clt_mdct_forward_c
-// (celt/mdct.c) for the non-subdivided (stride=1) case, using the same trig
-// convention as IMDCTRaw (cos(2π(i+0.125)/(2N))).
+// CLTMDCTBackward: a float32-faithful port of libopus clt_mdct_forward_c
+// (celt/mdct.c, float build) for the non-subdivided (stride=1) case — the
+// window/shuffle/fold, the pre-rotation with the static mode's float32
+// twiddles scaled by the KISS FFT's 1/nfft, the float32 KISS FFT stage
+// ordering (opusFFT) and the post-rotation, so the coefficients are
+// bit-identical to libopus for the 48 kHz mode sizes.
 //
 // Input `in` is the analysis buffer of length N+Overlap: the first Overlap
 // samples are the windowed transition from the previous frame and the remaining
 // N samples are the current frame (libopus celt_encoder compute_mdcts passes
 // in+b*N over a buffer of stride B*N+overlap). Output is N MDCT coefficients
 // matching the layout consumed by CLTMDCTBackward.
-//
-// scale is the post-FFT scale factor making CLTMDCTBackward(CLTMDCTForward(x))
-// reconstruct x through overlap-add; it pairs with the "raw" (unnormalised)
-// IMDCTRaw used by the backward path.
 func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
 	N := m.N        // libopus N2 (e.g. 960)
-	nFull := 2 * N  // libopus N (e.g. 1920) — argument to the trig table
 	N2 := N         // 960
 	N4 := N / 2     // 480
 	ov := m.Overlap // 120
-	w := m.Window   // length ov
-	// The backward path (IMDCTRaw) is unnormalised; the forward/backward pair has
-	// intrinsic gain N, so 2/N here yields a unity-gain transform pair.
-	scale := 2.0 / float64(N)
+	w := m.Window   // length ov (float32-exact values)
+	// st->scale of the N/4-point KISS FFT: 1.f/nfft.
+	scale := float32(1) / float32(N4)
 
-	f := make([]float64, N2)
+	f := make([]float32, N2)
 
 	// Window, shuffle, fold (libopus clt_mdct_forward "Window, shuffle, fold").
 	xp1 := ov >> 1
@@ -159,10 +156,12 @@ func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
 	yp := 0
 	nfold := (ov + 3) >> 2
 	i := 0
+	x := func(k int) float32 { return float32(in[k]) }
+	win := func(k int) float32 { return float32(w[k]) }
 	for ; i < nfold; i++ {
-		f[yp] = in[xp1+N2]*w[wp2] + in[xp2]*w[wp1]
+		f[yp] = x(xp1+N2)*win(wp2) + x(xp2)*win(wp1)
 		yp++
-		f[yp] = in[xp1]*w[wp1] - in[xp2-N2]*w[wp2]
+		f[yp] = x(xp1)*win(wp1) - x(xp2-N2)*win(wp2)
 		yp++
 		xp1 += 2
 		xp2 -= 2
@@ -173,17 +172,17 @@ func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
 	wp1 = 0
 	wp2 = ov - 1
 	for ; i < N4-nfold; i++ {
-		f[yp] = in[xp2]
+		f[yp] = x(xp2)
 		yp++
-		f[yp] = in[xp1]
+		f[yp] = x(xp1)
 		yp++
 		xp1 += 2
 		xp2 -= 2
 	}
 	for ; i < N4; i++ {
-		f[yp] = -in[xp1-N2]*w[wp1] + in[xp2]*w[wp2]
+		f[yp] = -x(xp1-N2)*win(wp1) + x(xp2)*win(wp2)
 		yp++
-		f[yp] = in[xp1]*w[wp2] + in[xp2+N2]*w[wp1]
+		f[yp] = x(xp1)*win(wp2) + x(xp2+N2)*win(wp1)
 		yp++
 		xp1 += 2
 		xp2 -= 2
@@ -191,31 +190,32 @@ func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
 		wp2 -= 2
 	}
 
-	// Pre-rotation.
+	// Pre-rotation (float build: scale before the FFT).
 	fc := make([]Complex, N4)
 	for i := 0; i < N4; i++ {
-		t0 := math.Cos(2 * math.Pi * (float64(i) + 0.125) / float64(nFull))
-		t1 := math.Cos(2 * math.Pi * (float64(N4+i) + 0.125) / float64(nFull))
+		t0 := libopusMDCTTwiddle(N, i)
+		t1 := libopusMDCTTwiddle(N, N4+i)
 		re := f[2*i]
 		im := f[2*i+1]
 		yr := re*t0 - im*t1
 		yi := im*t0 + re*t1
-		fc[i] = Complex{Real: yr * scale, Imag: yi * scale}
+		fc[i] = Complex{Real: float64(yr * scale), Imag: float64(yi * scale)}
 	}
 
-	z := AnyFFT(fc)
+	// N/4 complex FFT with libopus' float KISS FFT (bit reversal inside).
+	z := opusFFT(fc)
 
 	// Post-rotation (stride=1): out[2i]=yr from the low end, out[N2-1-2i]=yi.
 	out := make([]float64, N2)
 	for i := 0; i < N4; i++ {
-		t0 := math.Cos(2 * math.Pi * (float64(i) + 0.125) / float64(nFull))
-		t1 := math.Cos(2 * math.Pi * (float64(N4+i) + 0.125) / float64(nFull))
-		fr := z[i].Real
-		fi := z[i].Imag
+		t0 := libopusMDCTTwiddle(N, i)
+		t1 := libopusMDCTTwiddle(N, N4+i)
+		fr := float32(z[i].Real)
+		fi := float32(z[i].Imag)
 		yr := fi*t1 - fr*t0
 		yi := fr*t1 + fi*t0
-		out[2*i] = yr
-		out[N2-1-2*i] = yi
+		out[2*i] = float64(yr)
+		out[N2-1-2*i] = float64(yi)
 	}
 	return out
 }

@@ -174,6 +174,24 @@ func (enc *Encoder) TellFrac() int {
 	return nbits - l
 }
 
+// Clone returns a deep copy of the encoder state (silk_encode_frame_FLP keeps
+// ec_enc copies to retry a frame); Restore puts a clone back.
+func (enc *Encoder) Clone() *Encoder {
+	c := *enc
+	c.buf = append([]byte(nil), enc.buf...)
+	c.endBytes = append([]byte(nil), enc.endBytes...)
+	return &c
+}
+
+// Restore resets the encoder to a state captured by Clone.
+func (enc *Encoder) Restore(c *Encoder) {
+	buf := append(enc.buf[:0], c.buf...)
+	endBytes := append(enc.endBytes[:0], c.endBytes...)
+	*enc = *c
+	enc.buf = buf
+	enc.endBytes = endBytes
+}
+
 // PatchInitialBits overwrites the first nbits (<= 8) of the stream with val,
 // like ec_enc_patch_initial_bits: the SILK encoder reserves them with a
 // placeholder symbol and fills in the VAD/LBRR flags once every frame of the

@@ -293,14 +293,21 @@ func (e *Encoder) applyShape32(shape *silkNoiseShapeAnalysis, signalType, quantO
 	shape.Warping_Q16 = cfg.warpingQ16
 	shape.InputQuality = s.inputQuality
 	shape.CodingQuality = s.codingQuality
-	quantOffsetF := f32(float64(silkQuantizationOffsetsQ10[signalType>>1][quantOffset]) / 1024.0)
-	lambda := c32(lambdaOffset)
-	lambda = f32(lambda + f32(c32(lambdaDelayedDecisions)*float64(cfg.nStatesDelayedDecision)))
-	lambda = f32(lambda + f32(f32(c32(lambdaSpeechAct)*float64(e.speechActivityQ8))*(1.0/256.0)))
-	lambda = f32(lambda + f32(c32(lambdaInputQuality)*s.inputQuality))
-	lambda = f32(lambda + f32(c32(lambdaCodingQuality)*s.codingQuality))
-	lambda = f32(lambda + f32(c32(lambdaQuantOffset)*quantOffsetF))
-	shape.Lambda_Q10 = silkFloat2Int(f32(lambda * 1024))
+	// psEncCtrl->Lambda is computed once per frame by
+	// silk_noise_shape_analysis_FLP (with the quantiser offset in force at
+	// that point); the encode_frame_FLP loop may raise it afterwards.
+	if !e.haveLambda32 {
+		quantOffsetF := f32(float64(silkQuantizationOffsetsQ10[signalType>>1][quantOffset]) / 1024.0)
+		lambda := c32(lambdaOffset)
+		lambda = f32(lambda + f32(c32(lambdaDelayedDecisions)*float64(cfg.nStatesDelayedDecision)))
+		lambda = f32(lambda + f32(f32(c32(lambdaSpeechAct)*float64(e.speechActivityQ8))*(1.0/256.0)))
+		lambda = f32(lambda + f32(c32(lambdaInputQuality)*s.inputQuality))
+		lambda = f32(lambda + f32(c32(lambdaCodingQuality)*s.codingQuality))
+		lambda = f32(lambda + f32(c32(lambdaQuantOffset)*quantOffsetF))
+		e.lambda32 = lambda
+		e.haveLambda32 = true
+	}
+	shape.Lambda_Q10 = silkFloat2Int(f32(e.lambda32 * 1024))
 }
 
 // noiseShapeFLP32Trace runs the faithful analysis on the frame with the

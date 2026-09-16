@@ -36,6 +36,24 @@ type FrameTrace struct {
 	// used for this frame, the LBRR bits this packet spent (curr_nBitsUsedLBRR)
 	// and ec_tell before the frame.
 	NBits, TargetRateBps, NBitsExceeded, NBitsUsedLBRR, LBRRBits, Tell int
+	// Loop records the encode_frame_FLP quantiser-loop iterations of the
+	// frame (one entry per coded pass).
+	Loop        []LoopIteration
+	LoopRestore bool // the output state was restored from the "lower" iteration
+}
+
+// LoopIteration is one pass of the encode_frame_FLP quantiser loop.
+type LoopIteration struct {
+	Iter, NBits, MaxBits int
+	UseCBR               bool
+	GainMultQ8           int32
+	GainsID              int32
+	FoundLower           bool
+	FoundUpper           bool
+	Lambda               float32
+	QuantOffset          int
+	GainSymbols          []int
+	Damage               bool
 }
 
 // StereoFrameTrace records one frame of the stereo packet flow (silk_Encode

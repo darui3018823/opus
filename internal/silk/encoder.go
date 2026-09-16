@@ -196,6 +196,17 @@ type Encoder struct {
 	pendingLBRRStereoMidOnly []bool
 	// lastStereoTrace holds the per-frame stereo decisions of the last packet.
 	lastStereoTrace []StereoFrameTrace
+	// lambda32 is the frame's noise-shape Lambda (silk_float) once computed
+	// (haveLambda32); the encode_frame_FLP loop raises it when a frame busts
+	// its bit budget.
+	lambda32     float64
+	haveLambda32 bool
+	// maxBits is encControl->maxBits, the packet's bit budget (0 = none);
+	// frameMaxBits / frameUseCBR are the per-frame values silk_Encode derives
+	// from it for the frame being coded.
+	maxBits      int
+	frameMaxBits int
+	frameUseCBR  bool
 }
 
 type nlsfAnalysis struct {
@@ -365,6 +376,35 @@ func (e *Encoder) SetBitrate(bitrate int) error {
 	return nil
 }
 
+// SetMaxBits sets encControl->maxBits, the bit budget of the next packet
+// (0 = unlimited). In CBR the frame loop codes up to it; in VBR a frame that
+// busts it is re-quantised.
+func (e *Encoder) SetMaxBits(bits int) {
+	e.maxBits = bits
+	if e.side != nil {
+		e.side.maxBits = bits
+	}
+}
+
+// frameBitBudget returns silk_Encode's per-frame maxBits and useCBR for
+// frame index frame of an nFrames packet.
+func (e *Encoder) frameBitBudget(nFrames, frame int) (maxBits int, useCBR bool) {
+	maxBits = e.maxBits
+	if maxBits > 0 {
+		if nFrames == 2 && frame == 0 {
+			maxBits = maxBits * 3 / 5
+		} else if nFrames == 3 {
+			if frame == 0 {
+				maxBits = maxBits * 2 / 5
+			} else if frame == 1 {
+				maxBits = maxBits * 3 / 4
+			}
+		}
+	}
+	useCBR = e.rateMode == RateModeCBR && frame == nFrames-1 && maxBits > 0
+	return maxBits, useCBR
+}
+
 // SetRateMode supplies the top-level Opus packet-size contract. The
 // SNR-target natural-size path is available only in VBR/CVBR and remains
 // independently disableable with OPUS_SILK_RC_SNR=0.
@@ -466,6 +506,7 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 		e.curFrame = i
 		tell := enc.ECTell()
 		e.targetRateBps = e.frameTargetRate(nFrames, i, tell)
+		e.frameMaxBits, e.frameUseCBR = e.frameBitBudget(nFrames, i)
 		e.encodeRangeFrame(enc, signal, vadFlags[i], i > 0)
 		e.recordRateTrace(nFrames, tell, lbrrBits)
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
@@ -611,6 +652,12 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 
 		e.curFrame = i
 		e.channelRateBps = int(ms.midSideRates[0])
+		e.frameMaxBits, e.frameUseCBR = e.frameBitBudget(nFrames, i)
+		if ms.midSideRates[1] > 0 && e.frameMaxBits > 0 {
+			// Give mid up to 1/2 of the max bits for that frame.
+			e.frameUseCBR = false
+			e.frameMaxBits -= e.maxBits / (nFrames * 2)
+		}
 		st.Tell[0], st.SpeechActQ8[0], st.FirstAfterRst[0] = enc.ECTell(), e.frameVAD[i].speechActivityQ8, e.firstFrameAfterReset
 		e.encodeRangeFrame(enc, mid, vadFlags[0][i], i > 0)
 		e.recordRateTrace(nFrames, tell, lbrrBits)
@@ -620,6 +667,7 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 			st.Tell[1], st.SpeechActQ8[1], st.FirstAfterRst[1] = enc.ECTell(), e.side.frameVAD[i].speechActivityQ8, e.side.firstFrameAfterReset
 			e.side.curFrame = i
 			e.side.channelRateBps = int(ms.midSideRates[1])
+			e.side.frameMaxBits, e.side.frameUseCBR = e.side.frameBitBudget(nFrames, i)
 			// CODE_INDEPENDENTLY for the first frame, CODE_INDEPENDENTLY_NO_LTP_SCALING
 			// after a skipped side frame, CODE_CONDITIONALLY otherwise.
 			e.side.codeNoLTPScaling = i > 0 && e.prevOnlyMiddle
@@ -753,6 +801,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		// harmonic shaping drives every NSQ pass of this frame.
 		e.pendingShape32 = e.noiseShapeFLP32Trace(signal, signalType, pitchLags)
 		e.haveShape32 = true
+		e.haveLambda32 = false
 		gainTargets, shape := e.shapeGainAnalysis(signal, bootstrap.lpcQ12, nil, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
 		domainGainTargets = gainTargets
 		gainIndices := e.resolveGainIndices(gainTargets, conditionalGain)
@@ -798,53 +847,59 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	if e.haveShape32 && len(domainConfig) == 1 {
 		exactGains = e.exactProcessGains(signal, signalType, quantOffset, nlsf, domainConfig[0], conditionalGain)
 	}
-	useExactGains := exactGains != nil && e.rateMode != RateModeCBR
-	if useExactGains {
+	var gainIndices, pitchLags []int
+	var ltpCoeffsQ14 [][5]int16
+	var ltpScaleQ14 int16
+	var frameSeed int32
+	var pulses []int16
+	rateScale := 1.0
+	if exactGains != nil {
+		// silk_encode_frame_FLP: code the frame from the process_gains gains
+		// and, when the packet has a bit budget, iterate the quantiser loop.
 		quantOffset = exactGains.quantOffset
-	}
-
-	plan := e.selectRateControlPlan(initialState, signal, vadActive, signalType, quantOffset, conditionalGain, nlsf, pitchLag, pitchGain, domainGainTargets)
-	e.lastSNRVBRFrame = plan.snrVBR
-	if useExactGains {
-		plan = rateControlPlan{gainTargets: exactGains.absIndices, gainIndices: exactGains.absIndices, rateScale: 1}
 		e.lastSNRVBRFrame = false
-		e.exactGainSymbols = exactGains.symbols
-	}
+		e.restoreFrameState(initialState)
+		r := e.encodeFrameLoop(enc, initialState, signal, vadActive, signalType, quantOffset, conditionalGain,
+			nlsf, cb, pitchLag, pitchGain, exactGains, e.frameMaxBits, e.frameUseCBR)
+		gainIndices, pitchLags, ltpCoeffsQ14, ltpScaleQ14 = r.gainIndices, r.pitchLags, r.ltpCoeffsQ14, r.ltpScaleQ14
+		frameSeed, pulses, quantOffset = r.frameSeed, r.pulses, r.quantOffset
+	} else {
+		plan := e.selectRateControlPlan(initialState, signal, vadActive, signalType, quantOffset, conditionalGain, nlsf, pitchLag, pitchGain, domainGainTargets)
+		e.lastSNRVBRFrame = plan.snrVBR
+		rateScale = plan.rateScale
 
-	e.restoreFrameState(initialState)
-	e.encodeTypeOffset(enc, vadActive, signalType, quantOffset)
-	gainIndices := e.encodeGains(enc, signalType, plan.gainTargets, conditionalGain)
-	e.exactGainSymbols = nil
-	e.encodeNLSF(enc, cb, signalType, nlsf)
-	if e.nSubframes == 4 {
-		enc.EncodeIcdf(nlsf.interpFactor, silkNLSFInterpFactorICDF[:], 8)
-	}
+		e.restoreFrameState(initialState)
+		e.encodeTypeOffset(enc, vadActive, signalType, quantOffset)
+		gainIndices = e.encodeGains(enc, signalType, plan.gainTargets, conditionalGain)
+		e.encodeNLSF(enc, cb, signalType, nlsf)
+		if e.nSubframes == 4 {
+			enc.EncodeIcdf(nlsf.interpFactor, silkNLSFInterpFactorICDF[:], 8)
+		}
 
-	ltpCoeffsQ14 := make([][5]int16, e.nSubframes)
-	ltpScaleQ14 := silkLTPScalesTable[0]
-	pitchLags := make([]int, e.nSubframes)
-	for sf := range pitchLags {
-		pitchLags[sf] = pitchLag
-	}
-	if signalType == SignalTypeVoiced {
-		ltpCoeffsQ14, ltpScaleQ14, pitchLags = e.encodePitchAndLTP(enc, signal, nlsf.lpcQ12, pitchGain, conditionalGain)
-	}
+		ltpCoeffsQ14 = make([][5]int16, e.nSubframes)
+		ltpScaleQ14 = silkLTPScalesTable[0]
+		pitchLags = make([]int, e.nSubframes)
+		for sf := range pitchLags {
+			pitchLags[sf] = pitchLag
+		}
+		if signalType == SignalTypeVoiced {
+			ltpCoeffsQ14, ltpScaleQ14, pitchLags = e.encodePitchAndLTP(enc, signal, nlsf.lpcQ12, pitchGain, conditionalGain)
+		}
 
-	if len(plan.gainIndices) == len(gainIndices) {
-		gainIndices = plan.gainIndices
+		if len(plan.gainIndices) == len(gainIndices) {
+			gainIndices = plan.gainIndices
+		}
+		// silk_encode_frame_FLP: indices.Seed = frameCounter++ & 3 seeds the
+		// delayed-decision states; the winner's initial seed is what gets coded.
+		frameSeed = int32(e.frameCounter & 3)
+		e.frameCounter++
+		e.nsqSeed = frameSeed
+		e.traceNLSFQ15 = nlsf.nlsfQ15
+		pulses = e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, nlsf.lpcQ12Interp, gainIndices,
+			signalType, quantOffset, frameSeed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale)
+		enc.EncodeIcdf(int(e.nsqSeed), silkUniform4ICDF[:], 8)
+		e.encodePulses(enc, pulses, signalType, quantOffset)
 	}
-	// Run the delayed-decision NSQ before encoding the seed: the trellis selects
-	// the winning state and its initial seed (e.nsqSeed), which libopus writes to
-	// the bitstream so the decoder reproduces the same sign sequence.
-	// silk_encode_frame_FLP: indices.Seed = frameCounter++ & 3 seeds the
-	// delayed-decision states; the winner's initial seed is what gets coded.
-	frameSeed := int32(e.frameCounter & 3)
-	e.frameCounter++
-	e.nsqSeed = frameSeed
-	e.traceNLSFQ15 = nlsf.nlsfQ15
-	pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, nlsf.lpcQ12Interp, gainIndices,
-		signalType, quantOffset, frameSeed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale)
-	e.pendingTrace.Seed = e.nsqSeed
 	e.pendingTrace.Shape32 = e.pendingShape32
 	e.pendingTrace.NLSFTargetQ15 = append([]int16(nil), e.traceNLSFTargetQ15...)
 	e.pendingTrace.InterpFactor = nlsf.interpFactor
@@ -852,8 +907,6 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	e.pendingTrace.LPCInPre = e.traceLPCInPre
 	e.pendingTrace.InvGains = e.traceInvGains
 	e.lastTrace = e.pendingTrace
-	enc.EncodeIcdf(int(e.nsqSeed), silkUniform4ICDF[:], 8)
-	e.encodePulses(enc, pulses, signalType, quantOffset)
 
 	// Low-Bitrate Redundancy: generate (but do not yet emit) a coarse redundant
 	// copy of this frame. It is buffered and written at the front of the next
@@ -875,7 +928,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		lastGainIndex = exactGains.absIndices[e.nSubframes-1]
 	}
 	e.generateLBRRFrame(signal, signalType, quantOffset, lbrrGainSymbols, lastGainIndex, conditionalGain, nlsf,
-		pitchLags, ltpCoeffsQ14, ltpScaleQ14, frameSeed, plan.rateScale, initialState)
+		pitchLags, ltpCoeffsQ14, ltpScaleQ14, frameSeed, rateScale, initialState)
 	if lbrrDebug {
 		if after := e.leakFingerprint(); after != leakBefore {
 			fmt.Fprintf(os.Stderr, "[LBRR LEAK]\n  before=%s\n  after =%s\n", leakBefore, after)
@@ -3399,6 +3452,10 @@ func (e *Encoder) Reset() {
 	e.codeNoLTPScaling = false
 	e.channelRateBps = 0
 	e.pendingLBRRStereoMidOnly = nil
+	e.lambda32 = 0
+	e.haveLambda32 = false
+	e.frameMaxBits = 0
+	e.frameUseCBR = false
 	e.stereoState.reset()
 	e.prevOnlyMiddle = false
 	if e.side != nil {

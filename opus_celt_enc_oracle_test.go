@@ -35,6 +35,8 @@ type celtOracleFrame struct {
 	tfEstimate  float32
 	tfChan      int
 	pfOn        bool
+	pitchIndex  int
+	gain1       float32
 	tell        int
 	tellCoarse  int
 	tfSelect    int
@@ -142,6 +144,9 @@ func runCELTEncOracle(t *testing.T, fixture string, frames, bitrate, complexity 
 			f.tfEstimate = float32(v)
 			f.tfChan, _ = strconv.Atoi(m[10])
 			f.pfOn = m[11] == "1"
+			f.pitchIndex, _ = strconv.Atoi(m[12])
+			g, _ := strconv.ParseFloat(m[13], 64)
+			f.gain1 = float32(g)
 			f.tell, _ = strconv.Atoi(m[15])
 		case strings.HasPrefix(line, "[SILK_CELT_ENC_IN]"):
 			out[cur].in = parseFloats(line)
@@ -301,9 +306,9 @@ func runCELTOracleCase(t *testing.T, tc celtOracleCase) {
 			blAbs, _, blEq, blN := float32Stats(tr.BandLogE, r.bandLogE)
 			t.Logf("frame %d: identical=%v prefix=%d Go %d B / C %d B | in: eq %d/%d maxAbs %.3g | freq: eq %d/%d maxAbs %.3g | bandE: eq %d/%d maxAbs %.3g | bandLogE: eq %d/%d maxAbs %.3g",
 				f, same, prefix, len(pkt), len(r.packet), inEq, inN, inAbs, fqEq, fqN, fqAbs, beEq, beN, beAbs, blEq, blN, blAbs)
-			t.Logf("frame %d: decisions Go{transient %v short %d tfEst %.6g tfChan %d intra %v tellCoarse %d tfSelect %d tellTF %d} C{transient %v short %d tfEst %.6g tfChan %d pf_on %v tell %d tellCoarse+tf %d tfSelect %d}",
-				f, tr.IsTransient, tr.ShortBlocks, tr.TFEstimate, tr.TFChan, tr.Intra, tr.TellCoarse, tr.TFSelect, tr.TellTF,
-				r.isTransient, r.shortBlocks, r.tfEstimate, r.tfChan, r.pfOn, r.tell, r.tellCoarse, r.tfSelect)
+			t.Logf("frame %d: decisions Go{transient %v short %d tfEst %.6g tfChan %d pf %v/%d/%.6g intra %v tellCoarse %d tfSelect %d tellTF %d} C{transient %v short %d tfEst %.6g tfChan %d pf %v/%d/%.6g tell %d tellCoarse+tf %d tfSelect %d}",
+				f, tr.IsTransient, tr.ShortBlocks, tr.TFEstimate, tr.TFChan, tr.PFOn, tr.PitchIndex, tr.PFGain, tr.Intra, tr.TellCoarse, tr.TFSelect, tr.TellTF,
+				r.isTransient, r.shortBlocks, r.tfEstimate, r.tfChan, r.pfOn, r.pitchIndex, r.gain1, r.tell, r.tellCoarse, r.tfSelect)
 			t.Logf("frame %d: trim Go{tellFrac %d spread %d trim %d boost %d} C{tellFrac %d spread %d trim %d boost %d} | alloc Go{bits %d rsv %d coded %d bal %d tellFine %d tellFinal %d} C{bits %d rsv %d coded %d bal %d tellFine %d tellFinal %d}",
 				f, tr.TellFracTrim, tr.Spread, tr.AllocTrim, tr.TotalBoost, r.tellFracTrim, r.spread, r.allocTrim, r.totalBoost,
 				tr.Bits, tr.AntiCollapseRsv, tr.CodedBands, tr.Balance, tr.TellFine, tr.TellFinal,
@@ -360,7 +365,7 @@ func TestCELTEncoderOracle(t *testing.T) {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
 	}
 	var cases []celtOracleCase
-	for _, complexity := range []int{0, 1, 2, 3, 4, 5, 10} {
+	for _, complexity := range []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10} {
 		for _, bitrate := range []int{24000, 64000, 128000} {
 			for _, vbr := range []bool{false, true} {
 				mode := "cbr"
@@ -374,7 +379,7 @@ func TestCELTEncoderOracle(t *testing.T) {
 					complexity: complexity,
 					vbr:        vbr,
 					channels:   1,
-					exact:      complexity <= 4,
+					exact:      complexity <= 6,
 				})
 			}
 		}

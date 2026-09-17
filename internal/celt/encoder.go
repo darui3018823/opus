@@ -81,6 +81,9 @@ type FrameTrace struct {
 	TFEstimate  float64
 	TFChan      int
 	Intra       bool
+	PFOn        bool
+	PitchIndex  int
+	PFGain      float64
 	TFRes       []int
 	TFSelect    int
 	TellCoarse  int       // ec_tell after the coarse energies
@@ -177,6 +180,19 @@ type Encoder struct {
 	// analysisScratch is the float32 work buffer shared by tone_detect and
 	// transient_analysis (frame + overlap samples).
 	analysisScratch []float32
+	// Pitch prefilter state (libopus st->prefilter_mem, prefilter_period /
+	// gain / tapset). e.overlap doubles as st->in_mem: the last overlap
+	// samples of the previous filtered frame. overlapMax is
+	// st->overlap_max, the peak of the previous frame's overlap region used
+	// by the input silence test.
+	prefilterMem    [][]float32
+	window32        []float32 // the overlap window in float32 for the comb filter
+	prefilterPre    [][]float32
+	prefilterY      []float32
+	prefilterPeriod int
+	prefilterGain   float32
+	prefilterTapset int
+	overlapMax      float32
 
 	// consecTransient counts consecutive transient frames (libopus
 	// st->consec_transient). It gates the anti-collapse decision: anti-collapse
@@ -267,8 +283,11 @@ func NewEncoder(frameSize, sampleRate, channels int, config *EncoderConfig) (*En
 		lastSpread:   spreadNormal,
 		lsbDepth:     24,
 	}
+	e.prefilterMem = make([][]float32, channels)
+	e.window32 = celtWindow(overlap)
 	for c := 0; c < channels; c++ {
 		e.overlap[c] = make([]float64, overlap)
+		e.prefilterMem[c] = make([]float32, combFilterMaxPeriod)
 	}
 
 	// oldBandE history is zeroed by libopus OPUS_RESET_STATE.
@@ -427,15 +446,99 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		e.preemphMem[c] = mem
 
 		buf := make([]float64, frameSize+ov)
-		copy(buf[:ov], e.overlap[c])
+		// The analysis (tone / transient detectors) sees the raw pre-emphasised
+		// history; run_prefilter swaps in the filtered tail before the MDCT.
+		for i := 0; i < ov; i++ {
+			buf[i] = float64(e.prefilterMem[c][combFilterMaxPeriod-ov+i])
+		}
 		copy(buf[ov:], pe)
 		bufs[c] = buf
+	}
+	// libopus input silence test: the peak over the frame plus the previous
+	// frame's overlap region against one LSB of the declared input depth.
+	pcmSilence := false
+	{
+		sampleMax := e.overlapMax
+		nOverlap := ch * (frameSize - ov)
+		for i := 0; i < nOverlap && i < len(samples); i++ {
+			if v := float32(samples[i]); v > sampleMax {
+				sampleMax = v
+			} else if -v > sampleMax {
+				sampleMax = -v
+			}
+		}
+		var overlapMax float32
+		for i := nOverlap; i < len(samples); i++ {
+			if v := float32(samples[i]); v > overlapMax {
+				overlapMax = v
+			} else if -v > overlapMax {
+				overlapMax = -v
+			}
+		}
+		e.overlapMax = overlapMax
+		if overlapMax > sampleMax {
+			sampleMax = overlapMax
+		}
+		pcmSilence = sampleMax <= float32(1)/float32(int32(1)<<uint(e.lsbDepth))
 	}
 
 	// Transient detection (short MDCT blocks reduce pre-echo on attacks). The
 	// isTransient flag is only coded for LM>0; the bit's budget guard below is
 	// satisfied for every non-degenerate packet (the symbols before it cost only
 	// a couple of bits), so committing to short blocks here cannot desync.
+	// --- Byte budget (celt_encode_with_ec) ---
+	// nbCompressedBytes starts at the caller's maximum: the CBR packet size,
+	// or the 1275-byte packet cap in VBR. The constrained-VBR bound may
+	// shrink it before any symbol is coded; the VBR target shrinks it again
+	// after the allocation trim. Until then every budget guard reads
+	// totalBits = nbCompressedBytes*8, as libopus does. The hybrid path
+	// (shared range coder) keeps its own sizing further down.
+	vbrOn := e.rateMode != RateModeCBR
+	constrainedVBR := e.rateMode == RateModeCVBR
+	nbFilledBytes := 0
+	if shared {
+		nbFilledBytes = (tell0 + 4) >> 3
+	}
+	nbCompressedBytes := maxTargetBytes
+	vbrRate := 0
+	effectiveBytes := nbCompressedBytes - nbFilledBytes
+	if vbrOn {
+		// bitrate_to_bits(bitrate, Fs, frame_size) << BITRES
+		vbrRate = (e.bitrate * 6 / (6 * e.mode.SampleRate / frameSize)) << 3
+		effectiveBytes = vbrRate >> 6
+	}
+	nbAvailableBytes := nbCompressedBytes - nbFilledBytes
+	equivRate := (nbCompressedBytes * 8 * 50 << uint(3-lm)) - (40*ch+20)*((400>>uint(lm))-50)
+	if e.bitrate > 0 {
+		if r := e.bitrate - (40*ch+20)*((400>>uint(lm))-50); r < equivRate {
+			equivRate = r
+		}
+	}
+	enc := sharedEnc
+	if enc == nil {
+		enc = entcode.NewEncoder(nbCompressedBytes)
+	}
+	if vbrRate > 0 && constrainedVBR && !shared {
+		// Computes the max bit-rate allowed in VBR mode to avoid violating
+		// the target rate and buffering. Clamped to at least two bytes when
+		// the encoder is entirely empty.
+		vbrBound := vbrRate
+		maxAllowed := (vbrRate + vbrBound - e.vbrReservoir) >> 6
+		if maxAllowed < 2 {
+			maxAllowed = 2
+		}
+		if maxAllowed > nbAvailableBytes {
+			maxAllowed = nbAvailableBytes
+		}
+		if maxAllowed < nbAvailableBytes {
+			nbCompressedBytes = nbFilledBytes + maxAllowed
+			nbAvailableBytes = maxAllowed
+			enc.Shrink(nbCompressedBytes)
+		}
+	}
+	totalBits := nbCompressedBytes * 8
+	targetBytes := nbCompressedBytes
+
 	// tone_detect first: a dominant pure tone disables the transient detector
 	// near DC, biases dynalloc and gates tf_analysis and the prefilter.
 	if len(e.analysisScratch) < frameSize+ov {
@@ -453,6 +556,11 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	if v := float32(1) - float32(tfEstimate); v < toneishness {
 		toneishness = v
 	}
+	// Pitch prefilter (run_prefilter): the comb filter is applied to the
+	// analysis buffers in place and its history advanced, whether or not the
+	// pitch search is enabled for this frame.
+	pfEnabled := nbAvailableBytes > 12*ch && !shared && !pcmSilence && tell0+16 <= totalBits
+	pf := e.runPrefilter(bufs, frameSize, ov, pfEnabled, float32(tfEstimate), nbAvailableBytes, toneFreq, toneishness, e.window32)
 	// Pass 2: forward MDCT (M interleaved short blocks on transients, else one
 	// long block), band energy, and per-band normalisation.
 	//
@@ -613,59 +721,6 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		}
 	}
 
-	// --- Byte budget (celt_encode_with_ec) ---
-	// nbCompressedBytes starts at the caller's maximum: the CBR packet size,
-	// or the 1275-byte packet cap in VBR. The constrained-VBR bound may
-	// shrink it before any symbol is coded; the VBR target shrinks it again
-	// after the allocation trim. Until then every budget guard reads
-	// totalBits = nbCompressedBytes*8, as libopus does. The hybrid path
-	// (shared range coder) keeps its own sizing further down.
-	vbrOn := e.rateMode != RateModeCBR
-	constrainedVBR := e.rateMode == RateModeCVBR
-	nbFilledBytes := 0
-	if shared {
-		nbFilledBytes = (tell0 + 4) >> 3
-	}
-	nbCompressedBytes := maxTargetBytes
-	vbrRate := 0
-	effectiveBytes := nbCompressedBytes - nbFilledBytes
-	if vbrOn {
-		// bitrate_to_bits(bitrate, Fs, frame_size) << BITRES
-		vbrRate = (e.bitrate * 6 / (6 * e.mode.SampleRate / frameSize)) << 3
-		effectiveBytes = vbrRate >> 6
-	}
-	nbAvailableBytes := nbCompressedBytes - nbFilledBytes
-	equivRate := (nbCompressedBytes * 8 * 50 << uint(3-lm)) - (40*ch+20)*((400>>uint(lm))-50)
-	if e.bitrate > 0 {
-		if r := e.bitrate - (40*ch+20)*((400>>uint(lm))-50); r < equivRate {
-			equivRate = r
-		}
-	}
-	enc := sharedEnc
-	if enc == nil {
-		enc = entcode.NewEncoder(nbCompressedBytes)
-	}
-	if vbrRate > 0 && constrainedVBR && !shared {
-		// Computes the max bit-rate allowed in VBR mode to avoid violating
-		// the target rate and buffering. Clamped to at least two bytes when
-		// the encoder is entirely empty.
-		vbrBound := vbrRate
-		maxAllowed := (vbrRate + vbrBound - e.vbrReservoir) >> 6
-		if maxAllowed < 2 {
-			maxAllowed = 2
-		}
-		if maxAllowed > nbAvailableBytes {
-			maxAllowed = nbAvailableBytes
-		}
-		if maxAllowed < nbAvailableBytes {
-			nbCompressedBytes = nbFilledBytes + maxAllowed
-			nbAvailableBytes = maxAllowed
-			enc.Shrink(nbCompressedBytes)
-		}
-	}
-	totalBits := nbCompressedBytes * 8
-	targetBytes := nbCompressedBytes
-
 	// === Header symbols, in decoder order (decodeCELTRange) ===
 
 	// Silence flag (logp 15) — read only when ec_tell is still at the initial
@@ -675,9 +730,20 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 	etr(enc, "silence")
 
-	// Post-filter (CELT-only, start==0): signalled disabled.
-	if start == 0 && enc.ECTell()+16 <= totalBits {
-		enc.EncodeBitLogp(false, 1)
+	// Post-filter parameters (CELT-only): the flag, and when enabled the
+	// period as octave + mantissa, the quantised gain and the tapset.
+	if !pf.pfOn {
+		if !shared && tell0+16 <= totalBits {
+			enc.EncodeBitLogp(false, 1)
+		}
+	} else {
+		enc.EncodeBitLogp(true, 1)
+		pi := uint32(pf.pitchIndex + 1)
+		octave := uint(entcode.ILog(pi) - 5)
+		enc.EncodeUint(uint32(octave), 6)
+		enc.EncodeBits(pi-(16<<octave), 4+octave)
+		enc.EncodeBits(uint32(pf.qg), 3)
+		enc.EncodeIcdf(pf.tapset, tapsetIcdf[:], 2)
 	}
 
 	// isTransient (logp 3, LM>0). The decision was made in pass 1 and already
@@ -742,7 +808,8 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		ch, lm, nbAvailableBytes, e.complexity >= 4, numBands)
 	etr(enc, "coarse")
 	{
-		tr := FrameTrace{IsTransient: isTransient, TFEstimate: tfEstimate, TFChan: tfChan, Intra: intra, TellCoarse: enc.ECTell()}
+		tr := FrameTrace{IsTransient: isTransient, TFEstimate: tfEstimate, TFChan: tfChan, Intra: intra, TellCoarse: enc.ECTell(),
+			PFOn: pf.pfOn, PitchIndex: pf.pitchIndex, PFGain: float64(pf.gain)}
 		tr.OldBandE = append([]float64(nil), quantLogE...)
 		tr.CoarseError = append([]float64(nil), coarseError...)
 		if isTransient {
@@ -789,7 +856,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			}
 		default:
 			spread = spreadingDecision32(X, frameLen, end, ch, M, &e.tonalAverage, e.lastSpread,
-				&e.hfAverage, &e.tapsetDecision, false, dyn.spreadWeight)
+				&e.hfAverage, &e.tapsetDecision, pf.pfOn && !isTransient, dyn.spreadWeight)
 		}
 		enc.EncodeIcdf(spread, spreadIcdf[:], 5)
 	} else {
@@ -1062,6 +1129,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 	e.lastTrace.TellFinal = enc.ECTell()
 	e.lastTrace.PacketBytes = targetBytes
+	e.prefilterPeriod = pf.pitchIndex
+	e.prefilterGain = pf.gain
+	e.prefilterTapset = pf.tapset
 
 	e.finalRange = enc.GetRng()
 
@@ -1196,6 +1266,15 @@ func (e *Encoder) Reset() {
 	e.lastSpread = spreadNormal
 	e.hfAverage = 0
 	e.tapsetDecision = 0
+	for c := range e.prefilterMem {
+		for i := range e.prefilterMem[c] {
+			e.prefilterMem[c][i] = 0
+		}
+	}
+	e.prefilterPeriod = 0
+	e.prefilterGain = 0
+	e.prefilterTapset = 0
+	e.overlapMax = 0
 	e.consecTransient = 0
 	e.intensity = 0
 	e.lastCodedBands = 0
@@ -1293,6 +1372,25 @@ func (e *Encoder) CopyStateFrom(src *Encoder) {
 	e.lastSpread = src.lastSpread
 	e.hfAverage = src.hfAverage
 	e.tapsetDecision = src.tapsetDecision
+	for c := range e.prefilterMem {
+		sc := c
+		if sc >= len(src.prefilterMem) {
+			sc = len(src.prefilterMem) - 1
+		}
+		if sc >= 0 {
+			copy(e.prefilterMem[c], src.prefilterMem[sc])
+		}
+	}
+	e.prefilterPeriod = src.prefilterPeriod
+	e.prefilterGain = src.prefilterGain
+	e.prefilterTapset = src.prefilterTapset
+	e.overlapMax = src.overlapMax
+	e.specAvg = src.specAvg
+	e.stereoSaving = src.stereoSaving
+	e.vbrReservoir = src.vbrReservoir
+	e.vbrDrift = src.vbrDrift
+	e.vbrOffset = src.vbrOffset
+	e.vbrCount = src.vbrCount
 	e.consecTransient = src.consecTransient
 	e.intensity = src.intensity
 	e.lastCodedBands = src.lastCodedBands

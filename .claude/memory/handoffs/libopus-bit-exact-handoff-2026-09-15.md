@@ -173,7 +173,10 @@ same-channel-count cell in CVBR, CVBR+FEC and CBR)**. `38072d0`/`8a93b3e`/`93e4b
 input with exact transitions → **84/99 cgoref cells**. `d683ded`/`8e60c26`
 (2026-09-17): static automatic bandwidth decision → SILK internal rate
 (NB at low bitrates through the resampler) byte-identical; `899e978`: plain
-`silk_NSQ` port → every complexity 0–10 byte-identical. Remaining: the
+`silk_NSQ` port → every complexity 0–10 byte-identical. 2026-09-18: the
+CELT-only encoder (48 kHz mono + stereo, CBR/CVBR, complexity 0–10) is
+byte-identical to the plain-C libopus build too (`TestCELTEncoderOracle`,
+84 cells; see the convergence plan's 2026-09-18 entry). Remaining: the
 digital-silence shortcut policy (onset fixture; libopus codes silent
 frames), mode policy (hybrid for 24/48 kHz input), mid-stream SILK
 internal-rate switching + decide_fec narrowing, the tonality analysis

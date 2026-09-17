@@ -1025,3 +1025,64 @@ input, SILK internal-rate switching (needs the CELT redundancy frame),
   `kf_bfly*` order, post-rotation) with the oracle's `[CELT_ENC_FREQ]`, then
   `compute_band_energies`/`amp2Log2` (`celt_sqrt`/`celt_log2` float32
   approximations), then `quant_coarse_energy`.
+
+### 2026-09-18: Phase 5 — CELT-only encoder byte-identical (mono + stereo, complexity 0–10, CBR/CVBR)
+
+Commits `249dc5f` … `58a392d` (2026-09-17 02:58 – 2026-09-18 03:37 JST). Every
+stage of `celt_encode_with_ec` is now a float32-faithful port checked
+against the instrumented plain-C libopus 1.6.1 build (`--celt-enc` oracle,
+`TestCELTEncoderOracle`, **84 cells × 20 frames byte-identical, all gated**):
+
+- `249dc5f` `clt_mdct_forward` (float32 fold, KISS twiddles, `1/N4` pre-scale,
+  float KISS FFT), `compute_band_energies` (`1e-27f` + sequential float32
+  inner product, `celt_sqrt`), `amp2Log2` with the non-FLOAT_APPROX
+  `celt_log2`, `normalise_bands`.
+- `0b68b09` `quant_coarse_energy` (`delayedIntra` follower, two-pass intra
+  search at complexity ≥ 4, `max_decay`, `energyError` bias, no −28 clamp),
+  `quant_fine_energy`, `quant_energy_finalise`.
+- `c0c15cd` `interp_bits2pulses` skip decision (`depth_threshold` 7/9/0,
+  `prev = lastCodedBands`, `signalBandwidth`), float `max_decay =
+  min(16, 0.125·nbAvailableBytes)`; oracle matrix with per-stage dumps
+  (spread, dynalloc, trim, allocation, pulses, fine bits, final tell).
+- `20817ab` `tone_detect`/`tone_lpc`, `transient_analysis` (tone gate, weak
+  transients), `dynalloc_analysis` (spread_weight masking model, tone
+  compensation, 2/3 cap, `effectiveBytes` gate), `spreading_decision`
+  (weights, hf_average/tapset), `stereo_itheta` + `celt_atan2p_norm`; the
+  libopus spread rules (hybrid / short blocks / complexity < 3 / small budget).
+- `3d74fee` VBR: range coder starts at the 1275-byte cap, constrained bound
+  shrink up front, budget guards on the pre-target `total_bits`, then
+  `compute_vbr` (dynalloc boost, transient boost, depth floor, 0.67 damping,
+  temporal VBR `spec_avg`) + reservoir/drift/offset and the final shrink;
+  `op_pvq_search_c` in float32. The Go heuristic VBR is gone.
+- `42ed426` `run_prefilter`: `pitch_downsample` (autocorrelation, LPC, FIR),
+  `pitch_search`, `remove_doubling`, the tone shortcut, gain thresholds and
+  continuity rules, float `comb_filter` crossfade, before/after energy check,
+  `prefilter_mem`/`in_mem`, PCM silence test (`overlap_max`, `lsb_depth`),
+  post-filter parameter coding.
+- `5b4880e` `analysis.c` + `mlp.c` (tonality analysis with the 1.6.1 MLP
+  weights, `tonality_get_info`) run by the Opus layer at complexity ≥ 7 and
+  consumed by CELT (prefilter gain, dynalloc leak boost, `compute_vbr`
+  activity/tonality/pitch_change, signal bandwidth, float32
+  `alloc_trim_analysis`); `lastCodedBands` ±1 hysteresis; input LSB depth
+  16 for int16 API calls.
+- `180ba40` stereo decisions (dual stereo, intensity with the 1.6.1
+  hysteresis table) between dynalloc and the trim; trim guard
+  `tell_frac + 6 bits ≤ total − boost`; oracle fixture snapped to the int16
+  grid on both sides (C/Go `sin()` last-ulp differences).
+- `b1bfa30` `theta_rdo` (complexity ≥ 8: code each joint band twice, keep the
+  higher weighted correlation, encoder/ctx save/restore), float32
+  `intensity_stereo`/`stereo_split`, fold seed = final range value
+  (`st->rng = enc->rng`), Opus-layer `stereo_fade` (equiv_rate < 32 kb/s);
+  per-band `[CELT_ENC_QAB]` tell dump.
+- `58a392d` `TestCGOEncodeRefCELTByteExact` reports identity against the
+  *linked* libopus: the msys2 build uses the SSE/AVX RTCD kernels
+  (`celt_inner_prod`, `xcorr_kernel`, `comb_filter_const`, …) whose float
+  summation order differs, so packets diverge in band energies / PVQ while
+  sizes match (2/36 cells identical). The plain-C build is the reference the
+  oracle reproduces; there is no libopus API to disable RTCD at runtime.
+
+Remaining for the CELT side: hybrid (SILK+CELT in one range coder, `silk_info`,
+start band 17, hybrid VBR/CBR sizing, SILK stereo width for the fade,
+transition redundancy), CELT at 8–24 kHz input (resampler path), the
+digital-silence shortcut (policy decision pending), the Opus-layer
+mode/bandwidth policy (`mode_thresholds`, `voice_est` with the analysis).

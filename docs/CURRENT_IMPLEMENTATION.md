@@ -1033,9 +1033,23 @@ for one delayed-decision state is ported next to the delayed-decision
 quantiser, `TestCGOEncodeRefSILKComplexity`).
 The remaining cells are policy the Go encoder does not mirror: libopus
 picks hybrid for 24/48 kHz mono input and narrows the bandwidth for FEC;
-mid-stream SILK internal-rate switching, the tonality analysis
-(complexity ≥ 7) and the hybrid/CELT paths are not yet exact. The SILK AB
-loudness gate passes at 8/12/16 kHz since the shaping port.
+mid-stream SILK internal-rate switching and the hybrid path are not yet
+exact. The SILK AB loudness gate passes at 8/12/16 kHz since the shaping port.
+
+The CELT-only encoder is byte-identical to the plain-C libopus 1.6.1 build
+as well (2026-09-18): `celt_encode_with_ec` is ported stage by stage in
+float32 — pre-emphasis, `clt_mdct_forward` with the float KISS FFT, band
+energies and `amp2Log2`, `tone_detect`, `transient_analysis`,
+`dynalloc_analysis`, `tf_analysis`, `quant_coarse_energy` (delayed-intra
+follower and two-pass search), spreading, the trim, `interp_bits2pulses`'
+skip decision, `op_pvq_search_c`, `theta_rdo`, fine energies, the pitch
+prefilter (`run_prefilter`), `compute_vbr` with the reservoir bookkeeping,
+the stereo width fade and the tonality analysis (`analysis.c` + MLP) at
+complexity ≥ 7. `TestCELTEncoderOracle` gates 48 kHz mono (24/64/128 kbps)
+and stereo (32/96/192 kbps) × CBR/CVBR × complexity 0–10 (mono) / 0,5,10
+(stereo), 20 frames each. The *linked* libopus (SIMD RTCD kernels) sums
+floats in a different order, so `TestCGOEncodeRefCELTByteExact` only
+reports; hybrid, non-48 kHz CELT input and the silence shortcut remain.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

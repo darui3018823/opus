@@ -238,7 +238,7 @@ var intensityThresholds = [21]int{
 	1, 2, 3, 4, 5, 6, 7, 8, 16, 24, 36, 44, 50, 56, 62, 67, 72, 79, 88, 106, 134,
 }
 var intensityHysteresis = [21]int{
-	1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 3, 3, 4, 5, 6, 8, 8, 8, 8,
+	1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 3, 3, 4, 5, 6, 8, 8,
 }
 
 // hysteresisDecision is the float port of libopus hysteresis_decision: it maps
@@ -257,9 +257,7 @@ func hysteresisDecision(val int, thresholds, hysteresis []int, n, prev int) int 
 	if i < prev && prev > 0 && val > thresholds[prev-1]-hysteresis[prev-1] {
 		i = prev
 	}
-	if i > n-1 {
-		i = n - 1
-	}
+	// libopus returns N when val is above every threshold.
 	if i < 0 {
 		i = 0
 	}

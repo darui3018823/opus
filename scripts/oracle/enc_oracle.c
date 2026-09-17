@@ -262,6 +262,10 @@ static int run_celt_encoder_oracle(int argc, char **argv)
         int n, b;
         if (channels == 2) fill_silk_fixture_stereo(pcm, rate, frame_size, frame, fixture);
         else fill_silk_fixture(pcm, rate, frame_size, frame, fixture);
+        /* Snap the fixture to the int16 grid so that a last-ulp difference
+           between the C and Go sin() cannot leak into the float CELT path. */
+        for (b = 0; b < frame_size * channels; b++)
+            pcm[b] = (float)(floor((double)pcm[b] * 32768.0 + 0.5) / 32768.0);
         oracle_trace_enabled = 1;
         fprintf(stderr, "[CELT_ENC_INPUT_FRAME] frame=%d\n", frame);
         n = opus_encode_float(enc, pcm, frame_size, packet, (opus_int32)sizeof(packet));

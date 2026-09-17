@@ -305,6 +305,12 @@ func runCELTOracleCase(t *testing.T, tc celtOracleCase) {
 		} else {
 			pcm = encOracleRefSpeechFrame(rate, f*frameSize, frameSize)
 		}
+		// The oracle snaps the fixture to the int16 grid (see enc_oracle.c)
+		// so a last-ulp sin() difference between the C and Go libm cannot
+		// leak into the float CELT path.
+		for i, v := range pcm {
+			pcm[i] = math.Floor(float64(float32(v))*32768+0.5) / 32768
+		}
 		pkt, err := enc.EncodeFloat(pcm, frameSize)
 		if err != nil {
 			t.Fatalf("frame %d: %v", f, err)
@@ -325,8 +331,13 @@ func runCELTOracleCase(t *testing.T, tc celtOracleCase) {
 			prefix++
 		}
 		if !same || testing.Verbose() {
-			inAbs, _, inEq, inN := float32Stats(tr.In[0], r.in)
-			fqAbs, _, fqEq, fqN := float32Stats(tr.Freq[0], r.freq)
+			var inAll, fqAll []float64
+			for c := range tr.In {
+				inAll = append(inAll, tr.In[c]...)
+				fqAll = append(fqAll, tr.Freq[c]...)
+			}
+			inAbs, _, inEq, inN := float32Stats(inAll, r.in)
+			fqAbs, _, fqEq, fqN := float32Stats(fqAll, r.freq)
 			beAbs, _, beEq, beN := float32Stats(tr.BandE, r.bandE)
 			blAbs, _, blEq, blN := float32Stats(tr.BandLogE, r.bandLogE)
 			t.Logf("frame %d: identical=%v prefix=%d Go %d B / C %d B | in: eq %d/%d maxAbs %.3g | freq: eq %d/%d maxAbs %.3g | bandE: eq %d/%d maxAbs %.3g | bandLogE: eq %d/%d maxAbs %.3g",
@@ -339,11 +350,16 @@ func runCELTOracleCase(t *testing.T, tc celtOracleCase) {
 					f, tr.Analysis.Valid, tr.Analysis.Tonality, tr.Analysis.TonalitySlope, tr.Analysis.Activity, tr.Analysis.MusicProb, tr.Analysis.MaxPitchRatio, tr.Analysis.Bandwidth, tr.PitchChange,
 					r.anValid, r.anTonality, r.anSlope, r.anActivity, r.anMusicProb, r.anMaxPitch, r.anBandwidth, r.pitchChange)
 			}
-			t.Logf("frame %d: trim Go{tellFrac %d spread %d trim %d boost %d} C{tellFrac %d spread %d trim %d boost %d} | alloc Go{bits %d rsv %d coded %d bal %d tellFine %d tellFinal %d} C{bits %d rsv %d coded %d bal %d tellFine %d tellFinal %d}",
+			t.Logf("frame %d: trim Go{tellFrac %d spread %d trim %d boost %d} C{tellFrac %d spread %d trim %d boost %d} | alloc Go{bits %d rsv %d coded %d bal %d int %d dual %v tellFine %d tellFinal %d} C{bits %d rsv %d coded %d bal %d int %d dual %v tellFine %d tellFinal %d}",
 				f, tr.TellFracTrim, tr.Spread, tr.AllocTrim, tr.TotalBoost, r.tellFracTrim, r.spread, r.allocTrim, r.totalBoost,
-				tr.Bits, tr.AntiCollapseRsv, tr.CodedBands, tr.Balance, tr.TellFine, tr.TellFinal,
-				r.bits, r.antiCollapseRsv, r.codedBands, r.balance, r.tellFine, r.tellFinal)
+				tr.Bits, tr.AntiCollapseRsv, tr.CodedBands, tr.Balance, tr.Intensity, tr.DualStereo, tr.TellFine, tr.TellFinal,
+				r.bits, r.antiCollapseRsv, r.codedBands, r.balance, r.intensity, r.dualStereo, r.tellFine, r.tellFinal)
 			if os.Getenv("CELT_ORACLE_DUMP") != "" {
+				for i := 0; i < len(inAll) && i < len(r.in); i++ {
+					if float32(inAll[i]) != r.in[i] {
+						t.Logf("frame %d: in[%d] Go %.9g C %.9g", f, i, float32(inAll[i]), r.in[i])
+					}
+				}
 				t.Logf("frame %d: oldBandE Go %v C %v", f, tr.OldBandE, r.oldBandE)
 				t.Logf("frame %d: error Go %v C %v", f, tr.CoarseError, r.errorE)
 				t.Logf("frame %d: tf_res Go %v C %v | pulses Go %v C %v", f, tr.TFRes, r.tfRes, tr.Pulses, r.pulses)
@@ -410,6 +426,25 @@ func TestCELTEncoderOracle(t *testing.T) {
 					vbr:        vbr,
 					channels:   1,
 					exact:      true,
+				})
+			}
+		}
+	}
+	for _, complexity := range []int{0, 5, 10} {
+		for _, bitrate := range []int{32000, 96000, 192000} {
+			for _, vbr := range []bool{false, true} {
+				mode := "cbr"
+				if vbr {
+					mode = "vbr"
+				}
+				cases = append(cases, celtOracleCase{
+					name:       fmt.Sprintf("stereo/%s/%dk/c%d", mode, bitrate/1000, complexity),
+					frames:     20,
+					bitrate:    bitrate,
+					complexity: complexity,
+					vbr:        vbr,
+					channels:   2,
+					exact:      false,
 				})
 			}
 		}

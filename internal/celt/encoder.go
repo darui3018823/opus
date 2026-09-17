@@ -878,6 +878,28 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	dynallocEncode(enc, offsets, numBands, start, end, lm, ch, totalBits)
 	etr(enc, "dynalloc")
 
+	// Stereo coding decisions (C==2 only), taken between the dynalloc
+	// boosts and the allocation trim as in celt_encode_with_ec: dual stereo
+	// from stereo_analysis, the intensity band from the equivalent rate with
+	// hysteresis. Both are coded by computeAllocationEncode.
+	encIntensity := end
+	encDualStereo := false
+	if ch == 2 {
+		// Always use MS for 2.5 ms frames until we can do a better analysis.
+		if lm != 0 {
+			encDualStereo = stereoAnalysis(X, frameLen, lm)
+		}
+		e.intensity = hysteresisDecision(equivRate/1000, intensityThresholds[:],
+			intensityHysteresis[:], len(intensityThresholds), e.intensity)
+		if e.intensity < start {
+			e.intensity = start
+		}
+		if e.intensity > end {
+			e.intensity = end
+		}
+		encIntensity = e.intensity
+	}
+
 	// Allocation trim (spectral tilt + stereo correlation).
 	surroundTrim := 0.0
 	if len(e.energyMask) >= ch*numBands && start == 0 {
@@ -888,14 +910,20 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		surroundTrim = surroundMaskTrim(e.energyMask, ch, numBands, maskEnd)
 	}
 	allocTrim := 5
-	if start == 0 {
-		allocTrim = allocTrimAnalysis32(X, logE, numBands, end, lm, ch, frameLen, &e.analysis, &e.stereoSaving,
-			float32(tfEstimate), encIntensityForTrim(e, start, end), float32(surroundTrim), equivRate)
-	} else {
-		e.stereoSaving = 0
-	}
-	if enc.ECTell()+6 <= totalBits {
-		enc.EncodeIcdf(allocTrim, TrimICDF[:], 7)
+	{
+		totalBoost := 0
+		for i := start; i < end; i++ {
+			totalBoost += offsets[i]
+		}
+		if enc.TellFrac()+(6<<3) <= totalBits<<3-totalBoost {
+			if start > 0 {
+				e.stereoSaving = 0
+			} else {
+				allocTrim = allocTrimAnalysis32(X, logE, numBands, end, lm, ch, frameLen, &e.analysis, &e.stereoSaving,
+					float32(tfEstimate), encIntensity, float32(surroundTrim), equivRate)
+			}
+			enc.EncodeIcdf(allocTrim, TrimICDF[:], 7)
+		}
 	}
 	etr(enc, "alloc_trim")
 	e.lastTrace.TellFracTrim = enc.TellFrac()
@@ -1039,42 +1067,6 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		bitsQ3 = 0
 	}
 
-	// Stereo coding decisions (C==2 only). Both are written into the stream by
-	// computeAllocationEncode and read back by the decoder, so any in-range choice
-	// round-trips; these heuristics only shape stereo quality.
-	encIntensity := end
-	encDualStereo := false
-	if ch == 2 {
-		// Dual stereo (independent L/R) vs joint mid/side, from the L/R-vs-M/S
-		// entropy proxy. LM>0 always here (20 ms frames), matching libopus' LM!=0
-		// guard for running this analysis.
-		encDualStereo = stereoAnalysis(X, frameLen, lm)
-
-		// Intensity-stereo starting band from the equivalent bitrate (libopus
-		// hysteresis_decision over equiv_rate in kbps). For our fixed-LM frames the
-		// (40*C+20)*((400>>LM)-50) correction term is zero (400>>LM == 50 at LM=3).
-		equivRate := targetBytes * 8 * 50
-		if shift := 3 - lm; shift > 0 {
-			equivRate >>= uint(shift)
-		} else if shift < 0 {
-			equivRate <<= uint(-shift)
-		}
-		if e.bitrate > 0 {
-			corr := (40*ch + 20) * ((400 >> uint(lm)) - 50)
-			if r := e.bitrate - corr; r < equivRate {
-				equivRate = r
-			}
-		}
-		e.intensity = hysteresisDecision(equivRate/1000, intensityThresholds[:],
-			intensityHysteresis[:], len(intensityThresholds), e.intensity)
-		encIntensity = e.intensity
-		if encIntensity < start {
-			encIntensity = start
-		}
-		if encIntensity > end {
-			encIntensity = end
-		}
-	}
 	pulses, eBits, finePriority, balance, intensity, codedBands, dualStereo :=
 		computeAllocationEncode(enc, encIntensity, encDualStereo,
 			numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets, e.lastCodedBands, e.signalBandwidth(end, equivRate))
@@ -1507,20 +1499,4 @@ func (e *Encoder) signalBandwidth(end, equivRate int) int {
 		return e.analysis.Bandwidth
 	}
 	return minBandwidth
-}
-
-// encIntensityForTrim returns the intensity band alloc_trim_analysis reads
-// (st->intensity, clamped to the coded range for stereo).
-func encIntensityForTrim(e *Encoder, start, end int) int {
-	if e.mode.Channels != 2 {
-		return end
-	}
-	v := e.intensity
-	if v < start {
-		v = start
-	}
-	if v > end {
-		v = end
-	}
-	return v
 }

@@ -1054,9 +1054,11 @@ reports. Hybrid packets are byte-identical too (`TestHybridEncoderOracle`,
 split, `silk_mode.maxBits`, `CELT_SET_SILK_INFO`, the hybrid tf/VBR rules,
 the HB gain and stereo width fades follow `opus_encode_native`. The
 automatic mode / bandwidth / channel policy of libopus is ported as
-`SetLibopusModePolicy(true)` (`TestAutoModeOracle`, 49/60 automatic-mode
-cells byte-identical); the default remains the Go policy. Non-48 kHz
-CELT/hybrid input, a stereo input coded as a mono hybrid/CELT stream, the
+`SetLibopusModePolicy(true)` (`TestAutoModeOracle`: VOIP/AUDIO ×
+voice/music/auto × mono/stereo × 12–128 kbps, 60/60 automatic-mode cells
+byte-identical, including a stereo input coded as a mono CELT or hybrid
+stream via `CELT_SET_CHANNELS` MDCT averaging and the SILK downmix); the
+default remains the Go policy. Non-48 kHz CELT/hybrid input, the
 SILK↔CELT transition redundancy and the silence shortcut remain.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss

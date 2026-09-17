@@ -1126,3 +1126,38 @@ Remaining (encoder): the two items above, SILK↔CELT transition redundancy
 path), CELT/hybrid at 8–24 kHz input, the digital-silence shortcut (policy),
 mid-stream SILK rate switching (`allowBandwidthSwitch`), `decide_fec`
 narrowing in hybrid. The linked SIMD libopus stays a non-goal.
+
+### 2026-09-18 (later): automatic mode 60/60 (`8e423ac`, `538956f`)
+
+- `8e423ac` fix(celt): the VOIP CELT-only "pitch near-tie" was not a float
+  order problem: Go's `combFilterMaxPeriod` was 1022 where libopus has
+  `COMBFILTER_MAXPERIOD 1024`, so the prefilter history and the
+  downsampled pitch buffer were shifted by one sample and the pitch search
+  range was two lags short. Found by dumping `pitch_buf` on *exact* frames
+  (`[CELT_ENC_PITCH]`/`[CELT_ENC_PITCH2]`/`[SILK_CELT_ENC_PITCH_BUF]` in
+  the oracle, `FrameTrace.PitchSearch/PitchRaw/PitchGain/PitchBuf` in Go):
+  it already differed everywhere while the decisions happened to agree.
+  Lesson: compare intermediates on matching frames too, not only at the
+  first packet difference.
+- `538956f` feat(encoder): a stereo input coded as a mono stream.
+  `celt.Encoder.SetStreamChannels` (CELT_SET_CHANNELS): the analysis
+  buffers, tone/transient detectors and the prefilter run on CC input
+  channels, `compute_mdcts` averages the two MDCTs (CC=2, C=1) and
+  everything from the band energies on uses C — the silence peak window
+  (`C*(N-overlap)` interleaved samples, a libopus quirk), `equiv_rate`,
+  `tf_chan=0`, the energy bias/error, and `oldBandE` is mirrored to the
+  second channel at the end of the frame. Also `energyError` is cleared
+  every frame and `consec_transient` advances when the transient bit could
+  not be coded (`transient_got_disabled`). Opus layer: the TOC of CELT-only
+  and hybrid packets carries `stream_channels`, a mono-stream hybrid
+  packet downmixes its SILK part and sizes the SILK share / redundancy from
+  the stream channels, the stereo width comes from the mono equivalent
+  rate, and `prev_channels` is recorded after every packet. Under the Go
+  policy hybrid/CELT packets always carry the input channel count.
+  **`TestAutoModeOracle`: 60/60 cells byte-identical, all gated.**
+
+Remaining (encoder): SILK↔CELT transition redundancy (`to_celt` deferral,
+SILK re-init + prefill on CELT→SILK), CELT/hybrid at 8–24 kHz input, the
+digital-silence shortcut (policy), mid-stream SILK rate switching,
+`decide_fec` narrowing in hybrid, the default policy switch (user
+decision). The linked SIMD libopus stays a non-goal.

@@ -1161,3 +1161,69 @@ SILK re-init + prefill on CELT→SILK), CELT/hybrid at 8–24 kHz input, the
 digital-silence shortcut (policy), mid-stream SILK rate switching,
 `decide_fec` narrowing in hybrid, the default policy switch (user
 decision). The linked SIMD libopus stays a non-goal.
+
+### 2026-09-18 (morning): mode transitions 108/108 (`a4d13f7`, `d794fc8`)
+
+- `a4d13f7` test(opusref): `--auto-enc` takes a comma-separated per-frame
+  bitrate schedule; `TestAutoModeTransitionOracle` (VOIP/AUDIO ×
+  voice/music/auto × mono/stereo × 9 schedules switching at frame 6 (and
+  back at 11), 16 frames) exercises every SILK↔hybrid↔CELT direction;
+  `TestAutoModeOracleSweep` (`OPUS_ORACLE_SWEEP=1`, 8–256 kbps × CBR/VBR ×
+  complexity 0/10) found 0/432 differing cells. The SILK `enc_API` dumps
+  no longer dereference the NULL range coder of a prefill call.
+- `d794fc8` feat(encoder): `opus_encode_native`'s transition handling
+  under the libopus policy (`encoder_transition.go`, `decideLibopusMode`,
+  `internal/silk/prefill.go`):
+  - to_celt: a switch to CELT-only is deferred by one packet, the last
+    SILK/hybrid packet carries a trailing 5 ms redundant CELT frame coded
+    from a reset state prefilled with the preceding 2.5 ms, prediction
+    off, VBR off, bitrate MAX; `prev_mode` becomes CELT-only.
+  - celt_to_silk: the first SILK/hybrid packet after CELT-only carries a
+    leading redundant frame coded from the current CELT state (then
+    reset), re-initialises the SILK encoder (`silk_InitEncoder`) and
+    prefills it with the 10 ms delay buffer (everything before the last
+    delay_compensation + 2.5 ms zeroed, those 2.5 ms faded in) —
+    `silk.Encoder.Prefill` runs the front end, VAD (and mid/side analysis)
+    and x_buf placement at complexity 0 without coding; the same faded
+    2.5 ms are the CELT prefill.
+  - any mode change: `OPUS_RESET_STATE` + 2.5 ms prefill (tmp_prefill from
+    the delay buffer, coded with the frame's start band and VBR settings)
+    + `CELT_SET_PREDICTION(0)` (`celt.Encoder.SetPrediction`,
+    `EncodePrefill`); `SET_PREDICTION(2)` again at the start of every
+    non-SILK packet. `Reset` now clears the analysis / SILK info too (they
+    are set before the reset in libopus, so a transition frame runs
+    without them).
+  - the redundant frames and prefills run on libopus's single celt_enc:
+    `celtWithFrameSize` threads state (`CopyStateFrom`) and settings
+    (`CopyConfigFrom`) through the 2.5 / 5 ms encoders; `CELT_SET_END_BAND`
+    and `CELT_SET_CHANNELS` follow every packet (also SILK-only ones, so a
+    WB SILK packet's redundant frame is band-limited to 17), the
+    redundancy bytes come off `bits_target` and `silk_mode.maxBits`
+    (`- redundancy_bytes*8 - 1 - 20*hybrid`), the hybrid CELT part keeps
+    its VBR/CBR setting with redundancy (it used to be forced CBR), the
+    frame is `ret + redundancy_bytes`. SILK-only redundancy follows the
+    libopus layout (celt_to_silk bit when 17 bits are left, size bounded
+    by the remaining bytes and 2..257, no trailing-zero strip).
+  - SILK `allowBandwidthSwitch` (speech activity below a threshold that
+    relaxes with the time since the last switch, `SPEECH_ACTIVITY_DTX_THRES`
+    / `MAX_BANDWIDTH_SWITCH_DELAY_MS`) re-runs the automatic bandwidth for
+    SILK/hybrid packets, with the "no SWB/FB until SILK runs at 16 kHz"
+    guard (`inWBmodeWithoutVariableLP`, the LP transition itself is not
+    ported).
+  - `prev_HB_gain` / `hybrid_stereo_width_Q14` follow every packet (the
+    SILK-only packet's fades shape the CELT input of its redundant frame);
+    `silkPrevChannels` (SILK's `nPrevChannelsInternal`, 0 after a re-init)
+    is separate from the Opus `prev_channels`.
+  - Bugs found on the way: `quant_coarse_energy` copied only `C*end`
+    entries of the channel-major `oldBandE`/`error` (the second channel of
+    a band-limited stereo frame kept stale values); the Go-only
+    `patch_transient_decision` voice threshold (0.5) and its
+    `TestCeltSignalTypePatchSensitivity` are gone (libopus: 1.0 with the
+    `ec_tell+3 <= total_bits` guard, also on the first frame).
+  - **`TestAutoModeTransitionOracle`: 108/108 cells byte-identical, gated.**
+
+Remaining (encoder): CELT/hybrid at 8–24 kHz input, the SILK internal
+rate transition (`sLP` variable cutoff, `silk_bw_switch` / prefill=2),
+the digital-silence shortcut (policy), `decide_fec` narrowing in hybrid,
+the default policy switch (user decision). The linked SIMD libopus stays a
+non-goal.

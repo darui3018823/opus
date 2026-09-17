@@ -1058,8 +1058,14 @@ automatic mode / bandwidth / channel policy of libopus is ported as
 voice/music/auto × mono/stereo × 12–128 kbps, 60/60 automatic-mode cells
 byte-identical, including a stereo input coded as a mono CELT or hybrid
 stream via `CELT_SET_CHANNELS` MDCT averaging and the SILK downmix); the
-default remains the Go policy. Non-48 kHz CELT/hybrid input, the
-SILK↔CELT transition redundancy and the silence shortcut remain.
+default remains the Go policy. Mode transitions follow `opus_encode_native`
+under that policy (`TestAutoModeTransitionOracle`, 108 bitrate-schedule
+cells byte-identical): the deferred switch to CELT-only with a trailing
+redundant frame, the leading redundant frame plus SILK re-init and 10 ms
+prefill after CELT-only, the CELT reset / 2.5 ms prefill / prediction-off
+on every mode change, and SILK's `allowBandwidthSwitch`. Non-48 kHz
+CELT/hybrid input, the SILK internal-rate transition and the silence
+shortcut remain.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

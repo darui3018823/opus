@@ -2752,6 +2752,16 @@ func (e *Encoder) LastSILKInfo() (signalType, offset int) {
 	return st, int(silkQuantizationOffsetsQ10[st>>1][e.lastQuantOffsetType])
 }
 
+// StereoWidthQ14 mirrors silk_Encode's encControl->stereoWidth_Q14 output:
+// 0 while a stereo->mono transition is pending, otherwise the smoothed
+// stereo width of the last coded frame (Q14, 16384 = full).
+func (e *Encoder) StereoWidthQ14() int {
+	if e.toMono {
+		return 0
+	}
+	return int(e.stereoState.smthWidthQ14)
+}
+
 func (e *Encoder) SetHybridMode(on bool) {
 	e.hybridMode = on
 	if e.side != nil {

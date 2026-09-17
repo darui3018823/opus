@@ -171,7 +171,18 @@ type Encoder struct {
 	hybridStereoWidthQ14 int
 	// prevHBGain is libopus st->prev_HB_gain: the hybrid high-band gain the
 	// previous frame faded to.
-	prevHBGain             float32
+	prevHBGain float32
+	// stereoWidth is libopus st->width_mem; libopusBandwidth is st->bandwidth,
+	// the bandwidth kept across SILK/hybrid packets (-1 before the first).
+	stereoWidth      stereoWidthState
+	libopusBandwidth int
+	// libopusModePolicy selects opus_encode_native's automatic mode /
+	// bandwidth decision (decideLibopusMode) instead of the Go encoder's
+	// bitrate-boundary rules; see SetLibopusModePolicy.
+	libopusModePolicy bool
+	// pendingMode is the mode decided for the packet being encoded under the
+	// libopus policy (-1 otherwise), read by the high-pass cutoff smoother.
+	pendingMode            int
 	celtFadeScratch        []float64
 	predictionDisabled     bool
 	phaseInversionDisabled bool
@@ -246,6 +257,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		lsbDepth:             LSBDepthDefault,
 		hybridStereoWidthQ14: 1 << 14,
 		prevHBGain:           1,
+		libopusBandwidth:     -1,
 		variableHPSmth2Q15:   variableHPSmth2Initial(),
 	}
 	enc.celtEncoders[3] = celtEnc
@@ -504,15 +516,45 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	if frameSize >= e.frameSize {
 		nFrames = frameSize / e.frameSize
 	}
+	// opus_encode_native: stream channels, then the mode / bandwidth
+	// decision (the toMono delay only applies to SILK and hybrid packets),
+	// before the high-pass conditioning whose cutoff depends on the mode.
+	maxDataBytes := MaxFrameBytes + 1
+	if e.rateMode == celt.RateModeCBR {
+		maxDataBytes = (bitrateToBits(e.bitrate, e.sampleRate, frameSize) + 4) / 8
+		if maxDataBytes > MaxFrameBytes+1 {
+			maxDataBytes = MaxFrameBytes + 1
+		}
+		if maxDataBytes < 1 {
+			maxDataBytes = 1
+		}
+	}
+	var decision modeDecision
+	if e.libopusModePolicy && frameSize >= e.frameSize {
+		e.decideStreamChannels(frameSize, framing.ModeSILKOnly)
+		decision = e.decideLibopusMode(raw, frameSize, maxDataBytes, analysisInfo)
+		if decision.mode == framing.ModeCELTOnly && e.toMono {
+			e.toMono = false
+			e.streamChannels = 1
+		}
+		e.pendingMode = decision.mode
+	} else {
+		e.pendingMode = -1
+	}
 	pcm = e.conditionInput(pcm, frameSize, nFrames)
 	celtPCM := e.delayedCELTInput(pcm)
 	if frameSize < e.frameSize {
 		return e.encodeShortCELTPacket(raw, celtPCM)
 	}
-	if e.shouldEncodeSILKOnly() {
+	if !e.libopusModePolicy {
+		decision = e.goModeDecision(raw, frameSize, nFrames)
+	}
+	if decision.mode == framing.ModeSILKOnly && e.silkEncoder != nil {
 		celtToSilk := e.prevMode == framing.ModeCELTOnly
-		e.decideStreamChannels(frameSize, framing.ModeSILKOnly)
-		if err := e.selectSILKInternalRate(frameSize); err != nil {
+		if !e.libopusModePolicy {
+			e.decideStreamChannels(frameSize, framing.ModeSILKOnly)
+		}
+		if err := e.selectSILKInternalRate(frameSize, decision.bandwidth); err != nil {
 			return nil, err
 		}
 		if silkBW, ok := nativeSilkFramingBandwidth(e.silkSampleRate); ok {
@@ -526,11 +568,19 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		}
 		return out, err
 	}
-	bw := -1
-	hybrid := false
-	if e.shouldEncodeHybrid(nFrames) {
-		bw = e.narrowAutoHybridBandwidth(raw, e.selectHybridBandwidth())
-		hybrid = bw == framing.BandwidthSuperwideband || bw == framing.BandwidthFullband
+	bw := decision.bandwidth
+	hybrid := decision.mode == framing.ModeHybrid && e.silkEncoder != nil && nFrames >= 1 && nFrames <= 6
+	if hybrid && e.silkSampleRate != 16000 {
+		if err := e.rebuildSILKEncoder(16000); err != nil {
+			return nil, err
+		}
+		if err := e.applyBitrateSetting(frameSize); err != nil {
+			return nil, err
+		}
+	}
+	if !e.libopusModePolicy && bw < 0 {
+		// The Go policy narrows the automatic CELT bandwidth from the signal.
+		bw = e.narrowAutoBandwidth(raw, e.selectCeltBandwidth())
 	}
 
 	// libopus-faithful hybrid->CELT transition: when the previous packet was
@@ -573,9 +623,6 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	// actual signal, so a source with no high-frequency energy is coded in a
 	// narrower band rather than wasting bits. The detection runs once over the whole
 	// input PCM, so every frame in a packet still shares the same bandwidth/config.
-	if bw < 0 {
-		bw = e.narrowAutoBandwidth(raw, e.selectCeltBandwidth())
-	}
 	e.celtEncoder.SetEndBand(celtEndBandForFramingBW(bw))
 	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, bw, e.channels, framing.FrameSize20ms)
 	if err != nil {
@@ -1003,6 +1050,17 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 			celtInput = e.celtInputFrame(celtChunk)
 		}
 		e.prevHBGain = hbGain
+		// Stereo width for the CELT input: SILK's smoothed width for a stereo
+		// hybrid stream, the equivalent-rate ramp for a mono stream.
+		if e.channels == 2 {
+			widthQ14 := celtOnlyStereoWidthQ14(e.celtEquivRate(e.streamChannelsOrInput()))
+			if e.streamChannelsOrInput() == 2 {
+				widthQ14 = e.silkEncoder.StereoWidthQ14()
+			}
+			celtChunk = append([]float64(nil), celtChunk...)
+			e.applyStereoWidthFade(celtChunk, widthQ14)
+			celtInput = e.celtInputFrame(celtChunk)
+		}
 
 		// Redundancy flag (logp 12) is written between SILK and CELT, then
 		// celt_to_silk (0 for SILK->CELT) and the redundant frame length. The gate
@@ -2326,6 +2384,8 @@ func (e *Encoder) Reset() error {
 	}
 	e.hybridStereoWidthQ14 = 1 << 14
 	e.prevHBGain = 1
+	e.stereoWidth = stereoWidthState{}
+	e.libopusBandwidth = -1
 	if e.inputResampler != nil {
 		e.inputResampler.Reset()
 	}

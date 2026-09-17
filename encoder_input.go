@@ -3,6 +3,7 @@ package opus
 import (
 	"math"
 
+	framing "github.com/darui3018823/opus/internal"
 	"github.com/darui3018823/opus/internal/silk"
 )
 
@@ -133,6 +134,12 @@ func dcReject(in []float64, cutoffHz int32, out []float64, hpMem *[4]float32, fr
 // this packet: the SILK encoder's variable_HP_smth1_Q15 when the packet will
 // carry SILK, otherwise the minimum cutoff (opus_encode_native).
 func (e *Encoder) hpFreqSmth1(nFrames int) int32 {
+	if e.libopusModePolicy {
+		if e.silkEncoder != nil && e.pendingMode >= 0 && e.pendingMode != framing.ModeCELTOnly {
+			return e.silkEncoder.VariableHPSmth1Q15()
+		}
+		return silk.Lin2Log(variableHPMinHz) << 8
+	}
 	if e.silkEncoder != nil && nFrames > 0 && (e.shouldEncodeSILKOnly() || e.shouldEncodeHybrid(nFrames)) {
 		return e.silkEncoder.VariableHPSmth1Q15()
 	}

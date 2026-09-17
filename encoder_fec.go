@@ -290,14 +290,20 @@ func (e *Encoder) silkInternalRateForBandwidth(bandwidth int) int {
 // (silk_control_audio_bandwidth with fs_kHz == 0: min(desired, API rate)).
 // Once frames have been coded the rate stays: libopus' mid-stream switching
 // (the sLP transition filter and its redundancy) is not ported.
-func (e *Encoder) selectSILKInternalRate(frameSize int) error {
-	if e.silkEncoder == nil || e.forcedBandwidth != BandwidthAuto || e.silkFramesCoded {
+func (e *Encoder) selectSILKInternalRate(frameSize, bw int) error {
+	if e.silkEncoder == nil || e.silkFramesCoded {
 		return nil
 	}
-	equiv := computeEquivRate(e.bitrate, e.streamChannelsOrInput(), e.sampleRate/frameSize, e.rateMode != celt.RateModeCBR, -1, e.complexity, e.packetLossPerc)
-	bw := e.decideAutoBandwidth(equiv, e.prevMode < 0)
-	if publicBW := silkFramingBWToPublic(bw); bandwidthRank(publicBW) > bandwidthRank(e.maxBandwidth) {
-		bw = publicToCeltFramingBW(e.maxBandwidth)
+	if bw < 0 {
+		// Go policy: the automatic bandwidth for the SILK internal rate.
+		if e.forcedBandwidth != BandwidthAuto {
+			return nil
+		}
+		equiv := computeEquivRate(e.bitrate, e.streamChannelsOrInput(), e.sampleRate/frameSize, e.rateMode != celt.RateModeCBR, -1, e.complexity, e.packetLossPerc)
+		bw = e.decideAutoBandwidth(equiv, e.prevMode < 0)
+		if publicBW := silkFramingBWToPublic(bw); bandwidthRank(publicBW) > bandwidthRank(e.maxBandwidth) {
+			bw = publicToCeltFramingBW(e.maxBandwidth)
+		}
 	}
 	rate := e.silkInternalRateForBandwidth(bw)
 	if rate == e.silkSampleRate {

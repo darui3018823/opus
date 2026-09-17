@@ -349,8 +349,78 @@ static int run_hybrid_encoder_oracle(int argc, char **argv)
     return 0;
 }
 
+/* --auto-enc <rate> <fixture> <frames> <bitrate> <vbr> <channels> <complexity> <signal> <app>:
+   automatic mode / bandwidth / channel decisions (no forced mode), with
+   the SILK and CELT traces. signal = voice|music|auto, app = voip|audio. */
+static int run_auto_encoder_oracle(int argc, char **argv)
+{
+    int rate, frames, bitrate, complexity, vbr, channels, frame_size, err, frame, app;
+    const char *fixture, *signal, *appname;
+    OpusEncoder *enc;
+    float pcm[960 * 2];
+    unsigned char packet[1500];
+
+    if (argc < 4) {
+        fprintf(stderr, "usage: %s --auto-enc <rate> <fixture> [frames] [bitrate] [vbr] [channels] [complexity] [signal] [app]\n", argv[0]);
+        return 2;
+    }
+    rate = atoi(argv[2]);
+    fixture = argv[3];
+    frames = (argc >= 5) ? atoi(argv[4]) : 8;
+    bitrate = (argc >= 6) ? atoi(argv[5]) : 32000;
+    vbr = (argc >= 7) ? atoi(argv[6]) : 1;
+    channels = (argc >= 8) ? atoi(argv[7]) : 1;
+    complexity = (argc >= 9) ? atoi(argv[8]) : 5;
+    signal = (argc >= 10) ? argv[9] : "voice";
+    appname = (argc >= 11) ? argv[10] : "voip";
+    if (rate != 48000) {
+        fprintf(stderr, "--auto-enc rate must be 48000\n");
+        return 2;
+    }
+    app = strcmp(appname, "audio") == 0 ? OPUS_APPLICATION_AUDIO : OPUS_APPLICATION_VOIP;
+    frame_size = rate / 50;
+    enc = opus_encoder_create(rate, channels, app, &err);
+    if (enc == NULL || err != OPUS_OK) {
+        fprintf(stderr, "opus_encoder_create failed: %d\n", err);
+        return 2;
+    }
+    opus_encoder_ctl(enc, OPUS_SET_BITRATE(bitrate));
+    opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(complexity));
+    opus_encoder_ctl(enc, OPUS_SET_VBR(vbr ? 1 : 0));
+    opus_encoder_ctl(enc, OPUS_SET_VBR_CONSTRAINT(1));
+    if (strcmp(signal, "voice") == 0) opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+    else if (strcmp(signal, "music") == 0) opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+    fprintf(stderr, "AUTO_ENC_ORACLE rate=%d frame_size=%d fixture=%s frames=%d bitrate=%d vbr=%d channels=%d complexity=%d signal=%s app=%s\n",
+            rate, frame_size, fixture, frames, bitrate, vbr, channels, complexity, signal, appname);
+    for (frame = 0; frame < frames; frame++) {
+        int n, b;
+        if (channels == 2) fill_silk_fixture_stereo(pcm, rate, frame_size, frame, fixture);
+        else fill_silk_fixture(pcm, rate, frame_size, frame, fixture);
+        for (b = 0; b < frame_size * channels; b++)
+            pcm[b] = (float)(floor((double)pcm[b] * 32768.0 + 0.5) / 32768.0);
+        oracle_trace_enabled = 1;
+        fprintf(stderr, "[CELT_ENC_INPUT_FRAME] frame=%d\n", frame);
+        n = opus_encode_float(enc, pcm, frame_size, packet, (opus_int32)sizeof(packet));
+        if (n < 0) {
+            fprintf(stderr, "encode frame %d failed: %d\n", frame, n);
+            opus_encoder_destroy(enc);
+            return 1;
+        }
+        fprintf(stderr, "ENC_RESULT frame=%d bytes=%d toc=0x%02x config=%d traced=1\n", frame, n, packet[0], (packet[0] >> 3) & 0x1f);
+        fprintf(stderr, "[ENC_PACKET] n=%d", n);
+        for (b = 0; b < n; b++) fprintf(stderr, " %02x", packet[b]);
+        fprintf(stderr, "\n");
+    }
+    oracle_trace_enabled = 0;
+    opus_encoder_destroy(enc);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "--auto-enc") == 0) {
+        return run_auto_encoder_oracle(argc, argv);
+    }
     if (argc >= 2 && strcmp(argv[1], "--hybrid-enc") == 0) {
         return run_hybrid_encoder_oracle(argc, argv);
     }

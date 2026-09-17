@@ -114,6 +114,17 @@ type modeDecision struct {
 	bandwidth int // framing bandwidth (NB..FB)
 	equivRate int
 	voiceEst  int
+	// Transition handling (libopus policy): the packet carries a 5 ms
+	// redundant CELT frame of redundancyBytes; celtToSilk says the previous
+	// packet was CELT-only (leading redundancy) rather than this one being
+	// the deferred last SILK/hybrid packet before CELT (to_celt, trailing
+	// redundancy); silkPrefill asks for the SILK re-init + prefill of a
+	// CELT-only -> SILK/hybrid switch.
+	redundancy      bool
+	celtToSilk      bool
+	toCelt          bool
+	silkPrefill     bool
+	redundancyBytes int
 }
 
 // libopusVoiceEst is opus_encode_native's voice_est: 127 for a voice hint,
@@ -180,6 +191,10 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 	frameRate := e.sampleRate / frameSize
 	vbr := e.rateMode != celt.RateModeCBR
 	bitrate := e.bitrate
+	if !vbr {
+		// CBR: the bitrate is rounded to the packet size.
+		bitrate = bitsToBitrate(maxDataBytes*8, e.sampleRate, frameSize)
+	}
 	streamChannels := e.streamChannelsOrInput()
 	equivRate := computeEquivRate(bitrate, streamChannels, frameRate, vbr, -1, e.complexity, e.packetLossPerc)
 	voiceEst := e.libopusVoiceEst(analysis)
@@ -235,15 +250,42 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 		mode = framing.ModeCELTOnly
 	}
 
+	// Mode transitions to or from CELT-only carry a redundant CELT frame; a
+	// switch to CELT-only is deferred by one packet (the last SILK/hybrid
+	// packet, to_celt) when the frame is at least 10 ms.
+	var d modeDecision
+	if e.prevMode >= 0 && ((mode != framing.ModeCELTOnly && e.prevMode == framing.ModeCELTOnly) ||
+		(mode == framing.ModeCELTOnly && e.prevMode != framing.ModeCELTOnly)) {
+		d.redundancy = true
+		d.celtToSilk = mode != framing.ModeCELTOnly
+		if !d.celtToSilk {
+			if frameSize >= e.sampleRate/100 {
+				mode = e.prevMode
+				d.toCelt = true
+			} else {
+				d.redundancy = false
+			}
+		}
+	}
+	if mode != framing.ModeCELTOnly && e.prevMode == framing.ModeCELTOnly {
+		d.silkPrefill = true
+	}
+
 	// Update equivalent rate with mode decision.
 	equivRate = computeEquivRate(bitrate, streamChannels, frameRate, vbr, mode, e.complexity, e.packetLossPerc)
 
 	// Automatic (rate-dependent) bandwidth selection: every CELT-only packet,
-	// the first packet, and (not ported) when SILK allows a switch.
+	// the first packet, and whenever SILK's speech activity allows a switch.
 	first := e.prevMode < 0
 	bandwidth := e.libopusBandwidth
-	if mode == framing.ModeCELTOnly || first || bandwidth < 0 {
+	allowSwitch := e.silkEncoder != nil && e.silkEncoder.AllowBandwidthSwitch()
+	if mode == framing.ModeCELTOnly || first || bandwidth < 0 || allowSwitch {
 		bandwidth = e.decideAutoBandwidthVE(equivRate, first, voiceEst)
+		// Prevents any transition to SWB/FB until the SILK layer has fully
+		// switched to WB mode and turned the variable LP filter off.
+		if !first && mode != framing.ModeCELTOnly && e.silkSampleRate != 16000 && bandwidth > framing.BandwidthWideband {
+			bandwidth = framing.BandwidthWideband
+		}
 	}
 	if maxBW := publicToCeltFramingBW(e.maxBandwidth); e.maxBandwidth != BandwidthAuto && bandwidth > maxBW {
 		bandwidth = maxBW
@@ -301,7 +343,19 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 		mode = framing.ModeSILKOnly
 	}
 	e.libopusBandwidth = bandwidth
-	return modeDecision{mode: mode, bandwidth: bandwidth, equivRate: equivRate, voiceEst: voiceEst}
+	// If we decided to go with CELT, make sure redundancy is off, no matter
+	// what we decided earlier; otherwise size it (none when too small).
+	if mode == framing.ModeCELTOnly {
+		d.redundancy = false
+	}
+	if d.redundancy {
+		d.redundancyBytes = computeRedundancyBytes(maxDataBytes, bitrate, frameRate, streamChannels)
+		if d.redundancyBytes == 0 {
+			d.redundancy = false
+		}
+	}
+	d.mode, d.bandwidth, d.equivRate, d.voiceEst = mode, bandwidth, equivRate, voiceEst
+	return d
 }
 
 // publicToFramingBW maps a public bandwidth setting to the framing constant,

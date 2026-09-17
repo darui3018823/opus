@@ -75,18 +75,24 @@ func (st *silkVADState) reset() {
 // The samples are converted to int16 with nearest-even rounding like the
 // libopus float API's FLOAT2INT16.
 func (e *Encoder) silkVADGetSAQ8(signal []float64) silkVADResult {
+	return e.silkVADGetSAQ8N(signal, e.frameSize)
+}
+
+// silkVADGetSAQ8N runs the VAD on a frame of n samples (frame_length: the
+// coded frame, or the 10 ms of a prefill).
+func (e *Encoder) silkVADGetSAQ8N(signal []float64, n int) silkVADResult {
 	result := silkVADResult{speechActivityQ8: 255, inputQuality: 1.0}
 	for b := range result.inputQualityBandQ15 {
 		result.inputQualityBandQ15[b] = 32767
 	}
-	if len(signal) == 0 || e.frameSize < 8 {
+	if len(signal) == 0 || n < 8 {
 		return result.withFloats()
 	}
-	x16 := make([]int16, e.frameSize)
+	x16 := make([]int16, n)
 	for i := 0; i < len(x16) && i < len(signal); i++ {
 		x16[i] = silkSAT16(silkFloat2Int(signal[i] * 32768.0))
 	}
-	saQ8, tiltQ15, qualityQ15 := e.silkVAD.getSAQ8(x16, e.frameSize, e.sampleRate/1000)
+	saQ8, tiltQ15, qualityQ15 := e.silkVAD.getSAQ8(x16, n, e.sampleRate/1000)
 	result.speechActivityQ8 = saQ8
 	result.inputTiltQ15 = tiltQ15
 	result.inputQualityBandQ15 = qualityQ15

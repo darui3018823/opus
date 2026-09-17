@@ -167,13 +167,15 @@ func (e *Encoder) quantCoarseEnergy(enc *entcode.Encoder, start, end, effEnd int
 			eProbModel[lm][interIdx][:], errOut, C, lm, false, maxDecay, nbEBands)
 		if twoPass && (badness1 < badness2 || (badness1 == badness2 && int32(enc.TellFrac())+intraBias > tellIntra)) {
 			enc.Restore(encIntra)
-			copy(oldEBands[:C*end], oldEBandsIntra[:C*end])
-			copy(errOut[:C*end], errIntra[:C*end])
+			// OPUS_COPY(..., C*m->nbEBands): the channel-major arrays have an
+			// nbEBands stride, so the second channel sits past C*end.
+			copy(oldEBands, oldEBandsIntra)
+			copy(errOut, errIntra)
 			intra = true
 		}
 	} else {
-		copy(oldEBands[:C*end], oldEBandsIntra[:C*end])
-		copy(errOut[:C*end], errIntra[:C*end])
+		copy(oldEBands, oldEBandsIntra)
+		copy(errOut, errIntra)
 	}
 
 	if intra {

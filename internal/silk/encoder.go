@@ -137,16 +137,22 @@ type Encoder struct {
 	// frameCounter is silk_encoder_state.frameCounter (NSQ seed source).
 	frameCounter int
 	// libopus bit reservoir (target_rate.go).
-	nBitsExceeded        int
-	nBitsUsedLBRR        int
-	targetRateBps        int
-	prevLagForPitch      int       // Previous frame pitch lag (0 if unvoiced)
-	ltpCorrState         float64   // Normalized LTP correlation from prev frame
-	pitchResidual        []float64 // res_pitch: whitened [history|frame|LTP_ORDER] from the pitch analysis
-	curLTP               *frameLTPResult
-	firstFrameAfterReset bool // True until the first frame after reset is encoded
-	curPitchLagIndex     int  // Lag index selected for the current frame
-	curPitchContourIndex int  // Pitch contour index for the current frame
+	nBitsExceeded int
+	// allowBandwidthSwitch / timeSinceSwitchAllowedMs mirror silk_Encode's
+	// per-packet flag telling the Opus layer that the speech activity is low
+	// enough to switch the audio bandwidth (the threshold relaxes with the
+	// time since the last allowed switch).
+	allowBandwidthSwitch     bool
+	timeSinceSwitchAllowedMs int32
+	nBitsUsedLBRR            int
+	targetRateBps            int
+	prevLagForPitch          int       // Previous frame pitch lag (0 if unvoiced)
+	ltpCorrState             float64   // Normalized LTP correlation from prev frame
+	pitchResidual            []float64 // res_pitch: whitened [history|frame|LTP_ORDER] from the pitch analysis
+	curLTP                   *frameLTPResult
+	firstFrameAfterReset     bool // True until the first frame after reset is encoded
+	curPitchLagIndex         int  // Lag index selected for the current frame
+	curPitchContourIndex     int  // Pitch contour index for the current frame
 
 	// ltpSumLogGainQ7 is the cumulative log prediction gain across subframes
 	// (silk sum_log_gain_Q7), limiting the total LTP gain for stability.
@@ -2747,6 +2753,14 @@ func (e *Encoder) LastStreamSNRVBR() bool {
 // the last coded frame of the first channel: the signal type and the
 // quantisation offset (silk_Quantization_Offsets_Q10) the CELT layer reads
 // in hybrid mode.
+// AllowBandwidthSwitch is encControl->allowBandwidthSwitch after the last
+// packet: the speech activity was low enough for the Opus layer to change
+// the audio bandwidth (opus_encode_native re-runs its automatic bandwidth
+// selection only then for SILK and hybrid packets).
+func (e *Encoder) AllowBandwidthSwitch() bool {
+	return e.allowBandwidthSwitch
+}
+
 func (e *Encoder) LastSILKInfo() (signalType, offset int) {
 	st := e.prevSignalType
 	return st, int(silkQuantizationOffsetsQ10[st>>1][e.lastQuantOffsetType])
@@ -3474,6 +3488,8 @@ func (e *Encoder) Reset() {
 	e.nBitsUsedLBRR = 0
 	e.targetRateBps = 0
 	e.frameCounter = 0
+	e.allowBandwidthSwitch = false
+	e.timeSinceSwitchAllowedMs = 0
 	e.prevLagForPitch = 0
 	e.ltpCorrState = 0
 	e.pitchResidual = nil

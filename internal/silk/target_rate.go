@@ -62,6 +62,17 @@ func (e *Encoder) finishPacketBitReservoir(nFrames, tell int) {
 	} else if e.nBitsExceeded > 10000 {
 		e.nBitsExceeded = 10000
 	}
+	// Update the flag indicating whether bandwidth switching is allowed:
+	// SPEECH_ACTIVITY_DTX_THRES in Q8 relaxed by (1 - thres) /
+	// MAX_BANDWIDTH_SWITCH_DELAY_MS per millisecond since the last switch.
+	speechActThrForSwitchQ8 := silkSMLAWB(13, 3188, int16(e.timeSinceSwitchAllowedMs))
+	if int32(e.speechActivityQ8) < speechActThrForSwitchQ8 {
+		e.allowBandwidthSwitch = true
+		e.timeSinceSwitchAllowedMs = 0
+	} else {
+		e.allowBandwidthSwitch = false
+		e.timeSinceSwitchAllowedMs += int32(nFrames * e.frameMs)
+	}
 }
 
 // recordRateTrace stores the frame's rate-control inputs in the frame trace.

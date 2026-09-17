@@ -17,6 +17,8 @@ import (
 // schedule, so that the automatic decisions switch mode, bandwidth or
 // channel count mid-stream (SILK<->hybrid<->CELT redundancy, the to_celt
 // deferral, the SILK re-init and prefill, the stereo<->mono transitions).
+// Every cell is gated on byte identity; OPUS_TRANSITION_VBR_TRACE=1 logs
+// the CELT VBR state of every frame.
 func TestAutoModeTransitionOracle(t *testing.T) {
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
@@ -60,6 +62,7 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 						channels: channels,
 						signal:   signal,
 						app:      app,
+						exact:    true,
 					})
 				}
 				cases = append(cases, transCase{
@@ -68,6 +71,7 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 					channels: channels,
 					signal:   signal,
 					app:      app,
+					exact:    true,
 				})
 			}
 		}
@@ -134,6 +138,12 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 				if pkt[0] == r.packet[0] {
 					tocMatch++
 				}
+				if os.Getenv("OPUS_TRANSITION_VBR_TRACE") != "" {
+					tr := enc.celtEncoder.LastFrameTrace()
+					t.Logf("frame %d: celt bitrate %d encoder bitrate %d rateMode %v", f, enc.celtEncoder.Bitrate(), enc.bitrate, enc.celtEncoder.GetRateMode())
+					t.Logf("frame %d: vbr Go{target %d base %d lastCoded %d int %d stereoSaving %.9g totBoost %d tfEst %.9g pitchChange %v maxDepth %.9g temporalVBR %.9g equiv %d | after: reservoir %d drift %d offset %d bytes %d}",
+						f, tr.VBRTarget, tr.VBRBaseTarget, tr.LastCodedBandsIn, tr.Intensity, tr.StereoSaving, tr.TotBoost, tr.TFEstimate, tr.PitchChange, tr.MaxDepth, tr.TemporalVBR, tr.EquivRate, tr.VBRReservoir, tr.VBRDrift, tr.VBROffset, tr.PacketBytes)
+				}
 				if bytes.Equal(pkt, r.packet) {
 					identical++
 				} else if firstDiff < 0 {
@@ -143,6 +153,66 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 						prefix++
 					}
 					t.Logf("frame %d (%d bps): Go %d B TOC %#x / C %d B TOC %#x, common prefix %d", f, bitrate, len(pkt), pkt[0], len(r.packet), r.packet[0], prefix)
+					lo := prefix - 4
+					if lo < 0 {
+						lo = 0
+					}
+					hiG, hiC := lo+28, lo+28
+					if hiG > len(pkt) {
+						hiG = len(pkt)
+					}
+					if hiC > len(r.packet) {
+						hiC = len(r.packet)
+					}
+					t.Logf("frame %d: bytes[%d:] Go % x / C % x", f, lo, pkt[lo:hiG], r.packet[lo:hiC])
+					tr := enc.celtEncoder.LastFrameTrace()
+					for _, sub := range enc.celtEncoders[:2] {
+						if sub == nil {
+							continue
+						}
+						st := sub.LastFrameTrace()
+						if st.PacketBytes == 0 && len(st.In) == 0 {
+							continue
+						}
+						t.Logf("frame %d: celt %d-sample Go{transient %v tfEst %.6g pf %v/%d intra %v tellCoarse %d tellFrac %d spread %d trim %d bits %d coded %d tellFinal %d bytes %d}",
+							f, sub.FrameSize(), st.IsTransient, st.TFEstimate, st.PFOn, st.PitchIndex, st.Intra, st.TellCoarse, st.TellFracTrim, st.Spread, st.AllocTrim, st.Bits, st.CodedBands, st.TellFinal, st.PacketBytes)
+						if sub.FrameSize() == 120 {
+							t.Logf("frame %d: celt 120-sample Go bandE %v | bandLogE %v | temporalVBR %.6g", f, st.BandE, st.BandLogE, st.TemporalVBR)
+						}
+						if len(r.in) > 0 && len(st.In) > 0 && len(st.In[0]) == len(r.in)/tc.channels {
+							var inAll []float64
+							for c := range st.In {
+								inAll = append(inAll, st.In[c]...)
+							}
+							inAbs, _, inEq, inN := float32Stats(inAll, r.in)
+							beAbs, _, beEq, beN := float32Stats(st.BandE, r.bandE)
+							t.Logf("frame %d: celt %d-sample in eq %d/%d maxAbs %.3g | bandE eq %d/%d maxAbs %.3g", f, sub.FrameSize(), inEq, inN, inAbs, beEq, beN, beAbs)
+							ceAbs, _, ceEq, ceN := float32Stats(st.CoarseError, r.errorE)
+							obAbs, _, obEq, obN := float32Stats(st.OldBandE, r.oldBandE)
+							t.Logf("frame %d: celt %d-sample coarse error eq %d/%d maxAbs %.3g | oldBandE eq %d/%d maxAbs %.3g", f, sub.FrameSize(), ceEq, ceN, ceAbs, obEq, obN, obAbs)
+							for i := 0; i < len(st.CoarseError) && i < len(r.errorE); i++ {
+								if float32(st.CoarseError[i]) != r.errorE[i] {
+									t.Logf("frame %d: error[%d] Go %.9g C %.9g | oldBandE Go %.9g C %.9g", f, i, float32(st.CoarseError[i]), r.errorE[i], float32(st.OldBandE[i]), r.oldBandE[i])
+								}
+							}
+							t.Logf("frame %d: celt %d-sample band tell_frac Go %v C %v | pulses Go %v C %v | fine Go %v C %v | Go{int %d dual %v bal %d rsv %d final rng %#x} C{int %d dual %v bal %d rsv %d}",
+								f, sub.FrameSize(), st.BandTellFrac, r.bandTellFrac, st.Pulses, r.pulses, st.FineQuant, r.fineQuant, st.Intensity, st.DualStereo, st.Balance, st.AntiCollapseRsv, sub.FinalRange(), r.intensity, r.dualStereo, r.balance, r.antiCollapseRsv)
+						}
+					}
+					t.Logf("frame %d: celt Go{transient %v tfEst %.6g pf %v/%d intra %v tellCoarse %d tellFrac %d spread %d trim %d bits %d coded %d tellFinal %d bytes %d} C{transient %v tfEst %.6g pf %v/%d tell %d tellCoarse %d tellFrac %d spread %d trim %d bits %d coded %d tellFinal %d}",
+						f, tr.IsTransient, tr.TFEstimate, tr.PFOn, tr.PitchIndex, tr.Intra, tr.TellCoarse, tr.TellFracTrim, tr.Spread, tr.AllocTrim, tr.Bits, tr.CodedBands, tr.TellFinal, tr.PacketBytes,
+						r.isTransient, r.tfEstimate, r.pfOn, r.pitchIndex, r.tell, r.tellCoarse, r.tellFracTrim, r.spread, r.allocTrim, r.bits, r.codedBands, r.tellFinal)
+					t.Logf("frame %d: celt Go{int %d dual %v reservoir %d drift %d offset %d temporalVBR %.6g pitchChange %v lastCoded %d} C{int %d dual %v}", f, tr.Intensity, tr.DualStereo, tr.VBRReservoir, tr.VBRDrift, tr.VBROffset, tr.TemporalVBR, tr.PitchChange, tr.CodedBands, r.intensity, r.dualStereo)
+					if len(r.in) > 0 && len(tr.In) > 0 {
+						var inAll []float64
+						for c := range tr.In {
+							inAll = append(inAll, tr.In[c]...)
+						}
+						inAbs, _, inEq, inN := float32Stats(inAll, r.in)
+						beAbs, _, beEq, beN := float32Stats(tr.BandE, r.bandE)
+						obAbs, _, obEq, obN := float32Stats(tr.OldBandE, r.oldBandE)
+						t.Logf("frame %d: celt in eq %d/%d maxAbs %.3g | bandE eq %d/%d maxAbs %.3g | oldBandE eq %d/%d maxAbs %.3g", f, inEq, inN, inAbs, beEq, beN, beAbs, obEq, obN, obAbs)
+					}
 				}
 			}
 			t.Logf("%s: TOC %d/%d, packets %d/%d byte-identical (first difference at frame %d)", tc.name, tocMatch, frames, identical, frames, firstDiff)

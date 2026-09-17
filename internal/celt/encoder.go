@@ -50,13 +50,6 @@ const (
 	SignalMusic
 )
 
-// patchTransientVoiceThreshold is the energy-rise threshold (log2-amplitude, the
-// bandLogE domain) used by patch_transient_decision for voice-leaning content. It
-// is lower than the libopus default of 1.0 so that speech plosives and onsets
-// switch to short blocks more eagerly (mirroring the spirit of libopus enabling
-// allow_weak_transients on the voice path).
-const patchTransientVoiceThreshold = 0.5
-
 // Encoder is a CELT encoder instance. Its output is decoded by the CELT decoder
 // in this package: the encode path is the structural mirror of decodeCELTRange,
 // emitting the same range-coder symbol sequence in the same order so that the
@@ -90,12 +83,22 @@ type FrameTrace struct {
 	PitchRaw    int       // remove_doubling period
 	PitchGain   float64   // remove_doubling gain
 	PitchBuf    []float32 // downsampled pitch buffer
-	TFRes       []int
-	TFSelect    int
-	TellCoarse  int       // ec_tell after the coarse energies
-	TellTF      int       // ec_tell after tf_encode
-	OldBandE    []float64 // oldBandE right after the coarse quantisation
-	CoarseError []float64 // the coarse residual (error) right after the coarse quantisation
+	// VBR state after the frame (st->vbr_reservoir / vbr_drift / vbr_offset)
+	// and the compute_vbr inputs / result of a CELT-only VBR frame.
+	VBRReservoir, VBRDrift, VBROffset int
+	TemporalVBR                       float32
+	VBRTarget, VBRBaseTarget          int
+	LastCodedBandsIn                  int
+	StereoSaving                      float32
+	TotBoost                          int
+	MaxDepth                          float32
+	EquivRate                         int
+	TFRes                             []int
+	TFSelect                          int
+	TellCoarse                        int       // ec_tell after the coarse energies
+	TellTF                            int       // ec_tell after tf_encode
+	OldBandE                          []float64 // oldBandE right after the coarse quantisation
+	CoarseError                       []float64 // the coarse residual (error) right after the coarse quantisation
 	// After the allocation trim: ec_tell_frac, the spread decision, the
 	// coded dynalloc boosts, the trim and the stereo decisions.
 	TellFracTrim int
@@ -162,7 +165,10 @@ type Encoder struct {
 	// (OPUS_SET_PACKET_LOSS_PERC) that biases the two-pass decision.
 	delayedIntra float32
 	forceIntra   bool
-	lossRate     int
+	// disablePF is st->disable_pf (CELT_SET_PREDICTION <= 1): no pitch
+	// prefilter on the frame after a mode transition.
+	disablePF bool
+	lossRate  int
 	// foldSeed mirrors the decoder's lastFinalRange (the range value used to seed
 	// PVQ noise folding). Because the range register evolves identically in the
 	// encoder and decoder for the same symbols, storing enc.GetRng() before flush
@@ -362,11 +368,33 @@ func (e *Encoder) EncodeRedundant(samples []float64, nbytes int) ([]byte, error)
 	if nbytes < 2 {
 		return nil, errors.New("celt: invalid redundancy size")
 	}
-	saved := e.rateMode
+	// OPUS_SET_VBR(0) + OPUS_SET_BITRATE(OPUS_BITRATE_MAX) + CELT_SET_START_BAND(0).
+	savedMode, savedBitrate := e.rateMode, e.bitrate
 	e.rateMode = RateModeCBR
+	e.bitrate = 0
 	_, out, err := e.encodeRange(samples, nil, nbytes, 0, -1, false)
-	e.rateMode = saved
+	e.rateMode, e.bitrate = savedMode, savedBitrate
 	return out, err
+}
+
+// EncodePrefill is the 2-byte "dummy" encode opus_encode_native runs on a
+// freshly reset CELT encoder to prefill its history with the 2.5 ms before
+// a frame that follows a mode transition (celt_encode_with_ec(..., dummy,
+// 2, NULL)). The output is discarded; only the state update matters, so it
+// runs with the encoder's current rate mode, bitrate and band limits like
+// libopus (startBand is CELT_SET_START_BAND at that point: 17 for a hybrid
+// frame, 0 otherwise).
+func (e *Encoder) EncodePrefill(samples []float64, startBand int) error {
+	_, _, err := e.encodeRange(samples, nil, 2, startBand, -1, false)
+	return err
+}
+
+// SetPrediction is CELT_SET_PREDICTION: 0 disables the pitch prefilter and
+// forces intra energy coding, 1 only disables the prefilter, 2 enables both
+// (the normal setting).
+func (e *Encoder) SetPrediction(v int) {
+	e.disablePF = v <= 1
+	e.forceIntra = v == 0
 }
 
 // EncodeHybrid writes the CELT high-band layer of a hybrid frame into an
@@ -596,7 +624,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// Pitch prefilter (run_prefilter): the comb filter is applied to the
 	// analysis buffers in place and its history advanced, whether or not the
 	// pitch search is enabled for this frame.
-	pfEnabled := nbAvailableBytes > 12*ch && !shared && !pcmSilence && tell0+16 <= totalBits
+	pfEnabled := nbAvailableBytes > 12*ch && !shared && !pcmSilence && tell0+16 <= totalBits && !e.disablePF
 	pf := e.runPrefilter(bufs, frameSize, ov, pfEnabled, float32(tfEstimate), nbAvailableBytes, toneFreq, toneishness, e.window32)
 	// pitch_change reads the previous period (clamped by run_prefilter) and
 	// gain, which are only replaced at the end of the frame.
@@ -765,15 +793,11 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// When the time-domain transientAnalysis did not flag the frame but the band
 	// energies jumped over the previous frame (an onset the envelope analysis
 	// missed), promote the frame to transient and re-run the MDCT with short blocks
-	// to limit pre-echo. libopus runs this at complexity>=5 on non-LFE frames.
-	// Skipped on the first frame (no previous energies to compare) and on silent
-	// frames (returned above). Voice-leaning content uses a lower threshold so
-	// plosives switch eagerly.
-	if lm > 0 && !isTransient && e.complexity >= 5 && e.frameCount > 0 {
-		threshold := 1.0 // libopus QCONST16(1, DB_SHIFT)
-		if e.signalType == SignalVoice {
-			threshold = patchTransientVoiceThreshold
-		}
+	// to limit pre-echo. libopus runs this at complexity>=5 on non-LFE frames
+	// whenever the transient flag still fits the budget (also on the first
+	// frame, against the zero energy history); silent frames returned above.
+	if lm > 0 && enc.ECTell()+3 <= totalBits && !isTransient && e.complexity >= 5 {
+		threshold := 1.0 // libopus GCONST(1.f)
 		if patchTransientDecision(logE, e.prevBandEnergies, numBands, start, end, ch, threshold) {
 			isTransient = true
 			tfEstimate = 0.2 // libopus QCONST16(.2f, 14)
@@ -1035,6 +1059,8 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		}
 		target := computeVBR(baseTarget, lm, equivRate, e.lastCodedBands, ch, e.intensity, constrainedVBR,
 			e.stereoSaving, dyn.totBoost, float32(tfEstimate), dyn.maxDepth, temporalVBR, &e.analysis, pitchChange)
+		e.lastTrace.VBRTarget, e.lastTrace.VBRBaseTarget, e.lastTrace.LastCodedBandsIn = target, baseTarget, e.lastCodedBands
+		e.lastTrace.StereoSaving, e.lastTrace.TotBoost, e.lastTrace.MaxDepth, e.lastTrace.EquivRate = e.stereoSaving, dyn.totBoost, dyn.maxDepth, equivRate
 		// The current offset is removed from the target and the space used
 		// so far is added.
 		target += tell
@@ -1166,6 +1192,8 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		e.lastCodedBands = codedBands
 	}
 	e.lastTrace.Bits = bitsQ3
+	e.lastTrace.VBRReservoir, e.lastTrace.VBRDrift, e.lastTrace.VBROffset = e.vbrReservoir, e.vbrDrift, e.vbrOffset
+	e.lastTrace.TemporalVBR = temporalVBR
 	e.lastTrace.AntiCollapseRsv = antiCollapseRsv
 	e.lastTrace.CodedBands = codedBands
 	e.lastTrace.Intensity = intensity
@@ -1399,6 +1427,12 @@ func (e *Encoder) Reset() {
 	e.vbrCount = 0
 	e.specAvg = 0
 	e.stereoSaving = 0
+	// OPUS_RESET_STATE clears everything from st->rng on, including the
+	// analysis and SILK info set for the current frame.
+	e.finalRange = 0
+	e.analysis = AnalysisInfo{}
+	e.silkSignalType = 0
+	e.silkOffset = 0
 }
 
 // SetPhaseInversionDisabled controls intensity-stereo phase inversion.
@@ -1509,6 +1543,16 @@ func (e *Encoder) CopyStateFrom(src *Encoder) {
 	e.consecTransient = src.consecTransient
 	e.intensity = src.intensity
 	e.lastCodedBands = src.lastCodedBands
+	// The Opus layer switches between frame-size encoders as one logical
+	// libopus celt_enc, so the per-frame settings travel with the state.
+	e.analysis = src.analysis
+	e.silkSignalType = src.silkSignalType
+	e.silkOffset = src.silkOffset
+	e.lsbDepth = src.lsbDepth
+	e.streamChannels = src.streamChannels
+	e.forceIntra = src.forceIntra
+	e.disablePF = src.disablePF
+	e.lossRate = src.lossRate
 }
 
 // SetBitrate sets the target bitrate.
@@ -1516,6 +1560,33 @@ func (e *Encoder) SetBitrate(bitrate int) {
 	if bitrate > 0 {
 		e.bitrate = bitrate
 	}
+}
+
+// SetBitrateMax is OPUS_SET_BITRATE(OPUS_BITRATE_MAX): no bitrate bound on
+// the equivalent rate, the byte budget alone sizes the frame.
+func (e *Encoder) SetBitrateMax() { e.bitrate = 0 }
+
+// Bitrate returns the target bitrate (0 = OPUS_BITRATE_MAX).
+func (e *Encoder) Bitrate() int { return e.bitrate }
+
+// FrameSize returns the encoder's frame size in samples.
+func (e *Encoder) FrameSize() int { return e.mode.FrameSize }
+
+// CopyConfigFrom copies the settings (bitrate, rate mode, complexity, band
+// limit, signal type, DTX, phase inversion) from src, so that an encoder of
+// another frame size can stand in for src as libopus's single celt_enc.
+func (e *Encoder) CopyConfigFrom(src *Encoder) {
+	if src == nil || src == e {
+		return
+	}
+	e.bitrate = src.bitrate
+	e.rateMode = src.rateMode
+	e.complexity = src.complexity
+	e.endBand = src.endBand
+	e.signalType = src.signalType
+	e.dtx = src.dtx
+	e.disableInv = src.disableInv
+	e.energyMask = append(e.energyMask[:0], src.energyMask...)
 }
 
 // SetComplexity sets the encoding complexity.

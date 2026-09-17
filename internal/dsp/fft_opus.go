@@ -44,13 +44,21 @@ func opusFFT(input []Complex) []Complex {
 	if n != 60 && n != 120 && n != 240 && n != 480 {
 		return AnyFFT(input)
 	}
+	return opusFFTInto(input, make([]opusComplex, n), make([]Complex, n))
+}
+
+// opusFFTInto is opusFFT with caller-provided scratch (fout) and output
+// buffers of len(input); it returns out.
+func opusFFTInto(input []Complex, fout []opusComplex, out []Complex) []Complex {
+	n := len(input)
+	if n != 60 && n != 120 && n != 240 && n != 480 {
+		return AnyFFT(input)
+	}
 	plan := getOpusFFTPlan(n)
-	fout := make([]opusComplex, n)
 	for i, value := range input {
 		fout[plan.bitrev[i]] = opusComplex{r: float32(value.Real), i: float32(value.Imag)}
 	}
 	plan.transform(fout)
-	out := make([]Complex, n)
 	for i, value := range fout {
 		out[i] = Complex{Real: float64(value.r), Imag: float64(value.i)}
 	}

@@ -112,6 +112,7 @@ type FrameTrace struct {
 	FinePriority    []int
 	TellFine        int
 	TellFinal       int
+	BandTellFrac    []int // ec_tell_frac after each coded band (quant_all_bands)
 	PacketBytes     int
 }
 
@@ -187,10 +188,11 @@ type Encoder struct {
 	// samples of the previous filtered frame. overlapMax is
 	// st->overlap_max, the peak of the previous frame's overlap region used
 	// by the input silence test.
-	prefilterMem [][]float32
-	window32     []float32 // the overlap window in float32 for the comb filter
-	prefilterPre [][]float32
-	prefilterY   []float32
+	prefilterMem    [][]float32
+	window32        []float32 // the overlap window in float32 for the comb filter
+	prefilterPre    [][]float32
+	prefilterY      []float32
+	bandTellScratch []int
 	// analysis is the tonality analysis result for the frame
 	// (CELT_SET_ANALYSIS); Valid is false below complexity 7.
 	analysis        AnalysisInfo
@@ -1115,9 +1117,14 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 	collapse := make([]byte, numBands*ch)
 	totalBitsQ3 := totalBits<<3 - antiCollapseRsv
+	bandTells := e.bandTellScratch[:0]
+	qabTellTrace = &bandTells
 	e.foldSeed = QuantAllBandsEncode(enc, bandE, start, end, X[:frameLen], Y, collapse,
 		pulses, isTransient, spread, dualStereo, intensity, tfRes,
-		totalBitsQ3, balance, lm, codedBands, e.foldSeed, e.disableInv)
+		totalBitsQ3, balance, lm, codedBands, e.foldSeed, e.disableInv, e.complexity)
+	qabTellTrace = nil
+	e.bandTellScratch = bandTells
+	e.lastTrace.BandTellFrac = bandTells
 
 	// Anti-collapse bit (raw, reserved only on transients with LM>=2). libopus
 	// enables anti-collapse while the run of consecutive transients is short
@@ -1148,6 +1155,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 	e.lastTrace.TellFinal = enc.ECTell()
 	e.lastTrace.PacketBytes = targetBytes
+	// st->rng = enc->rng: the next frame folds from the final range value,
+	// not from the LCG state quant_all_bands left behind.
+	e.foldSeed = enc.GetRng()
 	e.prefilterPeriod = pf.pitchIndex
 	e.prefilterGain = pf.gain
 	e.prefilterTapset = pf.tapset

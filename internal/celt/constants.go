@@ -191,6 +191,16 @@ func celtWindow(n int) []float32 {
 	return w
 }
 
+// OverlapSamples48k is the CELT overlap at 48 kHz (2.5 ms).
+const OverlapSamples48k = 120
+
+// OverlapWindow48k returns the 48 kHz CELT overlap window as float32
+// (libopus mode->window), used by the Opus-layer stereo and gain fades.
+// The slice is shared and must not be modified.
+func OverlapWindow48k() []float32 { return overlapWindow48k }
+
+var overlapWindow48k = celtWindow(OverlapSamples48k)
+
 // OverlapWindow48 returns the 120-sample (2.5 ms @ 48 kHz) CELT overlap window
 // as float64, used for redundancy crossfades (libopus smooth_fade).
 func OverlapWindow48() []float64 {

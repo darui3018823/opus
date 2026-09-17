@@ -31,6 +31,10 @@ var qabDebug = false
 // exact symbol where the two desync can be located.
 var qabRangeTrace = os.Getenv("OPUS_QAB_TRACE") != ""
 
+// qabTellTrace, when non-nil, receives ec_tell_frac after each band the
+// encoder codes (the oracle's [CELT_ENC_QAB] dump).
+var qabTellTrace *[]int
+
 type qabBandTrace struct {
 	i, N, b, tellf int
 	rng            uint32
@@ -405,25 +409,27 @@ func stereoIthetaF(X, Y []float64, stereo bool, n int) int {
 // intensityStereo collapses Y into X using the band's stereo energy ratio
 // (libopus bands.c intensity_stereo, float build).
 func intensityStereo(ctx *bandCtx, X, Y []float64, n int) {
-	left := ctx.bandE[ctx.i]
-	right := ctx.bandE[ctx.nbEBands+ctx.i]
-	norm := 1e-15 + math.Sqrt(1e-15+left*left+right*right)
+	left := float32(ctx.bandE[ctx.i])
+	right := float32(ctx.bandE[ctx.nbEBands+ctx.i])
+	norm := float32(1e-15) + float32(math.Sqrt(float64(float32(float32(1e-15)+float32(left*left))+float32(right*right))))
 	a1 := left / norm
 	a2 := right / norm
 	for j := 0; j < n; j++ {
-		X[j] = a1*X[j] + a2*Y[j]
+		l := float32(X[j])
+		r := float32(Y[j])
+		X[j] = float64(float32(a1*l) + float32(a2*r))
 	}
 }
 
 // stereoSplit rotates (X,Y) into the orthonormal mid/side basis
 // (libopus bands.c stereo_split, float build).
 func stereoSplit(X, Y []float64, n int) {
-	const c = 0.70710678
+	const c = float32(0.70710678)
 	for j := 0; j < n; j++ {
-		l := c * X[j]
-		r := c * Y[j]
-		X[j] = l + r
-		Y[j] = r - l
+		l := c * float32(X[j])
+		r := c * float32(Y[j])
+		X[j] = float64(l + r)
+		Y[j] = float64(r - l)
 	}
 }
 
@@ -1055,7 +1061,7 @@ func QuantAllBands(dec *entcode.Decoder, start, end int, X, Y []float64,
 	seed uint32, disableInv bool) uint32 {
 	return quantAllBandsImpl(false, nil, dec, nil, start, end, X, Y,
 		collapseMasks, pulses, shortBlocks, spread, dualStereo, intensity, tfRes,
-		totalBitsQ3, balance, lm, codedBands, seed, disableInv)
+		totalBitsQ3, balance, lm, codedBands, seed, disableInv, 0)
 }
 
 // QuantAllBandsEncode is the encoder-side entry point. bandE holds per-band
@@ -1064,17 +1070,20 @@ func QuantAllBands(dec *entcode.Decoder, start, end int, X, Y []float64,
 func QuantAllBandsEncode(enc *entcode.Encoder, bandE []float64, start, end int, X, Y []float64,
 	collapseMasks []byte, pulses []int, shortBlocks bool, spread int,
 	dualStereo bool, intensity int, tfRes []int, totalBitsQ3, balance, lm, codedBands int,
-	seed uint32, disableInv bool) uint32 {
+	seed uint32, disableInv bool, complexity int) uint32 {
 	return quantAllBandsImpl(true, enc, nil, bandE, start, end, X, Y,
 		collapseMasks, pulses, shortBlocks, spread, dualStereo, intensity, tfRes,
-		totalBitsQ3, balance, lm, codedBands, seed, disableInv)
+		totalBitsQ3, balance, lm, codedBands, seed, disableInv, complexity)
 }
 
 func quantAllBandsImpl(encode bool, enc *entcode.Encoder, dec *entcode.Decoder, bandE []float64,
 	start, end int, X, Y []float64,
 	collapseMasks []byte, pulses []int, shortBlocks bool, spread int,
 	dualStereo bool, intensity int, tfRes []int, totalBitsQ3, balance, lm, codedBands int,
-	seed uint32, disableInv bool) uint32 {
+	seed uint32, disableInv bool, complexity int) uint32 {
+	// theta_rdo: at complexity >= 8 the stereo encoder codes each joint band
+	// twice (theta rounded down and up) and keeps the better reconstruction.
+	thetaRdo := encode && Y != nil && !dualStereo && complexity >= 8
 
 	eBands := EBands48000
 	nbEBands := NumBands48000
@@ -1214,7 +1223,52 @@ func quantAllBandsImpl(encode bool, enc *entcode.Encoder, dec *entcode.Decoder, 
 			if !last {
 				out = norm[M*int(eBands[i])-normOffset:]
 			}
-			if Yband != nil {
+			if Yband != nil && thetaRdo && i < intensity {
+				var w [2]float32
+				computeChannelWeights(float32(bandE[i]), float32(bandE[nbEBands+i]), &w)
+				cm := int(xcm | ycm)
+				// Make a copy.
+				encSave := enc.Clone()
+				ctxSave := *ctx
+				xSave := append([]float64(nil), Xband[:N]...)
+				ySave := append([]float64(nil), Yband[:N]...)
+				// Encode and round down.
+				ctx.thetaRound = -1
+				cmDown := quantBandStereo(ctx, Xband, Yband, N, b, B, lb, lm, out, lowbandScratch, cm)
+				dist0 := float32(w[0]*innerProd64as32(xSave, Xband, N)) + float32(w[1]*innerProd64as32(ySave, Yband, N))
+				// Save first result.
+				encSave2 := enc.Clone()
+				ctxSave2 := *ctx
+				xSave2 := append([]float64(nil), Xband[:N]...)
+				ySave2 := append([]float64(nil), Yband[:N]...)
+				var normSave2 []float64
+				if !last {
+					normSave2 = append([]float64(nil), out[:N]...)
+				}
+				// Restore.
+				enc.Restore(encSave)
+				*ctx = ctxSave
+				copy(Xband[:N], xSave)
+				copy(Yband[:N], ySave)
+				if i == start+1 {
+					specialHybridFolding(norm, normSecond(norm, normLen), start, M, dualStereo, normOffset)
+				}
+				// Encode and round up.
+				ctx.thetaRound = 1
+				xcm = quantBandStereo(ctx, Xband, Yband, N, b, B, lb, lm, out, lowbandScratch, cm)
+				dist1 := float32(w[0]*innerProd64as32(xSave, Xband, N)) + float32(w[1]*innerProd64as32(ySave, Yband, N))
+				if dist0 >= dist1 {
+					xcm = cmDown
+					enc.Restore(encSave2)
+					*ctx = ctxSave2
+					copy(Xband[:N], xSave2)
+					copy(Yband[:N], ySave2)
+					if !last {
+						copy(out[:N], normSave2)
+					}
+				}
+			} else if Yband != nil {
+				ctx.thetaRound = 0
 				xcm = quantBandStereo(ctx, Xband, Yband, N, b, B, lb, lm, out, lowbandScratch, int(xcm|ycm))
 			} else {
 				xcm = quantBand(ctx, Xband, N, b, B, lb, lm, out, 1.0, lowbandScratch, int(xcm|ycm))
@@ -1246,6 +1300,9 @@ func quantAllBandsImpl(encode bool, enc *entcode.Encoder, dec *entcode.Decoder, 
 			fmt.Fprintln(os.Stderr)
 		}
 		balance += pulses[i] + tell
+		if encode && qabTellTrace != nil {
+			*qabTellTrace = append(*qabTellTrace, ctx.tellFrac())
+		}
 		updateLowband = b > (N << bitres)
 		ctx.avoidSplit = false
 	}
@@ -1258,4 +1315,19 @@ func normSecond(norm []float64, normLen int) []float64 {
 		return norm[normLen:]
 	}
 	return nil
+}
+
+// computeChannelWeights mirrors compute_channel_weights (float build): the
+// per-channel weights of the theta_rdo distortion, each band energy plus a
+// third of the smaller one.
+func computeChannelWeights(Ex, Ey float32, w *[2]float32) {
+	minE := Ex
+	if Ey < minE {
+		minE = Ey
+	}
+	// Adjustment to make the weights a bit more conservative.
+	Ex = Ex + minE/3
+	Ey = Ey + minE/3
+	w[0] = Ex
+	w[1] = Ey
 }

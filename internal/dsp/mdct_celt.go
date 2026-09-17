@@ -9,6 +9,11 @@ type CELTMode struct {
 	N       int       // frame size (e.g. 960)
 	Overlap int       // overlap size (e.g. 120)
 	Window  []float64 // synthesis window of length Overlap (rising ramp, 0→1)
+	// Forward MDCT scratch (a mode belongs to one encoder or decoder).
+	fwdF  []float32
+	fwdFC []Complex
+	fwdZ  []Complex
+	fwdIn []opusComplex
 }
 
 // NewCELTMode creates a CELT mode.  window is the overlap-region window (length = overlap).
@@ -146,7 +151,13 @@ func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
 	// st->scale of the N/4-point KISS FFT: 1.f/nfft.
 	scale := float32(1) / float32(N4)
 
-	f := make([]float32, N2)
+	if len(m.fwdF) != N2 {
+		m.fwdF = make([]float32, N2)
+		m.fwdFC = make([]Complex, N4)
+		m.fwdZ = make([]Complex, N4)
+		m.fwdIn = make([]opusComplex, N4)
+	}
+	f := m.fwdF
 
 	// Window, shuffle, fold (libopus clt_mdct_forward "Window, shuffle, fold").
 	xp1 := ov >> 1
@@ -191,7 +202,7 @@ func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
 	}
 
 	// Pre-rotation (float build: scale before the FFT).
-	fc := make([]Complex, N4)
+	fc := m.fwdFC
 	for i := 0; i < N4; i++ {
 		t0 := libopusMDCTTwiddle(N, i)
 		t1 := libopusMDCTTwiddle(N, N4+i)
@@ -203,7 +214,7 @@ func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
 	}
 
 	// N/4 complex FFT with libopus' float KISS FFT (bit reversal inside).
-	z := opusFFT(fc)
+	z := opusFFTInto(fc, m.fwdIn, m.fwdZ)
 
 	// Post-rotation (stride=1): out[2i]=yr from the low end, out[N2-1-2i]=yi.
 	out := make([]float64, N2)

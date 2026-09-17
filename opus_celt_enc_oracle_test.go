@@ -60,8 +60,10 @@ type celtOracleFrame struct {
 	finePriority    []int
 	// [CELT_ENC_FINAL]
 	tellFinal int
-	oldBandE  []float32
-	errorE    []float32
+	// [CELT_ENC_QAB]
+	bandTellFrac []int
+	oldBandE     []float32
+	errorE       []float32
 	// [CELT_ENC_ANALYSIS]
 	anValid     bool
 	anTonality  float32
@@ -86,6 +88,7 @@ var (
 	celtOracleTrimRe   = regexp.MustCompile(`^\[CELT_ENC_TRIM\] tell_frac=(\d+) spread=(\d+) alloc_trim=(\d+) total_boost=(\d+)`)
 	celtOracleAllocRe  = regexp.MustCompile(`^\[CELT_ENC_ALLOC\] tell=(\d+) bits=(-?\d+) anti_collapse_rsv=(\d+) codedBands=(\d+) intensity=(\d+) dual_stereo=(\d+) balance=(-?\d+)`)
 	celtOracleFinalRe  = regexp.MustCompile(`^\[CELT_ENC_FINAL\] tell=(\d+)`)
+	celtOracleQabRe    = regexp.MustCompile(`^\[CELT_ENC_QAB\] i=(\d+) N=(\d+) b=(-?\d+) tell_frac=(\d+)`)
 	celtOracleAnRe     = regexp.MustCompile(`^\[CELT_ENC_ANALYSIS\] valid=(\d) tonality=(\S+) tonality_slope=(\S+) activity=(\S+) music_prob=(\S+) max_pitch_ratio=(\S+) bandwidth=(-?\d+) noisiness=(\S+) activity_probability=(\S+) pitch_change=(\d)`)
 )
 
@@ -173,6 +176,13 @@ func runCELTEncOracle(t *testing.T, fixture string, frames, bitrate, complexity 
 			}
 			out[cur].tellCoarse, _ = strconv.Atoi(m[1])
 			out[cur].tfSelect, _ = strconv.Atoi(m[3])
+		case strings.HasPrefix(line, "[CELT_ENC_QAB]"):
+			m := celtOracleQabRe.FindStringSubmatch(line)
+			if m == nil {
+				t.Fatalf("bad CELT_ENC_QAB line: %s", line)
+			}
+			v, _ := strconv.Atoi(m[4])
+			out[cur].bandTellFrac = append(out[cur].bandTellFrac, v)
 		case strings.HasPrefix(line, "[CELT_ENC_ANALYSIS]"):
 			m := celtOracleAnRe.FindStringSubmatch(line)
 			if m == nil {
@@ -370,6 +380,9 @@ func runCELTOracleCase(t *testing.T, tc celtOracleCase) {
 			if _, _, eq, n := float32Stats(tr.CoarseError, r.errorE); eq != n {
 				t.Logf("frame %d: coarse error differs (%d/%d equal): Go %v C %v", f, eq, n, tr.CoarseError, r.errorE)
 			}
+			if !intsEqual(tr.BandTellFrac, r.bandTellFrac) {
+				t.Logf("frame %d: band tell_frac Go %v C %v", f, tr.BandTellFrac, r.bandTellFrac)
+			}
 			if !intsEqual(tr.Offsets, r.offsets) {
 				t.Logf("frame %d: offsets Go %v C %v", f, tr.Offsets, r.offsets)
 			}
@@ -444,7 +457,7 @@ func TestCELTEncoderOracle(t *testing.T) {
 					complexity: complexity,
 					vbr:        vbr,
 					channels:   2,
-					exact:      false,
+					exact:      true,
 				})
 			}
 		}

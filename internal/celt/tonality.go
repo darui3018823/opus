@@ -80,6 +80,7 @@ type TonalityAnalysis struct {
 	info             [analysisDetectSize]AnalysisInfo
 	fftRe, fftIm     []float32
 	tonality, noisin []float32
+	dmTmp            []float32 // downmix scratch
 }
 
 // NewTonalityAnalysis is tonality_analysis_init.
@@ -142,7 +143,7 @@ func silkResamplerDown2HP(S *[3]float32, out []float32, in []float32, inLen int)
 // channels of the float input (interleaved, C channels, samples in [-1, 1])
 // are summed, scaled to the CELT signal domain, capped at +6 dBFS, halved
 // for stereo and decimated to 24 kHz.
-func downmixAndResample(x []float64, y []float32, S *[3]float32, subframe, offset, C, fs int) float32 {
+func downmixAndResample(x []float64, y []float32, S *[3]float32, subframe, offset, C, fs int, scratch *[]float32) float32 {
 	if subframe == 0 {
 		return 0
 	}
@@ -153,7 +154,10 @@ func downmixAndResample(x []float64, y []float32, S *[3]float32, subframe, offse
 		subframe = subframe * 2 / 3
 		offset = offset * 2 / 3
 	}
-	tmp := make([]float32, subframe)
+	if len(*scratch) < 4*subframe {
+		*scratch = make([]float32, 4*subframe)
+	}
+	tmp := (*scratch)[:subframe]
 	for j := 0; j < subframe; j++ {
 		tmp[j] = float32(x[(j+offset)*C]) * 32768
 	}
@@ -186,7 +190,7 @@ func downmixAndResample(x []float64, y []float32, S *[3]float32, subframe, offse
 	case 24000:
 		copy(y, tmp[:subframe])
 	case 16000:
-		tmp3x := make([]float32, 3*subframe)
+		tmp3x := (*scratch)[subframe : 4*subframe]
 		for j := 0; j < subframe; j++ {
 			tmp3x[3*j] = tmp[j]
 			tmp3x[3*j+1] = tmp[j]
@@ -296,7 +300,7 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 		offset = 3 * offset / 2
 	}
 	t.hpEnerAccum += downmixAndResample(x, t.inmem[t.memFill:], &t.downmixState,
-		minInt(length, analysisBufSize-t.memFill), offset, C, t.fs)
+		minInt(length, analysisBufSize-t.memFill), offset, C, t.fs, &t.dmTmp)
 	if t.memFill+length < analysisBufSize {
 		t.memFill += length
 		// Don't have enough to update the analysis.
@@ -321,7 +325,7 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 	copy(t.inmem[:240], t.inmem[analysisBufSize-240:])
 	remaining := length - (analysisBufSize - t.memFill)
 	t.hpEnerAccum = downmixAndResample(x, t.inmem[240:], &t.downmixState,
-		remaining, offset+analysisBufSize-t.memFill, C, t.fs)
+		remaining, offset+analysisBufSize-t.memFill, C, t.fs, &t.dmTmp)
 	t.memFill = 240 + remaining
 	if isSilence {
 		// On silence, copy the previous analysis.

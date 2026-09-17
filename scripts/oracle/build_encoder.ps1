@@ -422,8 +422,16 @@ $celtPvqDump = @'
 $celtEnc = Replace-Checked $celtEnc "   if (qext_bytes == 0)`n      quant_energy_finalise(mode, start, end, oldBandE, error, fine_quant, fine_priority, nbCompressedBytes*8-ec_tell(enc), enc, C);`n" ($celtPvqDump.Replace("`r`n", "`n")) "celt_encoder final dump"
 Set-Content "$bld\celt_encoder_instr.c" $celtEnc -NoNewline
 
-$celtSrcs = Get-ChildItem "$celt\*.c" | Where-Object { $_.Name -notmatch '^(opus_custom_demo|dump_modes|.*_test.*|celt_encoder)' } | ForEach-Object { $_.FullName }
+# bands.c: per-band range coder position after quant_all_bands codes a band.
+$bandsSrc = (Get-Content "$celt\bands.c" -Raw).Replace("`r`n", "`n")
+$bandsSrc = Replace-Checked $bandsSrc '#include "rate.h"' "#include `"rate.h`"`n#include `"silk_trace.h`"" "bands include"
+$bandsQab = "      balance += pulses[i] + tell;`n      if (encode && oracle_trace_enabled) fprintf(stderr, `"[CELT_ENC_QAB] i=%d N=%d b=%d tell_frac=%d cm=%u seed=%u\n`", i, N, b, (int)ec_tell_frac(ec), x_cm, (unsigned)ctx.seed);`n"
+$bandsSrc = Replace-Checked $bandsSrc "      balance += pulses[i] + tell;`n" $bandsQab "bands qab dump"
+Set-Content "$bld\bands_instr.c" $bandsSrc -NoNewline
+
+$celtSrcs = Get-ChildItem "$celt\*.c" | Where-Object { $_.Name -notmatch '^(opus_custom_demo|dump_modes|.*_test.*|celt_encoder|bands)' } | ForEach-Object { $_.FullName }
 $celtSrcs += "$bld\celt_encoder_instr.c"
+$celtSrcs += "$bld\bands_instr.c"
 $silkSrcs = Get-ChildItem "$silk\*.c" | ForEach-Object { $_.FullName }
 $instrFloat = @('encode_frame_FLP.c','find_LPC_FLP.c','find_pred_coefs_FLP.c','noise_shape_analysis_FLP.c','process_gains_FLP.c','wrappers_FLP.c')
 $silkSrcs = $silkSrcs | Where-Object { $_ -notmatch 'NSQ_del_dec\.c$' -and $_ -notmatch 'enc_API\.c$' }

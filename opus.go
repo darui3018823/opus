@@ -165,7 +165,11 @@ type Encoder struct {
 	inputLSBDepth int
 	// analysis is the tonality analysis state (libopus st->analysis), run at
 	// complexity >= 7 on the raw input of every frame.
-	analysis               *celt.TonalityAnalysis
+	analysis *celt.TonalityAnalysis
+	// hybridStereoWidthQ14 is libopus st->hybrid_stereo_width_Q14: the
+	// stereo width the previous CELT frame was faded to (16384 = full).
+	hybridStereoWidthQ14   int
+	celtFadeScratch        []float64
 	predictionDisabled     bool
 	phaseInversionDisabled bool
 	surroundEnergyMask     []float64
@@ -220,24 +224,25 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 	}
 
 	enc := &Encoder{
-		sampleRate:          sampleRate,
-		channels:            channels,
-		application:         application,
-		celtEncoder:         celtEnc,
-		bitrateSetting:      64000,
-		bitrate:             64000,            // Default bitrate
-		complexity:          5,                // Default complexity
-		rateMode:            celt.RateModeCBR, // Default CBR (backward compatible)
-		frameSize:           frameSize,
-		expertFrameDuration: ExpertFrameDurationArgument,
-		maxBandwidth:        BandwidthFullband,
-		forcedBandwidth:     BandwidthAuto,
-		lastDetectedBW:      -1, // no detection history yet
-		internalFrameSize:   internalFrameSize,
-		prevMode:            -1, // no previous packet yet
-		forceChannels:       ChannelsAuto,
-		lsbDepth:            LSBDepthDefault,
-		variableHPSmth2Q15:  variableHPSmth2Initial(),
+		sampleRate:           sampleRate,
+		channels:             channels,
+		application:          application,
+		celtEncoder:          celtEnc,
+		bitrateSetting:       64000,
+		bitrate:              64000,            // Default bitrate
+		complexity:           5,                // Default complexity
+		rateMode:             celt.RateModeCBR, // Default CBR (backward compatible)
+		frameSize:            frameSize,
+		expertFrameDuration:  ExpertFrameDurationArgument,
+		maxBandwidth:         BandwidthFullband,
+		forcedBandwidth:      BandwidthAuto,
+		lastDetectedBW:       -1, // no detection history yet
+		internalFrameSize:    internalFrameSize,
+		prevMode:             -1, // no previous packet yet
+		forceChannels:        ChannelsAuto,
+		lsbDepth:             LSBDepthDefault,
+		hybridStereoWidthQ14: 1 << 14,
+		variableHPSmth2Q15:   variableHPSmth2Initial(),
 	}
 	enc.celtEncoders[3] = celtEnc
 
@@ -1580,6 +1585,15 @@ func celtEncoderIndex(frameSize int) int {
 // encodeOneCELTFrame resamples one 20 ms PCM chunk (if needed) and encodes it
 // into a single CELT frame payload (no TOC byte).
 func (e *Encoder) encodeOneCELTFrame(pcm []float64) ([]byte, error) {
+	if e.channels == 2 {
+		if len(e.celtFadeScratch) < len(pcm) {
+			e.celtFadeScratch = make([]float64, len(pcm))
+		}
+		faded := e.celtFadeScratch[:len(pcm)]
+		copy(faded, pcm)
+		e.applyStereoWidthFade(faded, celtOnlyStereoWidthQ14(e.celtEquivRate(2)))
+		pcm = faded
+	}
 	celtInput := e.celtInputFrame(pcm)
 
 	compressed, err := e.celtEncoder.Encode(celtInput)
@@ -2316,6 +2330,7 @@ func (e *Encoder) Reset() error {
 	if e.analysis != nil {
 		e.analysis.Reset()
 	}
+	e.hybridStereoWidthQ14 = 1 << 14
 	if e.inputResampler != nil {
 		e.inputResampler.Reset()
 	}

@@ -168,7 +168,10 @@ type Encoder struct {
 	analysis *celt.TonalityAnalysis
 	// hybridStereoWidthQ14 is libopus st->hybrid_stereo_width_Q14: the
 	// stereo width the previous CELT frame was faded to (16384 = full).
-	hybridStereoWidthQ14   int
+	hybridStereoWidthQ14 int
+	// prevHBGain is libopus st->prev_HB_gain: the hybrid high-band gain the
+	// previous frame faded to.
+	prevHBGain             float32
 	celtFadeScratch        []float64
 	predictionDisabled     bool
 	phaseInversionDisabled bool
@@ -242,6 +245,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		forceChannels:        ChannelsAuto,
 		lsbDepth:             LSBDepthDefault,
 		hybridStereoWidthQ14: 1 << 14,
+		prevHBGain:           1,
 		variableHPSmth2Q15:   variableHPSmth2Initial(),
 	}
 	enc.celtEncoders[3] = celtEnc
@@ -900,15 +904,33 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 	silkFrameSize := e.silkSampleRate * 20 / 1000
 	silkChunkLen := silkFrameSize * e.channels
 	celtEnd := celtEndBandForFramingBW(bw)
-	// opus_encode_native: in hybrid mode SILK gets compute_silk_rate_for_hybrid's
-	// share of the TOC-adjusted packet rate (the SILK-only path passes the
-	// whole rate, set by applyBitrateSetting).
-	if e.silkEncoder != nil {
-		total := bitsToBitrate(bitrateToBits(e.bitrate, e.sampleRate, e.frameSize)-8, e.sampleRate, e.frameSize)
-		silkRate := computeSILKRateForHybrid(total, bw, true, e.rateMode != celt.RateModeCBR, e.lbrrCoded, e.channels)
-		if silkRate > 80000 {
-			silkRate = 80000
+	// opus_encode_native sizing: max_data_bytes is the 1276-byte cap, or in
+	// CBR cbr_bytes = (bitrate_to_bits + 4) / 8 (the bitrate is then rounded
+	// to that size); bits_target is the packet minus the TOC; SILK gets
+	// compute_silk_rate_for_hybrid's share of it and CELT the rest.
+	cbr := e.rateMode == celt.RateModeCBR
+	bitrateBps := e.bitrate
+	maxDataBytes := MaxFrameBytes + 1
+	if cbr {
+		cbrBytes := (bitrateToBits(e.bitrate, e.sampleRate, e.frameSize) + 4) / 8
+		if cbrBytes > maxDataBytes {
+			cbrBytes = maxDataBytes
 		}
+		bitrateBps = bitsToBitrate(cbrBytes*8, e.sampleRate, e.frameSize)
+		maxDataBytes = cbrBytes
+		if maxDataBytes < 1 {
+			maxDataBytes = 1
+		}
+	}
+	bitsTarget := bitrateToBits(bitrateBps, e.sampleRate, e.frameSize)
+	if b := 8 * maxDataBytes; b < bitsTarget {
+		bitsTarget = b
+	}
+	bitsTarget -= 8
+	silkRate := 0
+	if e.silkEncoder != nil {
+		total := bitsToBitrate(bitsTarget, e.sampleRate, e.frameSize)
+		silkRate = computeSILKRateForHybrid(total, bw, true, !cbr, e.lbrrCoded, e.channels)
 		if silkRate < 5000 {
 			silkRate = 5000
 		}
@@ -918,10 +940,6 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		// silk_mode.maxBits: the frame's byte ceiling minus the TOC. In CBR
 		// SILK runs as VBR capped so that it can steal up to 25 % of the bits
 		// left after its rate; in VBR the cap is the SILK share of the ceiling.
-		maxDataBytes := MaxFrameBytes
-		if e.rateMode == celt.RateModeCBR {
-			maxDataBytes = e.hybridFrameTargetBytes()
-		}
 		silkMaxBits := (maxDataBytes - 1) * 8
 		if e.rateMode == celt.RateModeCBR {
 			otherBits := silkMaxBits - silkRate*e.frameSize/e.sampleRate
@@ -939,10 +957,10 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		e.silkEncoder.SetMaxBits(silkMaxBits)
 		defer e.silkEncoder.SetMaxBits(0)
 	}
-	nominalBytes := e.hybridFrameTargetBytes()
-	// CBR keeps every hybrid frame at the full per-frame ceiling. In VBR/CVBR,
-	// CELT selects the final shared payload size immediately before allocation.
-	cbr := e.rateMode == celt.RateModeCBR
+	// nb_compr_bytes = max_data_bytes - 1 (- redundancy): CBR keeps every
+	// hybrid frame at that size, in VBR CELT shrinks the shared coder to the
+	// size it selects before the allocation.
+	nominalBytes := maxDataBytes - 1
 
 	frames := make([][]byte, 0, nFrames)
 	var rangeFinal uint32
@@ -959,12 +977,6 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 			((celtToSilk && k == 0) || (!celtToSilk && k == nFrames-1))
 
 		maxBytes := nominalBytes
-		if !cbr && !frameRedundancy {
-			// VBR's available packet capacity is distinct from its nominal rate
-			// target. CELT will shrink this RFC frame ceiling to the size selected
-			// from the SILK tell state and its own high-band target.
-			maxBytes = MaxFrameBytes
-		}
 		enc := entcode.NewEncoder(maxBytes)
 		e.silkEncoder.SetHybridMode(true)
 		if cbr {
@@ -979,6 +991,18 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		if err != nil {
 			return nil, false, fmt.Errorf("SILK hybrid encoding failed: %w", err)
 		}
+		// CELT_SET_SILK_INFO: the SILK part's signal type and offset.
+		e.celtEncoder.SetSILKInfo(e.silkEncoder.LastSILKInfo())
+		// HB_gain: increasingly attenuate the high band when it gets allocated
+		// fewer bits (gain_fade from the previous frame's gain).
+		celtRate := bitsToBitrate(bitsTarget, e.sampleRate, e.frameSize) - silkRate
+		hbGain := float32(1) - float32(math.Exp(0.6931471805599453094*float64(float32(-celtRate)*float32(1.0/1024))))
+		if e.prevHBGain < 1 || hbGain < 1 {
+			celtChunk = append([]float64(nil), celtChunk...)
+			applyGainFade(celtChunk, e.prevHBGain, hbGain, e.channels, e.sampleRate)
+			celtInput = e.celtInputFrame(celtChunk)
+		}
+		e.prevHBGain = hbGain
 
 		// Redundancy flag (logp 12) is written between SILK and CELT, then
 		// celt_to_silk (0 for SILK->CELT) and the redundant frame length. The gate
@@ -1038,14 +1062,14 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 			// The new hybrid high-band stream starts from a fresh CELT state.
 			e.celtEncoder.Reset()
 		}
-		// libopus gives hybrid CELT the total bitrate minus the SILK target and
-		// disables CELT's own VBR constraint. hybridCELTBitrate adapts that split
-		// to this encoder's natural-size SILK VBR output.
-		if frameRedundancy {
+		// libopus gives hybrid CELT the total bitrate minus the SILK target
+		// and disables CELT's own VBR constraint; in CBR the CELT part fills
+		// the remaining bytes (OPUS_BITRATE_MAX).
+		if frameRedundancy || cbr {
 			e.celtEncoder.SetRateMode(celt.RateModeCBR)
-		} else if !cbr {
+		} else {
 			e.celtEncoder.SetRateMode(celt.RateModeVBR)
-			e.celtEncoder.SetBitrate(e.hybridCELTBitrate(enc.ECTell()))
+			e.celtEncoder.SetBitrate(bitrateBps - silkRate)
 		}
 		chosenBytes, celtErr := e.celtEncoder.EncodeHybrid(
 			celtInput, enc, targetBytes, 17, celtEnd, isSilentPCM(celtChunk),
@@ -1113,30 +1137,6 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 	return append([]byte{toc | byte(code)}, payload...), redundancyEmitted, nil
 }
 
-func (e *Encoder) hybridFrameTargetBytes() int {
-	tb := int(float64(e.bitrate) * 0.020 / 8.0)
-	if tb < 2 {
-		tb = 2
-	}
-	if tb > 1275 {
-		tb = 1275
-	}
-	return tb
-}
-
-func (e *Encoder) hybridCELTBitrate(silkBits int) int {
-	// The current SILK VBR encoder can use substantially less than its configured
-	// target on easy speech. Base the split on the bits actually present in the
-	// shared stream so CELT's VBR target preserves the requested total rate.
-	frameRate := e.sampleRate / e.frameSize
-	silkBitrate := silkBits * frameRate
-	celtBitrate := e.bitrate - silkBitrate
-	if celtBitrate < 1 {
-		celtBitrate = 1
-	}
-	return celtBitrate
-}
-
 // encodeSILKOnlyPacket codes the conditioned pcm; raw is the caller's input,
 // which decides the digital-silence shortcut (like libopus' is_digital_silence
 // on the unfiltered input) so a high-pass tail after active audio does not
@@ -1195,9 +1195,6 @@ func (e *Encoder) encodeSILKOnlyPacket(pcm, raw, celtPCM []float64, nFrames int,
 			}
 			maxDataBytes = cbrBytes
 			silkRate := bitsToBitrate(cbrBytes*8-8, e.sampleRate, groupSamples)
-			if silkRate > 80000 {
-				silkRate = 80000
-			}
 			if silkRate < 5000 {
 				silkRate = 5000
 			}
@@ -1936,9 +1933,6 @@ func (e *Encoder) applyBitrateSetting(frameSize int) error {
 		// - 8), i.e. the packet rate minus the TOC byte amortised over the
 		// packet (24000 bps at 20 ms -> 23600 bps), which selects SNR_dB_Q7.
 		silkBitrate := bitsToBitrate(bitrateToBits(e.bitrate, e.sampleRate, frameSize)-8, e.sampleRate, frameSize)
-		if silkBitrate > 80000 {
-			silkBitrate = 80000
-		}
 		if silkBitrate < 5000 {
 			silkBitrate = 5000
 		}
@@ -2331,6 +2325,7 @@ func (e *Encoder) Reset() error {
 		e.analysis.Reset()
 	}
 	e.hybridStereoWidthQ14 = 1 << 14
+	e.prevHBGain = 1
 	if e.inputResampler != nil {
 		e.inputResampler.Reset()
 	}

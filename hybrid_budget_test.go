@@ -39,7 +39,9 @@ func TestHybridMultiFrameStrictBudget(t *testing.T) {
 			if err != nil {
 				t.Fatalf("splitOpusFrames: %v", err)
 			}
-			targetBytes := tc.bitrate * 20 / 1000 / 8
+			// libopus CBR: cbr_bytes = (bitrate_to_bits + 4) / 8 including the
+			// TOC, so each 20 ms frame carries cbr_bytes - 1 bytes.
+			targetBytes := (tc.bitrate*20/1000+4)/8 - 1
 			for i, frame := range frames {
 				if len(frame) != targetBytes {
 					t.Fatalf("frame %d length=%d, want %d", i, len(frame), targetBytes)

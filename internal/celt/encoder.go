@@ -195,7 +195,12 @@ type Encoder struct {
 	bandTellScratch []int
 	// analysis is the tonality analysis result for the frame
 	// (CELT_SET_ANALYSIS); Valid is false below complexity 7.
-	analysis        AnalysisInfo
+	analysis AnalysisInfo
+	// silkSignalType / silkOffset are CELT_SET_SILK_INFO: the SILK signal
+	// type (2 = voiced) and quantisation offset of the hybrid packet's SILK
+	// part, which steer the weak-transient rule, tf_res and the VBR target.
+	silkSignalType  int
+	silkOffset      int
 	prefilterPeriod int
 	prefilterGain   float32
 	prefilterTapset int
@@ -555,9 +560,13 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	isTransient := false
 	tfChan := 0
 	tfEstimate := 0.0
+	weakTransient := false
 	if e.complexity >= 1 {
 		var tfEst32 float32
-		isTransient, tfEst32, tfChan, _ = transientAnalysis32(bufs, frameSize+ov, ch, false, toneFreq, toneishness, e.analysisScratch)
+		// Reduces the likelihood of energy instability on fricatives at low
+		// bitrate in hybrid mode.
+		allowWeakTransients := shared && effectiveBytes < 15 && e.silkSignalType != 2
+		isTransient, tfEst32, tfChan, weakTransient = transientAnalysis32(bufs, frameSize+ov, ch, allowWeakTransients, toneFreq, toneishness, e.analysisScratch)
 		tfEstimate = float64(tfEst32)
 	}
 	if v := float32(1) - float32(tfEstimate); v < toneishness {
@@ -791,6 +800,19 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		for i := end; i < numBands; i++ {
 			tfRes[i] = tfRes[end-1]
 		}
+	} else if shared && weakTransient {
+		// For weak transients, we rely on the fact that improving time
+		// resolution using TF on a long window is imperfect and will not
+		// result in an energy collapse at low bitrate.
+		for i := 0; i < end; i++ {
+			tfRes[i] = 1
+		}
+	} else if shared && effectiveBytes < 15 && e.silkSignalType != 2 {
+		// For low bitrate hybrid, we force temporal resolution to 5 ms
+		// rather than 2.5 ms.
+		if isTransient {
+			tfSelect = 1
+		}
 	} else if isTransient {
 		for i := 0; i < end; i++ {
 			tfRes[i] = 1
@@ -1005,57 +1027,63 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		targetBytes = nbCompressedBytes
 	}
 
-	// libopus selects the hybrid VBR size only after coarse energy, TF,
-	// spreading, dynamic allocation, and allocation trim have been coded. The
-	// shrink must precede computeAllocationEncode so the encoder and decoder use
-	// the same final packet length as their allocation budget.
-	if shared && e.rateMode != RateModeCBR {
+	// Hybrid VBR (celt_encode_with_ec with start > 0): the CELT share of the
+	// packet rate is the base target, tonal SILK frames get more and noisy
+	// ones fewer bits, transients are boosted, and the size is floored so the
+	// SILK bits plus the redundancy signalling still fit. The hybrid CELT has
+	// no VBR constraint, so there is no reservoir.
+	if vbrRate > 0 && shared {
 		tell := enc.TellFrac()
 		totalBoost := 0
 		for i := start; i < end; i++ {
 			totalBoost += offsets[i]
 		}
-
-		// e.bitrate is the CELT share of the hybrid bitrate. vbrRate and target
-		// use the libopus Q3-bit domain.
-		vbrRate := e.bitrate * frameSize / e.mode.SampleRate << 3
+		minAllowed := ((tell + totalBoost + (1 << 6) - 1) >> 6) + 2
+		// Take into account the 37 bits we need to have left in the packet to
+		// signal a redundant frame in hybrid mode.
+		if hybridMin := (tell0Frac + (37 << 3) + totalBoost + (1 << 6) - 1) >> 6; hybridMin > minAllowed {
+			minAllowed = hybridMin
+		}
+		if capBytes := 1275 >> uint(3-lm); nbCompressedBytes > capBytes {
+			nbCompressedBytes = capBytes
+		}
 		baseTarget := vbrRate - ((9*ch + 4) << 3)
 		if baseTarget < 0 {
 			baseTarget = 0
 		}
-		target := baseTarget + int(math.Round((tfEstimate-0.25)*float64(50<<3)))
+		target := baseTarget
+		// Tonal frames (offset<100) need more bits than noisy (offset>100) ones.
+		if e.silkOffset < 100 {
+			target += 12 << 3 >> uint(3-lm)
+		}
+		if e.silkOffset > 100 {
+			target -= 18 << 3 >> uint(3-lm)
+		}
+		// Boosting bitrate on transients and vowels with significant temporal
+		// spikes.
+		target += int(float32(float32(tfEstimate)-float32(0.25)) * float32(50<<3))
+		// If we have a strong transient, let's make sure it has enough bits to
+		// code the first two bands, so that it can use folding rather than noise.
 		if tfEstimate > 0.7 && target < 50<<3 {
 			target = 50 << 3
 		}
 		target += tell
-
-		minAllowed := (tell+totalBoost+(1<<6)-1)/(1<<6) + 2
-		hybridMin := (tell0Frac + (37 << 3) + totalBoost + (1 << 6) - 1) / (1 << 6)
-		if minAllowed < hybridMin {
-			minAllowed = hybridMin
+		nbAvailableBytes = (target + (1 << 5)) >> 6
+		if nbAvailableBytes < minAllowed {
+			nbAvailableBytes = minAllowed
 		}
-		targetBytes = (target + (1 << 5)) >> 6
-		// Preserve the existing hybrid high-band activity calibration while
-		// moving it to the libopus VBR decision point. The SILK prefix plus a
-		// small mandatory CELT floor is the low-activity target; active high-band
-		// content interpolates toward base_target.
-		silkBytes := (tell0Frac + (1 << 6) - 1) >> 6
-		activityFloor := silkBytes + 10
-		if activityFloor < targetBytes {
-			activity := hybridHighBandActivity(samples, ch)
-			targetBytes = activityFloor + int(activity*float64(targetBytes-activityFloor)+0.5)
+		if nbAvailableBytes > nbCompressedBytes {
+			nbAvailableBytes = nbCompressedBytes
 		}
-		if targetBytes < minAllowed {
-			targetBytes = minAllowed
+		if e.vbrCount < 970 {
+			e.vbrCount++
 		}
-		if inputSilence {
-			targetBytes = minAllowed
+		if nbAvailableBytes < nbCompressedBytes {
+			nbCompressedBytes = nbAvailableBytes
 		}
-		if targetBytes > maxTargetBytes {
-			targetBytes = maxTargetBytes
-		}
-		enc.Shrink(targetBytes)
-		totalBits = targetBytes * 8
+		enc.Shrink(nbCompressedBytes)
+		totalBits = nbCompressedBytes * 8
+		targetBytes = nbCompressedBytes
 	}
 
 	// === Bit allocation, fine energy, PVQ, anti-collapse, final fine ===
@@ -1509,4 +1537,11 @@ func (e *Encoder) signalBandwidth(end, equivRate int) int {
 		return e.analysis.Bandwidth
 	}
 	return minBandwidth
+}
+
+// SetSILKInfo is CELT_SET_SILK_INFO: the SILK signal type and quantisation
+// offset of the hybrid packet's SILK part.
+func (e *Encoder) SetSILKInfo(signalType, offset int) {
+	e.silkSignalType = signalType
+	e.silkOffset = offset
 }

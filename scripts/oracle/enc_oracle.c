@@ -284,8 +284,76 @@ static int run_celt_encoder_oracle(int argc, char **argv)
     return 0;
 }
 
+/* --hybrid-enc <rate> <fixture> <frames> <bitrate> <bw> <vbr> <channels> <complexity>:
+   VOIP + voice hint, forced MODE_HYBRID, full SILK and CELT traces. */
+static int run_hybrid_encoder_oracle(int argc, char **argv)
+{
+    int rate, frames, bitrate, bandwidth, complexity, vbr, channels, frame_size, err, frame;
+    const char *fixture;
+    OpusEncoder *enc;
+    float pcm[960 * 2];
+    unsigned char packet[1500];
+
+    if (argc < 4) {
+        fprintf(stderr, "usage: %s --hybrid-enc <rate> <fixture> [frames] [bitrate] [bw] [vbr] [channels] [complexity]\n", argv[0]);
+        return 2;
+    }
+    rate = atoi(argv[2]);
+    fixture = argv[3];
+    frames = (argc >= 5) ? atoi(argv[4]) : 8;
+    bitrate = (argc >= 6) ? atoi(argv[5]) : 64000;
+    bandwidth = (argc >= 7) ? parse_bandwidth(argv[6]) : OPUS_BANDWIDTH_FULLBAND;
+    vbr = (argc >= 8) ? atoi(argv[7]) : 1;
+    channels = (argc >= 9) ? atoi(argv[8]) : 1;
+    complexity = (argc >= 10) ? atoi(argv[9]) : 5;
+    if (rate != 48000) {
+        fprintf(stderr, "--hybrid-enc rate must be 48000\n");
+        return 2;
+    }
+    frame_size = rate / 50;
+    enc = opus_encoder_create(rate, channels, OPUS_APPLICATION_VOIP, &err);
+    if (enc == NULL || err != OPUS_OK) {
+        fprintf(stderr, "opus_encoder_create failed: %d\n", err);
+        return 2;
+    }
+    opus_encoder_ctl(enc, OPUS_SET_BITRATE(bitrate));
+    opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(complexity));
+    opus_encoder_ctl(enc, OPUS_SET_VBR(vbr ? 1 : 0));
+    opus_encoder_ctl(enc, OPUS_SET_VBR_CONSTRAINT(1));
+    opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+    opus_encoder_ctl(enc, OPUS_SET_BANDWIDTH(bandwidth));
+    opus_encoder_ctl(enc, OPUS_SET_FORCE_MODE(MODE_HYBRID));
+    fprintf(stderr, "HYBRID_ENC_ORACLE rate=%d frame_size=%d fixture=%s frames=%d bitrate=%d bandwidth=%d vbr=%d channels=%d complexity=%d\n",
+            rate, frame_size, fixture, frames, bitrate, bandwidth, vbr, channels, complexity);
+    for (frame = 0; frame < frames; frame++) {
+        int n, b;
+        if (channels == 2) fill_silk_fixture_stereo(pcm, rate, frame_size, frame, fixture);
+        else fill_silk_fixture(pcm, rate, frame_size, frame, fixture);
+        for (b = 0; b < frame_size * channels; b++)
+            pcm[b] = (float)(floor((double)pcm[b] * 32768.0 + 0.5) / 32768.0);
+        oracle_trace_enabled = 1;
+        fprintf(stderr, "[CELT_ENC_INPUT_FRAME] frame=%d\n", frame);
+        n = opus_encode_float(enc, pcm, frame_size, packet, (opus_int32)sizeof(packet));
+        if (n < 0) {
+            fprintf(stderr, "encode frame %d failed: %d\n", frame, n);
+            opus_encoder_destroy(enc);
+            return 1;
+        }
+        fprintf(stderr, "ENC_RESULT frame=%d bytes=%d toc=0x%02x config=%d traced=1\n", frame, n, packet[0], (packet[0] >> 3) & 0x1f);
+        fprintf(stderr, "[ENC_PACKET] n=%d", n);
+        for (b = 0; b < n; b++) fprintf(stderr, " %02x", packet[b]);
+        fprintf(stderr, "\n");
+    }
+    oracle_trace_enabled = 0;
+    opus_encoder_destroy(enc);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "--hybrid-enc") == 0) {
+        return run_hybrid_encoder_oracle(argc, argv);
+    }
     if (argc >= 2 && strcmp(argv[1], "--celt-enc") == 0) {
         return run_celt_encoder_oracle(argc, argv);
     }

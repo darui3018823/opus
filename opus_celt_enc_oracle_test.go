@@ -107,7 +107,24 @@ func runCELTEncOracle(t *testing.T, fixture string, frames, bitrate, complexity 
 	if vbr {
 		vbrArg = "1"
 	}
-	cmd := exec.Command(encOraclePath(), "--celt-enc", "48000", fixture, strconv.Itoa(frames), strconv.Itoa(bitrate), strconv.Itoa(complexity), vbrArg, strconv.Itoa(channels))
+	return runCELTOracleCmd(t, fixture, "--celt-enc", "48000", fixture, strconv.Itoa(frames), strconv.Itoa(bitrate), strconv.Itoa(complexity), vbrArg, strconv.Itoa(channels))
+}
+
+// runHybridEncOracle runs the --hybrid-enc oracle (VOIP, voice hint, forced
+// MODE_HYBRID, given bandwidth) and returns the CELT-side traces per frame.
+func runHybridEncOracle(t *testing.T, fixture string, frames, bitrate int, bw string, vbr bool, channels, complexity int) []celtOracleFrame {
+	t.Helper()
+	vbrArg := "0"
+	if vbr {
+		vbrArg = "1"
+	}
+	return runCELTOracleCmd(t, fixture, "--hybrid-enc", "48000", fixture, strconv.Itoa(frames), strconv.Itoa(bitrate), bw, vbrArg, strconv.Itoa(channels), strconv.Itoa(complexity))
+}
+
+func runCELTOracleCmd(t *testing.T, fixture string, args ...string) []celtOracleFrame {
+	t.Helper()
+	frames, _ := strconv.Atoi(args[3])
+	cmd := exec.Command(encOraclePath(), args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {

@@ -111,7 +111,7 @@ func TestEncoderSetBitrate(t *testing.T) {
 		{"Valid 24kbps", 24000, false},
 		{"Valid 48kbps stereo packet rate", 48000, false},
 		{"Too low", 4000, true},
-		{"Too high", 90000, true},
+		{"Above the SNR table (libopus has no upper limit)", 90000, false},
 	}
 
 	for _, tt := range tests {

@@ -48,23 +48,24 @@ type Encoder struct {
 	inputQualityBandQ15 [silkVADNBands]int
 	// variableHPSmth1Q15 is silk_encoder_state.variable_HP_smth1_Q15, the
 	// smoothed log2 cutoff the Opus-layer high-pass follows.
-	variableHPSmth1Q15 int32
-	prevEnergy         float64   // Previous frame energy for smoothing
-	prevLPC            []float64 // Previous LPC coefficients
-	prevNLSF           []float64 // Previous NLSF
-	prevNLSFQ15        []int16   // Previous quantized NLSF in Q15 (matches decoder prevNLSFQ15; used for interpolation search)
-	prevPitchLag       int       // Previous pitch lag
-	prevLagIndex       int       // Previous entropy-coded pitch lag index
-	prevSignalType     int       // Previous SILK signal type
-	prevGains          []float64 // Previous subframe gains
-	prevGainIdx        int       // Previous absolute gain index, matching decoder state
-	prevGainQ16        int32     // Previous synthesis gain, matching decoder state
-	lpcState           []int32   // Encoder-side LPC synthesis state, Q14
-	ltpState           []int32   // Encoder-side LTP output history, Q0
-	nsq                silkNSQState
-	nsqDelDec          [4]nsqDelayedDecision
-	nsqSeed            int32 // winning del-dec seed (silk_NSQ_del_dec writes this back to the bitstream)
-	lastFinalRange     uint32
+	variableHPSmth1Q15  int32
+	prevEnergy          float64   // Previous frame energy for smoothing
+	prevLPC             []float64 // Previous LPC coefficients
+	prevNLSF            []float64 // Previous NLSF
+	prevNLSFQ15         []int16   // Previous quantized NLSF in Q15 (matches decoder prevNLSFQ15; used for interpolation search)
+	prevPitchLag        int       // Previous pitch lag
+	prevLagIndex        int       // Previous entropy-coded pitch lag index
+	prevSignalType      int       // Previous SILK signal type
+	lastQuantOffsetType int       // quantOffsetType of the last coded frame (silk_Encode encControl->offset)
+	prevGains           []float64 // Previous subframe gains
+	prevGainIdx         int       // Previous absolute gain index, matching decoder state
+	prevGainQ16         int32     // Previous synthesis gain, matching decoder state
+	lpcState            []int32   // Encoder-side LPC synthesis state, Q14
+	ltpState            []int32   // Encoder-side LTP output history, Q0
+	nsq                 silkNSQState
+	nsqDelDec           [4]nsqDelayedDecision
+	nsqSeed             int32 // winning del-dec seed (silk_NSQ_del_dec writes this back to the bitstream)
+	lastFinalRange      uint32
 	// useTrellisNSQ enables the FLP noise-shape analysis + delayed-decision
 	// trellis NSQ (Q3+Q4) for active frames. Voiced frames use the perceptual
 	// shaping path; unvoiced/stereo-component frames keep neutral shaping while
@@ -372,10 +373,11 @@ func (e *Encoder) SetComplexity(complexity int) error {
 
 // SetBitrate sets the target bitrate in bps
 func (e *Encoder) SetBitrate(bitrate int) error {
-	// MIN_TARGET_RATE_BPS .. MAX_TARGET_RATE_BPS (silk/define.h); the Opus
-	// layer passes the whole packet rate for stereo streams too.
-	if bitrate < 5000 || bitrate > 80000 {
-		return fmt.Errorf("bitrate must be between 5000 and 80000 bps, got %d", bitrate)
+	// libopus has no upper limit (MAX_TARGET_RATE_BPS is unused): the SNR
+	// table saturates, and the Opus layer passes the whole packet rate for
+	// stereo streams, which silk_stereo_LR_to_MS splits between mid and side.
+	if bitrate < 5000 {
+		return fmt.Errorf("bitrate must be at least 5000 bps, got %d", bitrate)
 	}
 	e.bitrate = bitrate
 	if e.side != nil {
@@ -972,6 +974,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	}
 	e.prevEnergy = computeEnergy(signal)
 	e.prevSignalType = signalType
+	e.lastQuantOffsetType = quantOffset
 	if signalType == SignalTypeVoiced && len(pitchLags) > 0 {
 		e.prevLagForPitch = pitchLags[len(pitchLags)-1]
 	} else {
@@ -2740,6 +2743,15 @@ func (e *Encoder) LastStreamSNRVBR() bool {
 // SetHybridMode marks subsequent frames as the SILK low band of a hybrid packet
 // (see hybridMode). The hybrid encoder sets it before encoding and clears it
 // after so the same SILK encoder instance can also serve SILK-only packets.
+// LastSILKInfo mirrors silk_Encode's encControl->signalType / offset for
+// the last coded frame of the first channel: the signal type and the
+// quantisation offset (silk_Quantization_Offsets_Q10) the CELT layer reads
+// in hybrid mode.
+func (e *Encoder) LastSILKInfo() (signalType, offset int) {
+	st := e.prevSignalType
+	return st, int(silkQuantizationOffsetsQ10[st>>1][e.lastQuantOffsetType])
+}
+
 func (e *Encoder) SetHybridMode(on bool) {
 	e.hybridMode = on
 	if e.side != nil {

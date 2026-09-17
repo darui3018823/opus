@@ -36,6 +36,32 @@ func (e *Encoder) celtEquivRate(streamChannels int) int {
 		framing.ModeCELTOnly, e.complexity, e.packetLossPerc)
 }
 
+// applyGainFade mirrors gain_fade: the CELT input is scaled from the
+// previous frame's high-band gain g1 to g2 with a crossfade over the CELT
+// overlap, then by g2.
+func applyGainFade(pcm []float64, g1, g2 float32, channels, sampleRate int) {
+	inc := 48000 / sampleRate
+	if inc < 1 {
+		inc = 1
+	}
+	overlap := celt.OverlapSamples48k / inc
+	window := celt.OverlapWindow48k()
+	frameSize := len(pcm) / channels
+	for i := 0; i < overlap && i < frameSize; i++ {
+		w := window[i*inc]
+		w = w * w
+		g := float32(w*g2) + float32((1-w)*g1)
+		for c := 0; c < channels; c++ {
+			pcm[i*channels+c] = float64(g * float32(pcm[i*channels+c]))
+		}
+	}
+	for i := overlap; i < frameSize; i++ {
+		for c := 0; c < channels; c++ {
+			pcm[i*channels+c] = float64(g2 * float32(pcm[i*channels+c]))
+		}
+	}
+}
+
 // applyStereoWidthFade mirrors the stereo_fade step of opus_encode_native for
 // one 20 ms CELT input chunk at the input rate: when the previous or the
 // current stereo width is below full, the side signal is attenuated with a

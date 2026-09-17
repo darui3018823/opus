@@ -52,7 +52,29 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 		return append(s, c)
 	}
 	var cases []transCase
+	if sched := os.Getenv("OPUS_TRANSITION_SCHEDULE"); sched != "" {
+		// Probe: one comma-separated schedule for every app/signal/channel
+		// combination, reporting only.
+		var schedule []int
+		for _, part := range strings.Split(sched, ",") {
+			b, err := strconv.Atoi(strings.TrimSpace(part))
+			if err != nil {
+				t.Fatalf("OPUS_TRANSITION_SCHEDULE: %v", err)
+			}
+			schedule = append(schedule, b)
+		}
+		for _, app := range []string{"voip", "audio"} {
+			for _, signal := range []string{"voice", "music", "auto"} {
+				for _, channels := range []int{1, 2} {
+					cases = append(cases, transCase{name: fmt.Sprintf("%s/%s/ch%d/probe", app, signal, channels), schedule: schedule, channels: channels, signal: signal, app: app})
+				}
+			}
+		}
+	}
 	for _, app := range []string{"voip", "audio"} {
+		if len(cases) > 0 {
+			break
+		}
 		for _, signal := range []string{"voice", "music", "auto"} {
 			for _, channels := range []int{1, 2} {
 				for _, sw := range [][2]int{{12000, 64000}, {64000, 12000}, {24000, 128000}, {128000, 24000}, {12000, 128000}, {128000, 12000}, {32000, 48000}, {48000, 32000}} {

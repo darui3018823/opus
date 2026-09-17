@@ -374,7 +374,7 @@ func TestCELTEncoderOracle(t *testing.T) {
 					complexity: complexity,
 					vbr:        vbr,
 					channels:   1,
-					exact:      complexity <= 4 && !vbr,
+					exact:      complexity <= 4,
 				})
 			}
 		}

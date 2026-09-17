@@ -196,9 +196,15 @@ type Encoder struct {
 	// CVBR reservoir: accumulated bit surplus/deficit in Q8 bits. Positive means
 	// the encoder has used fewer bits than the target and can afford to spend
 	// more; negative means it has overspent. Clamped to [-maxReservoir, maxReservoir].
+	// libopus VBR state: vbr_reservoir / vbr_drift / vbr_offset (eighth
+	// bits) and vbr_count; specAvg is st->spec_avg, the temporal VBR
+	// follower; stereoSaving is st->stereo_saving from alloc_trim_analysis.
+	vbrReservoir int
+	vbrDrift     int
 	vbrOffset    int
-	vbrCount     int // number of VBR frames encoded (for average computation)
-	vbrDriftComp int // drift compensation accumulator
+	vbrCount     int
+	specAvg      float32
+	stereoSaving float32
 }
 
 // FinalRange returns the range coder rng after the most recent Encode (before
@@ -279,6 +285,11 @@ func NewEncoder(frameSize, sampleRate, channels int, config *EncoderConfig) (*En
 // opus_encode_native: a CBR packet is cbr_bytes = (bitrate_to_bits + 4) / 8
 // including the TOC, so the CELT payload is one byte less.
 func (e *Encoder) targetBytes() int {
+	if e.rateMode != RateModeCBR {
+		// libopus: nb_compr_bytes = max_data_bytes-1 with max_data_bytes
+		// capped at 1276; celt_encode_with_ec shrinks to the VBR target.
+		return 1275
+	}
 	frameBits := e.bitrate * 6 / (6 * e.mode.SampleRate / e.mode.FrameSize)
 	tb := (frameBits+4)/8 - 1
 	if tb < 2 {
@@ -525,6 +536,39 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		copy(logE2, logE)
 	}
 
+	// Temporal VBR (libopus spec_avg follower), from the unbiased band log
+	// energies of the time-domain transient decision.
+	var temporalVBR float32
+	{
+		follow := float32(-10)
+		var frameAvg, offset float32
+		if isTransient {
+			offset = float32(0.5) * float32(lm)
+		}
+		for i := start; i < end; i++ {
+			f := follow - 1
+			if v := float32(logE[i]) - offset; v > f {
+				f = v
+			}
+			if ch == 2 {
+				if v := float32(logE[numBands+i]) - offset; v > f {
+					f = v
+				}
+			}
+			follow = f
+			frameAvg += follow
+		}
+		frameAvg /= float32(end - start)
+		temporalVBR = frameAvg - e.specAvg
+		if temporalVBR > 3 {
+			temporalVBR = 3
+		}
+		if temporalVBR < -1.5 {
+			temporalVBR = -1.5
+		}
+		e.specAvg += float32(0.02) * temporalVBR
+	}
+
 	// --- Silence detection ---
 	// Sum the SIG-domain band energy (bandE holds sqrt(1e-27+Σcoeff²) per band).
 	// The analysis above has already advanced the overlap and pre-emphasis memory,
@@ -569,102 +613,58 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		}
 	}
 
-	// --- VBR target computation ---
-	// In VBR/CVBR mode, adjust the allocation budget based on signal activity.
-	// This mirrors libopus celt_encode_with_ec VBR logic (simplified):
-	//   - Compute total band energy as a proxy for signal activity.
-	//   - Scale targetBytes between a floor (minBytes) and the full CBR target.
-	//   - Silent or near-silent frames get a smaller budget; complex frames
-	//     get the full budget.
-	targetBytes := maxTargetBytes
-
-	if e.rateMode != RateModeCBR && !shared {
-		// Sum log-domain band energies to estimate activity.
-		// EMean-subtracted logE is ~0 for a typical signal; very negative = quiet.
-		var activity float64
-		for c := 0; c < ch; c++ {
-			for i := start; i < end; i++ {
-				v := logE[c*numBands+i]
-				if v > 0 {
-					activity += v
-				} else if v > -10.0 {
-					// Only lightly penalize moderately quiet bands
-					activity += v * 0.05
-				}
-			}
-		}
-		// Normalise to [0, 1] range. A fully active signal with numBands
-		// bands at logE~+3 each gives activity ~63; we saturate at that.
-		maxActivity := float64(ch*numBands) * 3.0
-		if maxActivity < 1 {
-			maxActivity = 1
-		}
-		frac := activity / maxActivity
-		if frac > 1.0 {
-			frac = 1.0
-		}
-		if frac < 0.0 {
-			frac = 0.0
-		}
-
-		// Minimum packet size: enough for header symbols + some coarse energy.
-		minBytes := maxTargetBytes / 4
-		if minBytes < 2 {
-			minBytes = 2
-		}
-
-		// Scale target: frac=1 → full budget; frac=0 → minBytes.
-		// Use a sqrt curve so that moderate signals still get most of the budget.
-		scaledFrac := math.Sqrt(frac)
-		targetBytes = minBytes + int(scaledFrac*float64(maxTargetBytes-minBytes)+0.5)
-		if targetBytes > maxTargetBytes {
-			targetBytes = maxTargetBytes
-		}
-		if targetBytes < minBytes {
-			targetBytes = minBytes
-		}
-
-		// CVBR reservoir adjustment: use accumulated surplus to boost budget
-		// when the signal needs it.
-		if e.rateMode == RateModeCVBR && e.vbrOffset > 0 {
-			// Allow spending up to half the surplus on this frame.
-			boostBytes := (e.vbrOffset >> (3 + 3)) / 2 // Q8 bits → bytes, halved
-			targetBytes += boostBytes
-			if targetBytes > maxTargetBytes {
-				targetBytes = maxTargetBytes
-			}
+	// --- Byte budget (celt_encode_with_ec) ---
+	// nbCompressedBytes starts at the caller's maximum: the CBR packet size,
+	// or the 1275-byte packet cap in VBR. The constrained-VBR bound may
+	// shrink it before any symbol is coded; the VBR target shrinks it again
+	// after the allocation trim. Until then every budget guard reads
+	// totalBits = nbCompressedBytes*8, as libopus does. The hybrid path
+	// (shared range coder) keeps its own sizing further down.
+	vbrOn := e.rateMode != RateModeCBR
+	constrainedVBR := e.rateMode == RateModeCVBR
+	nbFilledBytes := 0
+	if shared {
+		nbFilledBytes = (tell0 + 4) >> 3
+	}
+	nbCompressedBytes := maxTargetBytes
+	vbrRate := 0
+	effectiveBytes := nbCompressedBytes - nbFilledBytes
+	if vbrOn {
+		// bitrate_to_bits(bitrate, Fs, frame_size) << BITRES
+		vbrRate = (e.bitrate * 6 / (6 * e.mode.SampleRate / frameSize)) << 3
+		effectiveBytes = vbrRate >> 6
+	}
+	nbAvailableBytes := nbCompressedBytes - nbFilledBytes
+	equivRate := (nbCompressedBytes * 8 * 50 << uint(3-lm)) - (40*ch+20)*((400>>uint(lm))-50)
+	if e.bitrate > 0 {
+		if r := e.bitrate - (40*ch+20)*((400>>uint(lm))-50); r < equivRate {
+			equivRate = r
 		}
 	}
-	if e.rateMode == RateModeCVBR && !shared && targetBytes < maxTargetBytes {
-		// Match libopus compute_vbr's constrained-VBR damping:
-		// base_target + 0.67*(target-base_target). The activity curve can
-		// otherwise start a quiet tonal stream at one quarter of its nominal
-		// target and take several damaged frames to refill the reservoir.
-		targetBytes = maxTargetBytes - (2*(maxTargetBytes-targetBytes)+1)/3
-	}
-
-	totalBits := targetBytes * 8
-
-	// Allocate the entropy coder at the full (CBR) budget, then shrink it to the
-	// chosen VBR target before any symbols are written (libopus ec_enc_shrink).
-	//
-	// Shrinking BEFORE the header/coarse-energy symbols — rather than after, as
-	// libopus celt_encode_with_ec does — is deliberate. The coarse-energy path
-	// selection (QuantizeCoarseEnergy) and clt_compute_allocation both read the
-	// budget as packet_length*8, and the decoder derives that from the FINAL
-	// (shrunk) packet length. Encoding against the shrunk budget here keeps those
-	// decisions bit-symmetric with the decoder. libopus can defer the shrink to
-	// after coarse energy because its budget guards never bind that early at its
-	// bitrates; doing the same unconditionally here would risk a low-bitrate
-	// stereo desync (the bitsLeft<30 qi-clamp in QuantizeCoarseEnergy can trip on
-	// the smaller decoder-side budget but not on the larger pre-shrink budget).
 	enc := sharedEnc
 	if enc == nil {
-		enc = entcode.NewEncoder(maxTargetBytes)
-		if targetBytes < maxTargetBytes {
-			enc.Shrink(targetBytes)
+		enc = entcode.NewEncoder(nbCompressedBytes)
+	}
+	if vbrRate > 0 && constrainedVBR && !shared {
+		// Computes the max bit-rate allowed in VBR mode to avoid violating
+		// the target rate and buffering. Clamped to at least two bytes when
+		// the encoder is entirely empty.
+		vbrBound := vbrRate
+		maxAllowed := (vbrRate + vbrBound - e.vbrReservoir) >> 6
+		if maxAllowed < 2 {
+			maxAllowed = 2
+		}
+		if maxAllowed > nbAvailableBytes {
+			maxAllowed = nbAvailableBytes
+		}
+		if maxAllowed < nbAvailableBytes {
+			nbCompressedBytes = nbFilledBytes + maxAllowed
+			nbAvailableBytes = maxAllowed
+			enc.Shrink(nbCompressedBytes)
 		}
 	}
+	totalBits := nbCompressedBytes * 8
+	targetBytes := nbCompressedBytes
 
 	// === Header symbols, in decoder order (decodeCELTRange) ===
 
@@ -695,18 +695,6 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// Dynamic allocation analysis (libopus dynalloc_analysis) reads the
 	// unbiased band energies; the boost symbols are written later
 	// (dynallocEncode), after spread, to keep the bitstream in decoder order.
-	vbrOn := e.rateMode != RateModeCBR
-	constrainedVBR := e.rateMode == RateModeCVBR
-	// libopus nbFilledBytes / effectiveBytes: the bytes SILK already used and
-	// the bytes this frame can spend (the CBR packet, or the VBR nominal rate).
-	nbFilledBytes := 0
-	if shared {
-		nbFilledBytes = (tell0 + 4) >> 3
-	}
-	effectiveBytes := targetBytes - nbFilledBytes
-	if vbrOn {
-		effectiveBytes = (e.bitrate * 6 / (6 * e.mode.SampleRate / frameSize)) >> 3
-	}
 	dyn := dynallocAnalysis32(logE, logE2, e.prevBandEnergies, numBands, start, end, ch, e.lsbDepth, lm,
 		isTransient, vbrOn, constrainedVBR, effectiveBytes, nil, toneFreq, toneishness)
 	offsets, importance := dyn.offsets, dyn.importance
@@ -751,7 +739,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	quantLogE := e.prevBandEnergies
 	coarseError := make([]float64, ch*numBands)
 	intra := e.quantCoarseEnergy(enc, start, end, end, logE, quantLogE, totalBits, coarseError,
-		ch, lm, targetBytes-nbFilledBytes, e.complexity >= 4, numBands)
+		ch, lm, nbAvailableBytes, e.complexity >= 4, numBands)
 	etr(enc, "coarse")
 	{
 		tr := FrameTrace{IsTransient: isTransient, TFEstimate: tfEstimate, TFChan: tfChan, Intra: intra, TellCoarse: enc.ECTell()}
@@ -793,7 +781,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			} else {
 				spread = spreadAggressive
 			}
-		case isTransient || e.complexity < 3 || targetBytes-nbFilledBytes < 10*ch:
+		case isTransient || e.complexity < 3 || nbAvailableBytes < 10*ch:
 			if e.complexity == 0 {
 				spread = spreadNone
 			} else {
@@ -834,6 +822,75 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	e.lastTrace.AllocTrim = allocTrim
 	for i := start; i < end; i++ {
 		e.lastTrace.TotalBoost += offsets[i]
+	}
+
+	// Variable bitrate (celt_encode_with_ec): the target for this frame from
+	// compute_vbr, bounded below so the symbols already written and the
+	// dynalloc boosts still fit, then the reservoir / drift bookkeeping and
+	// the shrink of the range coder to the final size.
+	if vbrRate > 0 && !shared {
+		tell := enc.TellFrac()
+		totalBoost := 0
+		for i := start; i < end; i++ {
+			totalBoost += offsets[i]
+		}
+		// The margin of 2 bytes ensures that none of the bust-prevention
+		// logic in the decoder will have triggered so far.
+		minAllowed := ((tell + totalBoost + (1 << 6) - 1) >> 6) + 2
+		lmDiff := 3 - lm
+		// Don't attempt to use more than 510 kb/s, even for frames smaller
+		// than 20 ms.
+		if capBytes := 1275 >> uint(3-lm); nbCompressedBytes > capBytes {
+			nbCompressedBytes = capBytes
+		}
+		baseTarget := vbrRate - ((40*ch + 20) << 3)
+		if constrainedVBR {
+			baseTarget += e.vbrOffset >> uint(lmDiff)
+		}
+		target := computeVBR(baseTarget, lm, equivRate, e.lastCodedBands, ch, e.intensity, constrainedVBR,
+			e.stereoSaving, dyn.totBoost, float32(tfEstimate), dyn.maxDepth, temporalVBR)
+		// The current offset is removed from the target and the space used
+		// so far is added.
+		target += tell
+		nbAvailableBytes = (target + (1 << 5)) >> 6
+		if nbAvailableBytes < minAllowed {
+			nbAvailableBytes = minAllowed
+		}
+		if nbAvailableBytes > nbCompressedBytes {
+			nbAvailableBytes = nbCompressedBytes
+		}
+		// By how much did we "miss" the target on that frame.
+		delta := target - vbrRate
+		target = nbAvailableBytes << 6
+		var alpha float32
+		if e.vbrCount < 970 {
+			e.vbrCount++
+			alpha = float32(1) / float32(e.vbrCount+20)
+		} else {
+			alpha = 0.001
+		}
+		// How many bits have we used in excess of what we're allowed.
+		if constrainedVBR {
+			e.vbrReservoir += target - vbrRate
+		}
+		// Compute the offset we need to apply in order to reach the target.
+		if constrainedVBR {
+			e.vbrDrift += int(alpha * float32((delta<<uint(lmDiff))-e.vbrOffset-e.vbrDrift))
+			e.vbrOffset = -e.vbrDrift
+		}
+		if constrainedVBR && e.vbrReservoir < 0 {
+			// We're under the min value -- increase rate.
+			adjust := (-e.vbrReservoir) / (8 << 3)
+			nbAvailableBytes += adjust
+			e.vbrReservoir = 0
+		}
+		if nbAvailableBytes < nbCompressedBytes {
+			nbCompressedBytes = nbAvailableBytes
+		}
+		// This moves the raw bits to take into account the new compressed size.
+		enc.Shrink(nbCompressedBytes)
+		totalBits = nbCompressedBytes * 8
+		targetBytes = nbCompressedBytes
 	}
 
 	// libopus selects the hybrid VBR size only after coarse energy, TF,
@@ -1033,41 +1090,6 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 	enc.Flush()
 
-	// --- Rate mode: determine final packet size ---
-	switch e.rateMode {
-	case RateModeVBR:
-		// VBR packet size is exactly the chosen targetBytes.
-		// The variance comes from targetBytes being adjusted based on
-		// signal activity before allocation.
-
-	case RateModeCVBR:
-		// Update CVBR reservoir.
-		// targetBytes is the actual chosen size for this frame.
-		// maxTargetBytes is the nominal CBR target.
-		targetBitsQ8 := maxTargetBytes << (3 + 3)
-		usedBitsQ8 := targetBytes << (3 + 3)
-
-		// maxReservoir limits how much the average can drift from the target.
-		maxReservoir := 3 * targetBitsQ8
-		if maxReservoir < 16<<3 {
-			maxReservoir = 16 << 3
-		}
-
-		delta := targetBitsQ8 - usedBitsQ8 // positive = underspend (surplus)
-
-		newOffset := e.vbrOffset + delta
-		if newOffset > maxReservoir {
-			newOffset = maxReservoir
-		}
-		if newOffset < -maxReservoir {
-			newOffset = -maxReservoir
-		}
-		e.vbrOffset = newOffset
-
-	default:
-		// CBR
-	}
-
 	out := enc.Bytes()
 	// Bytes() already returns max(capacity, range_front+raw_tail), so a genuine
 	// over-budget frame is reflected in len(out); the merge byte is shared between
@@ -1177,9 +1199,12 @@ func (e *Encoder) Reset() {
 	e.consecTransient = 0
 	e.intensity = 0
 	e.lastCodedBands = 0
+	e.vbrReservoir = 0
+	e.vbrDrift = 0
 	e.vbrOffset = 0
 	e.vbrCount = 0
-	e.vbrDriftComp = 0
+	e.specAvg = 0
+	e.stereoSaving = 0
 }
 
 // SetPhaseInversionDisabled controls intensity-stereo phase inversion.

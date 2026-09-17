@@ -1049,7 +1049,15 @@ complexity ≥ 7. `TestCELTEncoderOracle` gates 48 kHz mono (24/64/128 kbps)
 and stereo (32/96/192 kbps) × CBR/CVBR × complexity 0–10 (mono) / 0,5,10
 (stereo), 20 frames each. The *linked* libopus (SIMD RTCD kernels) sums
 floats in a different order, so `TestCGOEncodeRefCELTByteExact` only
-reports; hybrid, non-48 kHz CELT input and the silence shortcut remain.
+reports. Hybrid packets are byte-identical too (`TestHybridEncoderOracle`,
+48 kHz mono/stereo × CBR/CVBR × complexity 0/5/10): the SILK/CELT rate
+split, `silk_mode.maxBits`, `CELT_SET_SILK_INFO`, the hybrid tf/VBR rules,
+the HB gain and stereo width fades follow `opus_encode_native`. The
+automatic mode / bandwidth / channel policy of libopus is ported as
+`SetLibopusModePolicy(true)` (`TestAutoModeOracle`, 49/60 automatic-mode
+cells byte-identical); the default remains the Go policy. Non-48 kHz
+CELT/hybrid input, a stereo input coded as a mono hybrid/CELT stream, the
+SILK↔CELT transition redundancy and the silence shortcut remain.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

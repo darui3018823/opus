@@ -1086,3 +1086,43 @@ start band 17, hybrid VBR/CBR sizing, SILK stereo width for the fade,
 transition redundancy), CELT at 8–24 kHz input (resampler path), the
 digital-silence shortcut (policy decision pending), the Opus-layer
 mode/bandwidth policy (`mode_thresholds`, `voice_est` with the analysis).
+
+### 2026-09-18: hybrid byte-identical, libopus mode policy behind a switch (`00b2e03`, `d203140`)
+
+- `00b2e03` feat(encoder): hybrid packets follow `opus_encode_native` /
+  `celt_encode_with_ec`: `max_data_bytes`/`cbr_bytes` sizing with the rounded
+  CBR bitrate, `bits_target` − TOC, the SILK share from
+  `compute_silk_rate_for_hybrid` and its `maxBits` rules, the CELT share as
+  the hybrid CELT bitrate (unconstrained VBR) or `OPUS_BITRATE_MAX` in CBR,
+  `CELT_SET_SILK_INFO` (signal type / offset of the last SILK frame) driving
+  the weak-transient rule, hybrid `tf_res` and the hybrid VBR target
+  (tonal/noisy offsets, transient boost, 37-bit redundancy floor), `HB_gain`
+  fade, SILK's smoothed stereo width for the CELT stereo fade, and no
+  80 kb/s cap on the SILK rate (libopus has none). `--hybrid-enc` oracle +
+  `TestHybridEncoderOracle`: 48 kHz mono 48/64/96 kbps and stereo
+  64/96/160 kbps × CBR/CVBR × complexity 0/5/10 — **36/36 cells
+  byte-identical, gated**.
+- `d203140` feat(encoder): `decideLibopusMode` ports the automatic mode /
+  channel / bandwidth policy (`compute_equiv_rate`, `voice_est` incl. the
+  analysis' `voice_ratio`, `compute_stereo_width`, `mode_thresholds`
+  interpolation, VOIP bias, ±4000 hysteresis, FEC/DTX/tiny-packet
+  overrides, bandwidth thresholds + caps + `detected_bandwidth`, SILK↔hybrid
+  by bandwidth), decided before the high-pass conditioning. **Behind
+  `SetLibopusModePolicy(true)`** — the default stays the Go policy until
+  the user decides, because flipping it changes the mode of ~15 existing
+  encoder tests (e.g. libopus codes 48 kHz voice at 16–64 kbps as *hybrid
+  FB*, CELT-only from ~76 kbps equiv; the Go policy keeps SILK-only up to
+  40 kbps). `--auto-enc` oracle + `TestAutoModeOracle` (VOIP/AUDIO ×
+  voice/music/auto × mono/stereo × 12–128 kbps, 12 frames): 49/60 cells
+  byte-identical with the libopus policy (gated); the rest need (a) a stereo
+  input coded as a *mono* hybrid/CELT stream (libopus `stream_channels=1`
+  with `CC=2, C=1` MDCT averaging; 12 kbps stereo without a voice hint) and
+  (b) a VOIP CELT-only prefilter pitch near-tie at frame 11 (Go 264 vs C 263
+  after 10 identical frames; the `hp_cutoff`-conditioned input, suspect the
+  pitch search / `remove_doubling` float order).
+
+Remaining (encoder): the two items above, SILK↔CELT transition redundancy
+(`to_celt` deferral for SILK-only→CELT, `prev_channels` bookkeeping on every
+path), CELT/hybrid at 8–24 kHz input, the digital-silence shortcut (policy),
+mid-stream SILK rate switching (`allowBandwidthSwitch`), `decide_fec`
+narrowing in hybrid. The linked SIMD libopus stays a non-goal.

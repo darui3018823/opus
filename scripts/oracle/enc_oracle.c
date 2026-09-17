@@ -351,10 +351,25 @@ static int run_hybrid_encoder_oracle(int argc, char **argv)
 
 /* --auto-enc <rate> <fixture> <frames> <bitrate> <vbr> <channels> <complexity> <signal> <app>:
    automatic mode / bandwidth / channel decisions (no forced mode), with
-   the SILK and CELT traces. signal = voice|music|auto, app = voip|audio. */
+   the SILK and CELT traces. signal = voice|music|auto, app = voip|audio.
+   <bitrate> may be a comma-separated per-frame schedule ("12000,12000,64000"):
+   frame f uses entry min(f, n-1), so the last entry repeats. */
+#define AUTO_ENC_MAX_SCHEDULE 64
+static int parse_bitrate_schedule(const char *s, int *out, int max)
+{
+    int n = 0;
+    while (*s && n < max) {
+        out[n++] = atoi(s);
+        while (*s && *s != ',') s++;
+        if (*s == ',') s++;
+    }
+    return n;
+}
+
 static int run_auto_encoder_oracle(int argc, char **argv)
 {
     int rate, frames, bitrate, complexity, vbr, channels, frame_size, err, frame, app;
+    int schedule[AUTO_ENC_MAX_SCHEDULE], nschedule;
     const char *fixture, *signal, *appname;
     OpusEncoder *enc;
     float pcm[960 * 2];
@@ -367,7 +382,12 @@ static int run_auto_encoder_oracle(int argc, char **argv)
     rate = atoi(argv[2]);
     fixture = argv[3];
     frames = (argc >= 5) ? atoi(argv[4]) : 8;
-    bitrate = (argc >= 6) ? atoi(argv[5]) : 32000;
+    nschedule = (argc >= 6) ? parse_bitrate_schedule(argv[5], schedule, AUTO_ENC_MAX_SCHEDULE) : 0;
+    if (nschedule == 0) {
+        schedule[0] = 32000;
+        nschedule = 1;
+    }
+    bitrate = schedule[0];
     vbr = (argc >= 7) ? atoi(argv[6]) : 1;
     channels = (argc >= 8) ? atoi(argv[7]) : 1;
     complexity = (argc >= 9) ? atoi(argv[8]) : 5;
@@ -394,12 +414,17 @@ static int run_auto_encoder_oracle(int argc, char **argv)
             rate, frame_size, fixture, frames, bitrate, vbr, channels, complexity, signal, appname);
     for (frame = 0; frame < frames; frame++) {
         int n, b;
+        int fb = schedule[frame < nschedule ? frame : nschedule - 1];
+        if (fb != bitrate) {
+            bitrate = fb;
+            opus_encoder_ctl(enc, OPUS_SET_BITRATE(bitrate));
+        }
         if (channels == 2) fill_silk_fixture_stereo(pcm, rate, frame_size, frame, fixture);
         else fill_silk_fixture(pcm, rate, frame_size, frame, fixture);
         for (b = 0; b < frame_size * channels; b++)
             pcm[b] = (float)(floor((double)pcm[b] * 32768.0 + 0.5) / 32768.0);
         oracle_trace_enabled = 1;
-        fprintf(stderr, "[CELT_ENC_INPUT_FRAME] frame=%d\n", frame);
+        fprintf(stderr, "[CELT_ENC_INPUT_FRAME] frame=%d bitrate=%d\n", frame, bitrate);
         n = opus_encode_float(enc, pcm, frame_size, packet, (opus_int32)sizeof(packet));
         if (n < 0) {
             fprintf(stderr, "encode frame %d failed: %d\n", frame, n);

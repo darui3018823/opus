@@ -311,7 +311,7 @@ $targetDump = @'
             if( oracle_trace_enabled ) {
                 fprintf(stderr, "[SILK_ENC_TARGET] bitRate=%d payloadSize_ms=%d nBits=%d TargetRate_bps=%d nBitsExceeded=%d nBitsUsedLBRR=%d curr_nBitsUsedLBRR=%d nFramesEncoded=%d nFramesPerPacket=%d tell=%d useCBR=%d maxBits=%d\n",
                         encControl->bitRate, encControl->payloadSize_ms, nBits, TargetRate_bps, psEnc->nBitsExceeded, psEnc->nBitsUsedLBRR, curr_nBitsUsedLBRR,
-                        psEnc->state_Fxx[ 0 ].sCmn.nFramesEncoded, psEnc->state_Fxx[ 0 ].sCmn.nFramesPerPacket, ec_tell( psRangeEnc ), encControl->useCBR, encControl->maxBits);
+                        psEnc->state_Fxx[ 0 ].sCmn.nFramesEncoded, psEnc->state_Fxx[ 0 ].sCmn.nFramesPerPacket, psRangeEnc ? ec_tell( psRangeEnc ) : -1, encControl->useCBR, encControl->maxBits);
             }
 '@
 $encAPI = Replace-Checked $encAPI "            TargetRate_bps = silk_LIMIT( TargetRate_bps, encControl->bitRate, 5000 );`n" ($targetDump.Replace("`r`n", "`n") + "`n") "enc_API target rate"
@@ -331,7 +331,7 @@ $chDump = @'
                 if( channelRate_bps > 0 ) {
                     if( oracle_trace_enabled ) {
                         fprintf(stderr, "[SILK_ENC_CH] n=%d channelRate_bps=%d tell=%d speech_activity_Q8=%d first_frame_after_reset=%d\n",
-                            n, channelRate_bps, ec_tell( psRangeEnc ), psEnc->state_Fxx[ n ].sCmn.speech_activity_Q8, psEnc->state_Fxx[ n ].sCmn.first_frame_after_reset);
+                            n, channelRate_bps, psRangeEnc ? ec_tell( psRangeEnc ) : -1, psEnc->state_Fxx[ n ].sCmn.speech_activity_Q8, psEnc->state_Fxx[ n ].sCmn.first_frame_after_reset);
                     }
 '@
 $encAPI = Replace-Checked $encAPI "                if( channelRate_bps > 0 ) {`n" ($chDump.Replace("`r`n", "`n") + "`n") "enc_API channel dump"

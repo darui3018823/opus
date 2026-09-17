@@ -192,11 +192,15 @@ type Encoder struct {
 	// samples of the previous filtered frame. overlapMax is
 	// st->overlap_max, the peak of the previous frame's overlap region used
 	// by the input silence test.
-	prefilterMem    [][]float32
-	window32        []float32 // the overlap window in float32 for the comb filter
-	prefilterPre    [][]float32
-	prefilterY      []float32
-	prefilterPitch  []float32
+	prefilterMem   [][]float32
+	window32       []float32 // the overlap window in float32 for the comb filter
+	prefilterPre   [][]float32
+	prefilterY     []float32
+	prefilterPitch []float32
+	// streamChannels is CELT_SET_CHANNELS (st->stream_channels): the number
+	// of coded channels, 1 or the input channel count. A stereo input coded
+	// as a mono stream averages the two MDCTs (CC=2, C=1).
+	streamChannels  int
 	bandTellScratch []int
 	// analysis is the tonality analysis result for the frame
 	// (CELT_SET_ANALYSIS); Valid is false below complexity 7.
@@ -385,7 +389,14 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		return 0, nil, errors.New("celt: invalid input size")
 	}
 
-	ch := e.mode.Channels
+	// CC = st->channels (input channels), ch = C = st->stream_channels
+	// (coded channels). The analysis buffers, prefilter and MDCTs run on
+	// CC channels; everything from the band energies on runs on C.
+	CC := e.mode.Channels
+	ch := e.streamChannels
+	if ch < 1 || ch > CC {
+		ch = CC
+	}
 	numBands := e.mode.Bands.NumBands
 	nbEBands := NumBands48000
 	lm := e.mode.LM
@@ -442,16 +453,16 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// Pass 1: pre-emphasis and build the per-channel analysis buffers
 	// [overlap(prev) ‖ preemph(frame)], length frameSize+overlap. This is the
 	// time-domain signal both the transient detector and the forward MDCT read.
-	bufs := make([][]float64, ch)
-	for c := 0; c < ch; c++ {
+	bufs := make([][]float64, CC)
+	for c := 0; c < CC; c++ {
 		pe := make([]float64, frameSize)
 		mem := e.preemphMem[c]
 		for i := 0; i < frameSize; i++ {
 			var s float64
-			if ch == 1 {
+			if CC == 1 {
 				s = samples[i]
 			} else {
-				s = samples[i*ch+c]
+				s = samples[i*CC+c]
 			}
 			// celt_preemphasis (float build): x = CELT_SIG_SCALE * pcm,
 			// inp = x - m, m = coef0 * x, all in float32 with the 48 kHz
@@ -473,6 +484,8 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 	// libopus input silence test: the peak over the frame plus the previous
 	// frame's overlap region against one LSB of the declared input depth.
+	// The sample counts are C*(N-overlap) and C*overlap interleaved samples
+	// (celt_encode_with_ec reads them with the coded channel count).
 	pcmSilence := false
 	{
 		sampleMax := e.overlapMax
@@ -485,7 +498,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			}
 		}
 		var overlapMax float32
-		for i := nOverlap; i < len(samples); i++ {
+		for i := nOverlap; i < nOverlap+ch*ov && i < len(samples); i++ {
 			if v := float32(samples[i]); v > overlapMax {
 				overlapMax = v
 			} else if -v > overlapMax {
@@ -571,8 +584,11 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		// Reduces the likelihood of energy instability on fricatives at low
 		// bitrate in hybrid mode.
 		allowWeakTransients := shared && effectiveBytes < 15 && e.silkSignalType != 2
-		isTransient, tfEst32, tfChan, weakTransient = transientAnalysis32(bufs, frameSize+ov, ch, allowWeakTransients, toneFreq, toneishness, e.analysisScratch)
+		isTransient, tfEst32, tfChan, weakTransient = transientAnalysis32(bufs, frameSize+ov, CC, allowWeakTransients, toneFreq, toneishness, e.analysisScratch)
 		tfEstimate = float64(tfEst32)
+		if CC == 2 && ch == 1 {
+			tfChan = 0
+		}
 	}
 	if v := float32(1) - float32(tfEstimate); v < toneishness {
 		toneishness = v
@@ -604,9 +620,13 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// logE for the given block type. The overlap-state copy reads the unchanged
 	// analysis buffer, so calling this twice (after patch_transient_decision
 	// promotes the frame to transient) advances the overlap exactly once.
-	traceCoeffs := make([][]float64, ch)
-	computeSpectrum := func(transient bool) {
-		for c := 0; c < ch; c++ {
+	// computeMDCTs is compute_mdcts: the forward MDCT of every input channel
+	// (M interleaved short blocks when transient), the overlap-state copy,
+	// and for a stereo input coded as a mono stream the average of the two
+	// channels' coefficients. The result holds C channels.
+	computeMDCTs := func(transient bool) [][]float64 {
+		out := make([][]float64, CC)
+		for c := 0; c < CC; c++ {
 			buf := bufs[c]
 			var coeffs []float64
 			if transient {
@@ -624,6 +644,21 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 				coeffs = e.celtMode.CLTMDCTForward(buf)
 			}
 			copy(e.overlap[c], buf[frameSize:frameSize+ov])
+			out[c] = coeffs
+		}
+		if CC == 2 && ch == 1 {
+			for i := range out[0] {
+				out[0][i] = float64(float32(float32(0.5)*float32(out[0][i])) + float32(float32(0.5)*float32(out[1][i])))
+			}
+			out = out[:1]
+		}
+		return out
+	}
+	traceCoeffs := make([][]float64, ch)
+	computeSpectrum := func(transient bool) {
+		allCoeffs := computeMDCTs(transient)
+		for c := 0; c < ch; c++ {
+			coeffs := allCoeffs[c]
 			traceCoeffs[c] = coeffs
 
 			base := c * frameLen
@@ -649,6 +684,13 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	computeLogE2Long := func(corr float64) {
 		for c := 0; c < ch; c++ {
 			longCoeffs := e.celtMode.CLTMDCTForward(bufs[c])
+			if CC == 2 && ch == 1 {
+				other := e.celtMode.CLTMDCTForward(bufs[1])
+				longCoeffs = append([]float64(nil), longCoeffs...)
+				for i := range longCoeffs {
+					longCoeffs[i] = float64(float32(float32(0.5)*float32(longCoeffs[i])) + float32(float32(0.5)*float32(other[i])))
+				}
+			}
 			for i := 0; i < numBands; i++ {
 				lo := M * int(EBands48000[i])
 				hi := M * int(EBands48000[i+1])
@@ -773,11 +815,13 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 
 	// isTransient (logp 3, LM>0). The decision was made in pass 1 and already
 	// drove the MDCT block size; here we just code it.
+	transientGotDisabled := false
 	if lm > 0 && enc.ECTell()+3 <= totalBits {
 		enc.EncodeBitLogp(isTransient, 3)
 	} else {
 		if isTransient {
 			isTransient = false
+			transientGotDisabled = true
 			computeSpectrum(false)
 			copy(logE2, logE)
 		}
@@ -854,8 +898,10 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		if isTransient {
 			tr.ShortBlocks = M
 		}
-		for c := 0; c < ch; c++ {
+		for c := 0; c < CC; c++ {
 			tr.In = append(tr.In, append([]float64(nil), bufs[c]...))
+		}
+		for c := 0; c < ch; c++ {
 			tr.Freq = append(tr.Freq, append([]float64(nil), traceCoeffs[c]...))
 		}
 		tr.BandE = make([]float64, ch*nbEBands)
@@ -1175,6 +1221,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// Final fine energy (quant_energy_finalise) — one extra bit per
 	// (band,channel) by priority, then remember the clamped residual.
 	quantEnergyFinalise(enc, start, end, quantLogE, coarseError, eBits, finePriority, totalBits-enc.ECTell(), ch, numBands)
+	for i := range e.energyError {
+		e.energyError[i] = 0
+	}
 	for c := 0; c < ch; c++ {
 		for i := start; i < end; i++ {
 			idx := c*numBands + i
@@ -1198,9 +1247,12 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 
 	e.finalRange = enc.GetRng()
 
+	if CC == 2 && ch == 1 {
+		copy(e.prevBandEnergies[numBands:2*numBands], e.prevBandEnergies[:numBands])
+	}
 	// In case start or end were to change (libopus zeroes the bands outside
 	// the coded range).
-	for c := 0; c < ch; c++ {
+	for c := 0; c < CC; c++ {
 		for i := 0; i < start; i++ {
 			e.prevBandEnergies[c*numBands+i] = 0
 		}
@@ -1211,7 +1263,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	e.frameCount++
 	// Advance the consecutive-transient run (libopus updates consec_transient at
 	// end of frame; the anti-collapse decision above used the pre-update value).
-	if isTransient {
+	if isTransient || transientGotDisabled {
 		e.consecTransient++
 	} else {
 		e.consecTransient = 0
@@ -1547,6 +1599,16 @@ func (e *Encoder) signalBandwidth(end, equivRate int) int {
 
 // SetSILKInfo is CELT_SET_SILK_INFO: the SILK signal type and quantisation
 // offset of the hybrid packet's SILK part.
+// SetStreamChannels is CELT_SET_CHANNELS: the number of coded channels
+// (st->stream_channels). A stereo input coded as a mono stream (1) has
+// the two channels' MDCTs averaged before the band analysis.
+func (e *Encoder) SetStreamChannels(n int) {
+	if n < 1 || n > e.mode.Channels {
+		n = e.mode.Channels
+	}
+	e.streamChannels = n
+}
+
 func (e *Encoder) SetSILKInfo(signalType, offset int) {
 	e.silkSignalType = signalType
 	e.silkOffset = offset

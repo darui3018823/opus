@@ -548,6 +548,12 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	}
 	if !e.libopusModePolicy {
 		decision = e.goModeDecision(raw, frameSize, nFrames)
+		if decision.mode != framing.ModeSILKOnly {
+			// The Go policy codes hybrid and CELT packets with the input
+			// channel count; only its SILK-only path downmixes.
+			e.streamChannels = e.channels
+			e.toMono = false
+		}
 	}
 	if decision.mode == framing.ModeSILKOnly && e.silkEncoder != nil {
 		celtToSilk := e.prevMode == framing.ModeCELTOnly
@@ -610,6 +616,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 			} else {
 				e.prevMode = framing.ModeHybrid
 			}
+			e.prevStreamChannels = e.celtStreamChannels()
 		}
 		return out, err
 	}
@@ -624,7 +631,8 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	// narrower band rather than wasting bits. The detection runs once over the whole
 	// input PCM, so every frame in a packet still shares the same bandwidth/config.
 	e.celtEncoder.SetEndBand(celtEndBandForFramingBW(bw))
-	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, bw, e.channels, framing.FrameSize20ms)
+	streamChannels := e.celtStreamChannels()
+	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, bw, streamChannels, framing.FrameSize20ms)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate TOC: %w", err)
 	}
@@ -639,6 +647,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 			return nil, err
 		}
 		e.prevMode = framing.ModeCELTOnly
+		e.prevStreamChannels = streamChannels
 		e.lastFinalRange = e.celtEncoder.FinalRange()
 		return append([]byte{toc}, compressed...), nil
 	}
@@ -671,13 +680,22 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("failed to pack %d frames: %w", nFrames, err)
 	}
 	e.prevMode = framing.ModeCELTOnly
+	e.prevStreamChannels = streamChannels
 	e.lastFinalRange = rangeFinal
 	return append([]byte{toc | byte(code)}, payload...), nil
+}
+
+// celtStreamChannels is st->stream_channels for a CELT-only or hybrid
+// packet: a stereo input may be coded as a mono stream at low rates (SILK
+// downmixes, the CELT encoder averages the two channels' MDCTs).
+func (e *Encoder) celtStreamChannels() int {
+	return e.streamChannelsOrInput()
 }
 
 func (e *Encoder) encodeShortCELTPacket(pcm, celtPCM []float64) ([]byte, error) {
 	bw := e.narrowAutoBandwidth(pcm, e.selectCeltBandwidth())
 	e.celtEncoder.SetEndBand(celtEndBandForFramingBW(bw))
+	e.celtEncoder.SetStreamChannels(e.channels)
 	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, bw, e.channels, e.internalFrameSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate short-frame TOC: %w", err)
@@ -942,15 +960,23 @@ func (e *Encoder) narrowAutoHybridBandwidth(pcm []float64, bw int) int {
 }
 
 func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, redundancy, celtToSilk bool) ([]byte, bool, error) {
-	toc, err := framing.GenerateTOCExt(framing.ModeHybrid, bw, e.channels, framing.FrameSize20ms)
+	streamChannels := e.celtStreamChannels()
+	toc, err := framing.GenerateTOCExt(framing.ModeHybrid, bw, streamChannels, framing.FrameSize20ms)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to generate hybrid TOC: %w", err)
 	}
 
 	inputChunkLen := e.frameSize * e.channels
 	silkFrameSize := e.silkSampleRate * 20 / 1000
-	silkChunkLen := silkFrameSize * e.channels
+	silkChunkLen := silkFrameSize * streamChannels
 	celtEnd := celtEndBandForFramingBW(bw)
+	e.celtEncoder.SetStreamChannels(streamChannels)
+	if e.channels == 2 && streamChannels == 2 && e.prevStreamChannels == 1 && len(e.silkInputResamplers) > 1 {
+		// Mono -> stereo: the side channel's resampler restarts from the
+		// mono channel's state (silk_Encode).
+		e.silkInputResamplers[1].CopyStateFrom(e.silkInputResamplers[0])
+	}
+	e.silkEncoder.SetStreamChannels(streamChannels, e.toMono)
 	// opus_encode_native sizing: max_data_bytes is the 1276-byte cap, or in
 	// CBR cbr_bytes = (bitrate_to_bits + 4) / 8 (the bitrate is then rounded
 	// to that size); bits_target is the packet minus the TOC; SILK gets
@@ -977,7 +1003,7 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 	silkRate := 0
 	if e.silkEncoder != nil {
 		total := bitsToBitrate(bitsTarget, e.sampleRate, e.frameSize)
-		silkRate = computeSILKRateForHybrid(total, bw, true, !cbr, e.lbrrCoded, e.channels)
+		silkRate = computeSILKRateForHybrid(total, bw, true, !cbr, e.lbrrCoded, streamChannels)
 		if silkRate < 5000 {
 			silkRate = 5000
 		}
@@ -998,7 +1024,7 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 				silkMaxBits = 0
 			}
 		} else {
-			maxRate := computeSILKRateForHybrid(silkMaxBits*e.sampleRate/e.frameSize, bw, true, true, e.lbrrCoded, e.channels)
+			maxRate := computeSILKRateForHybrid(silkMaxBits*e.sampleRate/e.frameSize, bw, true, true, e.lbrrCoded, streamChannels)
 			silkMaxBits = bitrateToBits(maxRate, e.sampleRate, e.frameSize)
 		}
 		e.silkEncoder.SetMaxBits(silkMaxBits)
@@ -1069,7 +1095,7 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		// false flag is written and the frame stays plain hybrid.
 		redundancyBytes := 0
 		if frameRedundancy && enc.ECTell()+17+20 <= maxBytes*8 {
-			redundancyBytes = computeRedundancyBytes(maxBytes, e.bitrate, e.sampleRate/e.frameSize, e.channels)
+			redundancyBytes = computeRedundancyBytes(maxBytes, e.bitrate, e.sampleRate/e.frameSize, streamChannels)
 			// Reserve 8 bits for the length plus a few for CELT (libopus
 			// max_redundancy for the hybrid branch).
 			maxRedundancy := (maxBytes - 1) - ((enc.ECTell() + 8 + 3 + 7) >> 3)
@@ -1640,13 +1666,15 @@ func celtEncoderIndex(frameSize int) int {
 // encodeOneCELTFrame resamples one 20 ms PCM chunk (if needed) and encodes it
 // into a single CELT frame payload (no TOC byte).
 func (e *Encoder) encodeOneCELTFrame(pcm []float64) ([]byte, error) {
+	streamChannels := e.celtStreamChannels()
+	e.celtEncoder.SetStreamChannels(streamChannels)
 	if e.channels == 2 {
 		if len(e.celtFadeScratch) < len(pcm) {
 			e.celtFadeScratch = make([]float64, len(pcm))
 		}
 		faded := e.celtFadeScratch[:len(pcm)]
 		copy(faded, pcm)
-		e.applyStereoWidthFade(faded, celtOnlyStereoWidthQ14(e.celtEquivRate(2)))
+		e.applyStereoWidthFade(faded, celtOnlyStereoWidthQ14(e.celtEquivRate(streamChannels)))
 		pcm = faded
 	}
 	celtInput := e.celtInputFrame(pcm)

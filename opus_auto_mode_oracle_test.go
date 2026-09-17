@@ -48,9 +48,7 @@ func TestAutoModeOracle(t *testing.T) {
 						complexity: 5,
 						signal:     signal,
 						app:        app,
-						// Not yet exact: a stereo input coded as a mono hybrid /
-						// CELT stream (12 kbps stereo without a voice hint).
-						exact: !(channels == 2 && bitrate == 12000 && (signal == "music" || (signal == "auto" && app == "audio"))),
+						exact:      true,
 					})
 				}
 			}

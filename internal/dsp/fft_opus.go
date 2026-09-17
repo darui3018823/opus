@@ -279,3 +279,22 @@ func (p opusFFTPlan) bfly5(fout []opusComplex, fstride, m, groups, mm int) {
 		}
 	}
 }
+
+// OpusFFTScaled32 is libopus opus_fft_c for the static-mode sizes: the
+// input is scaled by 1/n in float32, bit-reversed and transformed with the
+// float KISS FFT stages. re and im hold the complex input and receive the
+// output.
+func OpusFFTScaled32(re, im []float32) {
+	n := len(re)
+	plan := getOpusFFTPlan(n)
+	scale := float32(1) / float32(n)
+	fout := make([]opusComplex, n)
+	for i := range re {
+		fout[plan.bitrev[i]] = opusComplex{r: re[i] * scale, i: im[i] * scale}
+	}
+	plan.transform(fout)
+	for i, v := range fout {
+		re[i] = v.r
+		im[i] = v.i
+	}
+}

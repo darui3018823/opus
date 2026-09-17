@@ -7,7 +7,8 @@ package celt
 // libopus equiv_rate; the surround masking terms are not used (energy_mask
 // is nil).
 func computeVBR(baseTarget, lm, equivRate, lastCodedBands, C, intensity int, constrainedVBR bool,
-	stereoSaving float32, totBoost int, tfEstimate float32, maxDepth, temporalVBR float32) int {
+	stereoSaving float32, totBoost int, tfEstimate float32, maxDepth, temporalVBR float32,
+	analysis *AnalysisInfo, pitchChange bool) int {
 	codedBands := lastCodedBands
 	if codedBands == 0 {
 		codedBands = NumBands48000
@@ -21,6 +22,9 @@ func computeVBR(baseTarget, lm, equivRate, lastCodedBands, C, intensity int, con
 		codedBins += int(EBands48000[ib]) << uint(lm)
 	}
 	target := baseTarget
+	if analysis.Valid && analysis.Activity < 0.4 {
+		target -= int(float32(codedBins<<3) * (float32(0.4) - analysis.Activity))
+	}
 	// Stereo savings.
 	if C == 2 {
 		codedStereoBands := intensity
@@ -46,6 +50,19 @@ func computeVBR(baseTarget, lm, equivRate, lastCodedBands, C, intensity int, con
 	// Apply transient boost, compensating for average boost (SHL32 by one is
 	// the identity in the float build).
 	target += int(float32(tfEstimate-float32(0.044)) * float32(target))
+	// Apply tonality boost (compensating for the average).
+	if analysis.Valid {
+		tonal := analysis.Tonality - float32(0.15)
+		if tonal < 0 {
+			tonal = 0
+		}
+		tonal -= 0.12
+		tonalTarget := target + int(float32(float32(codedBins<<3)*float32(1.2))*tonal)
+		if pitchChange {
+			tonalTarget += int(float32(codedBins<<3) * float32(0.8))
+		}
+		target = tonalTarget
+	}
 
 	{
 		bins := int(EBands48000[NumBands48000-2]) << uint(lm)

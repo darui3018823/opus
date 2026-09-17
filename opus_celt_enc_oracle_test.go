@@ -59,15 +59,24 @@ type celtOracleFrame struct {
 	fineQuant       []int
 	finePriority    []int
 	// [CELT_ENC_FINAL]
-	tellFinal  int
-	oldBandE   []float32
-	errorE     []float32
-	in         []float32
-	freq       []float32
-	bandE      []float32
-	bandLogE   []float32
-	packet     []byte
-	havePacket bool
+	tellFinal int
+	oldBandE  []float32
+	errorE    []float32
+	// [CELT_ENC_ANALYSIS]
+	anValid     bool
+	anTonality  float32
+	anSlope     float32
+	anActivity  float32
+	anMusicProb float32
+	anMaxPitch  float32
+	anBandwidth int
+	pitchChange bool
+	in          []float32
+	freq        []float32
+	bandE       []float32
+	bandLogE    []float32
+	packet      []byte
+	havePacket  bool
 }
 
 var (
@@ -77,6 +86,7 @@ var (
 	celtOracleTrimRe   = regexp.MustCompile(`^\[CELT_ENC_TRIM\] tell_frac=(\d+) spread=(\d+) alloc_trim=(\d+) total_boost=(\d+)`)
 	celtOracleAllocRe  = regexp.MustCompile(`^\[CELT_ENC_ALLOC\] tell=(\d+) bits=(-?\d+) anti_collapse_rsv=(\d+) codedBands=(\d+) intensity=(\d+) dual_stereo=(\d+) balance=(-?\d+)`)
 	celtOracleFinalRe  = regexp.MustCompile(`^\[CELT_ENC_FINAL\] tell=(\d+)`)
+	celtOracleAnRe     = regexp.MustCompile(`^\[CELT_ENC_ANALYSIS\] valid=(\d) tonality=(\S+) tonality_slope=(\S+) activity=(\S+) music_prob=(\S+) max_pitch_ratio=(\S+) bandwidth=(-?\d+) noisiness=(\S+) activity_probability=(\S+) pitch_change=(\d)`)
 )
 
 func celtOracleInts(line string) []int {
@@ -163,6 +173,21 @@ func runCELTEncOracle(t *testing.T, fixture string, frames, bitrate, complexity 
 			}
 			out[cur].tellCoarse, _ = strconv.Atoi(m[1])
 			out[cur].tfSelect, _ = strconv.Atoi(m[3])
+		case strings.HasPrefix(line, "[CELT_ENC_ANALYSIS]"):
+			m := celtOracleAnRe.FindStringSubmatch(line)
+			if m == nil {
+				t.Fatalf("bad CELT_ENC_ANALYSIS line: %s", line)
+			}
+			f := &out[cur]
+			f.anValid = m[1] == "1"
+			pf := func(s string) float32 { v, _ := strconv.ParseFloat(s, 64); return float32(v) }
+			f.anTonality = pf(m[2])
+			f.anSlope = pf(m[3])
+			f.anActivity = pf(m[4])
+			f.anMusicProb = pf(m[5])
+			f.anMaxPitch = pf(m[6])
+			f.anBandwidth, _ = strconv.Atoi(m[7])
+			f.pitchChange = m[10] == "1"
 		case strings.HasPrefix(line, "[SILK_CELT_ENC_OLDBANDE]"):
 			out[cur].oldBandE = parseFloats(line)
 		case strings.HasPrefix(line, "[SILK_CELT_ENC_ERROR]"):
@@ -309,6 +334,11 @@ func runCELTOracleCase(t *testing.T, tc celtOracleCase) {
 			t.Logf("frame %d: decisions Go{transient %v short %d tfEst %.6g tfChan %d pf %v/%d/%.6g intra %v tellCoarse %d tfSelect %d tellTF %d} C{transient %v short %d tfEst %.6g tfChan %d pf %v/%d/%.6g tell %d tellCoarse+tf %d tfSelect %d}",
 				f, tr.IsTransient, tr.ShortBlocks, tr.TFEstimate, tr.TFChan, tr.PFOn, tr.PitchIndex, tr.PFGain, tr.Intra, tr.TellCoarse, tr.TFSelect, tr.TellTF,
 				r.isTransient, r.shortBlocks, r.tfEstimate, r.tfChan, r.pfOn, r.pitchIndex, r.gain1, r.tell, r.tellCoarse, r.tfSelect)
+			if r.anValid || tr.Analysis.Valid {
+				t.Logf("frame %d: analysis Go{valid %v ton %.9g slope %.9g act %.9g mp %.9g mpr %.9g bw %d pc %v} C{valid %v ton %.9g slope %.9g act %.9g mp %.9g mpr %.9g bw %d pc %v}",
+					f, tr.Analysis.Valid, tr.Analysis.Tonality, tr.Analysis.TonalitySlope, tr.Analysis.Activity, tr.Analysis.MusicProb, tr.Analysis.MaxPitchRatio, tr.Analysis.Bandwidth, tr.PitchChange,
+					r.anValid, r.anTonality, r.anSlope, r.anActivity, r.anMusicProb, r.anMaxPitch, r.anBandwidth, r.pitchChange)
+			}
 			t.Logf("frame %d: trim Go{tellFrac %d spread %d trim %d boost %d} C{tellFrac %d spread %d trim %d boost %d} | alloc Go{bits %d rsv %d coded %d bal %d tellFine %d tellFinal %d} C{bits %d rsv %d coded %d bal %d tellFine %d tellFinal %d}",
 				f, tr.TellFracTrim, tr.Spread, tr.AllocTrim, tr.TotalBoost, r.tellFracTrim, r.spread, r.allocTrim, r.totalBoost,
 				tr.Bits, tr.AntiCollapseRsv, tr.CodedBands, tr.Balance, tr.TellFine, tr.TellFinal,
@@ -379,7 +409,7 @@ func TestCELTEncoderOracle(t *testing.T) {
 					complexity: complexity,
 					vbr:        vbr,
 					channels:   1,
-					exact:      complexity <= 6,
+					exact:      true,
 				})
 			}
 		}

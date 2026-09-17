@@ -223,7 +223,7 @@ type dynallocAnalysisResult struct {
 // OPUS_SET_LSB_DEPTH; effectiveBytes the libopus effectiveBytes.
 func dynallocAnalysis32(bandLogE, bandLogE2, oldBandE []float64, nbEBands, start, end, C, lsbDepth, lm int,
 	isTransient, vbr, constrainedVBR bool, effectiveBytes int, surroundDynalloc []float64,
-	toneFreq, toneishness float32) dynallocAnalysisResult {
+	toneFreq, toneishness float32, analysis *AnalysisInfo) dynallocAnalysisResult {
 	res := dynallocAnalysisResult{
 		offsets:      make([]int, nbEBands),
 		importance:   make([]int, nbEBands),
@@ -454,6 +454,11 @@ func dynallocAnalysis32(bandLogE, bandLogE2, oldBandE []float64, nbEBands, start
 			follower[end-2] += 1
 		}
 	}
+	if analysis != nil && analysis.Valid {
+		for i := start; i < analysisLeakBands && i < end; i++ {
+			follower[i] = follower[i] + float32(float32(1.0/64)*float32(analysis.LeakBoost[i]))
+		}
+	}
 	totBoost := 0
 	for i := start; i < end; i++ {
 		if follower[i] > 4 {
@@ -624,4 +629,117 @@ func spreadingDecision32(X []float64, N0, end, C, M int, average *int, lastDecis
 	default:
 		return spreadNone
 	}
+}
+
+// allocTrimAnalysis32 mirrors alloc_trim_analysis (float build): the trim
+// from the equivalent rate, the stereo correlation (updating
+// st->stereo_saving), the spectral tilt of the (biased) band log energies,
+// the surround trim, the transient estimate and the analysis tonality slope.
+func allocTrimAnalysis32(X, bandLogE []float64, nbEBands, end, lm, C, N0 int, analysis *AnalysisInfo, stereoSaving *float32,
+	tfEstimate float32, intensity int, surroundTrim float32, equivRate int) int {
+	trim := float32(5)
+	// At low bitrate, reducing the trim seems to help. At higher bitrates,
+	// it's less clear what's best, so we're keeping it as it was before.
+	if equivRate < 64000 {
+		trim = 4
+	} else if equivRate < 80000 {
+		frac := (equivRate - 64000) >> 10
+		trim = 4 + float32(float32(1.0/16)*float32(frac))
+	}
+	if C == 2 {
+		var sum float32
+		// Compute inter-channel correlation for low frequencies.
+		for i := 0; i < 8; i++ {
+			lo := int(EBands48000[i]) << uint(lm)
+			n := (int(EBands48000[i+1]) - int(EBands48000[i])) << uint(lm)
+			sum += innerProd64as32(X[lo:], X[N0+lo:], n)
+		}
+		sum = float32(1.0/8) * sum
+		if sum < 0 {
+			sum = -sum
+		}
+		if sum > 1 {
+			sum = 1
+		}
+		minXC := sum
+		for i := 8; i < intensity; i++ {
+			lo := int(EBands48000[i]) << uint(lm)
+			n := (int(EBands48000[i+1]) - int(EBands48000[i])) << uint(lm)
+			p := innerProd64as32(X[lo:], X[N0+lo:], n)
+			if p < 0 {
+				p = -p
+			}
+			if p < minXC {
+				minXC = p
+			}
+		}
+		if minXC < 0 {
+			minXC = -minXC
+		}
+		if minXC > 1 {
+			minXC = 1
+		}
+		// mid-side savings estimations based on the LF average
+		logXC := float32(celtLog2F32(float64(float32(1.001) - float32(sum*sum))))
+		// mid-side savings estimations based on min correlation
+		logXC2 := float32(celtLog2F32(float64(float32(1.001) - float32(minXC*minXC))))
+		if h := float32(0.5) * logXC; h > logXC2 {
+			logXC2 = h
+		}
+		if v := float32(0.75) * logXC; v > -4 {
+			trim += v
+		} else {
+			trim += -4
+		}
+		if v := *stereoSaving + float32(0.25); v < -(float32(0.5) * logXC2) {
+			*stereoSaving = v
+		} else {
+			*stereoSaving = -(float32(0.5) * logXC2)
+		}
+	}
+	// Estimate spectral tilt.
+	var diff float32
+	for c := 0; c < C; c++ {
+		for i := 0; i < end-1; i++ {
+			diff += float32(float32(bandLogE[i+c*nbEBands]) * float32(2+2*i-end))
+		}
+	}
+	diff /= float32(C * (end - 1))
+	tilt := (diff + 1) / 6
+	if tilt > 2 {
+		tilt = 2
+	}
+	if tilt < -2 {
+		tilt = -2
+	}
+	trim -= tilt
+	trim -= surroundTrim
+	trim -= 2 * tfEstimate
+	if analysis.Valid {
+		v := float32(2 * (analysis.TonalitySlope + float32(0.05)))
+		if v > 2 {
+			v = 2
+		}
+		if v < -2 {
+			v = -2
+		}
+		trim -= v
+	}
+	trimIndex := int(math.Floor(float64(float32(0.5) + trim)))
+	if trimIndex < 0 {
+		trimIndex = 0
+	}
+	if trimIndex > 10 {
+		trimIndex = 10
+	}
+	return trimIndex
+}
+
+// innerProd64as32 is celt_inner_prod over float32-valued float64 storage.
+func innerProd64as32(x, y []float64, n int) float32 {
+	var xy float32
+	for i := 0; i < n; i++ {
+		xy += float32(float32(x[i]) * float32(y[i]))
+	}
+	return xy
 }

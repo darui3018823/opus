@@ -346,6 +346,8 @@ $celtMdctDump = @'
    if( oracle_trace_enabled ) {
        fprintf(stderr, "[CELT_ENC_FRAME] N=%d LM=%d C=%d CC=%d overlap=%d silence=%d isTransient=%d shortBlocks=%d tf_estimate=%.9g tf_chan=%d pf_on=%d pitch_index=%d gain1=%.9g tapset=%d tell=%d total_bits=%d nbAvailableBytes=%d complexity=%d start=%d end=%d effEnd=%d\n",
            N, LM, C, CC, overlap, silence, isTransient, shortBlocks, (double)tf_estimate, tf_chan, pf_on, pitch_index, (double)gain1, prefilter_tapset, ec_tell(enc), total_bits, nbAvailableBytes, st->complexity, start, end, effEnd);
+       fprintf(stderr, "[CELT_ENC_ANALYSIS] valid=%d tonality=%.9g tonality_slope=%.9g activity=%.9g music_prob=%.9g max_pitch_ratio=%.9g bandwidth=%d noisiness=%.9g activity_probability=%.9g pitch_change=%d\n",
+           st->analysis.valid, (double)st->analysis.tonality, (double)st->analysis.tonality_slope, (double)st->analysis.activity, (double)st->analysis.music_prob, (double)st->analysis.max_pitch_ratio, st->analysis.bandwidth, (double)st->analysis.noisiness, (double)st->analysis.activity_probability, pitch_change);
        oracle_silk_dump_float("CELT_ENC_IN", in, CC*(N+overlap));
        oracle_silk_dump_float("CELT_ENC_FREQ", freq, CC*N);
    }

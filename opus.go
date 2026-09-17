@@ -158,8 +158,14 @@ type Encoder struct {
 	lastFinalRange uint32
 	inDTX          bool
 
-	forceChannels          int
-	lsbDepth               int
+	forceChannels int
+	lsbDepth      int
+	// inputLSBDepth is the precision of the API call (16 for Encode, 24 for
+	// Encode24 / EncodeFloat); libopus uses IMIN(call depth, OPUS_SET_LSB_DEPTH).
+	inputLSBDepth int
+	// analysis is the tonality analysis state (libopus st->analysis), run at
+	// complexity >= 7 on the raw input of every frame.
+	analysis               *celt.TonalityAnalysis
 	predictionDisabled     bool
 	phaseInversionDisabled bool
 	surroundEnergyMask     []float64
@@ -368,6 +374,7 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 		floatPCM[i] = float64(pcm[i]) / 32768.0
 	}
 
+	e.inputLSBDepth = 16
 	return e.encodeFloat(floatPCM, selectedFrameSize)
 }
 
@@ -389,6 +396,7 @@ func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608.0
 	}
+	e.inputLSBDepth = 24
 	return e.encodeFloat(floatPCM, selectedFrameSize)
 }
 
@@ -408,6 +416,7 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	}
 
 	selectedSize := selectedFrameSize * e.channels
+	e.inputLSBDepth = 24
 	return e.encodeFloat(pcm[:selectedSize], selectedFrameSize)
 }
 
@@ -457,6 +466,24 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	if err := e.selectCELTEncoder(frameSize); err != nil {
 		return nil, err
 	}
+	// opus_encode_native: lsb_depth = IMIN(call depth, OPUS_SET_LSB_DEPTH);
+	// the tonality analysis runs on the raw input at complexity >= 7 for
+	// 16-48 kHz input and feeds the CELT encoder (CELT_SET_ANALYSIS).
+	lsbDepth := e.lsbDepth
+	if e.inputLSBDepth > 0 && e.inputLSBDepth < lsbDepth {
+		lsbDepth = e.inputLSBDepth
+	}
+	e.celtEncoder.SetLSBDepth(lsbDepth)
+	var analysisInfo celt.AnalysisInfo
+	if e.complexity >= 7 && e.sampleRate >= 16000 && e.sampleRate <= 48000 {
+		if e.analysis == nil {
+			e.analysis = celt.NewTonalityAnalysis(e.sampleRate)
+		}
+		analysisInfo = e.analysis.Run(pcm, frameSize, e.channels, lsbDepth)
+	} else if e.analysis != nil && e.analysis.Initialized() {
+		e.analysis.Reset()
+	}
+	e.celtEncoder.SetAnalysis(analysisInfo)
 	if err := e.applyBitrateSetting(frameSize); err != nil {
 		return nil, err
 	}
@@ -2285,6 +2312,9 @@ func (e *Encoder) Reset() error {
 	}
 	if e.silkEncoder != nil {
 		e.silkEncoder.Reset()
+	}
+	if e.analysis != nil {
+		e.analysis.Reset()
 	}
 	if e.inputResampler != nil {
 		e.inputResampler.Reset()

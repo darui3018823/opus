@@ -511,6 +511,9 @@ func (e *Encoder) runPrefilter(in [][]float64, N, overlap int, enabled bool, tfE
 			gain1 = 0
 		}
 	}
+	if e.analysis.Valid {
+		gain1 = gain1 * e.analysis.MaxPitchRatio
+	}
 	// Gain threshold for enabling the prefilter/postfilter.
 	pfThreshold := float32(0.2)
 	// Adjusting the threshold based on rate and continuity.

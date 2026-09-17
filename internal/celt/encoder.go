@@ -84,6 +84,8 @@ type FrameTrace struct {
 	PFOn        bool
 	PitchIndex  int
 	PFGain      float64
+	PitchChange bool
+	Analysis    AnalysisInfo
 	TFRes       []int
 	TFSelect    int
 	TellCoarse  int       // ec_tell after the coarse energies
@@ -185,10 +187,13 @@ type Encoder struct {
 	// samples of the previous filtered frame. overlapMax is
 	// st->overlap_max, the peak of the previous frame's overlap region used
 	// by the input silence test.
-	prefilterMem    [][]float32
-	window32        []float32 // the overlap window in float32 for the comb filter
-	prefilterPre    [][]float32
-	prefilterY      []float32
+	prefilterMem [][]float32
+	window32     []float32 // the overlap window in float32 for the comb filter
+	prefilterPre [][]float32
+	prefilterY   []float32
+	// analysis is the tonality analysis result for the frame
+	// (CELT_SET_ANALYSIS); Valid is false below complexity 7.
+	analysis        AnalysisInfo
 	prefilterPeriod int
 	prefilterGain   float32
 	prefilterTapset int
@@ -561,6 +566,10 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// pitch search is enabled for this frame.
 	pfEnabled := nbAvailableBytes > 12*ch && !shared && !pcmSilence && tell0+16 <= totalBits
 	pf := e.runPrefilter(bufs, frameSize, ov, pfEnabled, float32(tfEstimate), nbAvailableBytes, toneFreq, toneishness, e.window32)
+	// pitch_change reads the previous period (clamped by run_prefilter) and
+	// gain, which are only replaced at the end of the frame.
+	pitchChange := (pf.gain > 0.4 || e.prefilterGain > 0.4) && (!e.analysis.Valid || e.analysis.Tonality > 0.3) &&
+		(float64(pf.pitchIndex) > 1.26*float64(e.prefilterPeriod) || float64(pf.pitchIndex) < 0.79*float64(e.prefilterPeriod))
 	// Pass 2: forward MDCT (M interleaved short blocks on transients, else one
 	// long block), band energy, and per-band normalisation.
 	//
@@ -762,7 +771,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// unbiased band energies; the boost symbols are written later
 	// (dynallocEncode), after spread, to keep the bitstream in decoder order.
 	dyn := dynallocAnalysis32(logE, logE2, e.prevBandEnergies, numBands, start, end, ch, e.lsbDepth, lm,
-		isTransient, vbrOn, constrainedVBR, effectiveBytes, nil, toneFreq, toneishness)
+		isTransient, vbrOn, constrainedVBR, effectiveBytes, nil, toneFreq, toneishness, &e.analysis)
 	offsets, importance := dyn.offsets, dyn.importance
 
 	// Time-frequency resolution. tf_analysis runs a Viterbi search over per-band
@@ -809,7 +818,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	etr(enc, "coarse")
 	{
 		tr := FrameTrace{IsTransient: isTransient, TFEstimate: tfEstimate, TFChan: tfChan, Intra: intra, TellCoarse: enc.ECTell(),
-			PFOn: pf.pfOn, PitchIndex: pf.pitchIndex, PFGain: float64(pf.gain)}
+			PFOn: pf.pfOn, PitchIndex: pf.pitchIndex, PFGain: float64(pf.gain), PitchChange: pitchChange, Analysis: e.analysis}
 		tr.OldBandE = append([]float64(nil), quantLogE...)
 		tr.CoarseError = append([]float64(nil), coarseError...)
 		if isTransient {
@@ -878,7 +887,13 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		}
 		surroundTrim = surroundMaskTrim(e.energyMask, ch, numBands, maskEnd)
 	}
-	allocTrim := allocTrimAnalysis(X, logE, numBands, end, lm, ch, frameLen, end, tfEstimate, surroundTrim, e.bitrate, start == 0)
+	allocTrim := 5
+	if start == 0 {
+		allocTrim = allocTrimAnalysis32(X, logE, numBands, end, lm, ch, frameLen, &e.analysis, &e.stereoSaving,
+			float32(tfEstimate), encIntensityForTrim(e, start, end), float32(surroundTrim), equivRate)
+	} else {
+		e.stereoSaving = 0
+	}
 	if enc.ECTell()+6 <= totalBits {
 		enc.EncodeIcdf(allocTrim, TrimICDF[:], 7)
 	}
@@ -915,7 +930,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			baseTarget += e.vbrOffset >> uint(lmDiff)
 		}
 		target := computeVBR(baseTarget, lm, equivRate, e.lastCodedBands, ch, e.intensity, constrainedVBR,
-			e.stereoSaving, dyn.totBoost, float32(tfEstimate), dyn.maxDepth, temporalVBR)
+			e.stereoSaving, dyn.totBoost, float32(tfEstimate), dyn.maxDepth, temporalVBR, &e.analysis, pitchChange)
 		// The current offset is removed from the target and the space used
 		// so far is added.
 		target += tell
@@ -1062,8 +1077,20 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 	pulses, eBits, finePriority, balance, intensity, codedBands, dualStereo :=
 		computeAllocationEncode(enc, encIntensity, encDualStereo,
-			numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets, e.lastCodedBands, end-1)
-	e.lastCodedBands = codedBands
+			numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets, e.lastCodedBands, e.signalBandwidth(end, equivRate))
+	// st->lastCodedBands moves by at most one band per frame.
+	if e.lastCodedBands != 0 {
+		v := codedBands
+		if v < e.lastCodedBands-1 {
+			v = e.lastCodedBands - 1
+		}
+		if v > e.lastCodedBands+1 {
+			v = e.lastCodedBands + 1
+		}
+		e.lastCodedBands = v
+	} else {
+		e.lastCodedBands = codedBands
+	}
 	e.lastTrace.Bits = bitsQ3
 	e.lastTrace.AntiCollapseRsv = antiCollapseRsv
 	e.lastTrace.CodedBands = codedBands
@@ -1404,6 +1431,11 @@ func (e *Encoder) SetBitrate(bitrate int) {
 }
 
 // SetComplexity sets the encoding complexity.
+// SetLSBDepth is OPUS_SET_LSB_DEPTH: the input precision the dynalloc
+// noise floor and the silence test assume (16 for int16 input, 24 for
+// float input).
+func (e *Encoder) SetLSBDepth(depth int) { e.lsbDepth = depth }
+
 func (e *Encoder) SetComplexity(complexity int) {
 	if complexity >= 0 && complexity <= 10 {
 		e.complexity = complexity
@@ -1446,3 +1478,49 @@ func (e *Encoder) DTX() bool { return e.dtx }
 
 // RateMode returns the current rate control mode.
 func (e *Encoder) GetRateMode() RateMode { return e.rateMode }
+
+// SetAnalysis is CELT_SET_ANALYSIS: the tonality analysis result the Opus
+// encoder computed for this frame (Valid false when the analysis is off).
+func (e *Encoder) SetAnalysis(info AnalysisInfo) { e.analysis = info }
+
+// signalBandwidth is the last band the allocation may keep: end-1 without
+// the analysis, otherwise the detected bandwidth floored by the bitrate.
+func (e *Encoder) signalBandwidth(end, equivRate int) int {
+	if !e.analysis.Valid {
+		return end - 1
+	}
+	C := e.mode.Channels
+	var minBandwidth int
+	switch {
+	case equivRate < 32000*C:
+		minBandwidth = 13
+	case equivRate < 48000*C:
+		minBandwidth = 16
+	case equivRate < 60000*C:
+		minBandwidth = 18
+	case equivRate < 80000*C:
+		minBandwidth = 19
+	default:
+		minBandwidth = 20
+	}
+	if e.analysis.Bandwidth > minBandwidth {
+		return e.analysis.Bandwidth
+	}
+	return minBandwidth
+}
+
+// encIntensityForTrim returns the intensity band alloc_trim_analysis reads
+// (st->intensity, clamped to the coded range for stereo).
+func encIntensityForTrim(e *Encoder, start, end int) int {
+	if e.mode.Channels != 2 {
+		return end
+	}
+	v := e.intensity
+	if v < start {
+		v = start
+	}
+	if v > end {
+		v = end
+	}
+	return v
+}

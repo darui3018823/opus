@@ -86,6 +86,10 @@ type FrameTrace struct {
 	PFGain      float64
 	PitchChange bool
 	Analysis    AnalysisInfo
+	PitchSearch int       // pitch_search result
+	PitchRaw    int       // remove_doubling period
+	PitchGain   float64   // remove_doubling gain
+	PitchBuf    []float32 // downsampled pitch buffer
 	TFRes       []int
 	TFSelect    int
 	TellCoarse  int       // ec_tell after the coarse energies
@@ -192,6 +196,7 @@ type Encoder struct {
 	window32        []float32 // the overlap window in float32 for the comb filter
 	prefilterPre    [][]float32
 	prefilterY      []float32
+	prefilterPitch  []float32
 	bandTellScratch []int
 	// analysis is the tonality analysis result for the frame
 	// (CELT_SET_ANALYSIS); Valid is false below complexity 7.
@@ -842,7 +847,8 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	etr(enc, "coarse")
 	{
 		tr := FrameTrace{IsTransient: isTransient, TFEstimate: tfEstimate, TFChan: tfChan, Intra: intra, TellCoarse: enc.ECTell(),
-			PFOn: pf.pfOn, PitchIndex: pf.pitchIndex, PFGain: float64(pf.gain), PitchChange: pitchChange, Analysis: e.analysis}
+			PFOn: pf.pfOn, PitchIndex: pf.pitchIndex, PFGain: float64(pf.gain), PitchChange: pitchChange, Analysis: e.analysis,
+			PitchSearch: pf.searchIndex, PitchRaw: pf.rawIndex, PitchGain: float64(pf.rawGain), PitchBuf: pf.pitchBuf}
 		tr.OldBandE = append([]float64(nil), quantLogE...)
 		tr.CoarseError = append([]float64(nil), coarseError...)
 		if isTransient {

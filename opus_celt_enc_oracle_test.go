@@ -62,8 +62,13 @@ type celtOracleFrame struct {
 	tellFinal int
 	// [CELT_ENC_QAB]
 	bandTellFrac []int
-	oldBandE     []float32
-	errorE       []float32
+	// [CELT_ENC_PITCH] / [CELT_ENC_PITCH2] / [SILK_CELT_ENC_PITCH_BUF]
+	pitchSearch int
+	pitchRaw    int
+	pitchGain   float32
+	pitchBuf    []float32
+	oldBandE    []float32
+	errorE      []float32
 	// [CELT_ENC_ANALYSIS]
 	anValid     bool
 	anTonality  float32
@@ -193,6 +198,16 @@ func runCELTOracleCmd(t *testing.T, fixture string, args ...string) []celtOracle
 			}
 			out[cur].tellCoarse, _ = strconv.Atoi(m[1])
 			out[cur].tfSelect, _ = strconv.Atoi(m[3])
+		case strings.HasPrefix(line, "[CELT_ENC_PITCH] "):
+			var prevP int
+			var prevG float64
+			fmt.Sscanf(line, "[CELT_ENC_PITCH] search=%d prev_period=%d prev_gain=%g", &out[cur].pitchSearch, &prevP, &prevG)
+		case strings.HasPrefix(line, "[CELT_ENC_PITCH2] "):
+			var g float64
+			fmt.Sscanf(line, "[CELT_ENC_PITCH2] index=%d gain=%g", &out[cur].pitchRaw, &g)
+			out[cur].pitchGain = float32(g)
+		case strings.HasPrefix(line, "[SILK_CELT_ENC_PITCH_BUF]"):
+			out[cur].pitchBuf = parseFloats(line)
 		case strings.HasPrefix(line, "[CELT_ENC_QAB]"):
 			m := celtOracleQabRe.FindStringSubmatch(line)
 			if m == nil {
@@ -372,6 +387,22 @@ func runCELTOracleCase(t *testing.T, tc celtOracleCase) {
 			t.Logf("frame %d: decisions Go{transient %v short %d tfEst %.6g tfChan %d pf %v/%d/%.6g intra %v tellCoarse %d tfSelect %d tellTF %d} C{transient %v short %d tfEst %.6g tfChan %d pf %v/%d/%.6g tell %d tellCoarse+tf %d tfSelect %d}",
 				f, tr.IsTransient, tr.ShortBlocks, tr.TFEstimate, tr.TFChan, tr.PFOn, tr.PitchIndex, tr.PFGain, tr.Intra, tr.TellCoarse, tr.TFSelect, tr.TellTF,
 				r.isTransient, r.shortBlocks, r.tfEstimate, r.tfChan, r.pfOn, r.pitchIndex, r.gain1, r.tell, r.tellCoarse, r.tfSelect)
+			if len(r.pitchBuf) > 0 || len(tr.PitchBuf) > 0 {
+				pb := make([]float64, len(tr.PitchBuf))
+				for i, v := range tr.PitchBuf {
+					pb[i] = float64(v)
+				}
+				pbAbs, _, pbEq, pbN := float32Stats(pb, r.pitchBuf)
+				t.Logf("frame %d: pitch Go{search %d raw %d gain %.9g} C{search %d raw %d gain %.9g} | pitch_buf eq %d/%d maxAbs %.3g",
+					f, tr.PitchSearch, tr.PitchRaw, tr.PitchGain, r.pitchSearch, r.pitchRaw, r.pitchGain, pbEq, pbN, pbAbs)
+				shown := 0
+				for i := 0; i < len(pb) && i < len(r.pitchBuf) && shown < 4; i++ {
+					if float32(pb[i]) != r.pitchBuf[i] {
+						t.Logf("frame %d: pitch_buf[%d] Go %.9g C %.9g (lens %d/%d)", f, i, float32(pb[i]), r.pitchBuf[i], len(pb), len(r.pitchBuf))
+						shown++
+					}
+				}
+			}
 			if r.anValid || tr.Analysis.Valid {
 				t.Logf("frame %d: analysis Go{valid %v ton %.9g slope %.9g act %.9g mp %.9g mpr %.9g bw %d pc %v} C{valid %v ton %.9g slope %.9g act %.9g mp %.9g mpr %.9g bw %d pc %v}",
 					f, tr.Analysis.Valid, tr.Analysis.Tonality, tr.Analysis.TonalitySlope, tr.Analysis.Activity, tr.Analysis.MusicProb, tr.Analysis.MaxPitchRatio, tr.Analysis.Bandwidth, tr.PitchChange,

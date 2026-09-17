@@ -433,6 +433,11 @@ type prefilterResult struct {
 	gain       float32
 	qg         int
 	tapset     int
+	// Diagnostics for the oracle comparison.
+	searchIndex int       // pitch_search result (max_period - index)
+	rawGain     float32   // remove_doubling gain before the 0.7 scaling
+	rawIndex    int       // remove_doubling period
+	pitchBuf    []float32 // the downsampled pitch buffer
 }
 
 // runPrefilter mirrors run_prefilter. in holds the per-channel analysis
@@ -462,6 +467,7 @@ func (e *Encoder) runPrefilter(in [][]float64, N, overlap int, enabled bool, tfE
 	}
 	var gain1 float32
 	pitchIndex := minPeriod
+	var res0 prefilterResult
 	switch {
 	case enabled && toneishness > 0.99:
 		// If we detect that the signal is dominated by a single tone, don't
@@ -490,16 +496,23 @@ func (e *Encoder) runPrefilter(in [][]float64, N, overlap int, enabled bool, tfE
 		}
 		gain1 = 0.75
 	case enabled && e.complexity >= 5:
-		pitchBuf := make([]float32, (maxPeriod+N)>>1)
+		if len(e.prefilterPitch) < (maxPeriod+N)>>1 {
+			e.prefilterPitch = make([]float32, (maxPeriod+N)>>1)
+		}
+		pitchBuf := e.prefilterPitch[:(maxPeriod+N)>>1]
 		pitchDownsample32(pre, pitchBuf, (maxPeriod+N)>>1, CC)
 		// Don't search for the fir last 1.5 octave of the range because
 		// there's too many false-positives due to short-term correlation.
 		pitchIndex = pitchSearch32(pitchBuf[maxPeriod>>1:], pitchBuf, N, maxPeriod-3*minPeriod)
 		pitchIndex = maxPeriod - pitchIndex
+		res0.searchIndex = pitchIndex
 		gain1, pitchIndex = removeDoubling32(pitchBuf, maxPeriod, minPeriod, N, pitchIndex, e.prefilterPeriod, e.prefilterGain)
 		if pitchIndex > maxPeriod-2 {
 			pitchIndex = maxPeriod - 2
 		}
+		res0.rawGain = gain1
+		res0.rawIndex = pitchIndex
+		res0.pitchBuf = pitchBuf
 		gain1 = float32(0.7) * gain1
 		if e.lossRate > 2 {
 			gain1 = float32(0.5) * gain1
@@ -541,7 +554,8 @@ func (e *Encoder) runPrefilter(in [][]float64, N, overlap int, enabled bool, tfE
 	if pfThreshold < 0.2 {
 		pfThreshold = 0.2
 	}
-	res := prefilterResult{tapset: e.tapsetDecision}
+	res := res0
+	res.tapset = e.tapsetDecision
 	if gain1 < pfThreshold {
 		gain1 = 0
 	} else {

@@ -420,6 +420,11 @@ $celtPvqDump = @'
    }
 '@
 $celtEnc = Replace-Checked $celtEnc "   if (qext_bytes == 0)`n      quant_energy_finalise(mode, start, end, oldBandE, error, fine_quant, fine_priority, nbCompressedBytes*8-ec_tell(enc), enc, C);`n" ($celtPvqDump.Replace("`r`n", "`n")) "celt_encoder final dump"
+# run_prefilter: pitch search intermediates.
+$celtPitch = "      pitch_index = max_period-pitch_index;`n      if (oracle_trace_enabled) fprintf(stderr, `"[CELT_ENC_PITCH] search=%d prev_period=%d prev_gain=%.9g\n`", pitch_index, st->prefilter_period, (double)st->prefilter_gain);`n"
+$celtEnc = Replace-Checked $celtEnc "      pitch_index = max_period-pitch_index;`n" $celtPitch "celt_encoder pitch dump"
+$celtPitch2 = "      if (pitch_index > max_period-QEXT_SCALE(2))`n         pitch_index = max_period-QEXT_SCALE(2);`n      if (oracle_trace_enabled) { fprintf(stderr, `"[CELT_ENC_PITCH2] index=%d gain=%.9g\n`", pitch_index, (double)gain1); oracle_silk_dump_float(`"CELT_ENC_PITCH_BUF`", pitch_buf, (max_period+N)>>1); }`n"
+$celtEnc = Replace-Checked $celtEnc "      if (pitch_index > max_period-QEXT_SCALE(2))`n         pitch_index = max_period-QEXT_SCALE(2);`n" $celtPitch2 "celt_encoder pitch dump 2"
 Set-Content "$bld\celt_encoder_instr.c" $celtEnc -NoNewline
 
 # bands.c: per-band range coder position after quant_all_bands codes a band.

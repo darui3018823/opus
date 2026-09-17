@@ -49,10 +49,8 @@ func TestAutoModeOracle(t *testing.T) {
 						signal:     signal,
 						app:        app,
 						// Not yet exact: a stereo input coded as a mono hybrid /
-						// CELT stream (12 kbps stereo without a voice hint), and the
-						// VOIP CELT-only prefilter pitch at frame 11 (near-tie).
-						exact: !(channels == 2 && bitrate == 12000 && signal != "voice") &&
-							!(app == "voip" && channels == 1 && (signal != "voice" || bitrate >= 80000) && bitrate >= 24000),
+						// CELT stream (12 kbps stereo without a voice hint).
+						exact: !(channels == 2 && bitrate == 12000 && (signal == "music" || (signal == "auto" && app == "audio"))),
 					})
 				}
 			}
@@ -132,6 +130,22 @@ func TestAutoModeOracle(t *testing.T) {
 						beAbs, _, beEq, beN := float32Stats(tr.BandE, r.bandE)
 						t.Logf("frame %d: celt in: eq %d/%d maxAbs %.3g | bandE: eq %d/%d maxAbs %.3g | Go{pf %v/%d/%.4g tellCoarse %d tellTF %d tellFinal %d} C{pf %v/%d/%.4g tell %d tellCoarse+tf %d tellFinal %d}",
 							f, inEq, inN, inAbs, beEq, beN, beAbs, tr.PFOn, tr.PitchIndex, tr.PFGain, tr.TellCoarse, tr.TellTF, tr.TellFinal, r.pfOn, r.pitchIndex, r.gain1, r.tell, r.tellCoarse, r.tellFinal)
+						shown := 0
+						for i := 0; i < len(inAll) && i < len(r.in) && shown < 6; i++ {
+							if float32(inAll[i]) != r.in[i] {
+								t.Logf("frame %d: in[%d] Go %.9g C %.9g", f, i, float32(inAll[i]), r.in[i])
+								shown++
+							}
+						}
+						pbAbs, _, pbEq, pbN := float32Stats(func() []float64 {
+							o := make([]float64, len(tr.PitchBuf))
+							for i, v := range tr.PitchBuf {
+								o[i] = float64(v)
+							}
+							return o
+						}(), r.pitchBuf)
+						t.Logf("frame %d: pitch Go{search %d raw %d gain %.9g} C{search %d raw %d gain %.9g} | pitch_buf eq %d/%d maxAbs %.3g",
+							f, tr.PitchSearch, tr.PitchRaw, tr.PitchGain, r.pitchSearch, r.pitchRaw, r.pitchGain, pbEq, pbN, pbAbs)
 					}
 				}
 			}

@@ -8,11 +8,9 @@ import (
 const (
 	// COMBFILTER_MINPERIOD = 15 samples (≈ 3200 Hz at 48 kHz)
 	combFilterMinPeriod = 15
-	// COMBFILTER_MAXPERIOD = 1022 samples (period encoded as 10-bit field → max 1022+15-1)
-	combFilterMaxPeriod = 1022
-	// The period is coded as an offset from combFilterMinPeriod with range
-	// MAX_PERIOD - (COMBFILTER_MINPERIOD-1) = 1024-14 = 1010 values.
-	combFilterPeriodRange = combFilterMaxPeriod - combFilterMinPeriod + 1
+	// COMBFILTER_MAXPERIOD = 1024 samples: the prefilter history length and
+	// the pitch search range (the coded period is clamped to MAXPERIOD-2).
+	combFilterMaxPeriod = 1024
 )
 
 // pfGainTable maps 3-bit gain index (0..7) to the gain scalar used in

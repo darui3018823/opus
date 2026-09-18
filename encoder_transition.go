@@ -81,7 +81,7 @@ func (e *Encoder) celtModeTransition(startBand int) error {
 func (e *Encoder) encodeCELTRedundancy(celtPCM []float64, nbytes, endBand int, celtToSilk bool) ([]byte, error) {
 	ch := e.channels
 	frame := len(celtPCM) / ch
-	n2, n4 := frame/4, frame/8
+	n2, n4 := e.sampleRate/200, e.sampleRate/400
 	encode := func(part []float64) ([]byte, error) {
 		var out []byte
 		err := e.celtWithFrameSize(celt.FrameSize5ms, func(enc *celt.Encoder) error {

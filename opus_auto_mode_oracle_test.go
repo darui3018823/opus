@@ -21,9 +21,8 @@ func TestAutoModeOracle(t *testing.T) {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
 	}
 	const (
-		rate      = 48000
-		frameSize = rate / 50
-		frames    = 12
+		rate   = 48000
+		frames = 12
 	)
 	type autoCase struct {
 		name       string
@@ -34,6 +33,7 @@ func TestAutoModeOracle(t *testing.T) {
 		signal     string
 		app        string
 		exact      bool
+		frameMs    int // 0 = 20
 	}
 	var cases []autoCase
 	for _, app := range []string{"voip", "audio"} {
@@ -51,16 +51,41 @@ func TestAutoModeOracle(t *testing.T) {
 						exact:      true,
 					})
 				}
+				// 40 / 60 ms packets: native SILK multi-frame packets and
+				// the repacketized 20 ms frames of hybrid / CELT-only.
+				for _, frameMs := range []int{40, 60} {
+					for _, bitrate := range []int{12000, 24000, 64000} {
+						if signal == "auto" {
+							continue
+						}
+						cases = append(cases, autoCase{
+							name:       fmt.Sprintf("%s/%s/ch%d/%dk/%dms", app, signal, channels, bitrate/1000, frameMs),
+							bitrate:    bitrate,
+							vbr:        true,
+							channels:   channels,
+							complexity: 5,
+							signal:     signal,
+							app:        app,
+							exact:      true,
+							frameMs:    frameMs,
+						})
+					}
+				}
 			}
 		}
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			frameMs := tc.frameMs
+			if frameMs == 0 {
+				frameMs = 20
+			}
+			frameSize := rate * frameMs / 1000
 			vbrArg := "0"
 			if tc.vbr {
 				vbrArg = "1"
 			}
-			ref := runCELTOracleCmd(t, "ref-speech", "--auto-enc", "48000", "ref-speech", strconv.Itoa(frames), strconv.Itoa(tc.bitrate), vbrArg, strconv.Itoa(tc.channels), strconv.Itoa(tc.complexity), tc.signal, tc.app)
+			ref := runCELTOracleCmd(t, "ref-speech", "--auto-enc", "48000", "ref-speech", strconv.Itoa(frames), strconv.Itoa(tc.bitrate), vbrArg, strconv.Itoa(tc.channels), strconv.Itoa(tc.complexity), tc.signal, tc.app, strconv.Itoa(frameMs))
 			app := ApplicationVOIP
 			if tc.app == "audio" {
 				app = ApplicationAudio

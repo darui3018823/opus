@@ -118,6 +118,8 @@ type Encoder struct {
 	// lastTrace is the final (non-LBRR) frame's trace.
 	pendingTrace FrameTrace
 	lastTrace    FrameTrace
+	// packetTraces holds the traces of every frame of the last packet.
+	packetTraces []FrameTrace
 	traceNLSFQ15 []int16
 	// pitchPredGain is psEncCtrl->predGain from find_pitch_lags (float32).
 	pitchPredGain float64
@@ -545,6 +547,10 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 		e.frameMaxBits, e.frameUseCBR = e.frameBitBudget(nFrames, i)
 		e.encodeRangeFrame(enc, signal, vadFlags[i], i > 0)
 		e.recordRateTrace(nFrames, tell, lbrrBits)
+		if i == 0 {
+			e.packetTraces = e.packetTraces[:0]
+		}
+		e.packetTraces = append(e.packetTraces, e.lastTrace)
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 	}
 	e.finishLBRRPacket(nFrames)
@@ -700,6 +706,10 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		st.Tell[0], st.SpeechActQ8[0], st.FirstAfterRst[0] = enc.ECTell(), e.frameVAD[i].speechActivityQ8, e.firstFrameAfterReset
 		e.encodeRangeFrame(enc, mid, vadFlags[0][i], i > 0)
 		e.recordRateTrace(nFrames, tell, lbrrBits)
+		if i == 0 {
+			e.packetTraces = e.packetTraces[:0]
+		}
+		e.packetTraces = append(e.packetTraces, e.lastTrace)
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 		if ms.midSideRates[1] > 0 {
 			st.SideCoded = true

@@ -353,7 +353,8 @@ static int run_hybrid_encoder_oracle(int argc, char **argv)
    automatic mode / bandwidth / channel decisions (no forced mode), with
    the SILK and CELT traces. signal = voice|music|auto, app = voip|audio.
    <bitrate> may be a comma-separated per-frame schedule ("12000,12000,64000"):
-   frame f uses entry min(f, n-1), so the last entry repeats. */
+   frame f uses entry min(f, n-1), so the last entry repeats. An optional
+   trailing <frame_ms> (20, 40 or 60; default 20) sets the packet duration. */
 #define AUTO_ENC_MAX_SCHEDULE 64
 static int parse_bitrate_schedule(const char *s, int *out, int max)
 {
@@ -368,11 +369,11 @@ static int parse_bitrate_schedule(const char *s, int *out, int max)
 
 static int run_auto_encoder_oracle(int argc, char **argv)
 {
-    int rate, frames, bitrate, complexity, vbr, channels, frame_size, err, frame, app;
+    int rate, frames, bitrate, complexity, vbr, channels, frame_size, err, frame, app, frame_ms;
     int schedule[AUTO_ENC_MAX_SCHEDULE], nschedule;
     const char *fixture, *signal, *appname;
     OpusEncoder *enc;
-    float pcm[960 * 2];
+    float pcm[2880 * 2];
     unsigned char packet[1500];
 
     if (argc < 4) {
@@ -393,12 +394,17 @@ static int run_auto_encoder_oracle(int argc, char **argv)
     complexity = (argc >= 9) ? atoi(argv[8]) : 5;
     signal = (argc >= 10) ? argv[9] : "voice";
     appname = (argc >= 11) ? argv[10] : "voip";
+    frame_ms = (argc >= 12) ? atoi(argv[11]) : 20;
     if (rate != 48000) {
         fprintf(stderr, "--auto-enc rate must be 48000\n");
         return 2;
     }
+    if (frame_ms != 20 && frame_ms != 40 && frame_ms != 60) {
+        fprintf(stderr, "--auto-enc frame_ms must be 20, 40 or 60\n");
+        return 2;
+    }
     app = strcmp(appname, "audio") == 0 ? OPUS_APPLICATION_AUDIO : OPUS_APPLICATION_VOIP;
-    frame_size = rate / 50;
+    frame_size = rate * frame_ms / 1000;
     enc = opus_encoder_create(rate, channels, app, &err);
     if (enc == NULL || err != OPUS_OK) {
         fprintf(stderr, "opus_encoder_create failed: %d\n", err);

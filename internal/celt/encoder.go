@@ -353,6 +353,17 @@ func (e *Encoder) Encode(samples []float64) ([]byte, error) {
 	return out, err
 }
 
+// EncodeMax encodes one CELT frame into at most maxBytes (opus_encode_native's
+// nb_compr_bytes = max_data_bytes - 1: the CBR size, or the cap a VBR frame
+// shrinks from).
+func (e *Encoder) EncodeMax(samples []float64, maxBytes int) ([]byte, error) {
+	if maxBytes > 1275 {
+		maxBytes = 1275
+	}
+	_, out, err := e.encodeRange(samples, nil, maxBytes, 0, -1, false)
+	return out, err
+}
+
 // SetEnergyMask sets the transient per-frame surround SMR. It is internal to
 // the parent surround encoder and is copied so callers may reuse their buffer.
 func (e *Encoder) SetEnergyMask(mask []float64) {

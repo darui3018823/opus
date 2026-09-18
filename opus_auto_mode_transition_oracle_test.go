@@ -23,10 +23,13 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
 	}
-	const (
-		rate      = 48000
-		frameSize = rate / 50
-	)
+	const rate = 48000
+	frameMs := 20
+	if v := os.Getenv("OPUS_TRANSITION_FRAME_MS"); v != "" {
+		// Probe: 40 or 60 ms packets.
+		frameMs, _ = strconv.Atoi(v)
+	}
+	frameSize := rate * frameMs / 1000
 	type transCase struct {
 		name     string
 		schedule []int
@@ -35,6 +38,7 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 		app      string
 		exact    bool
 		frames   int // 0 = 16
+		frameMs  int // 0 = 20
 	}
 	// Each schedule switches at frame 6 (and some back at frame 11).
 	sched := func(a, b int) []int {
@@ -118,6 +122,20 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 						frames:   160,
 					})
 				}
+				// 40 / 60 ms packets: the repacketized 20 ms frames of hybrid /
+				// CELT-only (to_celt on the last frame, redundancy on the first,
+				// the prefill on every frame) and native SILK multi-frame packets.
+				for _, mf := range []struct{ ms, a, b int }{{40, 12000, 128000}, {40, 128000, 12000}, {40, 8000, 24000}, {60, 128000, 12000}, {60, 8000, 24000}} {
+					cases = append(cases, transCase{
+						name:     fmt.Sprintf("%s/%s/ch%d/%dk-%dk-%dms", app, signal, channels, mf.a/1000, mf.b/1000, mf.ms),
+						schedule: sched(mf.a, mf.b),
+						channels: channels,
+						signal:   signal,
+						app:      app,
+						exact:    true,
+						frameMs:  mf.ms,
+					})
+				}
 			}
 		}
 	}
@@ -127,11 +145,16 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 			if frames == 0 {
 				frames = 16
 			}
+			frameMs, frameSize := frameMs, frameSize
+			if tc.frameMs != 0 {
+				frameMs = tc.frameMs
+				frameSize = rate * frameMs / 1000
+			}
 			parts := make([]string, len(tc.schedule))
 			for i, b := range tc.schedule {
 				parts[i] = strconv.Itoa(b)
 			}
-			ref, oracleStderr := runCELTOracleCmdWithStderr(t, "ref-speech", "--auto-enc", "48000", "ref-speech", strconv.Itoa(frames), strings.Join(parts, ","), "1", strconv.Itoa(tc.channels), "5", tc.signal, tc.app)
+			ref, oracleStderr := runCELTOracleCmdWithStderr(t, "ref-speech", "--auto-enc", "48000", "ref-speech", strconv.Itoa(frames), strings.Join(parts, ","), "1", strconv.Itoa(tc.channels), "5", tc.signal, tc.app, strconv.Itoa(frameMs))
 			silkRef := parseEncOracleFrames(t, oracleStderr, frames)
 			app := ApplicationVOIP
 			if tc.app == "audio" {
@@ -217,6 +240,9 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 							g := enc.silkEncoder.LastFrameTrace()
 							t.Logf("frame %d: silk signalType Go %d C %d pitchL Go %v C %v", f, g.SignalType, silkRef[f].stages.signalType, g.PitchL, silkRef[f].stages.pitchL)
 							t.Logf("frame %d: silk LTPCoef_Q14 Go %v C %v | LTPScale Go %d C %d | invGains Go %v C %v", f, g.LTPCoefQ14, silkRef[f].stages.ltpCoefQ14, g.LTPScaleQ14, silkRef[f].stages.ltpScaleQ14, g.InvGains, silkRef[f].stages.invGains)
+							for k, pt := range enc.silkEncoder.PacketFrameTraces() {
+								t.Logf("frame %d: silk sub-frame %d Go{signalType %d invGains %v gains %v nBits %d target %d loop %+v}", f, k, pt.SignalType, pt.InvGains, pt.GainsQ16, pt.NBits, pt.TargetRateBps, pt.Loop)
+							}
 							slg, xx, xX := enc.silkEncoder.LTPInputsTrace()
 							if len(xx) > 6 {
 								xx = xx[:6]

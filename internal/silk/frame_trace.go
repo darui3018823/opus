@@ -111,6 +111,12 @@ func (e *Encoder) LastFrameTrace() FrameTrace {
 	return e.lastTrace
 }
 
+// PacketFrameTraces returns the traces of every frame of the last packet
+// (the mid channel of a stereo packet).
+func (e *Encoder) PacketFrameTraces() []FrameTrace {
+	return append([]FrameTrace(nil), e.packetTraces...)
+}
+
 // recordNSQTrace captures the final NSQ inputs and outputs of a frame.
 func (e *Encoder) recordNSQTrace(
 	lpcQ12, lpcQ12Interp []int16, nlsfQ15 []int16,

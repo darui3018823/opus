@@ -126,6 +126,8 @@ type modeDecision struct {
 	silkPrefill     bool
 	silkPrefill2    bool // silk_bw_switch: re-init keeping the LP transition
 	redundancyBytes int
+	// bitrate is st->bitrate_bps for the packet (rounded to cbr_bytes in CBR).
+	bitrate int
 }
 
 // libopusVoiceEst is opus_encode_native's voice_est: 127 for a voice hint,
@@ -344,14 +346,6 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 		mode = framing.ModeSILKOnly
 	}
 	e.libopusBandwidth = bandwidth
-	// For the first frame at a new SILK bandwidth: leading redundancy and a
-	// prefill without resetting the sampling rate control.
-	if e.silkBwSwitch {
-		d.redundancy = true
-		d.celtToSilk = true
-		d.silkPrefill2 = true
-		e.silkBwSwitch = false
-	}
 	// If we decided to go with CELT, make sure redundancy is off, no matter
 	// what we decided earlier; otherwise size it (none when too small).
 	if mode == framing.ModeCELTOnly {
@@ -364,6 +358,7 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 		}
 	}
 	d.mode, d.bandwidth, d.equivRate, d.voiceEst = mode, bandwidth, equivRate, voiceEst
+	d.bitrate = bitrate
 	return d
 }
 

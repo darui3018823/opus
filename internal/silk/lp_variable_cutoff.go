@@ -50,7 +50,12 @@ func (e *Encoder) LPState() LPState { return e.lp }
 // SetLPState restores a transition filter state saved from another
 // encoder instance (silk_Encode prefill 2 re-initialises the encoder but
 // keeps sLP, with the old rate in saved_fs_kHz).
-func (e *Encoder) SetLPState(st LPState) { e.lp = st }
+func (e *Encoder) SetLPState(st LPState) {
+	e.lp = st
+	if e.side != nil {
+		e.side.lp = st
+	}
+}
 
 // lpInterpolateFilterTaps is silk_LP_interpolate_filter_taps.
 func lpInterpolateFilterTaps(ind int, facQ16 int32) (b [silkTransitionNB]int32, a [silkTransitionNA]int32) {
@@ -153,22 +158,26 @@ func (e *Encoder) lpFilterFrame(frame []float64) {
 // (opusCanSwitch, the packet after switchReady), it runs the transition
 // state machine and returns the internal rate the encoder must run at and
 // whether the Opus layer should prepare a switch (switchReady: the SILK
-// bit budget of this packet is reduced to leave room for redundancy). A
+// bit budget of this packet, payloadMs long, is reduced to leave room for
+// redundancy). A
 // returned rate other than the encoder's means a re-init at that rate,
 // carrying LPState (prefill 2; libopus runs this pass on the re-initialised
 // state with saved_fs_kHz, the Go caller runs it on the old encoder). The
 // side channel of a stereo stream runs the machine on its own state too
 // (silk_control_encoder per channel, the rate forced to the mid's), and
 // each channel reporting switchReady takes the redundancy room off maxBits.
-func (e *Encoder) ControlAudioBandwidth(desiredFsHz int, opusCanSwitch bool) (fsKHz int, switchReady bool) {
+func (e *Encoder) ControlAudioBandwidth(desiredFsHz int, opusCanSwitch bool, payloadMs int) (fsKHz int, switchReady bool) {
+	if payloadMs <= 0 {
+		payloadMs = e.frameMs
+	}
 	fsKHz, switchReady = e.controlAudioBandwidthState(desiredFsHz, opusCanSwitch)
 	if switchReady {
 		// Make room for redundancy.
-		e.maxBits -= e.maxBits * 5 / (e.frameMs + 5)
+		e.maxBits -= e.maxBits * 5 / (payloadMs + 5)
 	}
 	if e.channels == 2 && e.streamChannels == 2 && e.side != nil {
 		if _, ready := e.side.controlAudioBandwidthState(desiredFsHz, opusCanSwitch); ready {
-			e.maxBits -= e.maxBits * 5 / (e.frameMs + 5)
+			e.maxBits -= e.maxBits * 5 / (payloadMs + 5)
 			switchReady = true
 		}
 	}

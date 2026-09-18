@@ -123,7 +123,10 @@ type Encoder struct {
 	// silkBwSwitch is st->silk_bw_switch: SILK signalled switchReady, the
 	// next packet switches its internal rate (leading redundancy, prefill 2).
 	silkBwSwitch bool
-	toMono       bool
+	// nonfinalFrame is st->nonfinal_frame: this 20 ms frame is not the last
+	// of a multi-frame packet, so SILK may not switch its rate after it.
+	nonfinalFrame bool
+	toMono        bool
 	// autoBandwidth is st->auto_bandwidth (the hysteresis memory of the
 	// automatic bandwidth decision); silkFramesCoded marks that the SILK
 	// encoder has coded frames since (re)initialisation, after which the
@@ -553,6 +556,61 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	} else {
 		e.pendingMode = -1
 	}
+	if e.libopusModePolicy && nFrames >= 1 {
+		if decision.silkPrefill && e.silkEncoder != nil {
+			// CELT-only -> SILK/hybrid: silk_InitEncoder, once per packet; the
+			// encoder starts at the rate of the decided bandwidth (16 kHz for
+			// hybrid) and every frame of the packet prefills it.
+			rate := 16000
+			if decision.mode == framing.ModeSILKOnly {
+				rate = e.silkInternalRateForBandwidth(decision.bandwidth)
+			}
+			e.silkFramesCoded = false
+			if err := e.rebuildSILKEncoder(rate); err != nil {
+				return nil, err
+			}
+			if err := e.applyBitrateSetting(frameSize); err != nil {
+				return nil, err
+			}
+		}
+		// opus_encode_native: packets longer than 20 ms in hybrid / CELT-only
+		// mode (or longer than 60 ms) are coded as 20 ms frames with the
+		// packet's decisions and repacketized; the rest is one frame.
+		if (nFrames > 1 && decision.mode != framing.ModeSILKOnly) || nFrames > 3 {
+			return e.encodeMultiframeLibopus(raw, frameSize, nFrames, maxDataBytes, decision)
+		}
+	}
+	return e.encodeDecidedFrame(raw, frameSize, nFrames, maxDataBytes, decision)
+}
+
+// encodeDecidedFrame is opus_encode_frame_native: it codes one packet (a
+// 20 ms frame, or a 40/60 ms SILK-only packet) whose mode, bandwidth,
+// channels and transition flags were decided by the caller. Under the
+// libopus policy the per-frame parts of the decision are applied here: the
+// silk_bw_switch redundancy and prefill, and the redundancy size from this
+// frame's byte budget.
+func (e *Encoder) encodeDecidedFrame(pcm []float64, frameSize, nFrames, maxDataBytes int, decision modeDecision) ([]byte, error) {
+	raw := pcm
+	if e.libopusModePolicy && nFrames >= 1 {
+		// For the first frame at a new SILK bandwidth: leading redundancy
+		// and a prefill without resetting the sampling rate control.
+		if e.silkBwSwitch {
+			decision.redundancy, decision.celtToSilk, decision.silkPrefill2 = true, true, true
+			e.silkBwSwitch = false
+		}
+		// If we decided to go with CELT, make sure redundancy is off, no
+		// matter what we decided earlier; otherwise size it from this frame.
+		if decision.mode == framing.ModeCELTOnly {
+			decision.redundancy = false
+		}
+		decision.redundancyBytes = 0
+		if decision.redundancy {
+			decision.redundancyBytes = computeRedundancyBytes(maxDataBytes, decision.bitrate, e.sampleRate/frameSize, e.streamChannelsOrInput())
+			if decision.redundancyBytes == 0 {
+				decision.redundancy = false
+			}
+		}
+	}
 	pcm = e.conditionInput(pcm, frameSize, nFrames)
 	var silkPrefill []float64
 	if e.libopusModePolicy && (decision.silkPrefill || decision.silkPrefill2) && frameSize >= e.frameSize {
@@ -600,7 +658,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		if e.silkOnlyLibopusPath(nFrames) {
 			// opus_encode_native's single-frame SILK-only packet: rate,
 			// redundancy, internal sample rate control and prefills.
-			out, err = e.encodeSILKOnlyPacketLibopus(pcm, celtPCM, decision, maxDataBytes, silkPrefill, decision.silkPrefill2)
+			out, err = e.encodeSILKOnlyPacketLibopus(pcm, celtPCM, nFrames, decision, maxDataBytes, silkPrefill, decision.silkPrefill2)
 		} else {
 			if err := e.selectSILKInternalRate(frameSize, decision.bandwidth); err != nil {
 				return nil, err
@@ -624,16 +682,6 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	}
 	bw := decision.bandwidth
 	hybrid := decision.mode == framing.ModeHybrid && e.silkEncoder != nil && nFrames >= 1 && nFrames <= 6
-	if hybrid && silkPrefill != nil {
-		// CELT-only -> hybrid: silk_InitEncoder (the prefill follows once the
-		// SILK rate of the packet is known).
-		if err := e.rebuildSILKEncoder(16000); err != nil {
-			return nil, err
-		}
-		if err := e.applyBitrateSetting(frameSize); err != nil {
-			return nil, err
-		}
-	}
 	if hybrid && e.silkSampleRate != 16000 {
 		if err := e.rebuildSILKEncoder(16000); err != nil {
 			return nil, err
@@ -673,7 +721,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 
 	if hybrid {
 		e.updateLBRRCoded(framing.ModeHybrid, bw, e.sampleRate/frameSize)
-		out, redundancyEmitted, err := e.encodeHybridPacket(pcm, celtPCM, nFrames, bw, redundancy, celtToSilk, redundancyBytes, silkPrefill, decision.silkPrefill2)
+		out, redundancyEmitted, err := e.encodeHybridPacket(pcm, celtPCM, nFrames, bw, redundancy, celtToSilk, redundancyBytes, silkPrefill, decision.silkPrefill2, maxDataBytes, decision.bitrate)
 		if err == nil {
 			// to_celt: after the deferred frame the real switch happens, so the
 			// next packet's predecessor is CELT-only (opus_encode_native).
@@ -720,7 +768,11 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 
 	// Single-frame, no padding: compact code-0 packet (TOC + payload).
 	if nFrames == 1 && e.padBytes <= 0 {
-		compressed, err := e.encodeOneCELTFrame(celtPCM)
+		celtMax := 0
+		if e.libopusModePolicy {
+			celtMax = maxDataBytes - 1
+		}
+		compressed, err := e.encodeOneCELTFrameMax(celtPCM, celtMax)
 		if err != nil {
 			return nil, err
 		}
@@ -1042,7 +1094,7 @@ func (e *Encoder) narrowAutoHybridBandwidth(pcm []float64, bw int) int {
 // previous CELT-only state; otherwise trailing, before a switch to
 // CELT-only); redundancyBytesHint is the size libopus decided with the mode
 // (it lowers bits_target) or 0 to size it here.
-func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, redundancy, celtToSilk bool, redundancyBytesHint int, silkPrefill []float64, prefill2 bool) ([]byte, bool, error) {
+func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, redundancy, celtToSilk bool, redundancyBytesHint int, silkPrefill []float64, prefill2 bool, maxDataBytesIn, bitrateIn int) ([]byte, bool, error) {
 	streamChannels := e.celtStreamChannels()
 	toc, err := framing.GenerateTOCExt(framing.ModeHybrid, bw, streamChannels, framing.FrameSize20ms)
 	if err != nil {
@@ -1068,7 +1120,13 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 	cbr := e.rateMode == celt.RateModeCBR
 	bitrateBps := e.bitrate
 	maxDataBytes := MaxFrameBytes + 1
-	if cbr {
+	if e.libopusModePolicy && maxDataBytesIn > 0 {
+		// opus_encode_frame_native: the frame's max_data_bytes (the packet
+		// bound, or its share of a multi-frame packet) and the packet's
+		// (CBR-rounded) bitrate.
+		maxDataBytes = maxDataBytesIn
+		bitrateBps = bitrateIn
+	} else if cbr {
 		cbrBytes := (bitrateToBits(e.bitrate, e.sampleRate, e.frameSize) + 4) / 8
 		if cbrBytes > maxDataBytes {
 			cbrBytes = maxDataBytes
@@ -1127,7 +1185,7 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		if err != nil {
 			return nil, false, err
 		}
-		if switchReady && nFrames == 1 {
+		if switchReady && nFrames == 1 && !e.nonfinalFrame {
 			// For the first frame at a new SILK bandwidth: a trailing
 			// redundant frame now, the switch on the next packet.
 			if bytes := computeRedundancyBytes(maxDataBytes, bitrateBps, e.sampleRate/e.frameSize, streamChannels); bytes != 0 {
@@ -1792,6 +1850,12 @@ func celtEncoderIndex(frameSize int) int {
 // encodeOneCELTFrame resamples one 20 ms PCM chunk (if needed) and encodes it
 // into a single CELT frame payload (no TOC byte).
 func (e *Encoder) encodeOneCELTFrame(pcm []float64) ([]byte, error) {
+	return e.encodeOneCELTFrameMax(pcm, 0)
+}
+
+// encodeOneCELTFrameMax is encodeOneCELTFrame with nb_compr_bytes bounded by
+// maxBytes when maxBytes > 0 (opus_encode_frame_native's max_data_bytes - 1).
+func (e *Encoder) encodeOneCELTFrameMax(pcm []float64, maxBytes int) ([]byte, error) {
 	streamChannels := e.celtStreamChannels()
 	e.celtEncoder.SetStreamChannels(streamChannels)
 	if e.channels == 2 {
@@ -1805,7 +1869,13 @@ func (e *Encoder) encodeOneCELTFrame(pcm []float64) ([]byte, error) {
 	}
 	celtInput := e.celtInputFrame(pcm)
 
-	compressed, err := e.celtEncoder.Encode(celtInput)
+	var compressed []byte
+	var err error
+	if maxBytes > 0 {
+		compressed, err = e.celtEncoder.EncodeMax(celtInput, maxBytes)
+	} else {
+		compressed, err = e.celtEncoder.Encode(celtInput)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("CELT encoding failed: %w", err)
 	}

@@ -26,7 +26,6 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 	const (
 		rate      = 48000
 		frameSize = rate / 50
-		frames    = 16
 	)
 	type transCase struct {
 		name     string
@@ -35,6 +34,7 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 		signal   string
 		app      string
 		exact    bool
+		frames   int // 0 = 16
 	}
 	// Each schedule switches at frame 6 (and some back at frame 11).
 	sched := func(a, b int) []int {
@@ -95,16 +95,44 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 					app:      app,
 					exact:    true,
 				})
+				// SILK internal rate transitions (NB <-> WB): the variable
+				// low-pass, switchReady with its trailing redundancy and the
+				// re-init + prefill of the switch; 8k->24k switches up within
+				// 16 frames, 24k->8k needs the 128-frame down transition.
+				cases = append(cases, transCase{
+					name:     fmt.Sprintf("%s/%s/ch%d/8k-24k", app, signal, channels),
+					schedule: sched(8000, 24000),
+					channels: channels,
+					signal:   signal,
+					app:      app,
+					exact:    true,
+				})
+				if signal == "voice" {
+					cases = append(cases, transCase{
+						name:     fmt.Sprintf("%s/%s/ch%d/24k-8k-long", app, signal, channels),
+						schedule: sched(24000, 8000),
+						channels: channels,
+						signal:   signal,
+						app:      app,
+						exact:    true,
+						frames:   160,
+					})
+				}
 			}
 		}
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			frames := tc.frames
+			if frames == 0 {
+				frames = 16
+			}
 			parts := make([]string, len(tc.schedule))
 			for i, b := range tc.schedule {
 				parts[i] = strconv.Itoa(b)
 			}
-			ref := runCELTOracleCmd(t, "ref-speech", "--auto-enc", "48000", "ref-speech", strconv.Itoa(frames), strings.Join(parts, ","), "1", strconv.Itoa(tc.channels), "5", tc.signal, tc.app)
+			ref, oracleStderr := runCELTOracleCmdWithStderr(t, "ref-speech", "--auto-enc", "48000", "ref-speech", strconv.Itoa(frames), strings.Join(parts, ","), "1", strconv.Itoa(tc.channels), "5", tc.signal, tc.app)
+			silkRef := parseEncOracleFrames(t, oracleStderr, frames)
 			app := ApplicationVOIP
 			if tc.app == "audio" {
 				app = ApplicationAudio
@@ -160,6 +188,14 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 				if pkt[0] == r.packet[0] {
 					tocMatch++
 				}
+				if os.Getenv("OPUS_TRANSITION_SILK_STAGES") != "" && enc.silkEncoder != nil && f < len(silkRef) && silkRef[f].stages.haveNSQ {
+					g := enc.silkEncoder.LastFrameTrace()
+					slg, _, _ := enc.silkEncoder.LTPInputsTrace()
+					t.Logf("frame %d: silk signalType %d sum_log_gain_in %d", f, g.SignalType, slg)
+					if d := stageDiffs(g, silkRef[f].stages); len(d) > 0 {
+						t.Logf("frame %d: silk stage diffs %v", f, d)
+					}
+				}
 				if os.Getenv("OPUS_TRANSITION_VBR_TRACE") != "" {
 					tr := enc.celtEncoder.LastFrameTrace()
 					t.Logf("frame %d: celt bitrate %d encoder bitrate %d rateMode %v", f, enc.celtEncoder.Bitrate(), enc.bitrate, enc.celtEncoder.GetRateMode())
@@ -175,6 +211,49 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 						prefix++
 					}
 					t.Logf("frame %d (%d bps): Go %d B TOC %#x / C %d B TOC %#x, common prefix %d", f, bitrate, len(pkt), pkt[0], len(r.packet), r.packet[0], prefix)
+					if enc.silkEncoder != nil {
+						t.Logf("frame %d: silk rate %d lp %+v allowSwitch %v bwSwitch %v decidedBW %d", f, enc.silkSampleRate, enc.silkEncoder.LPState(), enc.silkEncoder.AllowBandwidthSwitch(), enc.silkBwSwitch, enc.libopusBandwidth)
+						if f < len(silkRef) && silkRef[f].stages.haveNSQ {
+							g := enc.silkEncoder.LastFrameTrace()
+							t.Logf("frame %d: silk signalType Go %d C %d pitchL Go %v C %v", f, g.SignalType, silkRef[f].stages.signalType, g.PitchL, silkRef[f].stages.pitchL)
+							t.Logf("frame %d: silk LTPCoef_Q14 Go %v C %v | LTPScale Go %d C %d | invGains Go %v C %v", f, g.LTPCoefQ14, silkRef[f].stages.ltpCoefQ14, g.LTPScaleQ14, silkRef[f].stages.ltpScaleQ14, g.InvGains, silkRef[f].stages.invGains)
+							slg, xx, xX := enc.silkEncoder.LTPInputsTrace()
+							if len(xx) > 6 {
+								xx = xx[:6]
+							}
+							t.Logf("frame %d: silk LTP inputs Go{sum_log_gain %d xX %v XX[0:6] %v}", f, slg, xX, xx)
+							for _, d := range stageDiffs(g, silkRef[f].stages) {
+								t.Logf("frame %d: silk %s", f, d)
+							}
+							if d := loopDiffs(g, silkRef[f]); d != "" {
+								t.Logf("frame %d: silk loop %s", f, d)
+							}
+						}
+					}
+					if dump := os.Getenv("OPUS_TRANSITION_SILK_DUMP"); dump != "" && enc.silkEncoder != nil {
+						var sb strings.Builder
+						for _, v := range enc.silkEncoder.InputBufferFLP() {
+							fmt.Fprintln(&sb, v)
+						}
+						_ = os.WriteFile(dump, []byte(sb.String()), 0o644)
+						{
+							var sb3 strings.Builder
+							for _, v := range enc.silkEncoder.PitchResidualTrace() {
+								fmt.Fprintln(&sb3, v)
+							}
+							_ = os.WriteFile(dump+".res", []byte(sb3.String()), 0o644)
+						}
+						if side := enc.silkEncoder.SideEncoder(); side != nil {
+							var sb2 strings.Builder
+							for _, v := range side.InputBufferFLP() {
+								fmt.Fprintln(&sb2, v)
+							}
+							_ = os.WriteFile(dump+".side", []byte(sb2.String()), 0o644)
+						}
+						t.Logf("frame %d: SILK x_buf written to %s (speech_activity_Q8 %d) stereo %+v prefill %+v", f, dump, enc.silkEncoder.LastSpeechActivityQ8(), enc.silkEncoder.LastStereoTrace(), enc.silkEncoder.LastPrefillStereoTrace())
+						st := enc.silkEncoder.LastFrameTrace()
+						t.Logf("frame %d: SILK rate Go{nBits %d target %d exceeded %d usedLBRR %d tell %d loop %+v}", f, st.NBits, st.TargetRateBps, st.NBitsExceeded, st.NBitsUsedLBRR, st.Tell, st.Loop)
+					}
 					lo := prefix - 4
 					if lo < 0 {
 						lo = 0

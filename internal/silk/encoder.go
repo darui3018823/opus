@@ -144,15 +144,20 @@ type Encoder struct {
 	// time since the last allowed switch).
 	allowBandwidthSwitch     bool
 	timeSinceSwitchAllowedMs int32
-	nBitsUsedLBRR            int
-	targetRateBps            int
-	prevLagForPitch          int       // Previous frame pitch lag (0 if unvoiced)
-	ltpCorrState             float64   // Normalized LTP correlation from prev frame
-	pitchResidual            []float64 // res_pitch: whitened [history|frame|LTP_ORDER] from the pitch analysis
-	curLTP                   *frameLTPResult
-	firstFrameAfterReset     bool // True until the first frame after reset is encoded
-	curPitchLagIndex         int  // Lag index selected for the current frame
-	curPitchContourIndex     int  // Pitch contour index for the current frame
+	// lp is silk_LP_state: the variable low-pass of an internal rate
+	// transition (lp_variable_cutoff.go).
+	lp LPState
+	// lastPrefillStereo traces the stereo analysis of the last Prefill.
+	lastPrefillStereo    StereoFrameTrace
+	nBitsUsedLBRR        int
+	targetRateBps        int
+	prevLagForPitch      int       // Previous frame pitch lag (0 if unvoiced)
+	ltpCorrState         float64   // Normalized LTP correlation from prev frame
+	pitchResidual        []float64 // res_pitch: whitened [history|frame|LTP_ORDER] from the pitch analysis
+	curLTP               *frameLTPResult
+	firstFrameAfterReset bool // True until the first frame after reset is encoded
+	curPitchLagIndex     int  // Lag index selected for the current frame
+	curPitchContourIndex int  // Pitch contour index for the current frame
 
 	// ltpSumLogGainQ7 is the cumulative log prediction gain across subframes
 	// (silk sum_log_gain_Q7), limiting the total LTP gain for stability.
@@ -779,6 +784,9 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	// analysis and quantisation stage below works on the 5 ms delayed coded
 	// frame taken from the look-ahead buffer.
 	vadSA := e.frameVADResult(signal)
+	// silk_LP_variable_cutoff: the transition low-pass runs on the frame
+	// after the VAD and before it enters x_buf.
+	e.lpFilterFrame(signal)
 	signal = e.pushInputFrame(signal)
 	// silk_HP_variable_cutoff runs before this frame's VAD result is
 	// installed, so it sees the previous frame's activity and quality.
@@ -830,6 +838,10 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 			ltpSum := e.ltpSumLogGainQ7
 			_, _, ltpCoeffsQ14, ltpPredCodGain = e.selectLTPGainsVQWithGain(signal, bootstrap.lpcQ12, pitchLags)
 			e.ltpSumLogGainQ7 = ltpSum
+		} else {
+			// silk_find_pred_coefs_FLP: an unvoiced frame clears the
+			// cumulative LTP prediction gain (sum_log_gain_Q7).
+			e.ltpSumLogGainQ7 = 0
 		}
 		// silk_noise_shape_analysis_FLP runs once per frame; its AR/tilt/LF/
 		// harmonic shaping drives every NSQ pass of this frame.
@@ -3415,6 +3427,7 @@ func encodePulseSigns(enc *entcode.Encoder, blocks []pulseBlock, signalType, qua
 // first_frame_after_reset. Everything else (VAD, input buffers, high-pass,
 // frame counter, LTP correlation) carries on.
 func (e *Encoder) resetForSideReactivation() {
+	e.lp.InLPState = [2]int32{}
 	e.shapeHarmSmooth32 = 0
 	e.shapeTiltSmooth32 = 0
 	e.shapeHarmSmooth = 0
@@ -3490,6 +3503,7 @@ func (e *Encoder) Reset() {
 	e.frameCounter = 0
 	e.allowBandwidthSwitch = false
 	e.timeSinceSwitchAllowedMs = 0
+	e.lp = LPState{}
 	e.prevLagForPitch = 0
 	e.ltpCorrState = 0
 	e.pitchResidual = nil

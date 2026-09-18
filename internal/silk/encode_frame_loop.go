@@ -129,6 +129,10 @@ func (e *Encoder) encodeFrameLoop(
 		}
 		if signalType == SignalTypeVoiced {
 			res.ltpCoeffsQ14, res.ltpScaleQ14, res.pitchLags = e.encodePitchAndLTP(enc, signal, nlsf.lpcQ12, pitchGain, conditional)
+		} else {
+			// silk_find_pred_coefs_FLP: an unvoiced (or inactive) frame
+			// clears the cumulative LTP prediction gain (sum_log_gain_Q7).
+			e.ltpSumLogGainQ7 = 0
 		}
 	}
 

@@ -296,6 +296,8 @@ func (e *Encoder) selectLTPGainsVQWithGain(signal []float64, lpcQ12 []int16, pit
 		}
 		XX, xX := e.findLTP(res, frameStart, pitchLags, subfrLen)
 		var r frameLTPResult
+		r.sumLogGainIn = e.ltpSumLogGainQ7
+		r.XX, r.xX = XX, xX
 		r.perIdx, r.gainIndices, r.sumLogGainQ7, r.predGainDB = silkQuantLTPGains(XX, xX, subfrLen, e.nSubframes, e.ltpSumLogGainQ7)
 		r.ltpCoeffsQ14 = ltpCoeffsForPerSubframe(r.perIdx, r.gainIndices)
 		e.curLTP = &r
@@ -313,6 +315,30 @@ type frameLTPResult struct {
 	ltpCoeffsQ14 [][5]int16
 	sumLogGainQ7 int32
 	predGainDB   float64
+	// Inputs, for oracle comparisons.
+	sumLogGainIn int32
+	XX           [][ltpOrder * ltpOrder]float64
+	xX           [][ltpOrder]float64
+}
+
+// LTPInputsTrace returns the last frame's LTP quantiser inputs: the
+// sum_log_gain_Q7 state before the frame and the normalised correlation
+// matrices / vectors (silk_find_LTP_FLP), flattened subframe-major.
+func (e *Encoder) LTPInputsTrace() (sumLogGainQ7 int32, xx []float32, xX []float32) {
+	if e.curLTP == nil {
+		return e.ltpSumLogGainQ7, nil, nil
+	}
+	for _, m := range e.curLTP.XX {
+		for _, v := range m {
+			xx = append(xx, float32(v))
+		}
+	}
+	for _, v := range e.curLTP.xX {
+		for _, x := range v {
+			xX = append(xX, float32(x))
+		}
+	}
+	return e.curLTP.sumLogGainIn, xx, xX
 }
 
 func (e *Encoder) selectLTPGainsVQ(signal []float64, lpcQ12 []int16, pitchLags []int) (perIdx int, gainIndices []int, ltpCoeffsQ14 [][5]int16) {

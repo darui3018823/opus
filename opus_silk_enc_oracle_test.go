@@ -135,14 +135,14 @@ var (
 	encOracleXInfoRe  = regexp.MustCompile(`speech_activity_Q8=(-?\d+) variable_HP_smth1_Q15=(-?\d+)`)
 	encOracleValuesRe = regexp.MustCompile(`v\[[\d,]+\]=(\S+)`)
 	encOracleStereoRe = regexp.MustCompile(`^\[SILK_ENC_STEREO\] frame=(\d+) ix=(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+) midOnly=(\d) rates=(-?\d+),(-?\d+) width_prev=(-?\d+) smth_width=(-?\d+) silent_side_len=(-?\d+) pred_prev=(-?\d+),(-?\d+) prev_decode_only_middle=(\d)`)
-	encOracleChRe     = regexp.MustCompile(`^\[SILK_ENC_CH\] n=(\d) channelRate_bps=(-?\d+) tell=(\d+) speech_activity_Q8=(-?\d+) first_frame_after_reset=(\d)`)
+	encOracleChRe     = regexp.MustCompile(`^\[SILK_ENC_CH\] n=(\d) channelRate_bps=(-?\d+) tell=(-?\d+) speech_activity_Q8=(-?\d+) first_frame_after_reset=(\d)`)
 	encOracleLoopRe   = regexp.MustCompile(`^\[SILK_ENC_LOOP\] iter=(\d+) nBits=(\d+) maxBits=(-?\d+) useCBR=(\d) gainMult_Q8=(-?\d+) gainsID=(-?\d+) found_lower=(\d) found_upper=(\d) Lambda=(\S+) quantOffset=(\d) gains=(-?\d+),(-?\d+),(-?\d+),(-?\d+)`)
 
 	encOracleLoopDamageRe = regexp.MustCompile(`^\[SILK_ENC_LOOP_DAMAGE\] iter=(\d+) nBits=(\d+) maxBits=(-?\d+)`)
 	encOracleNSQInRe      = regexp.MustCompile(`^\[SILK_ENC_NSQ_INPUT\] signalType=(\d+) quantOffset=(\d+) seed=(\d+) Lambda_Q10=(-?\d+) LTP_scale_Q14=(-?\d+)`)
 	encOracleRowsRe       = regexp.MustCompile(`rows=(\d+) cols=(\d+)`)
 	encOracleInterpRe     = regexp.MustCompile(`interp=(\d+)`)
-	encOracleTargetRe     = regexp.MustCompile(`nBits=(-?\d+) TargetRate_bps=(-?\d+) nBitsExceeded=(-?\d+) nBitsUsedLBRR=(-?\d+) curr_nBitsUsedLBRR=(-?\d+) nFramesEncoded=\d+ nFramesPerPacket=\d+ tell=(\d+)`)
+	encOracleTargetRe     = regexp.MustCompile(`nBits=(-?\d+) TargetRate_bps=(-?\d+) nBitsExceeded=(-?\d+) nBitsUsedLBRR=(-?\d+) curr_nBitsUsedLBRR=(-?\d+) nFramesEncoded=\d+ nFramesPerPacket=\d+ tell=(-?\d+)`)
 	encOracleMinInvRe     = regexp.MustCompile(`minInvGain=(\S+)`)
 	encOracleShapeRe      = regexp.MustCompile(`inputQuality=(\S+) codingQuality=(\S+) SNR_dB_Q7=(-?\d+) warping_Q16=(-?\d+) predGain=(\S+) LTPCorr=(\S+)`)
 )
@@ -237,6 +237,14 @@ func runEncOracleComplexity(t *testing.T, rate int, fixture string, frames, bitr
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("enc_oracle %d %s: %v\n%s", rate, fixture, err, stderr.String())
 	}
+	return parseEncOracleFrames(t, stderr.String(), frames)
+}
+
+// parseEncOracleFrames parses the SILK encoder dumps of an oracle run (one
+// frame per [ENC_INPUT] line) into encOracleFrame records; other oracle
+// modes (--auto-enc) emit the same dumps for their SILK-coded packets.
+func parseEncOracleFrames(t *testing.T, stderrText string, frames int) []encOracleFrame {
+	t.Helper()
 	out := make([]encOracleFrame, frames)
 	cur := 0
 	parseFloats := func(line string) []float32 {
@@ -251,7 +259,7 @@ func runEncOracleComplexity(t *testing.T, rate int, fixture string, frames, bitr
 		}
 		return vals
 	}
-	sc := bufio.NewScanner(strings.NewReader(stderr.String()))
+	sc := bufio.NewScanner(strings.NewReader(stderrText))
 	sc.Buffer(make([]byte, 1<<20), 1<<26)
 	for sc.Scan() {
 		line := sc.Text()

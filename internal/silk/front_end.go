@@ -236,3 +236,9 @@ func (e *Encoder) InputBufferFLP() []float32 {
 func (e *Encoder) LastSpeechActivityQ8() int {
 	return e.speechActivityQ8
 }
+
+// PitchResidualTrace returns the pitch-analysis residual (res_pitch) of the
+// last coded frame, in the int16 scale, for oracle comparisons.
+func (e *Encoder) PitchResidualTrace() []float64 {
+	return append([]float64(nil), e.pitchResidual...)
+}

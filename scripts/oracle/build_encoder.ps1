@@ -50,6 +50,8 @@ $pcmBufDump = @'
     }
 '@
 $opusEnc = Replace-Checked $opusEnc "    (void)float_api;`n#endif`n" ($pcmBufDump.Replace("`r`n", "`n") + "`n") "opus_encoder pcm_buf"
+# SILK prefill input.
+$opusEnc = Replace-Checked $opusEnc "            pcm_silk = st->delay_buffer;`n" "            pcm_silk = st->delay_buffer;`n            if (oracle_trace_enabled) { int _i; fprintf(stderr, `"[ENC_PREFILL] prefill=%d n=%d`", prefill, st->encoder_buffer*st->channels); for (_i = 0; _i < st->encoder_buffer*st->channels; _i++) fprintf(stderr, `" v[%d]=%.17g`", _i, (double)pcm_silk[_i]); fprintf(stderr, `"\n`"); }`n" "opus_encoder prefill dump"
 Set-Content "$bld\opus_encoder_instr.c" $opusEnc -NoNewline
 
 # encode_frame_FLP.c: dump inputBuf and x_buf once the new frame is in place.
@@ -178,6 +180,17 @@ $__new = @"
     oracle_silk_dump_float("ENC_RESNRG_FLP", psEncCtrl->ResNrg, psEnc->sCmn.nb_subfr);
 "@
 $findPred = Replace-Checked $findPred $__old ($__new.Replace("`r`n", "`n")) "stage anchor 8"
+$__old = "        /* Quantize LTP gain parameters */`n"
+$__new = @"
+        if( oracle_trace_enabled ) {
+            oracle_silk_dump_float("ENC_LTP_XX", XXLTP, psEnc->sCmn.nb_subfr * LTP_ORDER * LTP_ORDER);
+            oracle_silk_dump_float("ENC_LTP_XX_IN", xXLTP, psEnc->sCmn.nb_subfr * LTP_ORDER);
+            oracle_silk_dump_float("ENC_RES_PITCH", res_pitch - psEnc->sCmn.ltp_mem_length, psEnc->sCmn.ltp_mem_length + psEnc->sCmn.frame_length + psEnc->sCmn.la_pitch);
+            fprintf(stderr, "[SILK_ENC_LTP_STATE] sum_log_gain_Q7=%d\n", psEnc->sCmn.sum_log_gain_Q7);
+        }
+        /* Quantize LTP gain parameters */
+"@
+$findPred = Replace-Checked $findPred $__old ($__new.Replace("`r`n", "`n")) "find_pred_coefs LTP dump"
 Set-Content "$bld\find_pred_coefs_FLP_instr.c" $findPred
 
 $noiseShape = Get-Content "$silk\float\noise_shape_analysis_FLP.c" -Raw

@@ -15,6 +15,9 @@ func (e *Encoder) Prefill(pcm []float64) {
 	if n <= 0 {
 		return
 	}
+	// silk_Encode clears allowBandwidthSwitch before every frame and only
+	// recomputes it after a coded one, so a prefill leaves it cleared.
+	e.allowBandwidthSwitch = false
 	stereo := e.channels == 2 && e.streamChannels == 2 && e.side != nil
 	if stereo {
 		if len(pcm) < 2*n {
@@ -32,8 +35,21 @@ func (e *Encoder) Prefill(pcm []float64) {
 		}
 		left := floatFrameToInt16(e.frontEndFrame(l, false))
 		right := floatFrameToInt16(e.side.frontEndFrame(r, false))
-		// TargetRate_bps of a 10 ms prefill is the bitrate itself.
-		ms := e.stereoState.lrToMS(left, right, fsKHz, n, int32(e.bitrate), e.speechActivityQ8, e.toMono)
+		// TargetRate_bps of the 10 ms prefill: the bitrate less the bit
+		// reservoir excess (no LBRR share), clamped to [5000, bitrate].
+		total := e.bitrate - e.nBitsExceeded*1000/silkBitReservoirDecayTimeMs
+		if total > e.bitrate {
+			total = e.bitrate
+		}
+		if total < 5000 {
+			total = 5000
+		}
+		predBefore := e.stereoState.predPrevQ13
+		ms := e.stereoState.lrToMS(left, right, fsKHz, n, int32(total), e.speechActivityQ8, e.toMono)
+		e.lastPrefillStereo = StereoFrameTrace{Ix: ms.ix, MidOnly: ms.midOnly, Rates: ms.midSideRates, TotalRate: total,
+			WidthPrev: e.stereoState.widthPrevQ14, SmthWidth: e.stereoState.smthWidthQ14, PredPrev: e.stereoState.predPrevQ13,
+			PrevDecodeOnlyMiddle: e.prevOnlyMiddle, PrevSpeechActQ8: e.speechActivityQ8}
+		e.lastPrefillStereo.Tell = [2]int{int(predBefore[0]), int(predBefore[1])}
 		mid := int16FrameToFloat(ms.mid)
 		side := int16FrameToFloat(ms.side)
 		if !ms.midOnly {
@@ -78,6 +94,7 @@ func (e *Encoder) prefillFrame(frame []float64) {
 	} else {
 		e.noSpeechCounter = 0
 	}
+	e.lpFilterFrame(frame)
 	ltpMem := e.ltpMemLength()
 	la := e.laShapeLength()
 	want := ltpMem + la + e.frameSize
@@ -97,6 +114,10 @@ func (e *Encoder) prefillFrame(frame []float64) {
 	e.frameCounter++
 }
 
+// LastPrefillStereoTrace returns the stereo analysis of the last prefill
+// (Tell carries the predictor state before it).
+func (e *Encoder) LastPrefillStereoTrace() StereoFrameTrace { return e.lastPrefillStereo }
+
 // installVAD makes a VAD result the encoder's current speech activity,
 // input tilt and quality (the fields silk_VAD_GetSA_Q8 writes to the state).
 func (e *Encoder) installVAD(res silkVADResult) {
@@ -107,4 +128,33 @@ func (e *Encoder) installVAD(res silkVADResult) {
 	e.inputQuality = res.inputQuality
 	e.inputQualityB = res.inputQualityBand
 	e.inputQualityBandQ15 = res.inputQualityBandQ15
+}
+
+// CarryPacketState copies the state silk_Encode keeps across a prefill 2
+// re-initialisation (silk_init_encoder resets the per-channel states only):
+// the stereo state, the bit reservoir, the LBRR usage average, the previous
+// internal channel count, the bandwidth switch bookkeeping, the transition
+// low-pass state and the mono input history sample.
+func (e *Encoder) CarryPacketState(src *Encoder) {
+	if src == nil || src == e {
+		return
+	}
+	e.stereoState = src.stereoState
+	e.prevOnlyMiddle = src.prevOnlyMiddle
+	e.nBitsExceeded = src.nBitsExceeded
+	e.nBitsUsedLBRR = src.nBitsUsedLBRR
+	e.prevStreamChannels = src.prevStreamChannels
+	e.timeSinceSwitchAllowedMs = src.timeSinceSwitchAllowedMs
+	e.allowBandwidthSwitch = src.allowBandwidthSwitch
+	e.lp = src.lp
+	if e.channels == 2 && e.streamChannels == 2 && e.side != nil {
+		// prefill 2 restores the mid channel's sLP into every internal
+		// channel.
+		e.side.lp = src.lp
+	}
+	if len(src.encInputDelay) == len(e.encInputDelay) {
+		copy(e.encInputDelay, src.encInputDelay)
+	} else {
+		e.encInputDelay = append([]float64(nil), src.encInputDelay...)
+	}
 }

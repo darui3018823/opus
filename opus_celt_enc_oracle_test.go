@@ -128,6 +128,14 @@ func runHybridEncOracle(t *testing.T, fixture string, frames, bitrate int, bw st
 
 func runCELTOracleCmd(t *testing.T, fixture string, args ...string) []celtOracleFrame {
 	t.Helper()
+	out, _ := runCELTOracleCmdWithStderr(t, fixture, args...)
+	return out
+}
+
+// runCELTOracleCmdWithStderr is runCELTOracleCmd returning the oracle's
+// stderr too, for the SILK dumps of mixed-mode runs (parseEncOracleFrames).
+func runCELTOracleCmdWithStderr(t *testing.T, fixture string, args ...string) ([]celtOracleFrame, string) {
+	t.Helper()
 	frames, _ := strconv.Atoi(args[3])
 	cmd := exec.Command(encOraclePath(), args...)
 	var stderr bytes.Buffer
@@ -281,7 +289,7 @@ func runCELTOracleCmd(t *testing.T, fixture string, args ...string) []celtOracle
 			out[cur].havePacket = true
 		}
 	}
-	return out
+	return out, stderr.String()
 }
 
 // float32Stats returns the maximum absolute difference, the maximum

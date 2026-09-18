@@ -1227,3 +1227,46 @@ rate transition (`sLP` variable cutoff, `silk_bw_switch` / prefill=2),
 the digital-silence shortcut (policy), `decide_fec` narrowing in hybrid,
 the default policy switch (user decision). The linked SIMD libopus stays a
 non-goal.
+
+### 2026-09-18 (late morning): SILK internal rate transitions
+
+- `internal/silk/lp_variable_cutoff.go`: `silk_LP_variable_cutoff`
+  (interpolated elliptic low-pass over TRANSITION_FRAMES = 256 frames,
+  `silk_biquad_alt_stride1`, the `silk_Transition_LP_{A,B}_Q28` tables)
+  applied per channel to the frame after the VAD and before x_buf (also in
+  a prefill); `silk_control_audio_bandwidth` as `ControlAudioBandwidth`:
+  the per-channel state machine (mode 1 up / -2 down at double speed,
+  `switchReady` when the transition ends or an up-switch starts, the
+  `maxBits -= maxBits*5/(payloadSize_ms+5)` room for redundancy — applied
+  once per channel reporting it, side included), `InWBModeWithoutVariableLP`.
+- `encoder_silk_libopus.go`: `encodeSILKOnlyPacketLibopus` codes a
+  single-frame SILK-only packet like `opus_encode_native` (bits_target,
+  maxBits, the internal rate control, redundancy layout, `ret` bytes kept
+  even when the range coder needs fewer, CBR padding) and
+  `silkInternalRateControl` runs the switch: `silk_bw_switch` ->
+  `celt_to_silk` leading redundancy + prefill 2 (`CarryPacketState`: the
+  re-init keeps the top-level `silk_encoder` state — stereo state, bit
+  reservoir, LBRR average, `nPrevChannelsInternal`, `allowBandwidthSwitch`,
+  the mono input history sample — and restores the mid's sLP into every
+  channel), the decision with `opusCanSwitch` on the old encoder, the
+  re-init at the new rate (12 kHz MB between 8 and 16), the prefill with
+  the reservoir-adjusted target rate for the stereo analysis and cleared
+  `allowBandwidthSwitch`, then the main control pass. Hybrid packets run
+  the same control (desired 16 kHz) and arm the switch too. A fresh SILK
+  encoder starts at the rate of the decided bandwidth; hybrid packets now
+  mark SILK frames as coded so a later SILK-only packet does not re-init.
+- Bugs found on the way: `sum_log_gain_Q7` was never cleared on unvoiced /
+  inactive frames (libopus `find_pred_coefs` resets it) — a 24k→8k stream
+  diverged at the next voiced frame once the LTP gain budget bound; the
+  Go-policy perf digests moved accordingly.
+- `TestAutoModeTransitionOracle` gains `8k-24k` (all app/signal/channel
+  cells) and `24k-8k-long` (voice, 160 frames: the 128-frame down
+  transition, the switch to 12 kHz and its LP opening) — all byte-identical
+  and gated; `OPUS_TRANSITION_SCHEDULE` probes any schedule,
+  `OPUS_TRANSITION_SILK_STAGES` / `OPUS_TRANSITION_SILK_DUMP` log the SILK
+  stage diffs (`parseEncOracleFrames` on the mixed-mode oracle output).
+
+Remaining (encoder): CELT/hybrid at 8–24 kHz input, the digital-silence
+shortcut (policy), `decide_fec` narrowing in hybrid, multi-frame (40/60 ms)
+packets under the libopus policy, the default policy switch (user
+decision). The linked SIMD libopus stays a non-goal.

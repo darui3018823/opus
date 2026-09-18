@@ -1063,9 +1063,11 @@ under that policy (`TestAutoModeTransitionOracle`, 108 bitrate-schedule
 cells byte-identical): the deferred switch to CELT-only with a trailing
 redundant frame, the leading redundant frame plus SILK re-init and 10 ms
 prefill after CELT-only, the CELT reset / 2.5 ms prefill / prediction-off
-on every mode change, and SILK's `allowBandwidthSwitch`. Non-48 kHz
-CELT/hybrid input, the SILK internal-rate transition and the silence
-shortcut remain.
+on every mode change, SILK's `allowBandwidthSwitch`, and the SILK internal
+rate transitions (`silk_LP_variable_cutoff`, `silk_control_audio_bandwidth`,
+`silk_bw_switch` with the prefill-2 re-init; `8k-24k` and 160-frame
+`24k-8k-long` cells). Non-48 kHz CELT/hybrid input, multi-frame packets
+under that policy and the silence shortcut remain.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

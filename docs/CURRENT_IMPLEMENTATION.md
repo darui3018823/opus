@@ -1066,8 +1066,10 @@ prefill after CELT-only, the CELT reset / 2.5 ms prefill / prediction-off
 on every mode change, SILK's `allowBandwidthSwitch`, and the SILK internal
 rate transitions (`silk_LP_variable_cutoff`, `silk_control_audio_bandwidth`,
 `silk_bw_switch` with the prefill-2 re-init; `8k-24k` and 160-frame
-`24k-8k-long` cells). Non-48 kHz CELT/hybrid input, multi-frame packets
-under that policy and the silence shortcut remain.
+`24k-8k-long` cells), and 40/60 ms packets (native SILK multi-frame
+packets, and hybrid / CELT-only packets coded as repacketized 20 ms frames
+like `encode_multiframe_packet`, including their transitions). Non-48 kHz
+CELT/hybrid input and the silence shortcut remain.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

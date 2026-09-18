@@ -1270,3 +1270,38 @@ Remaining (encoder): CELT/hybrid at 8–24 kHz input, the digital-silence
 shortcut (policy), `decide_fec` narrowing in hybrid, multi-frame (40/60 ms)
 packets under the libopus policy, the default policy switch (user
 decision). The linked SIMD libopus stays a non-goal.
+
+### 2026-09-18 (noon): 40 / 60 ms packets under the libopus policy
+
+- `encodeFloat` is split like libopus 1.6.1: the packet-level decisions
+  (`decideLibopusMode` at the packet's frame size) and then
+  `opus_encode_frame_native` per frame (`encodeDecidedFrame`: conditioning,
+  the `silk_bw_switch` redundancy/prefill 2, the redundancy size from the
+  frame's `max_data_bytes`, the mode paths). `encoder_multiframe.go` is
+  `encode_multiframe_packet`: hybrid / CELT-only packets over 20 ms (and
+  SILK-only over 60 ms, as 2×40 / 2×60 / 5×20) are coded as 20 ms frames
+  with the packet's decisions — `nonfinal_frame` holds back a SILK
+  bandwidth switch, `to_celt` applies to the last frame only, the leading
+  redundancy to the first, the prefill of a CELT-only → SILK/hybrid switch
+  repeats on every frame (libopus re-initialises the channel states each
+  time; the top-level `silk_encoder` state is carried), each frame is
+  bounded by `curr_max = min(bitrate bytes per 20 ms, share of the packet)`
+  (`celt.Encoder.EncodeMax`, the hybrid sizing takes the frame's
+  `max_data_bytes` and the packet's CBR-rounded bitrate), and the frames
+  are repacketized (code 1/2/3, CBR padded to `cbr_bytes`; the
+  `out_data_bytes` bound of a VBR packet is the reference tools' 1500). A
+  packet coded during the stereo→mono delay leaves `force_channels` at
+  mono, as libopus does. SILK-only 40/60 ms packets are one native SILK
+  packet (`encodeSILKOnlyPacketLibopus` takes nFrames; the redundant frame
+  covers the packet's first/last 5 ms, `payloadSize_ms` feeds the
+  switchReady room). `silk_InitEncoder` now happens once per packet in
+  `encodeFloat`.
+- `TestAutoModeOracle` gains 40/60 ms cells (12/24/64 kbps, voice/music,
+  mono/stereo, both applications) and `TestAutoModeTransitionOracle` the
+  `12k-128k-40ms`, `128k-12k-40ms`, `8k-24k-40ms`, `128k-12k-60ms`,
+  `8k-24k-60ms` cells — all byte-identical and gated
+  (`OPUS_TRANSITION_FRAME_MS` probes other durations).
+
+Remaining (encoder): CELT/hybrid at 8–24 kHz input, the digital-silence
+shortcut (policy), `decide_fec` narrowing in hybrid, the default policy
+switch (user decision). The linked SIMD libopus stays a non-goal.

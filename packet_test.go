@@ -101,6 +101,23 @@ func TestInspectPacketSampleRateAndValidation(t *testing.T) {
 	if _, err := InspectPacket(overlong, SampleRate48kHz); !errors.Is(err, ErrInvalidPacket) {
 		t.Fatalf("over-120 ms packet error = %v, want ErrInvalidPacket", err)
 	}
+
+	frames = make([][]byte, 6)
+	for i := range frames {
+		frames[i] = []byte{0}
+	}
+	payload, code, err = packOpusFrames(frames, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	maximum := append([]byte{byte(31<<3) | byte(code)}, payload...)
+	info, err := InspectPacket(maximum, SampleRate48kHz)
+	if err != nil {
+		t.Fatalf("InspectPacket at 120 ms: %v", err)
+	}
+	if info.SampleCount != FrameSize120ms {
+		t.Fatalf("120 ms packet sample count = %d, want %d", info.SampleCount, FrameSize120ms)
+	}
 }
 
 func checkPacketValue(t *testing.T, name string, fn func([]byte) (int, error), packet []byte, want int) {

@@ -134,3 +134,13 @@ func TestRepacketizerRejectsMismatchAndOverDuration(t *testing.T) {
 		t.Fatalf("over-duration error = %v, want ErrInvalidPacket", err)
 	}
 }
+
+func TestRepacketizerRejectsEmptyOutput(t *testing.T) {
+	rp := NewRepacketizer()
+	if _, err := rp.Out(); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("empty Out error = %v, want ErrBadArg", err)
+	}
+	if _, err := rp.OutRange(0, 1); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("empty OutRange error = %v, want ErrBadArg", err)
+	}
+}

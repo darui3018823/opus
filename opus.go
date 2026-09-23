@@ -143,6 +143,9 @@ type Encoder struct {
 	packetLSBDepth   int
 	// frameSILKDTX marks a frame SILK DTX dropped (no delay-buffer tail).
 	frameSILKDTX bool
+	// packetEquivRate is the libopus policy's equiv_rate for the packet
+	// being coded (0 outside it).
+	packetEquivRate int
 	// analysisReadPos / analysisReadSubframe are analysis_read_pos_bak and
 	// analysis_read_subframe_bak: the analysis read position before this
 	// packet's run_analysis (-1 when the analysis did not run).
@@ -580,13 +583,14 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		}
 	}
 	var decision modeDecision
-	if e.libopusModePolicy && frameSize >= e.frameSize {
+	if e.libopusModePolicy {
 		// is_digital_silence, the peak signal energy and silk_mode.useDTX:
 		// SILK's own DTX only runs when the generalized DTX cannot.
 		isSilence := isDigitalSilence(raw, lsbDepth)
 		e.trackPeakSignalEnergy(raw, isSilence, analysisInfo)
 		e.silkUseDTX = e.dtx && !(analysisInfo.Valid || isSilence)
 		e.frameIsSilence, e.frameAnalysis, e.packetLSBDepth = isSilence, analysisInfo, lsbDepth
+		defer func() { e.packetEquivRate = 0 }()
 		e.decideStreamChannels(frameSize, framing.ModeSILKOnly)
 		decision = e.decideLibopusMode(raw, frameSize, maxDataBytes, analysisInfo)
 		if decision.mode == framing.ModeCELTOnly && e.toMono {
@@ -594,8 +598,14 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 			e.streamChannels = 1
 		}
 		e.pendingMode = decision.mode
+		e.packetEquivRate = decision.equivRate
 	} else {
 		e.pendingMode = -1
+	}
+	if e.libopusModePolicy && frameSize < e.frameSize {
+		// A 2.5/5/10 ms packet is one frame of its own size; below 10 ms
+		// the decision is always CELT-only.
+		nFrames = 1
 	}
 	if e.libopusModePolicy && nFrames >= 1 {
 		if decision.silkPrefill && e.silkEncoder != nil {
@@ -712,7 +722,10 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 		silkPrefill = e.silkPrefillInput()
 	}
 	celtPCM := e.delayedCELTInput(pcm)
-	if frameSize < e.frameSize {
+	short := frameSize < e.frameSize
+	if short && (!e.libopusModePolicy || decision.mode != framing.ModeCELTOnly) {
+		// TODO(10 ms SILK/hybrid): the libopus policy codes these as SILK or
+		// hybrid; the Go encoder has no 10 ms SILK/hybrid packets yet.
 		return e.encodeShortCELTPacket(raw, celtPCM)
 	}
 	if e.libopusModePolicy {
@@ -866,7 +879,11 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 	// input PCM, so every frame in a packet still shares the same bandwidth/config.
 	e.celtEncoder.SetEndBand(celtEndBandForFramingBW(bw))
 	streamChannels := e.celtStreamChannels()
-	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, bw, streamChannels, framing.FrameSize20ms)
+	tocFrameSize := framing.FrameSize20ms
+	if short {
+		tocFrameSize = e.internalFrameSize
+	}
+	toc, err := framing.GenerateTOCExt(framing.ModeCELTOnly, bw, streamChannels, tocFrameSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate TOC: %w", err)
 	}

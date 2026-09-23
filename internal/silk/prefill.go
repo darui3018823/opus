@@ -11,7 +11,9 @@ package silk
 // untouched. bitrate is the frame's SILK bitrate (the stereo analysis
 // reads it as the prefill's target rate).
 func (e *Encoder) Prefill(pcm []float64) {
-	n := e.frameSize / 2
+	// silk_Encode's prefill always runs one 10 ms frame (payloadSize_ms =
+	// 10), whatever the packet's frame duration.
+	n := e.sampleRate / 100
 	if n <= 0 {
 		return
 	}

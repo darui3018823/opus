@@ -130,7 +130,9 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 				// 40 / 60 ms packets: the repacketized 20 ms frames of hybrid /
 				// CELT-only (to_celt on the last frame, redundancy on the first,
 				// the prefill on every frame) and native SILK multi-frame packets.
-				for _, mf := range []struct{ ms, a, b int }{{40, 12000, 128000}, {40, 128000, 12000}, {40, 8000, 24000}, {60, 128000, 12000}, {60, 8000, 24000}} {
+				// 48k-16k: a stereo hybrid -> mono SILK switch inside a
+				// multi-frame packet leaves force_channels = 1 for good.
+				for _, mf := range []struct{ ms, a, b int }{{40, 12000, 128000}, {40, 128000, 12000}, {40, 8000, 24000}, {40, 48000, 16000}, {60, 128000, 12000}, {60, 8000, 24000}, {60, 48000, 16000}} {
 					cases = append(cases, transCase{
 						name:     fmt.Sprintf("%s/%s/ch%d/%dk-%dk-%dms", app, signal, channels, mf.a/1000, mf.b/1000, mf.ms),
 						schedule: sched(mf.a, mf.b),

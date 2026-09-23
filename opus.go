@@ -482,7 +482,13 @@ func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
 // that are exact multiples (1..6) of the 20 ms base are split into consecutive
 // 20 ms frames and packed as one Opus packet (RFC 6716 §3.2).
 func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
-	if e.forceChannels == ChannelsMono && e.channels == ChannelsStereo {
+	// The Go policy codes a forced-mono stereo input with a separate mono
+	// encoder. libopus instead keeps its one encoder and codes a mono stream
+	// (stream_channels = force_channels, the CELT MDCT and SILK mid averaged
+	// from both channels), which is also what a 40/60 ms packet coded during
+	// the stereo->mono delay leaves behind: it sets force_channels = 1 for
+	// good.
+	if !e.libopusModePolicy && e.forceChannels == ChannelsMono && e.channels == ChannelsStereo {
 		mono := make([]float64, frameSize)
 		for i := 0; i < frameSize; i++ {
 			mono[i] = 0.5 * (pcm[2*i] + pcm[2*i+1])

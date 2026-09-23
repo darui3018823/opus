@@ -151,7 +151,7 @@ func parseFloat32Values(line string) []float32 {
 	ms := encOracleValuesRe.FindAllStringSubmatch(line, -1)
 	vals := make([]float32, len(ms))
 	for i, m := range ms {
-		f, _ := strconv.ParseFloat(m[1], 64)
+		f, _ := parseOracleFloat(m[1])
 		vals[i] = float32(f)
 	}
 	return vals
@@ -180,7 +180,7 @@ func parseIntValues(line string) []int {
 	for i, m := range ms {
 		v, err := strconv.Atoi(m[1])
 		if err != nil {
-			f, _ := strconv.ParseFloat(m[1], 64)
+			f, _ := parseOracleFloat(m[1])
 			v = int(f)
 		}
 		vals[i] = v
@@ -203,6 +203,22 @@ func parseIntRows(line string) [][]int {
 		}
 	}
 	return out
+}
+
+// parseOracleFloat parses a value the C oracle printed with %g / %.17g,
+// including the NaN and infinity spellings of the different C runtimes
+// (glibc prints "-nan", MSVCRT "-nan(ind)").
+func parseOracleFloat(s string) (float64, error) {
+	switch t := strings.TrimPrefix(strings.TrimPrefix(strings.ToLower(s), "-"), "+"); {
+	case strings.HasPrefix(t, "nan"), strings.Contains(t, "#qnan"), strings.Contains(t, "#ind"):
+		return math.NaN(), nil
+	case strings.HasPrefix(t, "inf"), strings.Contains(t, "#inf"):
+		if strings.HasPrefix(s, "-") {
+			return math.Inf(-1), nil
+		}
+		return math.Inf(1), nil
+	}
+	return strconv.ParseFloat(s, 64)
 }
 
 func encOraclePath() string {
@@ -251,7 +267,7 @@ func parseEncOracleFrames(t *testing.T, stderrText string, frames int) []encOrac
 		ms := encOracleValuesRe.FindAllStringSubmatch(line, -1)
 		vals := make([]float32, len(ms))
 		for i, m := range ms {
-			f, err := strconv.ParseFloat(m[1], 64)
+			f, err := parseOracleFloat(m[1])
 			if err != nil {
 				t.Fatalf("parse %q: %v", m[1], err)
 			}
@@ -314,7 +330,7 @@ func parseEncOracleFrames(t *testing.T, stderrText string, frames int) []encOrac
 			it.gainsID, _ = strconv.Atoi(m[6])
 			it.foundLower = m[7] == "1"
 			it.foundUpper = m[8] == "1"
-			f, _ := strconv.ParseFloat(m[9], 64)
+			f, _ := parseOracleFloat(m[9])
 			it.lambda = float32(f)
 			it.quantOffset, _ = strconv.Atoi(m[10])
 			for k := 0; k < 4; k++ {
@@ -398,15 +414,15 @@ func parseEncOracleFrames(t *testing.T, stderrText string, frames int) []encOrac
 			}
 			st := &out[cur].stages
 			st.haveShape = true
-			f, _ := strconv.ParseFloat(m[1], 64)
+			f, _ := parseOracleFloat(m[1])
 			st.shapeInputQ = float32(f)
-			f, _ = strconv.ParseFloat(m[2], 64)
+			f, _ = parseOracleFloat(m[2])
 			st.shapeCodingQ = float32(f)
 			st.shapeSNRdBQ7, _ = strconv.Atoi(m[3])
 			st.shapeWarping, _ = strconv.Atoi(m[4])
-			f, _ = strconv.ParseFloat(m[5], 64)
+			f, _ = parseOracleFloat(m[5])
 			st.shapePredGain = float32(f)
-			f, _ = strconv.ParseFloat(m[6], 64)
+			f, _ = parseOracleFloat(m[6])
 			st.shapeLTPCorr = float32(f)
 		case strings.HasPrefix(line, "[SILK_ENC_SHAPE_AR_FLP]"):
 			out[cur].stages.shapeAR = parseFloat32Rows(line)
@@ -432,7 +448,7 @@ func parseEncOracleFrames(t *testing.T, stderrText string, frames int) []encOrac
 			}
 		case strings.HasPrefix(line, "[SILK_ENC_FIND_LPC]"):
 			if m := encOracleMinInvRe.FindStringSubmatch(line); m != nil {
-				f, _ := strconv.ParseFloat(m[1], 64)
+				f, _ := parseOracleFloat(m[1])
 				out[cur].stages.findLPCMinInv = float32(f)
 			}
 		case strings.HasPrefix(line, "[SILK_ENC_NLSF_QUANT_Q15]"):

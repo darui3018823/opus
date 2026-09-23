@@ -149,7 +149,7 @@ func runCELTOracleCmdWithStderr(t *testing.T, fixture string, args ...string) ([
 		ms := encOracleValuesRe.FindAllStringSubmatch(line, -1)
 		vals := make([]float32, len(ms))
 		for i, m := range ms {
-			f, err := strconv.ParseFloat(m[1], 64)
+			f, err := parseOracleFloat(m[1])
 			if err != nil {
 				t.Fatalf("parse %q: %v", m[1], err)
 			}
@@ -183,12 +183,12 @@ func runCELTOracleCmdWithStderr(t *testing.T, fixture string, args ...string) ([
 			f.silence = m[6] == "1"
 			f.isTransient = m[7] == "1"
 			f.shortBlocks, _ = strconv.Atoi(m[8])
-			v, _ := strconv.ParseFloat(m[9], 64)
+			v, _ := parseOracleFloat(m[9])
 			f.tfEstimate = float32(v)
 			f.tfChan, _ = strconv.Atoi(m[10])
 			f.pfOn = m[11] == "1"
 			f.pitchIndex, _ = strconv.Atoi(m[12])
-			g, _ := strconv.ParseFloat(m[13], 64)
+			g, _ := parseOracleFloat(m[13])
 			f.gain1 = float32(g)
 			f.tell, _ = strconv.Atoi(m[15])
 		case strings.HasPrefix(line, "[SILK_CELT_ENC_IN]"):
@@ -230,7 +230,7 @@ func runCELTOracleCmdWithStderr(t *testing.T, fixture string, args ...string) ([
 			}
 			f := &out[cur]
 			f.anValid = m[1] == "1"
-			pf := func(s string) float32 { v, _ := strconv.ParseFloat(s, 64); return float32(v) }
+			pf := func(s string) float32 { v, _ := parseOracleFloat(s); return float32(v) }
 			f.anTonality = pf(m[2])
 			f.anSlope = pf(m[3])
 			f.anActivity = pf(m[4])

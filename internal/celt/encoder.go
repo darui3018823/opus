@@ -123,11 +123,75 @@ type FrameTrace struct {
 	PacketBytes     int
 }
 
-// LastFrameTrace returns the trace of the most recently coded frame.
+// LastFrameTrace returns the trace of the most recently coded frame. Its
+// slices are reused by the next frame.
 func (e *Encoder) LastFrameTrace() FrameTrace { return e.lastTrace }
 
+// frameScratch holds encodeRange's per-frame buffers.
+type frameScratch struct {
+	x, bandE, logE, logE2, coarseError []float64
+	bufs, pe                           [][]float64
+	tfRes                              []int
+	collapse                           []byte
+}
+
+// scratchF64 returns s resized to n and zeroed, growing it when needed.
+func scratchF64(s *[]float64, n int) []float64 {
+	if cap(*s) < n {
+		*s = make([]float64, n)
+	}
+	out := (*s)[:n]
+	for i := range out {
+		out[i] = 0
+	}
+	return out
+}
+
+// scratchInt is scratchF64 for ints.
+func scratchInt(s *[]int, n int) []int {
+	if cap(*s) < n {
+		*s = make([]int, n)
+	}
+	out := (*s)[:n]
+	for i := range out {
+		out[i] = 0
+	}
+	return out
+}
+
+// scratchRows returns rows[:n] with each row of length m, zeroed.
+func scratchRows(rows *[][]float64, n, m int) [][]float64 {
+	if cap(*rows) < n {
+		*rows = make([][]float64, n)
+	}
+	out := (*rows)[:n]
+	for c := range out {
+		out[c] = scratchF64(&out[c], m)
+	}
+	return out
+}
+
+// appendTraceRows copies rows into dst's rows, reusing their storage.
+func appendTraceRows(dst [][]float64, rows [][]float64) [][]float64 {
+	full := dst[:cap(dst)]
+	dst = dst[:0]
+	for c, row := range rows {
+		var buf []float64
+		if c < len(full) {
+			buf = full[c][:0]
+		}
+		dst = append(dst, append(buf, row...))
+	}
+	return dst
+}
+
 type Encoder struct {
-	lastTrace     FrameTrace
+	lastTrace   FrameTrace
+	traceCoeffs [][]float64
+	// frame is the per-frame work storage of encodeRange, reused between
+	// frames (nothing outlives the frame: the trace copies what it keeps).
+	frame         frameScratch
+	dynalloc      dynallocScratch
 	mode          *Mode
 	celtMode      *dsp.CELTMode // forward (analysis) MDCT, N-point long block
 	shortCeltMode *dsp.CELTMode // forward MDCT for transient short blocks (NBase-point)
@@ -203,6 +267,10 @@ type Encoder struct {
 	prefilterPre   [][]float32
 	prefilterY     []float32
 	prefilterPitch []float32
+	// upsample is st->upsample (resampling_factor(Fs)): an input below 48 kHz
+	// reaches the 48 kHz mode zero-stuffed by this factor; the MDCT bins
+	// above the input's Nyquist are cleared and the rest scaled by it.
+	upsample int
 	// streamChannels is CELT_SET_CHANNELS (st->stream_channels): the number
 	// of coded channels, 1 or the input channel count. A stereo input coded
 	// as a mono stream averages the two MDCTs (CC=2, C=1).
@@ -253,14 +321,6 @@ type Encoder struct {
 // FinalRange returns the range coder rng after the most recent Encode (before
 // flush). For a correctly paired packet it equals the decoder's LastFinalRange.
 func (e *Encoder) FinalRange() uint32 { return e.finalRange }
-
-// silenceEnergyThreshold is the SIG-domain (×32768) summed band-energy below
-// which a frame is treated as digital silence. Pre-emphasised real audio yields
-// band energies many orders of magnitude above this (even at very low levels,
-// because of the ×32768 scaling), while a truly silent frame sums only the
-// per-band 1e-27 floors. The wide gap makes a fixed threshold safe against
-// false positives on quiet-but-real content.
-const silenceEnergyThreshold = 1e-2
 
 // EncoderConfig holds encoder configuration
 type EncoderConfig struct {
@@ -471,30 +531,22 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	if maxTargetBytes < 2 {
 		maxTargetBytes = 2
 	}
-	inputSilence := sourceSilence
-	if !inputSilence {
-		inputSilence = true
-		for _, sample := range samples {
-			if sample != 0 {
-				inputSilence = false
-				break
-			}
-		}
-	}
+	_ = sourceSilence
 
 	// --- Analysis: pre-emphasis, forward MDCT, band energy, normalisation ---
-	X := make([]float64, ch*frameLen)
+	X := scratchF64(&e.frame.x, ch*frameLen)
 	// bandE holds per-band amplitude in libopus channel-major [c*nbEBands+i]
 	// layout (used by stereo intensity/split inside quant_all_bands).
-	bandE := make([]float64, 2*nbEBands)
-	logE := make([]float64, ch*numBands)
+	bandE := scratchF64(&e.frame.bandE, 2*nbEBands)
+	logE := scratchF64(&e.frame.logE, ch*numBands)
 
 	// Pass 1: pre-emphasis and build the per-channel analysis buffers
 	// [overlap(prev) ‖ preemph(frame)], length frameSize+overlap. This is the
 	// time-domain signal both the transient detector and the forward MDCT read.
-	bufs := make([][]float64, CC)
+	bufs := scratchRows(&e.frame.bufs, CC, frameSize+ov)
+	pes := scratchRows(&e.frame.pe, CC, frameSize)
 	for c := 0; c < CC; c++ {
-		pe := make([]float64, frameSize)
+		pe := pes[c]
 		mem := e.preemphMem[c]
 		for i := 0; i < frameSize; i++ {
 			var s float64
@@ -512,14 +564,13 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		}
 		e.preemphMem[c] = mem
 
-		buf := make([]float64, frameSize+ov)
+		buf := bufs[c]
 		// The analysis (tone / transient detectors) sees the raw pre-emphasised
 		// history; run_prefilter swaps in the filtered tail before the MDCT.
 		for i := 0; i < ov; i++ {
 			buf[i] = float64(e.prefilterMem[c][combFilterMaxPeriod-ov+i])
 		}
 		copy(buf[ov:], pe)
-		bufs[c] = buf
 	}
 	// libopus input silence test: the peak over the frame plus the previous
 	// frame's overlap region against one LSB of the declared input depth.
@@ -608,6 +659,35 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	totalBits := nbCompressedBytes * 8
 	targetBytes := nbCompressedBytes
 
+	// The silence flag (logp 15) is the first symbol of a CELT-only frame;
+	// a hybrid frame never codes it. A silent frame shrinks a VBR budget to
+	// two bytes and pretends every remaining bit is used, so no further
+	// symbol fits while the analysis still updates the encoder state.
+	silence := pcmSilence
+	if enc.ECTell() == 1 {
+		enc.EncodeBitLogp(silence, 15)
+	} else {
+		silence = false
+	}
+	if silence {
+		// DTX (a Go policy: libopus decides DTX at the Opus layer) sends
+		// the same minimal frame in CBR.
+		if vbrRate > 0 || e.dtx {
+			if nbFilledBytes+2 < nbCompressedBytes {
+				nbCompressedBytes = nbFilledBytes + 2
+			}
+			effectiveBytes = nbCompressedBytes
+			totalBits = nbCompressedBytes * 8
+			nbAvailableBytes = 2
+			targetBytes = nbCompressedBytes
+			enc.Shrink(nbCompressedBytes)
+		}
+		// Pretend we've filled all the remaining bits with zeros.
+		tell0 = nbCompressedBytes * 8
+		enc.AddTellBits(tell0 - enc.ECTell())
+	}
+	etr(enc, "silence")
+
 	// tone_detect first: a dominant pure tone disables the transient detector
 	// near DC, biases dynalloc and gates tf_analysis and the prefilter.
 	if len(e.analysisScratch) < frameSize+ov {
@@ -635,7 +715,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// Pitch prefilter (run_prefilter): the comb filter is applied to the
 	// analysis buffers in place and its history advanced, whether or not the
 	// pitch search is enabled for this frame.
-	pfEnabled := nbAvailableBytes > 12*ch && !shared && !pcmSilence && tell0+16 <= totalBits && !e.disablePF
+	// libopus reads `tell` here, captured before the silence flag was coded
+	// (and replaced by the full budget on a silent frame).
+	pfEnabled := nbAvailableBytes > 12*ch && !shared && !silence && tell0+16 <= totalBits && !e.disablePF
 	pf := e.runPrefilter(bufs, frameSize, ov, pfEnabled, float32(tfEstimate), nbAvailableBytes, toneFreq, toneishness, e.window32)
 	// pitch_change reads the previous period (clamped by run_prefilter) and
 	// gain, which are only replaced at the end of the frame.
@@ -651,7 +733,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// per-band energy (logE/bandE, used for normalisation and coarse energy) stays
 	// short-block. Off transients (or below complexity 8) the long block IS the
 	// actual MDCT, so logE2==logE — matching libopus' OPUS_COPY fallback.
-	logE2 := make([]float64, ch*numBands)
+	logE2 := scratchF64(&e.frame.logE2, ch*numBands)
 	nBase := e.mode.NBase
 
 	// computeSpectrum runs the forward MDCT (M interleaved short blocks when
@@ -691,9 +773,25 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			}
 			out = out[:1]
 		}
+		if e.upsample > 1 {
+			// Zero-stuffed input: scale the bins below the input Nyquist by
+			// the factor and clear the rest.
+			bound := frameSize / e.upsample
+			for c := 0; c < ch; c++ {
+				for i := 0; i < bound; i++ {
+					out[c][i] = float64(float32(out[c][i]) * float32(e.upsample))
+				}
+				for i := bound; i < frameSize; i++ {
+					out[c][i] = 0
+				}
+			}
+		}
 		return out
 	}
-	traceCoeffs := make([][]float64, ch)
+	if cap(e.traceCoeffs) < ch {
+		e.traceCoeffs = make([][]float64, ch)
+	}
+	traceCoeffs := e.traceCoeffs[:ch]
 	computeSpectrum := func(transient bool) {
 		allCoeffs := computeMDCTs(transient)
 		for c := 0; c < ch; c++ {
@@ -728,6 +826,16 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 				longCoeffs = append([]float64(nil), longCoeffs...)
 				for i := range longCoeffs {
 					longCoeffs[i] = float64(float32(float32(0.5)*float32(longCoeffs[i])) + float32(float32(0.5)*float32(other[i])))
+				}
+			}
+			if e.upsample > 1 {
+				longCoeffs = append([]float64(nil), longCoeffs...)
+				bound := frameSize / e.upsample
+				for i := 0; i < bound; i++ {
+					longCoeffs[i] = float64(float32(longCoeffs[i]) * float32(e.upsample))
+				}
+				for i := bound; i < frameSize; i++ {
+					longCoeffs[i] = 0
 				}
 			}
 			for i := 0; i < numBands; i++ {
@@ -783,23 +891,6 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		e.specAvg += float32(0.02) * temporalVBR
 	}
 
-	// --- Silence detection ---
-	// Sum the SIG-domain band energy (bandE holds sqrt(1e-27+Σcoeff²) per band).
-	// The analysis above has already advanced the overlap and pre-emphasis memory,
-	// so state continuity is preserved whether or not the frame is silent.
-	var frameEnergy float64
-	for c := 0; c < ch; c++ {
-		for i := start; i < end; i++ {
-			amp := bandE[c*nbEBands+i]
-			frameEnergy += amp * amp
-		}
-	}
-	isSilence := frameEnergy < silenceEnergyThreshold
-	if isSilence && !shared {
-		out, err := e.encodeSilenceFrame(maxTargetBytes)
-		return maxTargetBytes, out, err
-	}
-
 	// --- patch_transient_decision (energy-rise fallback transient detector) ---
 	// When the time-domain transientAnalysis did not flag the frame but the band
 	// energies jumped over the previous frame (an onset the envelope analysis
@@ -824,13 +915,6 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 
 	// === Header symbols, in decoder order (decodeCELTRange) ===
-
-	// Silence flag (logp 15) — read only when ec_tell is still at the initial
-	// one-bit offset. Hybrid frames skip this after SILK has consumed bits.
-	if enc.ECTell() == 1 && enc.ECTell()+1 <= totalBits {
-		enc.EncodeBitLogp(false, 15)
-	}
-	etr(enc, "silence")
 
 	// Post-filter parameters (CELT-only): the flag, and when enabled the
 	// period as octave + mantissa, the quantised gain and the tapset.
@@ -865,14 +949,14 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// Dynamic allocation analysis (libopus dynalloc_analysis) reads the
 	// unbiased band energies; the boost symbols are written later
 	// (dynallocEncode), after spread, to keep the bitstream in decoder order.
-	dyn := dynallocAnalysis32(logE, logE2, e.prevBandEnergies, numBands, start, end, ch, e.lsbDepth, lm,
-		isTransient, vbrOn, constrainedVBR, effectiveBytes, nil, toneFreq, toneishness, &e.analysis)
+	dyn := dynallocAnalysis32Scratch(logE, logE2, e.prevBandEnergies, numBands, start, end, ch, e.lsbDepth, lm,
+		isTransient, vbrOn, constrainedVBR, effectiveBytes, nil, toneFreq, toneishness, &e.analysis, &e.dynalloc)
 	offsets, importance := dyn.offsets, dyn.importance
 
 	// Time-frequency resolution. tf_analysis runs a Viterbi search over per-band
 	// L1 sparsity to pick tfRes[]/tf_select; libopus disables it for hybrid, at
 	// very low bitrate, below complexity 2 and on pure tones.
-	tfRes := make([]int, numBands)
+	tfRes := scratchInt(&e.frame.tfRes, numBands)
 	tfSelect := 0
 	enableTFAnalysis := effectiveBytes >= 15*ch && !shared && e.complexity >= 2 && toneishness < 0.98
 	if enableTFAnalysis {
@@ -920,37 +1004,37 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// intra flag and the per-band Laplace residuals. oldBandE is updated in
 	// place; coarseError feeds the fine quantiser and the next frame's bias.
 	quantLogE := e.prevBandEnergies
-	coarseError := make([]float64, ch*numBands)
+	coarseError := scratchF64(&e.frame.coarseError, ch*numBands)
 	intra := e.quantCoarseEnergy(enc, start, end, end, logE, quantLogE, totalBits, coarseError,
 		ch, lm, nbAvailableBytes, e.complexity >= 4, numBands)
 	etr(enc, "coarse")
 	{
+		// The trace reuses the previous frame's buffers: LastFrameTrace is
+		// only valid until the next frame is coded.
+		prev := e.lastTrace
 		tr := FrameTrace{IsTransient: isTransient, TFEstimate: tfEstimate, TFChan: tfChan, Intra: intra, TellCoarse: enc.ECTell(),
 			PFOn: pf.pfOn, PitchIndex: pf.pitchIndex, PFGain: float64(pf.gain), PitchChange: pitchChange, Analysis: e.analysis,
 			PitchSearch: pf.searchIndex, PitchRaw: pf.rawIndex, PitchGain: float64(pf.rawGain), PitchBuf: pf.pitchBuf}
-		tr.OldBandE = append([]float64(nil), quantLogE...)
-		tr.CoarseError = append([]float64(nil), coarseError...)
+		tr.OldBandE = append(prev.OldBandE[:0], quantLogE...)
+		tr.CoarseError = append(prev.CoarseError[:0], coarseError...)
 		if isTransient {
 			tr.ShortBlocks = M
 		}
-		for c := 0; c < CC; c++ {
-			tr.In = append(tr.In, append([]float64(nil), bufs[c]...))
-		}
+		tr.In = appendTraceRows(prev.In, bufs[:CC])
+		tr.Freq = appendTraceRows(prev.Freq, traceCoeffs[:ch])
+		tr.BandE = prev.BandE[:0]
+		tr.BandLogE = prev.BandLogE[:0]
 		for c := 0; c < ch; c++ {
-			tr.Freq = append(tr.Freq, append([]float64(nil), traceCoeffs[c]...))
+			tr.BandE = append(tr.BandE, bandE[c*nbEBands:(c+1)*nbEBands]...)
+			tr.BandLogE = append(tr.BandLogE, traceBandLogE[c*numBands:(c+1)*numBands]...)
 		}
-		tr.BandE = make([]float64, ch*nbEBands)
-		tr.BandLogE = make([]float64, ch*numBands)
-		for c := 0; c < ch; c++ {
-			copy(tr.BandE[c*nbEBands:(c+1)*nbEBands], bandE[c*nbEBands:(c+1)*nbEBands])
-			copy(tr.BandLogE[c*numBands:(c+1)*numBands], traceBandLogE[c*numBands:(c+1)*numBands])
-		}
+		tr.TFRes, tr.Offsets, tr.Pulses, tr.FineQuant, tr.FinePriority = prev.TFRes[:0], prev.Offsets[:0], prev.Pulses[:0], prev.FineQuant[:0], prev.FinePriority[:0]
 		e.lastTrace = tr
 	}
 
 	tfEncode(enc, start, end, isTransient, tfRes, lm, tfSelect, totalBits)
 	etr(enc, "tf_encode")
-	e.lastTrace.TFRes = append([]int(nil), tfRes...)
+	e.lastTrace.TFRes = append(e.lastTrace.TFRes[:0], tfRes...)
 	e.lastTrace.TFSelect = tfSelect
 	e.lastTrace.TellTF = enc.ECTell()
 
@@ -1039,7 +1123,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	etr(enc, "alloc_trim")
 	e.lastTrace.TellFracTrim = enc.TellFrac()
 	e.lastTrace.Spread = spread
-	e.lastTrace.Offsets = append([]int(nil), offsets...)
+	e.lastTrace.Offsets = append(e.lastTrace.Offsets[:0], offsets...)
 	e.lastTrace.AllocTrim = allocTrim
 	for i := start; i < end; i++ {
 		e.lastTrace.TotalBoost += offsets[i]
@@ -1085,6 +1169,14 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		// By how much did we "miss" the target on that frame.
 		delta := target - vbrRate
 		target = nbAvailableBytes << 6
+		// If the frame is silent we don't adjust our drift, otherwise the
+		// encoder will shoot to very high rates after hitting a span of
+		// silence, but we do allow the bitres to refill.
+		if silence {
+			nbAvailableBytes = 2
+			target = 2 * 8 << 3
+			delta = 0
+		}
 		var alpha float32
 		if e.vbrCount < 970 {
 			e.vbrCount++
@@ -1102,9 +1194,12 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			e.vbrOffset = -e.vbrDrift
 		}
 		if constrainedVBR && e.vbrReservoir < 0 {
-			// We're under the min value -- increase rate.
+			// We're under the min value -- increase rate, unless we're just
+			// coding silence.
 			adjust := (-e.vbrReservoir) / (8 << 3)
-			nbAvailableBytes += adjust
+			if !silence {
+				nbAvailableBytes += adjust
+			}
 			e.vbrReservoir = 0
 		}
 		if nbAvailableBytes < nbCompressedBytes {
@@ -1210,9 +1305,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	e.lastTrace.Intensity = intensity
 	e.lastTrace.DualStereo = dualStereo
 	e.lastTrace.Balance = balance
-	e.lastTrace.Pulses = append([]int(nil), pulses...)
-	e.lastTrace.FineQuant = append([]int(nil), eBits...)
-	e.lastTrace.FinePriority = append([]int(nil), finePriority...)
+	e.lastTrace.Pulses = append(e.lastTrace.Pulses[:0], pulses...)
+	e.lastTrace.FineQuant = append(e.lastTrace.FineQuant[:0], eBits...)
+	e.lastTrace.FinePriority = append(e.lastTrace.FinePriority[:0], finePriority...)
 
 	if encDebug && e.frameCount == 10 {
 		fmt.Fprintf(os.Stderr, "[ENC] bitsQ3=%d codedBands=%d\n", bitsQ3, codedBands)
@@ -1234,7 +1329,13 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	if ch == 2 {
 		Y = X[frameLen:]
 	}
-	collapse := make([]byte, numBands*ch)
+	if cap(e.frame.collapse) < numBands*ch {
+		e.frame.collapse = make([]byte, numBands*ch)
+	}
+	collapse := e.frame.collapse[:numBands*ch]
+	for i := range collapse {
+		collapse[i] = 0
+	}
 	totalBitsQ3 := totalBits<<3 - antiCollapseRsv
 	bandTells := e.bandTellScratch[:0]
 	qabTellTrace = &bandTells
@@ -1286,6 +1387,11 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 
 	e.finalRange = enc.GetRng()
 
+	if silence {
+		for i := 0; i < ch*numBands; i++ {
+			e.prevBandEnergies[i] = -28
+		}
+	}
 	if CC == 2 && ch == 1 {
 		copy(e.prevBandEnergies[numBands:2*numBands], e.prevBandEnergies[:numBands])
 	}
@@ -1359,46 +1465,6 @@ func hybridHighBandActivity(pcm []float64, channels int) float64 {
 		activity = 1
 	}
 	return activity
-}
-
-// encodeSilenceFrame emits a CELT frame whose only bitstream content is the
-// silence flag (logp 15, set true). The decoder (decodeCELTRange) reads the flag,
-// advances its tell to the packet end so every later symbol's budget guard fails,
-// and forces all band energies to the -28 dB floor — reconstructing digital
-// silence. We mirror that state here: the inter-frame coarse-energy predictor
-// goes to the -28 floor and the fold seed/final range take the range value right
-// after the silence bit, matching the decoder's post-frame state exactly.
-//
-// Packet sizing: VBR/CVBR (and DTX) keep the minimal flushed packet; plain CBR
-// with DTX off pads to the full target so the constant-bitrate contract holds.
-func (e *Encoder) encodeSilenceFrame(maxTargetBytes int) ([]byte, error) {
-	enc := entcode.NewEncoder(maxTargetBytes)
-	enc.EncodeBitLogp(true, 15)
-
-	e.foldSeed = enc.GetRng()
-	e.finalRange = enc.GetRng()
-	for idx := range e.prevBandEnergies {
-		e.prevBandEnergies[idx] = -28.0
-		e.energyError[idx] = 0
-	}
-	e.frameCount++
-	// A silent frame is non-transient: reset the run.
-	e.consecTransient = 0
-
-	etr(enc, "silence(true)")
-	enc.Flush()
-	out := enc.Bytes()
-
-	padTo := 0
-	if e.rateMode == RateModeCBR && !e.dtx {
-		padTo = maxTargetBytes
-	}
-	if len(out) < padTo {
-		padded := make([]byte, padTo)
-		copy(padded, out)
-		out = padded
-	}
-	return out, nil
 }
 
 // Reset resets the encoder state.
@@ -1597,6 +1663,7 @@ func (e *Encoder) CopyConfigFrom(src *Encoder) {
 	e.signalType = src.signalType
 	e.dtx = src.dtx
 	e.disableInv = src.disableInv
+	e.upsample = src.upsample
 	e.energyMask = append(e.energyMask[:0], src.energyMask...)
 }
 
@@ -1681,6 +1748,16 @@ func (e *Encoder) signalBandwidth(end, equivRate int) int {
 
 // SetSILKInfo is CELT_SET_SILK_INFO: the SILK signal type and quantisation
 // offset of the hybrid packet's SILK part.
+// SetUpsample sets st->upsample, the zero-stuffing factor of an input below
+// 48 kHz (resampling_factor(Fs): 1 for 48 kHz, 2 for 24, 3 for 16, 4 for
+// 12, 6 for 8 kHz).
+func (e *Encoder) SetUpsample(n int) {
+	if n < 1 {
+		n = 1
+	}
+	e.upsample = n
+}
+
 // SetStreamChannels is CELT_SET_CHANNELS: the number of coded channels
 // (st->stream_channels). A stereo input coded as a mono stream (1) has
 // the two channels' MDCTs averaged before the band analysis.

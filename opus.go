@@ -1314,7 +1314,7 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		// frame tail below.
 		var leadingRedFrame []byte
 		if frameRedundancy && celtToSilk {
-			rf, rerr := e.encodeCELTRedundancy(celtInput, redundancyBytes, celtEnd, true)
+			rf, rerr := e.encodeCELTRedundancy(celtChunk, redundancyBytes, celtEnd, true)
 			if rerr != nil {
 				return nil, false, fmt.Errorf("CELT leading redundant frame encoding failed: %w", rerr)
 			}
@@ -1375,7 +1375,7 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 				// encoder from a reset, prefilled state, so the next (genuinely
 				// CELT-only) packet continues from it, as the decoder adopts
 				// the redundant decoder's state (celtDec.CopyStateFrom(redDec)).
-				rf, rerr := e.encodeCELTRedundancy(celtInput, redundancyBytes, celtEnd, false)
+				rf, rerr := e.encodeCELTRedundancy(celtChunk, redundancyBytes, celtEnd, false)
 				if rerr != nil {
 					return nil, false, fmt.Errorf("CELT redundant frame encoding failed: %w", rerr)
 				}
@@ -1815,6 +1815,7 @@ func (e *Encoder) selectCELTEncoder(frameSize int) error {
 	next.SetPhaseInversionDisabled(e.phaseInversionDisabled)
 	next.SetSignalType(e.effectiveSignalType())
 	next.SetEnergyMask(e.surroundEnergyMask)
+	next.SetUpsample(e.celtUpsample())
 	if next != e.celtEncoder {
 		next.CopyStateFrom(e.celtEncoder)
 		e.celtEncoder = next
@@ -1985,6 +1986,19 @@ func (e *Encoder) delayedCELTInput(pcm []float64) []float64 {
 
 func (e *Encoder) celtInputFrame(pcm []float64) []float64 {
 	var celtInput []float64
+	if up := e.celtUpsample(); up > 1 {
+		// libopus: the CELT encoder runs the 48 kHz mode on the input
+		// zero-stuffed by resampling_factor(Fs) (celt_preemphasis).
+		ch := e.channels
+		n := len(pcm) / ch
+		celtInput = make([]float64, n*up*ch)
+		for t := 0; t < n; t++ {
+			for c := 0; c < ch; c++ {
+				celtInput[(t*up)*ch+c] = pcm[t*ch+c]
+			}
+		}
+		return celtInput
+	}
 	if e.inputResampler != nil {
 		// Resample from sampleRate to 48kHz.
 		resampled := e.inputResampler.Process(pcm)

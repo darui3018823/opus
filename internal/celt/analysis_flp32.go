@@ -224,14 +224,54 @@ type dynallocAnalysisResult struct {
 func dynallocAnalysis32(bandLogE, bandLogE2, oldBandE []float64, nbEBands, start, end, C, lsbDepth, lm int,
 	isTransient, vbr, constrainedVBR bool, effectiveBytes int, surroundDynalloc []float64,
 	toneFreq, toneishness float32, analysis *AnalysisInfo) dynallocAnalysisResult {
-	res := dynallocAnalysisResult{
-		offsets:      make([]int, nbEBands),
-		importance:   make([]int, nbEBands),
-		spreadWeight: make([]int, nbEBands),
+	return dynallocAnalysis32Scratch(bandLogE, bandLogE2, oldBandE, nbEBands, start, end, C, lsbDepth, lm,
+		isTransient, vbr, constrainedVBR, effectiveBytes, surroundDynalloc, toneFreq, toneishness, analysis, nil)
+}
+
+// dynallocScratch holds dynallocAnalysis32's work buffers so a frame does
+// not allocate; the result slices alias it until the next call.
+type dynallocScratch struct {
+	ints  []int
+	f32   []float32
+	mask  []float32
+	sig   []float32
+	f32ok bool
+}
+
+// dynallocAnalysis32Scratch is dynallocAnalysis32 with reusable storage
+// (nil allocates).
+func dynallocAnalysis32Scratch(bandLogE, bandLogE2, oldBandE []float64, nbEBands, start, end, C, lsbDepth, lm int,
+	isTransient, vbr, constrainedVBR bool, effectiveBytes int, surroundDynalloc []float64,
+	toneFreq, toneishness float32, analysis *AnalysisInfo, sc *dynallocScratch) dynallocAnalysisResult {
+	if sc == nil {
+		sc = &dynallocScratch{}
 	}
-	follower := make([]float32, C*nbEBands)
-	noiseFloor := make([]float32, nbEBands)
-	bandLogE3 := make([]float32, nbEBands)
+	if cap(sc.ints) < 3*nbEBands {
+		sc.ints = make([]int, 3*nbEBands)
+	}
+	if cap(sc.f32) < (C+2)*nbEBands {
+		sc.f32 = make([]float32, (C+2)*nbEBands)
+	}
+	if cap(sc.mask) < nbEBands {
+		sc.mask = make([]float32, nbEBands)
+		sc.sig = make([]float32, nbEBands)
+	}
+	ints := sc.ints[:3*nbEBands]
+	for i := range ints {
+		ints[i] = 0
+	}
+	f32 := sc.f32[:(C+2)*nbEBands]
+	for i := range f32 {
+		f32[i] = 0
+	}
+	res := dynallocAnalysisResult{
+		offsets:      ints[:nbEBands:nbEBands],
+		importance:   ints[nbEBands : 2*nbEBands : 2*nbEBands],
+		spreadWeight: ints[2*nbEBands : 3*nbEBands : 3*nbEBands],
+	}
+	follower := f32[: C*nbEBands : C*nbEBands]
+	noiseFloor := f32[C*nbEBands : (C+1)*nbEBands : (C+1)*nbEBands]
+	bandLogE3 := f32[(C+1)*nbEBands : (C+2)*nbEBands : (C+2)*nbEBands]
 	maxDepth := float32(-31.9)
 	for i := 0; i < end; i++ {
 		// Noise floor must take into account eMeans, the depth, the width of
@@ -253,8 +293,11 @@ func dynallocAnalysis32(bandLogE, bandLogE2, oldBandE []float64, nbEBands, start
 	{
 		// Compute a really simple masking model to avoid taking into account
 		// completely masked bands when computing the spreading decision.
-		mask := make([]float32, nbEBands)
-		sig := make([]float32, nbEBands)
+		mask := sc.mask[:nbEBands]
+		sig := sc.sig[:nbEBands]
+		for i := range mask {
+			mask[i], sig[i] = 0, 0
+		}
 		for i := 0; i < end; i++ {
 			mask[i] = float32(bandLogE[i]) - noiseFloor[i]
 		}

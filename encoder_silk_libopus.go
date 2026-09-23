@@ -197,7 +197,7 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 		// CELT_SET_END_BAND / CELT_SET_CHANNELS follow the packet's bandwidth
 		// and stream channels on every packet.
 		e.celtEncoder.SetStreamChannels(streamChannels)
-		redFrame, err := e.encodeCELTRedundancy(e.celtInputFrame(celtPCM), redBytes, celtEndBandForFramingBW(bw), celtToSilk)
+		redFrame, err := e.encodeCELTRedundancy(celtPCM, redBytes, celtEndBandForFramingBW(bw), celtToSilk)
 		if err != nil {
 			return nil, fmt.Errorf("CELT redundant frame encoding failed: %w", err)
 		}

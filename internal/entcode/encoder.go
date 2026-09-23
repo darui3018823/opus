@@ -24,6 +24,8 @@ type Encoder struct {
 	nendBits  uint
 	endBytes  []byte
 	nbitsRaw  int // total raw bits emitted (for Tell)
+	// nbitsExtra is added to the reported bit count (AddTellBits).
+	nbitsExtra int
 
 	// capacity is the target packet size; raw bits are placed at offset capacity
 	// (the absolute end) so a fixed-size packet keeps a zeroed gap between the
@@ -135,8 +137,13 @@ func (enc *Encoder) Tell() int {
 		nbytes++
 	}
 	nbytes += int(enc.ext)
-	return nbytes*8 + (32 - ILog(enc.rng)) + enc.nbitsRaw
+	return nbytes*8 + (32 - ILog(enc.rng)) + enc.nbitsRaw + enc.nbitsExtra
 }
+
+// AddTellBits adds n bits to the reported bit count (libopus
+// `enc->nbits_total += ...`: celt_encode_with_ec pretends a silent frame
+// has used its whole budget so that no further symbol fits).
+func (enc *Encoder) AddTellBits(n int) { enc.nbitsExtra += n }
 
 // ecNbitsTotal returns the libopus encoder nbits_total value. libopus tracks
 // nbits_total = (EC_CODE_BITS+1) + EC_SYM_BITS*(symbols shifted out) + raw bits.
@@ -148,7 +155,7 @@ func (enc *Encoder) ecNbitsTotal() int {
 		nbytes++
 	}
 	nbytes += int(enc.ext)
-	return nbytes*8 + (CodeBits + 1) + enc.nbitsRaw
+	return nbytes*8 + (CodeBits + 1) + enc.nbitsRaw + enc.nbitsExtra
 }
 
 // ECTell returns bits consumed using the libopus ec_tell convention (== 1

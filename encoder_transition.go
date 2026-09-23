@@ -41,12 +41,22 @@ func (e *Encoder) celtWithFrameSize(size int, fn func(enc *celt.Encoder) error) 
 	return err
 }
 
+// celtUpsample is resampling_factor(Fs) under the libopus policy: the
+// zero-stuffing factor that brings the input to the CELT encoder's 48 kHz
+// mode (the Go policy resamples instead).
+func (e *Encoder) celtUpsample() int {
+	if !e.libopusModePolicy || e.sampleRate >= 48000 {
+		return 1
+	}
+	return 48000 / e.sampleRate
+}
+
 // celtPrefill is the 2-byte "dummy" encode of 2.5 ms that follows an
 // OPUS_RESET_STATE in opus_encode_native, filling the CELT history before a
-// frame that starts a new mode.
+// frame that starts a new mode. pcm is the input-rate signal.
 func (e *Encoder) celtPrefill(pcm []float64, startBand int) error {
 	return e.celtWithFrameSize(celt.FrameSize2_5ms, func(enc *celt.Encoder) error {
-		return enc.EncodePrefill(pcm, startBand)
+		return enc.EncodePrefill(e.celtInputFrame(pcm), startBand)
 	})
 }
 
@@ -58,7 +68,7 @@ func (e *Encoder) celtPrefill(pcm []float64, startBand int) error {
 // hybrid, 0 for CELT-only), which the prefill encode also uses.
 func (e *Encoder) celtModeTransition(startBand int) error {
 	e.celtEncoder.Reset()
-	n := celt.FrameSize2_5ms * e.channels
+	n := e.sampleRate / 400 * e.channels
 	prefill := e.celtPrefillTail
 	if len(prefill) != n {
 		prefill = make([]float64, n)
@@ -77,11 +87,17 @@ func (e *Encoder) celtModeTransition(startBand int) error {
 // state prefilled with the 2.5 ms before the last 5 ms, with prediction
 // disabled, and covers the last 5 ms. endBand < 0 keeps the encoder's band
 // limit (libopus leaves it as the previous CELT frame set it). The input
-// is the 48 kHz CELT input of the frame.
+// is the frame's CELT input at the input rate (delayed, faded).
 func (e *Encoder) encodeCELTRedundancy(celtPCM []float64, nbytes, endBand int, celtToSilk bool) ([]byte, error) {
 	ch := e.channels
 	frame := len(celtPCM) / ch
 	n2, n4 := e.sampleRate/200, e.sampleRate/400
+	if endBand >= 0 {
+		// CELT_SET_END_BAND is a packet-level setting of celt_enc: the
+		// 2.5 ms prefill before the trailing frame runs under it too (its
+		// temporal VBR follower averages the coded bands only).
+		e.celtEncoder.SetEndBand(endBand)
+	}
 	encode := func(part []float64) ([]byte, error) {
 		var out []byte
 		err := e.celtWithFrameSize(celt.FrameSize5ms, func(enc *celt.Encoder) error {
@@ -89,7 +105,7 @@ func (e *Encoder) encodeCELTRedundancy(celtPCM []float64, nbytes, endBand int, c
 				enc.SetEndBand(endBand)
 			}
 			var err error
-			out, err = enc.EncodeRedundant(part, nbytes)
+			out, err = enc.EncodeRedundant(e.celtInputFrame(part), nbytes)
 			return err
 		})
 		return out, err
@@ -150,7 +166,7 @@ func (e *Encoder) silkPrefillInput() []float64 {
 // rememberCELTPrefillTail keeps the last 2.5 ms of the frame's (unfaded)
 // CELT input: the tmp_prefill of a mode transition in the next packet.
 func (e *Encoder) rememberCELTPrefillTail(celtPCM []float64) {
-	n := celt.FrameSize2_5ms * e.channels
+	n := e.sampleRate / 400 * e.channels
 	if len(celtPCM) < n {
 		return
 	}

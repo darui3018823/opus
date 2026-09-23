@@ -1440,3 +1440,31 @@ linked SIMD libopus stays a non-goal.
   fixed the same way.
 - The parallel oracle run found a data race on a package-level trace
   variable (introduced on this branch), fixed per call.
+
+### 2026-09-24: packets shorter than 20 ms
+
+- Under `ModePolicyLibopus` every packet duration goes through the libopus
+  decision. 2.5/5 ms (always CELT-only) and 10 ms CELT-only packets use the
+  CELT path with the TOC of their own duration; the CELT stereo width takes
+  the packet's `equiv_rate` (it used the 20 ms frame rate).
+- 10 ms SILK / hybrid packets: `silk.Encoder.SetFrameMs` switches between
+  10 and 20 ms frames in place like `silk_setup_fs` (x_buf's LTP memory and
+  look-ahead and the NSQ history carry over), the SILK prefill always runs a
+  10 ms frame, and the Opus layer sizes TOC, SILK input and bit targets from
+  the packet's frame length. The Go SILK encoder's 10 ms frames were already
+  libopus-exact.
+- `clt_compute_allocation` runs on an empty budget too (a silent frame's
+  codedBands / intensity carry into the next frame); the allocator's arrays
+  come from a reused scratch.
+- libopus "PLC frames" (TOC-only packets when the budget is too small, e.g.
+  2.5 ms at 8 kbps) are ported, after the analysis / peak energy / stereo
+  width updates as in libopus.
+- The CELT loss rate was lost when the encoder switched frame sizes (the
+  state hand-over overwrote it); it is set after the hand-over.
+- The oracle accepts 2.5/5/10 ms packets (its frame size overflowed a
+  32-bit long for 60 ms and longer at 48 kHz on Windows); the sweep has
+  short-frame, short-transition, short-DTX and short-FEC groups — 2796
+  configurations, all byte-identical.
+
+Remaining (encoder): the multistream, surround and projection encoders do
+not expose `ModePolicy`; the linked SIMD libopus stays a non-goal.

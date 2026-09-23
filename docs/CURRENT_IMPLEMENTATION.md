@@ -1094,7 +1094,12 @@ forced and capped bandwidths, forced mono, int16 input, LSB depths, FEC and
 DTX at 8/12/24 kHz), and CI builds the instrumented oracle and runs these
 gates on Linux. The encoder's arithmetic is free of fused multiply-adds, so
 its output is identical on amd64, arm64 and the other FMA architectures (CI
-checks the arm64 build).
+checks the arm64 build). Packets shorter than 20 ms follow the libopus policy
+as well: 2.5/5 ms CELT-only packets, 10 ms SILK and hybrid packets (the SILK
+encoder switches between 10 and 20 ms frames in place, as silk_setup_fs
+does), their transitions, DTX and FEC, and libopus's TOC-only "PLC frames"
+when the budget is too small; the sweep's 2796 configurations are all
+byte-identical.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

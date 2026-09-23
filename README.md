@@ -17,9 +17,9 @@ is cross-checked against libopus 1.6.1. The encoder produces
 standards-compatible CELT, SILK-only, and hybrid packets. By default it uses
 its own mode, bandwidth, and rate decisions (`ModePolicyLegacy`); with
 `SetModePolicy(ModePolicyLibopus)` (or `EncoderProfileLibopus`) it follows
-libopus 1.6.1's encoder, and its 20/40/60 ms packets are byte-identical to
-libopus's plain-C float build in the tested configurations (automatic mode,
-mode transitions, 8–48 kHz input, in-band FEC, and DTX).
+libopus 1.6.1's encoder, and its packets (2.5 to 120 ms) are byte-identical
+to libopus's plain-C float build in the tested configurations (automatic
+mode, mode transitions, 8–48 kHz input, in-band FEC, and DTX).
 The authoritative implementation snapshot is
 [docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md).
 
@@ -199,8 +199,8 @@ go test -run='^$' -fuzz='^FuzzOggOpusReaderWriter$' -fuzztime=60s ./oggopus
 
 - The default `ModePolicyLegacy` makes the Go encoder's own mode and bandwidth
   decisions, which differ from libopus. `ModePolicyLibopus` reproduces libopus
-  for 20/40/60 ms packets; 2.5/5/10 ms packets and the multistream, surround,
-  and projection encoders still use the Go decisions.
+  for single-stream packets of every duration; the multistream, surround, and
+  projection encoders still use the Go decisions.
 - Byte identity is measured against libopus built without SIMD kernels; a
   libopus linked with SIMD kernels sums floats in a different order, so its
   CELT output differs.

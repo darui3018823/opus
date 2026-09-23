@@ -11,6 +11,8 @@
 #include "opus_defines.h"
 #include "opus.h"
 #include "opus_private.h"
+#include "opus_multistream.h"
+#include "opus_projection.h"
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -565,8 +567,183 @@ static int run_auto_encoder_oracle(int argc, char **argv)
     return 0;
 }
 
+/* mc / mc-gaps (msFixtureSample in opus_multistream_enc_oracle_test.go):
+   channel c of a multichannel input is a harmonic tone of its own pitch,
+   envelope and phase plus a little hashed noise, so that no two channels are
+   alike. mc-gaps puts ref-speech-gaps' silence and noise segments over it. */
+static double ms_fixture_sample(const char *fixture, long idx, int c, int rate)
+{
+    double tm = (double)idx / (double)rate;
+    double f0 = 140.0 + 45.0 * c;
+    double env = 0.5 + 0.3 * sin(2.0 * M_PI * (2.0 + 0.7 * c) * tm + 0.4 * c);
+    double v = env * (0.25 * sin(2.0 * M_PI * f0 * tm + 0.3 * c) +
+        0.10 * sin(2.0 * M_PI * 2.0 * f0 * tm + 0.9) +
+        0.05 * sin(2.0 * M_PI * 3.3 * f0 * tm + 0.2 * c));
+    v += 10.0 * gaps_noise(idx, c + 7, 2);
+    if (strcmp(fixture, "mc-gaps") == 0) {
+        int seg = gaps_segment(idx, rate);
+        if (seg == 1) return 0.0;
+        if (seg >= 2) return gaps_noise(idx, c, seg);
+        return v;
+    }
+    if (strcmp(fixture, "mc") != 0) {
+        fprintf(stderr, "unknown multichannel fixture %s\n", fixture);
+        exit(2);
+    }
+    return v;
+}
+
+/* --ms-enc <rate> <fixture> <frames> <bitrate|schedule> <vbr> <channels>
+   <complexity> <signal> <app> <frame_ms> <loss_perc> <dtx> <family> [options]:
+   the multistream encoders. family 0, 1, 2 or 255 is
+   opus_multistream_surround_encoder_create with that mapping family, -1 is
+   opus_multistream_encoder_create with the family-1 layout (family 255 above
+   8 channels), and 3 is opus_projection_ambisonics_encoder_create. Options
+   as --auto-enc (vbrc, bw, maxbw, int16, lsb). */
+static int run_ms_encoder_oracle(int argc, char **argv)
+{
+    int rate, frames, bitrate, complexity, vbr, channels, frame_size, err, frame, app, frame_us, loss_perc, use_dtx, family;
+    int schedule[AUTO_ENC_MAX_SCHEDULE], nschedule;
+    int streams = 0, coupled = 0;
+    unsigned char mapping[256];
+    const char *fixture, *signal, *appname;
+    OpusMSEncoder *enc = NULL;
+    OpusProjectionEncoder *proj = NULL;
+    static float pcm[5760 * 255];
+    static opus_int16 pcm16[5760 * 255];
+    static unsigned char packet[1275 * 255];
+    int opt_vbrc = 1, opt_bw = 0, opt_maxbw = 0, opt_int16 = 0, opt_lsb = 0;
+
+    if (argc < 15) {
+        fprintf(stderr, "usage: %s --ms-enc <rate> <fixture> <frames> <bitrate> <vbr> <channels> <complexity> <signal> <app> <frame_ms> <loss_perc> <dtx> <family> [options]\n", argv[0]);
+        return 2;
+    }
+    rate = atoi(argv[2]);
+    fixture = argv[3];
+    frames = atoi(argv[4]);
+    nschedule = parse_bitrate_schedule(argv[5], schedule, AUTO_ENC_MAX_SCHEDULE);
+    if (nschedule == 0) {
+        schedule[0] = OPUS_AUTO;
+        nschedule = 1;
+    }
+    bitrate = schedule[0];
+    vbr = atoi(argv[6]);
+    channels = atoi(argv[7]);
+    complexity = atoi(argv[8]);
+    signal = argv[9];
+    appname = argv[10];
+    frame_us = (int)(atof(argv[11]) * 1000.0 + 0.5);
+    loss_perc = atoi(argv[12]);
+    use_dtx = atoi(argv[13]);
+    family = atoi(argv[14]);
+    if (argc >= 16 && argv[15][0] != '\0' && strcmp(argv[15], "-") != 0) {
+        char opts[512];
+        char *tok;
+        strncpy(opts, argv[15], sizeof(opts) - 1);
+        opts[sizeof(opts) - 1] = '\0';
+        for (tok = strtok(opts, ","); tok != NULL; tok = strtok(NULL, ",")) {
+            char *eq = strchr(tok, '=');
+            if (eq == NULL) { fprintf(stderr, "bad option %s\n", tok); return 2; }
+            *eq = '\0';
+            if (strcmp(tok, "vbrc") == 0) opt_vbrc = atoi(eq + 1);
+            else if (strcmp(tok, "bw") == 0) opt_bw = parse_bandwidth(eq + 1);
+            else if (strcmp(tok, "maxbw") == 0) opt_maxbw = parse_bandwidth(eq + 1);
+            else if (strcmp(tok, "int16") == 0) opt_int16 = atoi(eq + 1);
+            else if (strcmp(tok, "lsb") == 0) opt_lsb = atoi(eq + 1);
+            else if (strcmp(tok, "notrace") == 0) (void)0;
+            else { fprintf(stderr, "unknown option %s\n", tok); return 2; }
+        }
+    }
+    if (channels < 1 || channels > 255) {
+        fprintf(stderr, "--ms-enc channels must be 1..255\n");
+        return 2;
+    }
+    app = strcmp(appname, "audio") == 0 ? OPUS_APPLICATION_AUDIO :
+        strcmp(appname, "lowdelay") == 0 ? OPUS_APPLICATION_RESTRICTED_LOWDELAY : OPUS_APPLICATION_VOIP;
+    frame_size = (int)((long long)rate * frame_us / 1000000);
+    if (family == 3) {
+        proj = opus_projection_ambisonics_encoder_create(rate, channels, 3, &streams, &coupled, app, &err);
+        if (proj == NULL || err != OPUS_OK) {
+            fprintf(stderr, "opus_projection_ambisonics_encoder_create failed: %d\n", err);
+            return 2;
+        }
+    } else if (family >= 0) {
+        enc = opus_multistream_surround_encoder_create(rate, channels, family, &streams, &coupled, mapping, app, &err);
+    } else {
+        int f = channels <= 8 ? 1 : 255;
+        OpusMSEncoder *probe = opus_multistream_surround_encoder_create(rate, channels, f, &streams, &coupled, mapping, app, &err);
+        if (probe != NULL) opus_multistream_encoder_destroy(probe);
+        if (err == OPUS_OK)
+            enc = opus_multistream_encoder_create(rate, channels, streams, coupled, mapping, app, &err);
+    }
+    if (proj == NULL && (enc == NULL || err != OPUS_OK)) {
+        fprintf(stderr, "multistream encoder create failed: %d\n", err);
+        return 2;
+    }
+#define MS_CTL(x) (proj ? opus_projection_encoder_ctl(proj, x) : opus_multistream_encoder_ctl(enc, x))
+    MS_CTL(OPUS_SET_BITRATE(bitrate));
+    MS_CTL(OPUS_SET_COMPLEXITY(complexity));
+    MS_CTL(OPUS_SET_VBR(vbr ? 1 : 0));
+    MS_CTL(OPUS_SET_VBR_CONSTRAINT(opt_vbrc));
+    if (opt_bw) MS_CTL(OPUS_SET_BANDWIDTH(opt_bw));
+    if (opt_maxbw) MS_CTL(OPUS_SET_MAX_BANDWIDTH(opt_maxbw));
+    if (opt_lsb) MS_CTL(OPUS_SET_LSB_DEPTH(opt_lsb));
+    if (use_dtx) MS_CTL(OPUS_SET_DTX(1));
+    if (loss_perc > 0) {
+        MS_CTL(OPUS_SET_INBAND_FEC(1));
+        MS_CTL(OPUS_SET_PACKET_LOSS_PERC(loss_perc));
+    }
+    if (strcmp(signal, "voice") == 0) MS_CTL(OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+    else if (strcmp(signal, "music") == 0) MS_CTL(OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+    fprintf(stderr, "MS_ENC_ORACLE rate=%d frame_size=%d fixture=%s frames=%d bitrate=%d vbr=%d channels=%d streams=%d coupled=%d family=%d\n",
+            rate, frame_size, fixture, frames, bitrate, vbr, channels, streams, coupled, family);
+    for (frame = 0; frame < frames; frame++) {
+        int n, b, i, c;
+        int fb = schedule[frame < nschedule ? frame : nschedule - 1];
+        if (fb != bitrate) {
+            bitrate = fb;
+            MS_CTL(OPUS_SET_BITRATE(bitrate));
+        }
+        for (i = 0; i < frame_size; i++) {
+            long idx = (long)frame * frame_size + i;
+            for (c = 0; c < channels; c++) {
+                float v = (float)ms_fixture_sample(fixture, idx, c, rate);
+                pcm[i * channels + c] = (float)(floor((double)v * 32768.0 + 0.5) / 32768.0);
+            }
+        }
+        fprintf(stderr, "[CELT_ENC_INPUT_FRAME] frame=%d bitrate=%d\n", frame, bitrate);
+        if (opt_int16) {
+            for (b = 0; b < frame_size * channels; b++) {
+                double v = floor((double)pcm[b] * 32768.0 + 0.5);
+                if (v > 32767.0) v = 32767.0;
+                if (v < -32768.0) v = -32768.0;
+                pcm16[b] = (opus_int16)v;
+            }
+            n = proj ? opus_projection_encode(proj, pcm16, frame_size, packet, (opus_int32)sizeof(packet))
+                     : opus_multistream_encode(enc, pcm16, frame_size, packet, (opus_int32)sizeof(packet));
+        } else {
+            n = proj ? opus_projection_encode_float(proj, pcm, frame_size, packet, (opus_int32)sizeof(packet))
+                     : opus_multistream_encode_float(enc, pcm, frame_size, packet, (opus_int32)sizeof(packet));
+        }
+        if (n < 0) {
+            fprintf(stderr, "encode frame %d failed: %d\n", frame, n);
+            return 1;
+        }
+        fprintf(stderr, "[ENC_PACKET] n=%d", n);
+        for (b = 0; b < n; b++) fprintf(stderr, " %02x", packet[b]);
+        fprintf(stderr, "\n");
+    }
+#undef MS_CTL
+    if (proj) opus_projection_encoder_destroy(proj);
+    if (enc) opus_multistream_encoder_destroy(enc);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "--ms-enc") == 0) {
+        return run_ms_encoder_oracle(argc, argv);
+    }
     if (argc >= 2 && strcmp(argv[1], "--auto-enc") == 0) {
         return run_auto_encoder_oracle(argc, argv);
     }

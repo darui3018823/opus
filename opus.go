@@ -153,6 +153,14 @@ type Encoder struct {
 	// analysis_read_subframe_bak: the analysis read position before this
 	// packet's run_analysis (-1 when the analysis did not run).
 	analysisReadPos, analysisReadSubframe int
+	// outDataBytes is the multistream encoder's per-stream packet budget
+	// (opus_encode_native's out_data_bytes; 0 outside it), analysisInput
+	// the input the tonality analysis reads instead of the packet's (the
+	// projection encoder's unmixed channels), and libopusForcedMode
+	// st->user_forced_mode (-1 for automatic) under the libopus policy.
+	outDataBytes      int
+	analysisInput     []float64
+	libopusForcedMode int
 	// streamStarted is set by the first encode after construction or Reset:
 	// SetModePolicy resets the stream state only once encoding has begun.
 	streamStarted bool
@@ -306,6 +314,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		prevHBGain:           1,
 		libopusBandwidth:     -1,
 		libopusMode:          framing.ModeHybrid,
+		libopusForcedMode:    -1,
 		variableHPSmth2Q15:   variableHPSmth2Initial(),
 	}
 	enc.celtEncoders[3] = celtEnc
@@ -561,7 +570,11 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 			e.analysis = celt.NewTonalityAnalysis(e.sampleRate)
 		}
 		e.analysisReadPos, e.analysisReadSubframe = e.analysis.ReadPosition()
-		analysisInfo = e.analysis.Run(pcm, frameSize, e.channels, lsbDepth)
+		analysisPCM := pcm
+		if e.analysisInput != nil {
+			analysisPCM = e.analysisInput
+		}
+		analysisInfo = e.analysis.Run(analysisPCM, frameSize, e.channels, lsbDepth)
 	} else if e.analysis != nil && e.analysis.Initialized() {
 		e.analysis.Reset()
 	}
@@ -588,6 +601,11 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		}
 		if maxDataBytes < 1 {
 			maxDataBytes = 1
+		}
+	}
+	if e.libopusModePolicy && e.outDataBytes > 0 {
+		if err := e.applyOutDataBytes(frameSize, &maxDataBytes); err != nil {
+			return nil, err
 		}
 	}
 	var decision modeDecision
@@ -2384,6 +2402,12 @@ func (e *Encoder) applyBitrateSetting(frameSize int) error {
 			bitrate = maximum
 		}
 	}
+	return e.setPacketBitrate(bitrate, frameSize)
+}
+
+// setPacketBitrate sets the packet's bitrate (st->bitrate_bps) on the
+// encoder and its CELT and SILK layers.
+func (e *Encoder) setPacketBitrate(bitrate, frameSize int) error {
 	e.bitrate = bitrate
 	e.celtEncoder.SetBitrate(e.bitrate)
 	if e.silkEncoder != nil {

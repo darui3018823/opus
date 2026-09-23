@@ -79,8 +79,38 @@ func NewProjectionEncoder(sampleRate, channels, mappingFamily int, application A
 		multistream:    ms,
 		bitrate:        BitrateAuto,
 	}
+	if mappingFamily == MappingFamilyAmbisonics {
+		ms.mappingType = msMappingAmbisonics
+	}
+	ms.policyChanged = e.configureForPolicy
 	e.configureStreams()
 	return e, nil
+}
+
+// SetModePolicy selects the automatic decision policy; see
+// MultistreamEncoder.SetModePolicy. Under ModePolicyLibopus, mapping family
+// 3 follows opus_projection_encode* and family 2
+// opus_multistream_surround_encoder's ambisonics mapping.
+func (e *ProjectionEncoder) SetModePolicy(policy ModePolicy) error {
+	return e.multistream.SetModePolicy(policy)
+}
+
+// ModePolicy reports the automatic decision policy.
+func (e *ProjectionEncoder) ModePolicy() ModePolicy { return e.multistream.ModePolicy() }
+
+// configureForPolicy sets up the elementary streams for the selected
+// policy (libopus leaves prediction enabled).
+func (e *ProjectionEncoder) configureForPolicy() {
+	if !e.multistream.libopusPolicy {
+		for _, enc := range e.multistream.encoders {
+			enc.libopusForcedMode = -1
+		}
+		e.configureStreams()
+		return
+	}
+	for _, enc := range e.multistream.encoders {
+		enc.SetPredictionDisabled(false)
+	}
 }
 
 // NewAmbisonicsEncoder is an alias for NewProjectionEncoder.
@@ -159,6 +189,7 @@ func (e *ProjectionEncoder) SetBitrate(bitrate int) error {
 		return fmt.Errorf("%w: invalid projection bitrate %d", ErrBadArg, bitrate)
 	}
 	e.bitrate = bitrate
+	e.multistream.bitrate = bitrate
 	return nil
 }
 
@@ -198,7 +229,7 @@ func (e *ProjectionEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768
 	}
-	return e.EncodeFloat(floatPCM, frameSize)
+	return e.encodeFloatDepth(floatPCM, frameSize, 16)
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
@@ -229,6 +260,11 @@ func (e *ProjectionEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte,
 
 // EncodeFloat encodes frameSize samples per channel of interleaved float64 PCM.
 func (e *ProjectionEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
+	return e.encodeFloatDepth(pcm, frameSize, 24)
+}
+
+// encodeFloatDepth encodes one packet; lsbDepth is the input's sample depth.
+func (e *ProjectionEncoder) encodeFloatDepth(pcm []float64, frameSize, lsbDepth int) ([]byte, error) {
 	required := frameSize * e.channels
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
@@ -240,8 +276,10 @@ func (e *ProjectionEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	if err := e.prepareRates(selectedFrameSize); err != nil {
-		return nil, err
+	if !e.multistream.libopusPolicy {
+		if err := e.prepareRates(selectedFrameSize); err != nil {
+			return nil, err
+		}
 	}
 	mixed := pcm[:required]
 	if e.mappingFamily == MappingFamilyProjection {
@@ -250,6 +288,15 @@ func (e *ProjectionEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, e
 		if err != nil {
 			return nil, err
 		}
+	}
+	if e.multistream.libopusPolicy {
+		// opus_projection_encode*: the streams code the mixed channels, the
+		// tonality analysis reads the unmixed input.
+		var analysis []float64
+		if e.mappingFamily == MappingFamilyProjection {
+			analysis = pcm[:selectedFrameSize*e.channels]
+		}
+		return e.multistream.encodeLibopus(mixed[:selectedFrameSize*e.channels], selectedFrameSize, lsbDepth, analysis)
 	}
 	return e.multistream.EncodeFloat(mixed, frameSize)
 }

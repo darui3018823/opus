@@ -209,6 +209,8 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 	switch {
 	case e.application == ApplicationRestrictedLowDelay:
 		mode = framing.ModeCELTOnly
+	case e.libopusForcedMode >= 0:
+		mode = e.libopusForcedMode
 	default:
 		stereoWidth := e.packetStereoWidth
 		// Interpolate based on stereo width, then on the speech/music probability.

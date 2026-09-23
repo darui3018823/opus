@@ -476,6 +476,7 @@ func intsEqual(a, b []int) bool {
 // instrumented libopus encoder over a matrix of bitrate, rate mode and
 // complexity. Cells marked exact are gated; the others report progress.
 func TestCELTEncoderOracle(t *testing.T) {
+	t.Parallel()
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
 	}
@@ -519,6 +520,9 @@ func TestCELTEncoderOracle(t *testing.T) {
 		}
 	}
 	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) { runCELTOracleCase(t, tc) })
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runCELTOracleCase(t, tc)
+		})
 	}
 }

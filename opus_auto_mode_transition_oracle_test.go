@@ -20,6 +20,7 @@ import (
 // Every cell is gated on byte identity; OPUS_TRANSITION_VBR_TRACE=1 logs
 // the CELT VBR state of every frame.
 func TestAutoModeTransitionOracle(t *testing.T) {
+	t.Parallel()
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
 	}
@@ -166,6 +167,7 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			frames := tc.frames
 			if frames == 0 {
 				frames = 16

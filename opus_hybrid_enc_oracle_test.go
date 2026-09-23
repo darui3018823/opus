@@ -17,6 +17,7 @@ import (
 // are gated; the others report the first divergent frame and the CELT-side
 // stage differences.
 func TestHybridEncoderOracle(t *testing.T) {
+	t.Parallel()
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
 	}
@@ -60,6 +61,7 @@ func TestHybridEncoderOracle(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			ref := runHybridEncOracle(t, "ref-speech", frames, tc.bitrate, "fb", tc.vbr, tc.channels, tc.complexity)
 			enc, err := NewEncoder(rate, tc.channels, ApplicationVOIP)
 			if err != nil {

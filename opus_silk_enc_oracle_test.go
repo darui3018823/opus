@@ -674,6 +674,7 @@ func firstFloat32Mismatch(got, want []float32) (int, bool) {
 // packets must be byte-identical to libopus. Later frames of a diverged
 // fixture are reported for diagnosis only.
 func TestSILKEncoderInputPipelineOracle(t *testing.T) {
+	t.Parallel()
 	runSILKEncoderOracle(t, 0, 24000)
 }
 
@@ -698,6 +699,7 @@ func encOracleRefSpeechFrame(rate, start, n int) []float64 {
 // in-band FEC (20 % loss): LBRR generation, its bit accounting and the
 // packet header must match libopus too.
 func TestSILKEncoderInputPipelineOracleFEC(t *testing.T) {
+	t.Parallel()
 	runSILKEncoderOracle(t, 20, 24000)
 }
 
@@ -705,6 +707,7 @@ func TestSILKEncoderInputPipelineOracleFEC(t *testing.T) {
 // silk_control_SNR sits near the top of its tables and the bit reservoir
 // behaves differently.
 func TestSILKEncoderInputPipelineOracle32k(t *testing.T) {
+	t.Parallel()
 	runSILKEncoderOracle(t, 0, 32000)
 }
 
@@ -720,6 +723,7 @@ func runSILKEncoderOracleMode(t *testing.T, lossPerc, bitrate int, vbr bool) {
 // complexity 8 (four delayed-decision states, 24th-order shaping, 16 NLSF
 // survivors, maximum pitch complexity).
 func TestSILKEncoderInputPipelineOracleComplexity8(t *testing.T) {
+	t.Parallel()
 	runSILKEncoderOracleComplexity(t, 0, 24000, true, 8)
 }
 
@@ -743,6 +747,7 @@ func runSILKEncoderOracleComplexity(t *testing.T, lossPerc, bitrate int, vbr boo
 				t.Fatalf("no Go generator for fixture %s", fixture)
 			}
 			t.Run(fmt.Sprintf("%dk/%s", rate/1000, fixture), func(t *testing.T) {
+				t.Parallel()
 				bandwidth := "auto"
 				if rate > 16000 {
 					bandwidth = "wb"
@@ -893,6 +898,7 @@ func runSILKEncoderOracleComplexity(t *testing.T, lossPerc, bitrate int, vbr boo
 // and, at the first differing packet, reports the silk_stereo_LR_to_MS
 // decisions and per-channel entry states of both encoders.
 func TestSILKEncoderStereoOracle(t *testing.T) {
+	t.Parallel()
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
 	}
@@ -901,6 +907,7 @@ func TestSILKEncoderStereoOracle(t *testing.T) {
 		{8000, 24000, 0}, {16000, 32000, 0}, {8000, 24000, 20}, {16000, 32000, 20}, {12000, 40000, 20},
 	} {
 		t.Run(fmt.Sprintf("%dk/%dkbps/loss%d", tc.rate/1000, tc.bitrate/1000, tc.lossPerc), func(t *testing.T) {
+			t.Parallel()
 			bandwidth := "auto"
 			if tc.rate > 16000 {
 				bandwidth = "wb"
@@ -1026,5 +1033,6 @@ func loopDiffs(g silk.FrameTrace, r encOracleFrame) string {
 // packet is sized to cbr_bytes and the encode_frame_FLP quantiser loop must
 // take the same iterations as libopus.
 func TestSILKEncoderInputPipelineOracleCBR(t *testing.T) {
+	t.Parallel()
 	runSILKEncoderOracleMode(t, 0, 24000, false)
 }

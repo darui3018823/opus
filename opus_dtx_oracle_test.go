@@ -77,6 +77,7 @@ func refSpeechGapsFrame(rate, channels, start, n int) []float64 {
 // off, the peak-energy activity test when it is on, and multi-frame packets
 // made of DTX frames.
 func TestDTXOracle(t *testing.T) {
+	t.Parallel()
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
 	}
@@ -104,6 +105,7 @@ func TestDTXOracle(t *testing.T) {
 	for _, tc := range cases {
 		name := fmt.Sprintf("in%dk/ch%d/%dk/c%d/%dms/%s-%s/vbr=%v", tc.rate/1000, tc.channels, tc.bitrate/1000, tc.complexity, tc.frameMs, tc.app, tc.signal, tc.vbr)
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			frames := 2400 / tc.frameMs
 			frameSize := tc.rate * tc.frameMs / 1000
 			vbrArg := "0"

@@ -17,6 +17,7 @@ import (
 // hints, 48 kHz mono and stereo over a bitrate sweep. It checks the TOC
 // (mode, bandwidth, channels) of every packet and the packet bytes.
 func TestAutoModeOracle(t *testing.T) {
+	t.Parallel()
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
 	}
@@ -118,6 +119,7 @@ func TestAutoModeOracle(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			frameMs := tc.frameMs
 			if frameMs == 0 {
 				frameMs = 20

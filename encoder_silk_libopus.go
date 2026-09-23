@@ -83,7 +83,7 @@ func (e *Encoder) silkInternalRateControl(frameSize, desiredRate int, silkPrefil
 // 40 or 60 ms packet is one native SILK packet of nFrames frames.
 func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames int, d modeDecision, maxDataBytes int,
 	silkPrefill []float64, prefill2 bool) ([]byte, error) {
-	frameSize := e.frameSize * nFrames
+	frameSize := e.silkUnitFrameSize() * nFrames
 	frameRate := e.sampleRate / frameSize
 	streamChannels := e.streamChannelsOrInput()
 	desiredRate := e.silkInternalRateForBandwidth(d.bandwidth)
@@ -137,12 +137,15 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 	if !ok {
 		return nil, fmt.Errorf("SILK-only encoding not available for %d Hz", e.silkSampleRate)
 	}
-	toc, err := framing.GenerateTOCExt(framing.ModeSILKOnly, bw, streamChannels, nFrames*framing.FrameSize20ms)
+	toc, err := framing.GenerateTOCExt(framing.ModeSILKOnly, bw, streamChannels, frameSize*48000/e.sampleRate)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate SILK TOC: %w", err)
 	}
 
-	silkFrameSize := e.silkSampleRate * 20 / 1000
+	silkFrameSize := e.silkSampleRate * e.silkFrameMsOrDefault() / 1000
+	if err := e.silkEncoder.SetFrameMs(e.silkFrameMsOrDefault()); err != nil {
+		return nil, err
+	}
 	silkPCM := e.silkInput(pcm, silkFrameSize*nFrames*streamChannels)
 	e.inDTX = false
 	enc := entcode.NewEncoder(maxDataBytes - 1)
@@ -230,6 +233,20 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 
 // silkOnlyLibopusPath reports whether a SILK-only packet takes the libopus
 // single-frame path.
+// silkFrameMsOrDefault is the SILK frame duration of the packet (10 or 20
+// ms; 20 outside the libopus policy).
+func (e *Encoder) silkFrameMsOrDefault() int {
+	if e.libopusModePolicy && e.silkFrameMs == 10 {
+		return 10
+	}
+	return 20
+}
+
+// silkUnitFrameSize is the SILK / hybrid frame length at the input rate.
+func (e *Encoder) silkUnitFrameSize() int {
+	return e.sampleRate * e.silkFrameMsOrDefault() / 1000
+}
+
 func (e *Encoder) silkOnlyLibopusPath(nFrames int) bool {
 	return e.libopusModePolicy && nFrames >= 1 && nFrames <= 3 && e.silkEncoder != nil
 }

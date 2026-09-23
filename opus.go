@@ -143,6 +143,9 @@ type Encoder struct {
 	packetLSBDepth   int
 	// frameSILKDTX marks a frame SILK DTX dropped (no delay-buffer tail).
 	frameSILKDTX bool
+	// silkFrameMs is the SILK / hybrid frame duration of the packet being
+	// coded under the libopus policy: 10 for a 10 ms packet, 20 otherwise.
+	silkFrameMs int
 	// packetEquivRate is the libopus policy's equiv_rate for the packet
 	// being coded (0 outside it).
 	packetEquivRate int
@@ -602,10 +605,15 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	} else {
 		e.pendingMode = -1
 	}
+	e.silkFrameMs = 20
 	if e.libopusModePolicy && frameSize < e.frameSize {
 		// A 2.5/5/10 ms packet is one frame of its own size; below 10 ms
-		// the decision is always CELT-only.
+		// the decision is always CELT-only, at 10 ms SILK and hybrid code
+		// 10 ms frames.
 		nFrames = 1
+		if frameSize*100 == e.sampleRate {
+			e.silkFrameMs = 10
+		}
 	}
 	if e.libopusModePolicy && nFrames >= 1 {
 		if decision.silkPrefill && e.silkEncoder != nil {
@@ -718,14 +726,12 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 	}
 	pcm = e.conditionInput(pcm, frameSize, nFrames)
 	var silkPrefill []float64
-	if e.libopusModePolicy && (decision.silkPrefill || decision.silkPrefill2) && frameSize >= e.frameSize {
+	if e.libopusModePolicy && (decision.silkPrefill || decision.silkPrefill2) && frameSize*100 >= e.sampleRate {
 		silkPrefill = e.silkPrefillInput()
 	}
 	celtPCM := e.delayedCELTInput(pcm)
 	short := frameSize < e.frameSize
-	if short && (!e.libopusModePolicy || decision.mode != framing.ModeCELTOnly) {
-		// TODO(10 ms SILK/hybrid): the libopus policy codes these as SILK or
-		// hybrid; the Go encoder has no 10 ms SILK/hybrid packets yet.
+	if short && !e.libopusModePolicy {
 		return e.encodeShortCELTPacket(raw, celtPCM)
 	}
 	if e.libopusModePolicy {
@@ -1221,13 +1227,16 @@ func (e *Encoder) narrowAutoHybridBandwidth(pcm []float64, bw int) int {
 // (it lowers bits_target) or 0 to size it here.
 func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, redundancy, celtToSilk bool, redundancyBytesHint int, silkPrefill []float64, prefill2 bool, maxDataBytesIn, bitrateIn int) ([]byte, bool, error) {
 	streamChannels := e.celtStreamChannels()
-	toc, err := framing.GenerateTOCExt(framing.ModeHybrid, bw, streamChannels, framing.FrameSize20ms)
+	// unit is the frame length at the input rate: 20 ms, or 10 ms for a
+	// 10 ms packet under the libopus policy.
+	unit := e.silkUnitFrameSize()
+	toc, err := framing.GenerateTOCExt(framing.ModeHybrid, bw, streamChannels, unit*48000/e.sampleRate)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to generate hybrid TOC: %w", err)
 	}
 
-	inputChunkLen := e.frameSize * e.channels
-	silkFrameSize := e.silkSampleRate * 20 / 1000
+	inputChunkLen := unit * e.channels
+	silkFrameSize := e.silkSampleRate * e.silkFrameMsOrDefault() / 1000
 	silkChunkLen := silkFrameSize * streamChannels
 	celtEnd := celtEndBandForFramingBW(bw)
 	e.celtEncoder.SetStreamChannels(streamChannels)
@@ -1252,17 +1261,17 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		maxDataBytes = maxDataBytesIn
 		bitrateBps = bitrateIn
 	} else if cbr {
-		cbrBytes := (bitrateToBits(e.bitrate, e.sampleRate, e.frameSize) + 4) / 8
+		cbrBytes := (bitrateToBits(e.bitrate, e.sampleRate, unit) + 4) / 8
 		if cbrBytes > maxDataBytes {
 			cbrBytes = maxDataBytes
 		}
-		bitrateBps = bitsToBitrate(cbrBytes*8, e.sampleRate, e.frameSize)
+		bitrateBps = bitsToBitrate(cbrBytes*8, e.sampleRate, unit)
 		maxDataBytes = cbrBytes
 		if maxDataBytes < 1 {
 			maxDataBytes = 1
 		}
 	}
-	bitsTarget := bitrateToBits(bitrateBps, e.sampleRate, e.frameSize)
+	bitsTarget := bitrateToBits(bitrateBps, e.sampleRate, unit)
 	if b := 8 * (maxDataBytes - redundancyBytesHint); b < bitsTarget {
 		bitsTarget = b
 	}
@@ -1270,7 +1279,7 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 	silkRate := 0
 	silkMaxBits := 0
 	if e.silkEncoder != nil {
-		total := bitsToBitrate(bitsTarget, e.sampleRate, e.frameSize)
+		total := bitsToBitrate(bitsTarget, e.sampleRate, unit)
 		silkRate = computeSILKRateForHybrid(total, bw, true, !cbr, e.lbrrCoded, streamChannels)
 		if silkRate < 5000 {
 			silkRate = 5000
@@ -1287,7 +1296,7 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 			silkMaxBits -= redundancyBytesHint*8 + 1 + 20
 		}
 		if e.rateMode == celt.RateModeCBR {
-			otherBits := silkMaxBits - silkRate*e.frameSize/e.sampleRate
+			otherBits := silkMaxBits - silkRate*unit/e.sampleRate
 			if otherBits < 0 {
 				otherBits = 0
 			}
@@ -1296,8 +1305,8 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 				silkMaxBits = 0
 			}
 		} else {
-			maxRate := computeSILKRateForHybrid(silkMaxBits*e.sampleRate/e.frameSize, bw, true, true, e.lbrrCoded, streamChannels)
-			silkMaxBits = bitrateToBits(maxRate, e.sampleRate, e.frameSize)
+			maxRate := computeSILKRateForHybrid(silkMaxBits*e.sampleRate/unit, bw, true, true, e.lbrrCoded, streamChannels)
+			silkMaxBits = bitrateToBits(maxRate, e.sampleRate, unit)
 		}
 		e.silkEncoder.SetMaxBits(silkMaxBits)
 		defer e.silkEncoder.SetMaxBits(0)
@@ -1306,14 +1315,14 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 	// prefill of a re-initialised encoder; switchReady arms a SILK bandwidth
 	// switch with a trailing redundant frame.
 	if e.libopusModePolicy {
-		switchReady, err := e.silkInternalRateControl(e.frameSize, 16000, silkPrefill, prefill2, silkRate, silkMaxBits, streamChannels)
+		switchReady, err := e.silkInternalRateControl(unit, 16000, silkPrefill, prefill2, silkRate, silkMaxBits, streamChannels)
 		if err != nil {
 			return nil, false, err
 		}
 		if switchReady && nFrames == 1 && !e.nonfinalFrame {
 			// For the first frame at a new SILK bandwidth: a trailing
 			// redundant frame now, the switch on the next packet.
-			if bytes := computeRedundancyBytes(maxDataBytes, bitrateBps, e.sampleRate/e.frameSize, streamChannels); bytes != 0 {
+			if bytes := computeRedundancyBytes(maxDataBytes, bitrateBps, e.sampleRate/unit, streamChannels); bytes != 0 {
 				redundancy, celtToSilk, redundancyBytesHint = true, false, bytes
 				e.silkBwSwitch = true
 			}
@@ -1345,6 +1354,9 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 			// libopus switches SILK to VBR-with-cap inside a CBR hybrid packet.
 			e.silkEncoder.SetRateMode(silk.RateModeCVBR)
 		}
+		if err := e.silkEncoder.SetFrameMs(e.silkFrameMsOrDefault()); err != nil {
+			return nil, false, err
+		}
 		err := e.silkEncoder.EncodeMultiWithEncoder(enc, silkPCM, 1)
 		if cbr {
 			e.silkEncoder.SetRateMode(silk.RateModeCBR)
@@ -1361,7 +1373,7 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		e.celtEncoder.SetSILKInfo(e.silkEncoder.LastSILKInfo())
 		// HB_gain: increasingly attenuate the high band when it gets allocated
 		// fewer bits (gain_fade from the previous frame's gain).
-		celtRate := bitsToBitrate(bitsTarget, e.sampleRate, e.frameSize) - silkRate
+		celtRate := bitsToBitrate(bitsTarget, e.sampleRate, unit) - silkRate
 		hbGain := float32(1) - float32(math.Exp(0.6931471805599453094*float64(float32(-celtRate)*float32(1.0/1024))))
 		if e.prevHBGain < 1 || hbGain < 1 {
 			celtChunk = append([]float64(nil), celtChunk...)
@@ -1390,7 +1402,7 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		if frameRedundancy && enc.ECTell()+17+20 <= maxBytes*8 {
 			redundancyBytes = redundancyBytesHint
 			if redundancyBytes == 0 {
-				redundancyBytes = computeRedundancyBytes(maxBytes, e.bitrate, e.sampleRate/e.frameSize, streamChannels)
+				redundancyBytes = computeRedundancyBytes(maxBytes, e.bitrate, e.sampleRate/unit, streamChannels)
 			}
 			// Reserve 8 bits for the length plus a few for CELT (libopus
 			// max_redundancy for the hybrid branch); target the same bitrate

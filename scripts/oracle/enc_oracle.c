@@ -39,10 +39,60 @@ static float noise_sample(unsigned int *state, double *prev)
     return (float)y;
 }
 
+/* ref-speech-gaps (refSpeechGapsSample in opus_dtx_oracle_test.go): a 2.4 s
+   cycle of ref-speech (0-0.4 s), digital silence (0.4-0.9 s), noise at
+   about -60 dBFS (0.9-1.4 s), noise of a few LSBs (1.4-2.3 s) and ref-speech
+   again (2.3-2.4 s), for the DTX paths. The noise is a hash of the sample
+   index, so any frame size sees the same signal. */
+static int gaps_segment(long idx, int rate)
+{
+    long period = (long)rate * 12 / 5;
+    long pos = idx % period;
+    if (pos < (long)rate * 2 / 5) return 0;
+    if (pos < (long)rate * 9 / 10) return 1;
+    if (pos < (long)rate * 7 / 5) return 2;
+    if (pos < (long)rate * 23 / 10) return 3;
+    return 0;
+}
+
+static double gaps_noise(long idx, int ch, int seg)
+{
+    unsigned int h = (unsigned int)idx * 2654435761u + (unsigned int)ch * 40503u + 12345u;
+    h ^= h >> 15;
+    h *= 2246822519u;
+    h ^= h >> 13;
+    return ((double)(h & 0xffff) / 65536.0 - 0.5) * (seg == 2 ? 0.002 : 0.0002);
+}
+
 static void fill_silk_fixture_stereo(float *pcm, int rate, int frame_size, int frame, const char *fixture)
 {
     int i;
     int start = frame * frame_size;
+    if (strcmp(fixture, "ref-speech-gaps") == 0) {
+        for (i = 0; i < frame_size; i++) {
+            long idx = (long)start + i;
+            double tm = (double)idx / (double)rate;
+            int seg = gaps_segment(idx, rate);
+            if (seg == 1) {
+                pcm[2 * i] = pcm[2 * i + 1] = 0.0f;
+            } else if (seg >= 2) {
+                pcm[2 * i] = (float)gaps_noise(idx, 0, seg);
+                pcm[2 * i + 1] = (float)gaps_noise(idx, 1, seg);
+            } else {
+                double env = 0.55 + 0.35 * sin(2.0 * M_PI * 3.0 * tm);
+                double s = 0.32 * sin(2.0 * M_PI * 180.0 * tm) +
+                    0.12 * sin(2.0 * M_PI * 360.0 * tm + 0.4) +
+                    0.06 * sin(2.0 * M_PI * 720.0 * tm + 0.9) +
+                    0.025 * sin(2.0 * M_PI * 1100.0 * tm + 1.7);
+                double r = 0.30 * sin(2.0 * M_PI * 185.0 * tm + 0.2) +
+                    0.10 * sin(2.0 * M_PI * 370.0 * tm + 0.7) +
+                    0.05 * sin(2.0 * M_PI * 740.0 * tm + 1.1);
+                pcm[2 * i] = (float)(env * s);
+                pcm[2 * i + 1] = (float)(env * r);
+            }
+        }
+        return;
+    }
     if (strcmp(fixture, "ref-speech") == 0) {
         /* silkRefSpeechFrame (opus_cgo_silk_encode_test.go), channels = 2. */
         for (i = 0; i < frame_size; i++) {
@@ -106,6 +156,26 @@ static void fill_silk_fixture(float *pcm, int rate, int frame_size, int frame, c
                 0.06 * sin(2.0 * M_PI * 720.0 * tm + 0.9) +
                 0.025 * sin(2.0 * M_PI * 1100.0 * tm + 1.7);
             pcm[i] = (float)(env * s);
+        }
+        return;
+    }
+    if (strcmp(fixture, "ref-speech-gaps") == 0) {
+        for (i = 0; i < frame_size; i++) {
+            long idx = (long)start + i;
+            double tm = (double)idx / (double)rate;
+            int seg = gaps_segment(idx, rate);
+            if (seg == 1) {
+                pcm[i] = 0.0f;
+            } else if (seg >= 2) {
+                pcm[i] = (float)gaps_noise(idx, 0, seg);
+            } else {
+                double env = 0.55 + 0.35 * sin(2.0 * M_PI * 3.0 * tm);
+                double s = 0.32 * sin(2.0 * M_PI * 180.0 * tm) +
+                    0.12 * sin(2.0 * M_PI * 360.0 * tm + 0.4) +
+                    0.06 * sin(2.0 * M_PI * 720.0 * tm + 0.9) +
+                    0.025 * sin(2.0 * M_PI * 1100.0 * tm + 1.7);
+                pcm[i] = (float)(env * s);
+            }
         }
         return;
     }
@@ -369,7 +439,7 @@ static int parse_bitrate_schedule(const char *s, int *out, int max)
 
 static int run_auto_encoder_oracle(int argc, char **argv)
 {
-    int rate, frames, bitrate, complexity, vbr, channels, frame_size, err, frame, app, frame_ms, loss_perc;
+    int rate, frames, bitrate, complexity, vbr, channels, frame_size, err, frame, app, frame_ms, loss_perc, use_dtx;
     int schedule[AUTO_ENC_MAX_SCHEDULE], nschedule;
     const char *fixture, *signal, *appname;
     OpusEncoder *enc;
@@ -377,7 +447,7 @@ static int run_auto_encoder_oracle(int argc, char **argv)
     unsigned char packet[1500];
 
     if (argc < 4) {
-        fprintf(stderr, "usage: %s --auto-enc <rate> <fixture> [frames] [bitrate] [vbr] [channels] [complexity] [signal] [app] [frame_ms] [loss_perc]\n", argv[0]);
+        fprintf(stderr, "usage: %s --auto-enc <rate> <fixture> [frames] [bitrate] [vbr] [channels] [complexity] [signal] [app] [frame_ms] [loss_perc] [dtx]\n", argv[0]);
         return 2;
     }
     rate = atoi(argv[2]);
@@ -396,6 +466,7 @@ static int run_auto_encoder_oracle(int argc, char **argv)
     appname = (argc >= 11) ? argv[10] : "voip";
     frame_ms = (argc >= 12) ? atoi(argv[11]) : 20;
     loss_perc = (argc >= 13) ? atoi(argv[12]) : 0;
+    use_dtx = (argc >= 14) ? atoi(argv[13]) : 0;
     if (rate != 8000 && rate != 12000 && rate != 16000 && rate != 24000 && rate != 48000) {
         fprintf(stderr, "--auto-enc rate must be 8000, 12000, 16000, 24000 or 48000\n");
         return 2;
@@ -415,14 +486,15 @@ static int run_auto_encoder_oracle(int argc, char **argv)
     opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(complexity));
     opus_encoder_ctl(enc, OPUS_SET_VBR(vbr ? 1 : 0));
     opus_encoder_ctl(enc, OPUS_SET_VBR_CONSTRAINT(1));
+    if (use_dtx) opus_encoder_ctl(enc, OPUS_SET_DTX(1));
     if (loss_perc > 0) {
         opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1));
         opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(loss_perc));
     }
     if (strcmp(signal, "voice") == 0) opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
     else if (strcmp(signal, "music") == 0) opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
-    fprintf(stderr, "AUTO_ENC_ORACLE rate=%d frame_size=%d fixture=%s frames=%d bitrate=%d vbr=%d channels=%d complexity=%d signal=%s app=%s loss=%d\n",
-            rate, frame_size, fixture, frames, bitrate, vbr, channels, complexity, signal, appname, loss_perc);
+    fprintf(stderr, "AUTO_ENC_ORACLE rate=%d frame_size=%d fixture=%s frames=%d bitrate=%d vbr=%d channels=%d complexity=%d signal=%s app=%s loss=%d dtx=%d\n",
+            rate, frame_size, fixture, frames, bitrate, vbr, channels, complexity, signal, appname, loss_perc, use_dtx);
     for (frame = 0; frame < frames; frame++) {
         int n, b;
         int fb = schedule[frame < nschedule ? frame : nschedule - 1];

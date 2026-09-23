@@ -63,8 +63,15 @@ func (e *Encoder) encodeMultiframeLibopus(raw []float64, frameSize, nFrames, max
 	} else {
 		e.prevStreamChannels = e.streamChannels
 	}
+	// Reset the analysis position to the beginning of the first frame so
+	// it can be read one frame at a time.
+	perFrameAnalysis := e.analysisReadPos != -1 && e.analysis != nil
+	if perFrameAnalysis {
+		e.analysis.SetReadPosition(e.analysisReadPos, e.analysisReadSubframe)
+	}
 	frames := make([][]byte, 0, nFrames)
 	totSize := 0
+	dtxCount := 0
 	var rangeFinal uint32
 	for i := 0; i < nFrames; i++ {
 		e.toMono = false
@@ -82,10 +89,20 @@ func (e *Encoder) encodeMultiframeLibopus(raw []float64, frameSize, nFrames, max
 			currMax = left
 		}
 		sub := raw[i*encFrameSize*ch : (i+1)*encFrameSize*ch]
+		// The frame's analysis (tonality_get_info, which CELT_SET_ANALYSIS
+		// hands to the CELT encoder) and is_digital_silence.
+		if perFrameAnalysis {
+			e.frameAnalysis = e.analysis.GetInfo(encFrameSize)
+			e.celtEncoder.SetAnalysis(e.frameAnalysis)
+		}
+		e.frameIsSilence = isDigitalSilence(sub, e.packetLSBDepth)
 		pkt, err := e.encodeDecidedFrame(sub, encFrameSize, subFrames, currMax, d)
 		if err != nil {
 			e.nonfinalFrame = false
 			return nil, err
+		}
+		if len(pkt) == 1 {
+			dtxCount++
 		}
 		totSize += len(pkt)
 		rangeFinal = e.lastFinalRange
@@ -112,7 +129,8 @@ func (e *Encoder) encodeMultiframeLibopus(raw []float64, frameSize, nFrames, max
 	var payload []byte
 	var code int
 	var err error
-	if !vbr {
+	// CBR pads the packet unless every frame is a DTX frame.
+	if !vbr && dtxCount != nFrames {
 		payload, code, err = packOpusFramesToPacketSize(payloads, !allEqual, repacketizeLen)
 	} else {
 		payload, code, err = packOpusFrames(payloads, !allEqual)

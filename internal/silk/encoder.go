@@ -41,8 +41,20 @@ type Encoder struct {
 	frameVAD        []silkVADResult
 	curFrame        int
 	noSpeechCounter int
-	inputQuality    float64
-	inputQualityB   [silkVADNBands]float64
+	// useDTX / inDTX are sCmn.useDTX / inDTX: SILK's own DTX, used by the
+	// Opus layer when its generalized DTX cannot run. inDTX starts every
+	// silk_Encode call at useDTX and the VAD clears it until the frame is
+	// NB_SPEECH_FRAMES_BEFORE_DTX frames into a silence; a packet whose coded
+	// channels are all inDTX is dropped (zero bytes).
+	useDTX bool
+	inDTX  bool
+	// opusNoActivity is the Opus layer's VAD decision VAD_NO_ACTIVITY for
+	// the call: it lowers an active SILK VAD to just under the threshold.
+	opusNoActivity bool
+	// lastPacketDTX reports that the last packet was dropped by SILK DTX.
+	lastPacketDTX bool
+	inputQuality  float64
+	inputQualityB [silkVADNBands]float64
 	// inputQualityBandQ15 keeps the fixed-point band quality of the current
 	// frame; hpVariableCutoff reads the previous frame's value from it.
 	inputQualityBandQ15 [silkVADNBands]int
@@ -488,6 +500,7 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 	if len(pcm) != expected {
 		return fmt.Errorf("invalid PCM length: got %d, expected %d", len(pcm), expected)
 	}
+	e.beginDTXPacket()
 	if streamChannels == 2 {
 		defer func() { e.prevStreamChannels = 2 }()
 		return e.encodeMultiStereoWithEncoder(enc, pcm, nFrames)
@@ -554,6 +567,7 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 	}
 	e.finishLBRRPacket(nFrames)
+	e.lastPacketDTX = e.inDTX
 	e.finishPacketBitReservoir(nFrames, enc.ECTell())
 	return nil
 }
@@ -750,6 +764,8 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 
 	e.finishLBRRPacket(nFrames)
 	e.side.finishLBRRPacket(nFrames)
+	// Zero bytes if all channels DTXed.
+	e.lastPacketDTX = e.inDTX && e.side.inDTX
 	e.finishPacketBitReservoir(nFrames, enc.ECTell())
 	e.pendingLBRRStereoPred = append(e.pendingLBRRStereoPred[:0], predIx...)
 	e.pendingLBRRStereoMidOnly = append(e.pendingLBRRStereoMidOnly[:0], midOnly...)
@@ -3464,6 +3480,8 @@ func (e *Encoder) Reset() {
 	e.frameVAD = nil
 	e.curFrame = 0
 	e.noSpeechCounter = 0
+	e.inDTX = false
+	e.lastPacketDTX = false
 	e.silkVAD.reset()
 	e.speechActivity = 1.0
 	e.inputTilt = 0
@@ -3610,20 +3628,95 @@ func (e *Encoder) runFrameVAD(frame int, pcm []float64) bool {
 		e.frameVAD = e.frameVAD[:0]
 	}
 	res := e.silkVADGetSAQ8(pcm)
+	e.lowerVADForOpusActivity(&res)
 	for len(e.frameVAD) <= frame {
 		e.frameVAD = append(e.frameVAD, silkVADResult{})
 	}
 	e.frameVAD[frame] = res
-	if res.speechActivityQ8 < activityThresholdQ8 {
+	return e.updateDTXFlags(res.speechActivityQ8)
+}
+
+// lowerVADForOpusActivity: if the Opus VAD is inactive and the SILK VAD is
+// active, lower the SILK VAD to just under the threshold.
+func (e *Encoder) lowerVADForOpusActivity(res *silkVADResult) {
+	const activityThresholdQ8 = 13 // SILK_FIX_CONST(SPEECH_ACTIVITY_DTX_THRES, 8)
+	if e.opusNoActivity && res.speechActivityQ8 >= activityThresholdQ8 {
+		res.speechActivityQ8 = activityThresholdQ8 - 1
+		res.speechActivity = float64(res.speechActivityQ8) / 256.0
+	}
+}
+
+// updateDTXFlags converts the frame's speech activity into its VAD flag and
+// the DTX state (silk_encode_do_VAD_FLP).
+func (e *Encoder) updateDTXFlags(speechActivityQ8 int) bool {
+	const activityThresholdQ8 = 13 // SILK_FIX_CONST(SPEECH_ACTIVITY_DTX_THRES, 8)
+	if speechActivityQ8 < activityThresholdQ8 {
 		e.noSpeechCounter++
-		if e.noSpeechCounter > silkMaxConsecutiveDTX+silkNBSpeechFramesBeforeDTX {
+		if e.noSpeechCounter <= silkNBSpeechFramesBeforeDTX {
+			e.inDTX = false
+		} else if e.noSpeechCounter > silkMaxConsecutiveDTX+silkNBSpeechFramesBeforeDTX {
 			e.noSpeechCounter = silkNBSpeechFramesBeforeDTX
+			e.inDTX = false
 		}
 		return false
 	}
 	e.noSpeechCounter = 0
+	e.inDTX = false
 	return true
 }
+
+// beginDTXPacket starts a silk_Encode call: inDTX = useDTX on every channel.
+func (e *Encoder) beginDTXPacket() {
+	e.inDTX = e.useDTX
+	e.lastPacketDTX = false
+	if e.side != nil {
+		e.side.inDTX = e.side.useDTX
+	}
+}
+
+// SetDTX sets silk_mode.useDTX for the next packets (both channels).
+func (e *Encoder) SetDTX(enabled bool) {
+	e.useDTX = enabled
+	if e.side != nil {
+		e.side.useDTX = enabled
+	}
+}
+
+// Opus-layer voice activity decisions passed to silk_Encode.
+const (
+	VADNoDecision = -1
+	VADNoActivity = 0
+	VADActivity   = 1
+)
+
+// SetOpusActivity passes the Opus layer's voice activity decision for the
+// next call (VADNoDecision, VADNoActivity or VADActivity).
+func (e *Encoder) SetOpusActivity(activity int) {
+	e.opusNoActivity = activity == VADNoActivity
+	if e.side != nil {
+		e.side.opusNoActivity = e.opusNoActivity
+	}
+}
+
+// PacketDTX reports that SILK DTX dropped the last packet: opus_encode_native
+// then sends a TOC-only packet.
+func (e *Encoder) PacketDTX() bool { return e.lastPacketDTX }
+
+// NoSpeechDTX is SILK's part of OPUS_GET_IN_DTX: every coded channel has
+// been inactive for NB_SPEECH_FRAMES_BEFORE_DTX frames.
+func (e *Encoder) NoSpeechDTX() bool {
+	if e.noSpeechCounter < silkNBSpeechFramesBeforeDTX {
+		return false
+	}
+	if e.streamChannels == 2 && e.side != nil {
+		return e.side.noSpeechCounter >= silkNBSpeechFramesBeforeDTX
+	}
+	return true
+}
+
+// LastSignalType is silk_mode.signalType after silk_Encode: the signal type
+// of the last coded frame of the first channel.
+func (e *Encoder) LastSignalType() int { return e.prevSignalType }
 
 // frameVADResult returns the stored VAD result for the frame being encoded,
 // falling back to a direct evaluation when the frame was not pre-analysed

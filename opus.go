@@ -1,6 +1,7 @@
 package opus
 
 import (
+	"errors"
 	"fmt"
 	"math"
 
@@ -129,6 +130,23 @@ type Encoder struct {
 	// of a multi-frame packet, so SILK may not switch its rate after it.
 	nonfinalFrame bool
 	toMono        bool
+	// peakSignalEnergy / nbNoActivityMsQ1 are st->peak_signal_energy and
+	// st->nb_no_activity_ms_Q1 (libopus DTX); silkUseDTX is silk_mode.useDTX
+	// for the packet. frameIsSilence / frameAnalysis / packetLSBDepth carry
+	// the packet's (or, in a multi-frame packet, the frame's) silence test and
+	// analysis to opus_encode_frame_native.
+	peakSignalEnergy float32
+	nbNoActivityMsQ1 int
+	silkUseDTX       bool
+	frameIsSilence   bool
+	frameAnalysis    celt.AnalysisInfo
+	packetLSBDepth   int
+	// frameSILKDTX marks a frame SILK DTX dropped (no delay-buffer tail).
+	frameSILKDTX bool
+	// analysisReadPos / analysisReadSubframe are analysis_read_pos_bak and
+	// analysis_read_subframe_bak: the analysis read position before this
+	// packet's run_analysis (-1 when the analysis did not run).
+	analysisReadPos, analysisReadSubframe int
 	// streamStarted is set by the first encode after construction or Reset:
 	// SetModePolicy resets the stream state only once encoding has begun.
 	streamStarted bool
@@ -526,10 +544,12 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	}
 	e.celtEncoder.SetLSBDepth(lsbDepth)
 	var analysisInfo celt.AnalysisInfo
+	e.analysisReadPos, e.analysisReadSubframe = -1, -1
 	if e.complexity >= 7 && e.sampleRate >= 16000 && e.sampleRate <= 48000 {
 		if e.analysis == nil {
 			e.analysis = celt.NewTonalityAnalysis(e.sampleRate)
 		}
+		e.analysisReadPos, e.analysisReadSubframe = e.analysis.ReadPosition()
 		analysisInfo = e.analysis.Run(pcm, frameSize, e.channels, lsbDepth)
 	} else if e.analysis != nil && e.analysis.Initialized() {
 		e.analysis.Reset()
@@ -561,6 +581,12 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	}
 	var decision modeDecision
 	if e.libopusModePolicy && frameSize >= e.frameSize {
+		// is_digital_silence, the peak signal energy and silk_mode.useDTX:
+		// SILK's own DTX only runs when the generalized DTX cannot.
+		isSilence := isDigitalSilence(raw, lsbDepth)
+		e.trackPeakSignalEnergy(raw, isSilence, analysisInfo)
+		e.silkUseDTX = e.dtx && !(analysisInfo.Valid || isSilence)
+		e.frameIsSilence, e.frameAnalysis, e.packetLSBDepth = isSilence, analysisInfo, lsbDepth
 		e.decideStreamChannels(frameSize, framing.ModeSILKOnly)
 		decision = e.decideLibopusMode(raw, frameSize, maxDataBytes, analysisInfo)
 		if decision.mode == framing.ModeCELTOnly && e.toMono {
@@ -605,7 +631,61 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 // silk_bw_switch redundancy and prefill, and the redundancy size from this
 // frame's byte budget.
 func (e *Encoder) encodeDecidedFrame(pcm []float64, frameSize, nFrames, maxDataBytes int, decision modeDecision) ([]byte, error) {
+	if !e.libopusModePolicy || nFrames < 1 {
+		return e.encodeDecidedFrameCore(pcm, frameSize, nFrames, maxDataBytes, decision)
+	}
+	// opus_encode_frame_native's voice activity, passed to SILK.
+	activity := e.frameActivity(pcm, e.frameIsSilence, e.frameAnalysis, decision.mode)
+	if e.silkEncoder != nil {
+		e.silkEncoder.SetDTX(e.silkUseDTX)
+		e.silkEncoder.SetOpusActivity(activity)
+	}
+	// SILK DTX returns before the CELT processing, the delay-buffer update
+	// and the HB gain / stereo width / previous-mode bookkeeping.
+	var saved struct {
+		delay          []float64
+		prevHBGain     float32
+		hybridWidthQ14 int
+	}
+	if e.silkUseDTX {
+		saved.delay = append(saved.delay, e.delayBuffer...)
+		saved.prevHBGain = e.prevHBGain
+		saved.hybridWidthQ14 = e.hybridStereoWidthQ14
+	}
+	out, err := e.encodeDecidedFrameCore(pcm, frameSize, nFrames, maxDataBytes, decision)
+	var dtx silkDTXPacket
+	if errors.As(err, &dtx) {
+		copy(e.delayBuffer, saved.delay)
+		e.prevHBGain = saved.prevHBGain
+		e.hybridStereoWidthQ14 = saved.hybridWidthQ14
+		e.lastFinalRange = 0
+		return []byte{dtx.toc}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if activity == silk.VADNoDecision && decision.mode != framing.ModeCELTOnly && e.silkEncoder != nil {
+		activity = silk.VADNoActivity
+		if e.silkEncoder.LastSignalType() != silk.SignalTypeInactive {
+			activity = silk.VADActivity
+		}
+	}
+	// DTX decision: a fully coded frame becomes a TOC-only packet.
+	if e.dtx && !e.silkUseDTX {
+		if e.decideDTXMode(activity, 2*1000*frameSize/e.sampleRate) {
+			e.lastFinalRange = 0
+			return []byte{out[0] &^ 0x03}, nil
+		}
+	} else {
+		e.nbNoActivityMsQ1 = 0
+	}
+	return out, nil
+}
+
+// encodeDecidedFrameCore codes the frame (see encodeDecidedFrame).
+func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxDataBytes int, decision modeDecision) ([]byte, error) {
 	raw := pcm
+	e.frameSILKDTX = false
 	if e.libopusModePolicy && nFrames >= 1 {
 		// For the first frame at a new SILK bandwidth: leading redundancy
 		// and a prefill without resetting the sampling rate control.
@@ -637,8 +717,13 @@ func (e *Encoder) encodeDecidedFrame(pcm []float64, frameSize, nFrames, maxDataB
 	}
 	if e.libopusModePolicy {
 		// The frame's CELT input tail becomes the next packet's tmp_prefill
-		// once this packet is done (a SILK prefill fades the current one).
-		defer e.rememberCELTPrefillTail(celtPCM)
+		// once this packet is done (a SILK prefill fades the current one);
+		// a SILK DTX packet returns before that.
+		defer func() {
+			if !e.silkEncoderDTX() {
+				e.rememberCELTPrefillTail(celtPCM)
+			}
+		}()
 	}
 	if !e.libopusModePolicy {
 		decision = e.goModeDecision(raw, frameSize, nFrames)
@@ -1249,6 +1334,10 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		if err != nil {
 			return nil, false, fmt.Errorf("SILK hybrid encoding failed: %w", err)
 		}
+		if e.libopusModePolicy && e.silkEncoder.PacketDTX() {
+			e.frameSILKDTX = true
+			return nil, false, silkDTXPacket{toc: toc}
+		}
 		// CELT_SET_SILK_INFO: the SILK part's signal type and offset.
 		e.celtEncoder.SetSILKInfo(e.silkEncoder.LastSILKInfo())
 		// HB_gain: increasingly attenuate the high band when it gets allocated
@@ -1832,7 +1921,7 @@ func (e *Encoder) selectCELTEncoder(frameSize int) error {
 	next.SetBitrate(e.bitrate)
 	next.SetComplexity(e.complexity)
 	next.SetRateMode(e.rateMode)
-	next.SetDTX(e.dtx)
+	next.SetDTX(e.celtDTX())
 	next.SetPhaseInversionDisabled(e.phaseInversionDisabled)
 	next.SetSignalType(e.effectiveSignalType())
 	next.SetEnergyMask(e.surroundEnergyMask)
@@ -2082,7 +2171,12 @@ func (e *Encoder) FinalRange() uint32 { return e.lastFinalRange }
 
 // InDTX reports whether the most recently encoded packet used the encoder's
 // DTX silence path.
-func (e *Encoder) InDTX() bool { return e.inDTX }
+func (e *Encoder) InDTX() bool {
+	if e.libopusModePolicy {
+		return e.libopusInDTX()
+	}
+	return e.inDTX
+}
 
 // Application returns the current application mode.
 func (e *Encoder) Application() Application { return e.application }
@@ -2361,7 +2455,7 @@ func (e *Encoder) SetPacketPadding(n int) {
 // frames are kept compact even without DTX.
 func (e *Encoder) SetDTX(enabled bool) {
 	e.dtx = enabled
-	e.celtEncoder.SetDTX(enabled)
+	e.celtEncoder.SetDTX(e.celtDTX())
 }
 
 // DTX reports whether discontinuous transmission is enabled.
@@ -2668,6 +2762,8 @@ func (e *Encoder) Reset() error {
 	e.silkPrevChannels = 0
 	clear(e.celtPrefillTail)
 	e.streamStarted = false
+	e.peakSignalEnergy = 0
+	e.nbNoActivityMsQ1 = 0
 	e.autoBandwidth = 0
 	e.lastFinalRange = 0
 	e.inDTX = false
@@ -2689,7 +2785,7 @@ func (e *Encoder) Reset() error {
 			enc.SetBitrate(e.bitrate)
 			enc.SetComplexity(e.complexity)
 			enc.SetRateMode(e.rateMode)
-			enc.SetDTX(e.dtx)
+			enc.SetDTX(e.celtDTX())
 			enc.SetPhaseInversionDisabled(e.phaseInversionDisabled)
 			enc.SetSignalType(signalHint)
 		}

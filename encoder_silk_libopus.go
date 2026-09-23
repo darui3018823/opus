@@ -149,6 +149,11 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 	if err := e.silkEncoder.EncodeMultiWithEncoder(enc, silkPCM, nFrames); err != nil {
 		return nil, fmt.Errorf("SILK encoding failed: %w", err)
 	}
+	if e.silkEncoder.PacketDTX() {
+		// SILK DTX: the TOC alone, before any CELT processing.
+		e.frameSILKDTX = true
+		return nil, silkDTXPacket{toc: toc}
+	}
 	e.silkFramesCoded = true
 
 	redundancy, redBytes, celtToSilk := d.redundancy, d.redundancyBytes, d.celtToSilk

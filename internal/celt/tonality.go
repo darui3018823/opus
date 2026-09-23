@@ -702,6 +702,24 @@ func (t *TonalityAnalysis) Run(pcm []float64, frameSize, C, lsbDepth int) Analys
 	return t.getInfo(frameSize)
 }
 
+// ReadPosition returns the analysis read position (read_pos,
+// read_subframe).
+func (t *TonalityAnalysis) ReadPosition() (pos, subframe int) {
+	return t.readPos, t.readSubframe
+}
+
+// SetReadPosition rewinds the read position, as opus_encode_native does
+// before reading a multi-frame packet's analysis one frame at a time.
+func (t *TonalityAnalysis) SetReadPosition(pos, subframe int) {
+	t.readPos, t.readSubframe = pos, subframe
+}
+
+// GetInfo is tonality_get_info for length samples, advancing the read
+// position.
+func (t *TonalityAnalysis) GetInfo(length int) AnalysisInfo {
+	return t.getInfo(length)
+}
+
 // getInfo is tonality_get_info.
 func (t *TonalityAnalysis) getInfo(length int) AnalysisInfo {
 	pos := t.readPos

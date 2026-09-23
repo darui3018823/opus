@@ -18,6 +18,7 @@ func (e *Encoder) Prefill(pcm []float64) {
 	// silk_Encode clears allowBandwidthSwitch before every frame and only
 	// recomputes it after a coded one, so a prefill leaves it cleared.
 	e.allowBandwidthSwitch = false
+	e.beginDTXPacket()
 	stereo := e.channels == 2 && e.streamChannels == 2 && e.side != nil
 	if stereo {
 		if len(pcm) < 2*n {
@@ -84,16 +85,10 @@ func (e *Encoder) Prefill(pcm []float64) {
 func (e *Encoder) prefillFrame(frame []float64) {
 	n := len(frame)
 	res := e.silkVADGetSAQ8N(frame, n)
+	e.lowerVADForOpusActivity(&res)
 	e.installVAD(res)
 	// The VAD's DTX bookkeeping (silk_encode_do_VAD).
-	if res.speechActivityQ8 < 13 {
-		e.noSpeechCounter++
-		if e.noSpeechCounter > silkMaxConsecutiveDTX+silkNBSpeechFramesBeforeDTX {
-			e.noSpeechCounter = silkNBSpeechFramesBeforeDTX
-		}
-	} else {
-		e.noSpeechCounter = 0
-	}
+	e.updateDTXFlags(res.speechActivityQ8)
 	e.lpFilterFrame(frame)
 	ltpMem := e.ltpMemLength()
 	la := e.laShapeLength()

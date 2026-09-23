@@ -56,6 +56,10 @@ func (e *Encoder) frameTargetRate(nFrames, frame, tell int) int {
 // [0, 10000]).
 func (e *Encoder) finishPacketBitReservoir(nFrames, tell int) {
 	silkBytes := (tell + 7) >> 3
+	if e.lastPacketDTX {
+		// A DTXed packet counts as zero bytes.
+		silkBytes = 0
+	}
 	e.nBitsExceeded += silkBytes*8 - e.packetBitBudget(nFrames)
 	if e.nBitsExceeded < 0 {
 		e.nBitsExceeded = 0

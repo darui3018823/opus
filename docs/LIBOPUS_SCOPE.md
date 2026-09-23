@@ -5,7 +5,9 @@ Last reviewed: 2026-07-21
 This project targets a Pure Go implementation of standard Opus and the core
 libopus 1.6.1 behavior needed to encode, decode, recover loss, inspect and
 transform packets, and operate multistream and projection streams. It is not a
-C ABI drop-in replacement and encoder output is not expected to be bit-exact.
+C ABI drop-in replacement. Encoder output is bit-exact with libopus only under
+`ModePolicyLibopus`, for the configurations its oracle tests cover (see
+[CURRENT_IMPLEMENTATION.md](CURRENT_IMPLEMENTATION.md)).
 
 ## In Scope
 
@@ -26,7 +28,10 @@ libopus core-library compatibility requirement.
   policy CTLs
 - `opus_custom.h` / Opus Custom
 - libopus's C ABI and source-level C API compatibility
-- Bit-exact parity with the libopus encoder
+- Bit-exact parity with the libopus encoder under the default
+  `ModePolicyLegacy`, for packets shorter than 20 ms, for the multistream,
+  surround, and projection encoders, and against a libopus built with SIMD
+  kernels
 
 Packet extensions, including DRED and QEXT payloads, can be parsed, generated,
 or transported opaquely. That transport support is not codec/DSP support.

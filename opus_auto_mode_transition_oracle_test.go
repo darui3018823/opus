@@ -192,7 +192,9 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			enc.SetLibopusModePolicy(true)
+			if err := enc.SetModePolicy(ModePolicyLibopus); err != nil {
+				t.Fatal(err)
+			}
 			switch tc.signal {
 			case "voice":
 				enc.SetSignalType(SignalVoice)

@@ -127,6 +127,9 @@ type Encoder struct {
 	// of a multi-frame packet, so SILK may not switch its rate after it.
 	nonfinalFrame bool
 	toMono        bool
+	// streamStarted is set by the first encode after construction or Reset:
+	// SetModePolicy resets the stream state only once encoding has begun.
+	streamStarted bool
 	// autoBandwidth is st->auto_bandwidth (the hysteresis memory of the
 	// automatic bandwidth decision); silkFramesCoded marks that the SILK
 	// encoder has coded frames since (re)initialisation, after which the
@@ -188,7 +191,7 @@ type Encoder struct {
 	libopusBandwidth int
 	// libopusModePolicy selects opus_encode_native's automatic mode /
 	// bandwidth decision (decideLibopusMode) instead of the Go encoder's
-	// bitrate-boundary rules; see SetLibopusModePolicy.
+	// bitrate-boundary rules; see SetModePolicy.
 	libopusModePolicy bool
 	// pendingMode is the mode decided for the packet being encoded under the
 	// libopus policy (-1 otherwise), read by the high-pass cutoff smoother.
@@ -488,6 +491,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	// from both channels), which is also what a 40/60 ms packet coded during
 	// the stereo->mono delay leaves behind: it sets force_channels = 1 for
 	// good.
+	e.streamStarted = true
 	if !e.libopusModePolicy && e.forceChannels == ChannelsMono && e.channels == ChannelsStereo {
 		mono := make([]float64, frameSize)
 		for i := 0; i < frameSize; i++ {
@@ -2648,6 +2652,17 @@ func (e *Encoder) Reset() error {
 	e.lastDetectedBW = -1
 	e.prevMode = -1
 	e.silkFramesCoded = false
+	// OPUS_RESET_STATE also clears stream_channels (back to the input
+	// channel count), prev_channels, silk_bw_switch and nonfinal_frame, and
+	// silk_InitEncoder clears nPrevChannelsInternal; the CELT prefill tail
+	// comes from the cleared delay buffer.
+	e.streamChannels = e.channels
+	e.prevStreamChannels = 0
+	e.silkBwSwitch = false
+	e.nonfinalFrame = false
+	e.silkPrevChannels = 0
+	clear(e.celtPrefillTail)
+	e.streamStarted = false
 	e.autoBandwidth = 0
 	e.lastFinalRange = 0
 	e.inDTX = false

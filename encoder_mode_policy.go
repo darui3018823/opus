@@ -1,6 +1,7 @@
 package opus
 
 import (
+	"fmt"
 	"math"
 
 	framing "github.com/darui3018823/opus/internal"
@@ -442,14 +443,62 @@ func (e *Encoder) goModeDecision(raw []float64, frameSize, nFrames int) modeDeci
 	return modeDecision{mode: framing.ModeCELTOnly, bandwidth: -1}
 }
 
-// SetLibopusModePolicy selects the automatic mode, channel and bandwidth
-// policy: true follows libopus 1.6.1's opus_encode_native (mode thresholds
-// interpolated by the stereo width and the voice estimate, the VOIP bias and
-// hysteresis, the rate-dependent bandwidth thresholds, the tonality analysis'
-// detected bandwidth, SILK/hybrid by bandwidth); false (the default) keeps
-// the Go encoder's bitrate-boundary rules and its signal-analysis bandwidth
-// narrowing.
-func (e *Encoder) SetLibopusModePolicy(enabled bool) { e.libopusModePolicy = enabled }
+// ModePolicy selects the rules behind the encoder's automatic decisions:
+// the coding mode (SILK, hybrid, CELT), the coded stream channels and the
+// bandwidth, together with the transitions between them. Every policy
+// produces standard Opus packets; only the encoder's choices differ.
+type ModePolicy int
+
+const (
+	// ModePolicyLegacy is the Go encoder's historical policy: bitrate
+	// boundaries for the mode and signal-analysis bandwidth narrowing. It is
+	// NewEncoder's default.
+	ModePolicyLegacy ModePolicy = iota
+	// ModePolicyLibopus follows libopus 1.6.1's opus_encode_native: mode
+	// thresholds interpolated by the stereo width and the voice estimate,
+	// the VOIP bias and hysteresis, the rate-dependent bandwidth thresholds,
+	// the tonality analysis' detected bandwidth, decide_fec, the transition
+	// redundancy and prefills, and a sub-48 kHz CELT input zero-stuffed as
+	// libopus does. With the same settings and input its packets are
+	// byte-identical to libopus 1.6.1 (float build without SIMD kernels).
+	// EncoderProfileLibopus selects it.
+	ModePolicyLibopus
+)
+
+// SetModePolicy selects the automatic decision policy.
+//
+// Call it before the first Encode. The policies keep different per-stream
+// state, so changing the policy after encoding has started resets the
+// stream state exactly as Reset does (every setting is kept): the next
+// packet is coded as the first packet of a new stream. Setting the current
+// policy again is a no-op. An unknown policy returns ErrBadArg and leaves
+// the encoder unchanged.
+func (e *Encoder) SetModePolicy(policy ModePolicy) error {
+	var libopus bool
+	switch policy {
+	case ModePolicyLegacy:
+	case ModePolicyLibopus:
+		libopus = true
+	default:
+		return fmt.Errorf("%w: unsupported mode policy %d", ErrBadArg, policy)
+	}
+	if libopus == e.libopusModePolicy {
+		return nil
+	}
+	e.libopusModePolicy = libopus
+	if e.streamStarted {
+		return e.Reset()
+	}
+	return nil
+}
+
+// ModePolicy reports the automatic decision policy.
+func (e *Encoder) ModePolicy() ModePolicy {
+	if e.libopusModePolicy {
+		return ModePolicyLibopus
+	}
+	return ModePolicyLegacy
+}
 
 // LibopusModePolicy reports whether the libopus mode policy is selected.
 func (e *Encoder) LibopusModePolicy() bool { return e.libopusModePolicy }

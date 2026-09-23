@@ -218,6 +218,11 @@ libopus' frame-size/sample-rate/channel formula. For requests longer than
 Opus frame rather than dividing one frame budget across the whole packet.
 
 `NewEncoder` preserves the historical defaults (64 kbit/s, complexity 5, CBR).
+`SetModePolicy` selects the automatic mode / channel / bandwidth policy:
+`ModePolicyLegacy` (the default, the Go encoder's rules) or
+`ModePolicyLibopus` (libopus 1.6.1's `opus_encode_native`). It should be
+called before the first `Encode`; a change after encoding has started resets
+the stream state as `Reset` does, keeping every setting.
 `NewEncoderWithProfile(..., EncoderProfileLibopus)` selects automatic bitrate,
 complexity 9, and constrained VBR without imposing a behavior change on
 existing callers.
@@ -1054,7 +1059,7 @@ reports. Hybrid packets are byte-identical too (`TestHybridEncoderOracle`,
 split, `silk_mode.maxBits`, `CELT_SET_SILK_INFO`, the hybrid tf/VBR rules,
 the HB gain and stereo width fades follow `opus_encode_native`. The
 automatic mode / bandwidth / channel policy of libopus is ported as
-`SetLibopusModePolicy(true)` (`TestAutoModeOracle`: VOIP/AUDIO ×
+`SetModePolicy(ModePolicyLibopus)` (`TestAutoModeOracle`: VOIP/AUDIO ×
 voice/music/auto × mono/stereo × 12–128 kbps, 60/60 automatic-mode cells
 byte-identical, including a stereo input coded as a mono CELT or hybrid
 stream via `CELT_SET_CHANNELS` MDCT averaging and the SILK downmix); the

@@ -12,7 +12,7 @@ import (
 )
 
 // TestAutoModeOracle compares the Go encoder with the libopus mode policy
-// (SetLibopusModePolicy) against the instrumented libopus encoder in its
+// (SetModePolicy(ModePolicyLibopus)) against the instrumented libopus encoder in its
 // automatic mode: no forced mode or bandwidth, VOIP/AUDIO, voice/music
 // hints, 48 kHz mono and stereo over a bitrate sweep. It checks the TOC
 // (mode, bandwidth, channels) of every packet and the packet bytes.
@@ -140,7 +140,9 @@ func TestAutoModeOracle(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			enc.SetLibopusModePolicy(true)
+			if err := enc.SetModePolicy(ModePolicyLibopus); err != nil {
+				t.Fatal(err)
+			}
 			switch tc.signal {
 			case "voice":
 				enc.SetSignalType(SignalVoice)

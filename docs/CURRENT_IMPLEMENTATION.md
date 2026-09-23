@@ -224,8 +224,8 @@ Opus frame rather than dividing one frame budget across the whole packet.
 called before the first `Encode`; a change after encoding has started resets
 the stream state as `Reset` does, keeping every setting.
 `NewEncoderWithProfile(..., EncoderProfileLibopus)` selects automatic bitrate,
-complexity 9, and constrained VBR without imposing a behavior change on
-existing callers.
+complexity 9, constrained VBR and (since v1.5.0) `ModePolicyLibopus`, without
+imposing a behavior change on `NewEncoder` callers.
 
 Encoder, decoder, multistream, surround, projection, and container reader/writer
 instances are stateful and are not safe for concurrent use. One instance owns

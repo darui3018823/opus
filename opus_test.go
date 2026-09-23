@@ -94,6 +94,12 @@ func TestNewEncoderWithProfile(t *testing.T) {
 	if !compatible.VBR() {
 		t.Fatal("libopus profile VBR = false")
 	}
+	if got := compatible.ModePolicy(); got != ModePolicyLibopus {
+		t.Fatalf("libopus profile mode policy = %d, want ModePolicyLibopus", got)
+	}
+	if got := legacy.ModePolicy(); got != ModePolicyLegacy {
+		t.Fatalf("legacy profile mode policy = %d, want ModePolicyLegacy", got)
+	}
 	packet, err := compatible.Encode(make([]int16, 960), 960)
 	if err != nil {
 		t.Fatal(err)

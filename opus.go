@@ -24,7 +24,9 @@ const (
 	// 64 kbit/s, complexity 5, and CBR.
 	EncoderProfileLegacy EncoderProfile = iota
 	// EncoderProfileLibopus uses libopus-style defaults: automatic bitrate,
-	// complexity 9, and constrained VBR.
+	// complexity 9, constrained VBR, and ModePolicyLibopus for the automatic
+	// mode, channel and bandwidth decisions (since v1.5.0; call
+	// SetModePolicy(ModePolicyLegacy) for the earlier decisions).
 	EncoderProfileLibopus
 )
 
@@ -354,6 +356,9 @@ func NewEncoderWithProfile(sampleRate, channels int, application Application, pr
 		}
 		enc.SetVBR(true)
 		enc.SetVBRConstraint(true)
+		if err := enc.SetModePolicy(ModePolicyLibopus); err != nil {
+			return nil, err
+		}
 	}
 	return enc, nil
 }

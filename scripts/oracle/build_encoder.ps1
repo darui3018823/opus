@@ -2,7 +2,7 @@
 # source tree (repo `libopus/`, the bit-exact convergence target).
 #
 #   pwsh scripts/oracle/build_encoder.ps1
-#   $env:TEMP\opusoracle\enc_oracle.exe --silk-enc <rate> <fixture> [targetFrame|-1] [frames] [bitrate] [bandwidth]
+#   <os temp dir>/opusoracle/enc_oracle.exe --silk-enc <rate> <fixture> [targetFrame|-1] [frames] [bitrate] [bandwidth]
 #
 # The exe runs the real opus_encode_float with the AB-test settings and prints,
 # to stderr, for every traced frame: the conditioned pcm_buf that CELT/SILK
@@ -10,32 +10,33 @@
 # ([SILK_ENC_XFRAME_INFO]/[SILK_ENC_INPUTBUF]/[SILK_ENC_XBUF]), and the packet
 # bytes ([ENC_PACKET]). Consumed by opus_silk_enc_oracle_test.go (opusref tag).
 #
-# Requires: gcc (msys2 mingw64). Scalar build (no SIMD, no FMA): -O1 only.
+# Requires: gcc (msys2 mingw64 on Windows, the system gcc on Linux). Scalar build (no SIMD, no FMA): -O1 only.
 
 param([string]$Source = "")
 
 $ErrorActionPreference = 'Stop'
-$bld = "$env:TEMP\opusoracle"
+# The oracle lands where the Go tests look for it (os.TempDir()/opusoracle).
+$bld = Join-Path ([System.IO.Path]::GetTempPath()) "opusoracle"
 New-Item -ItemType Directory -Force $bld | Out-Null
 
-$srcDir = if ($Source -ne "") { (Resolve-Path $Source).Path } else { (Resolve-Path (Join-Path $PSScriptRoot "..\..\libopus")).Path }
+$srcDir = if ($Source -ne "") { (Resolve-Path $Source).Path } else { (Resolve-Path (Join-Path $PSScriptRoot "../../libopus")).Path }
 Write-Host "libopus source: $srcDir"
-if (-not (Test-Path "$srcDir\silk\enc_API.c")) { throw "not a libopus source tree: $srcDir" }
+if (-not (Test-Path "$srcDir/silk/enc_API.c")) { throw "not a libopus source tree: $srcDir" }
 
-$celt = "$srcDir\celt"
-$silk = "$srcDir\silk"
-$opusSrc = "$srcDir\src"
+$celt = "$srcDir/celt"
+$silk = "$srcDir/silk"
+$opusSrc = "$srcDir/src"
 
 function Replace-Checked([string]$text, [string]$old, [string]$new, [string]$label) {
     if (-not $text.Contains($old)) { throw "instrumentation anchor not found: $label" }
     return $text.Replace($old, $new)
 }
 
-Copy-Item "$PSScriptRoot\silk_trace.h" "$bld\silk_trace.h" -Force
-Copy-Item "$PSScriptRoot\enc_oracle.c" "$bld\enc_oracle.c" -Force
+Copy-Item "$PSScriptRoot/silk_trace.h" "$bld/silk_trace.h" -Force
+Copy-Item "$PSScriptRoot/enc_oracle.c" "$bld/enc_oracle.c" -Force
 
 # opus_encoder.c: dump pcm_buf right after the input conditioning.
-$opusEnc = (Get-Content "$opusSrc\opus_encoder.c" -Raw).Replace("`r`n", "`n")
+$opusEnc = (Get-Content "$opusSrc/opus_encoder.c" -Raw).Replace("`r`n", "`n")
 $opusEnc = Replace-Checked $opusEnc '#include "opus_private.h"' "#include `"opus_private.h`"`n#include <stdio.h>`nextern int oracle_trace_enabled;" "opus_encoder include"
 $pcmBufDump = @'
     (void)float_api;
@@ -52,10 +53,10 @@ $pcmBufDump = @'
 $opusEnc = Replace-Checked $opusEnc "    (void)float_api;`n#endif`n" ($pcmBufDump.Replace("`r`n", "`n") + "`n") "opus_encoder pcm_buf"
 # SILK prefill input.
 $opusEnc = Replace-Checked $opusEnc "            pcm_silk = st->delay_buffer;`n" "            pcm_silk = st->delay_buffer;`n            if (oracle_trace_enabled) { int _i; fprintf(stderr, `"[ENC_PREFILL] prefill=%d n=%d`", prefill, st->encoder_buffer*st->channels); for (_i = 0; _i < st->encoder_buffer*st->channels; _i++) fprintf(stderr, `" v[%d]=%.17g`", _i, (double)pcm_silk[_i]); fprintf(stderr, `"\n`"); }`n" "opus_encoder prefill dump"
-Set-Content "$bld\opus_encoder_instr.c" $opusEnc -NoNewline
+Set-Content "$bld/opus_encoder_instr.c" $opusEnc -NoNewline
 
 # encode_frame_FLP.c: dump inputBuf and x_buf once the new frame is in place.
-$encFrame = (Get-Content "$silk\float\encode_frame_FLP.c" -Raw).Replace("`r`n", "`n")
+$encFrame = (Get-Content "$silk/float/encode_frame_FLP.c" -Raw).Replace("`r`n", "`n")
 $encFrame = Replace-Checked $encFrame '#include "stack_alloc.h"' "#include `"stack_alloc.h`"`n#include `"silk_trace.h`"" "encode_frame include"
 $xbufDump = @'
         x_frame[ LA_SHAPE_MS * psEnc->sCmn.fs_kHz + i * ( psEnc->sCmn.frame_length >> 3 ) ] += ( 1 - ( i & 2 ) ) * 1e-6f;
@@ -94,14 +95,14 @@ $restoreDump = @'
                     }
 '@
 $encFrame = Replace-Checked $encFrame "                if( found_lower && ( gainsID == gainsID_lower || nBits > maxBits ) ) {`n" ($restoreDump.Replace("`r`n", "`n") + "`n") "encode_frame restore dump"
-Set-Content "$bld\encode_frame_FLP_instr.c" $encFrame -NoNewline
+Set-Content "$bld/encode_frame_FLP_instr.c" $encFrame -NoNewline
 
 # SILK encoder analysis-stage instrumentation (shared with the legacy build.ps1
 # blocks, but every anchor is checked against the 1.6.1 sources).
 # Generate instrumented SILK encoder sources. These are used by
 # `oracle.exe --silk-enc ...` to dump the libopus encoder's per-frame analysis
 # and NSQ inputs for the mono SILK-only AB fixtures.
-$findLPC = Get-Content "$silk\float\find_LPC_FLP.c" -Raw
+$findLPC = Get-Content "$silk/float/find_LPC_FLP.c" -Raw
 $findLPC = $findLPC.Replace("`r`n", "`n")
 $findLPC = Replace-Checked $findLPC '#include "tuning_parameters.h"' "#include `"tuning_parameters.h`"`r`n#include `"silk_trace.h`"" "stage anchor 1"
 $__old = "    res_nrg = silk_burg_modified_FLP( a, x, minInvGain, subfr_length, psEncC->nb_subfr, psEncC->predictLPCOrder, arch );"
@@ -143,9 +144,9 @@ $__new = @"
     celt_assert( psEncC->indices.NLSFInterpCoef_Q2 == 4 ||
 "@
 $findLPC = Replace-Checked $findLPC $__old ($__new.Replace("`r`n", "`n")) "stage anchor 5"
-Set-Content "$bld\find_LPC_FLP_instr.c" $findLPC
+Set-Content "$bld/find_LPC_FLP_instr.c" $findLPC
 
-$findPred = Get-Content "$silk\float\find_pred_coefs_FLP.c" -Raw
+$findPred = Get-Content "$silk/float/find_pred_coefs_FLP.c" -Raw
 $findPred = $findPred.Replace("`r`n", "`n")
 $__old = "    /* LPC_in_pre contains the LTP-filtered input for voiced, and the unfiltered input for unvoiced */`n"
 $__new = @"
@@ -191,9 +192,9 @@ $__new = @"
         /* Quantize LTP gain parameters */
 "@
 $findPred = Replace-Checked $findPred $__old ($__new.Replace("`r`n", "`n")) "find_pred_coefs LTP dump"
-Set-Content "$bld\find_pred_coefs_FLP_instr.c" $findPred
+Set-Content "$bld/find_pred_coefs_FLP_instr.c" $findPred
 
-$noiseShape = Get-Content "$silk\float\noise_shape_analysis_FLP.c" -Raw
+$noiseShape = Get-Content "$silk/float/noise_shape_analysis_FLP.c" -Raw
 $noiseShape = $noiseShape.Replace("`r`n", "`n")
 $noiseShape = Replace-Checked $noiseShape '#include "tuning_parameters.h"' "#include `"tuning_parameters.h`"`r`n#include `"silk_trace.h`"" "stage anchor 9"
 $__old = "        psEncCtrl->Tilt[ k ]           = psShapeSt->Tilt_smth;`n    }`n}"
@@ -217,9 +218,9 @@ $__new = @"
 }
 "@
 $noiseShape = Replace-Checked $noiseShape $__old ($__new.Replace("`r`n", "`n")) "stage anchor 10"
-Set-Content "$bld\noise_shape_analysis_FLP_instr.c" $noiseShape
+Set-Content "$bld/noise_shape_analysis_FLP_instr.c" $noiseShape
 
-$processGains = Get-Content "$silk\float\process_gains_FLP.c" -Raw
+$processGains = Get-Content "$silk/float/process_gains_FLP.c" -Raw
 $processGains = $processGains.Replace("`r`n", "`n")
 $processGains = Replace-Checked $processGains '#include "tuning_parameters.h"' "#include `"tuning_parameters.h`"`r`n#include `"silk_trace.h`"" "stage anchor 11"
 $__old = "    silk_assert( psEncCtrl->Lambda > 0.0f );"
@@ -237,9 +238,9 @@ $__new = @"
     silk_assert( psEncCtrl->Lambda > 0.0f );
 "@
 $processGains = Replace-Checked $processGains $__old ($__new.Replace("`r`n", "`n")) "stage anchor 12"
-Set-Content "$bld\process_gains_FLP_instr.c" $processGains
+Set-Content "$bld/process_gains_FLP_instr.c" $processGains
 
-$wrappers = Get-Content "$silk\float\wrappers_FLP.c" -Raw
+$wrappers = Get-Content "$silk/float/wrappers_FLP.c" -Raw
 $wrappers = $wrappers.Replace("`r`n", "`n")
 $wrappers = Replace-Checked $wrappers '#include "main_FLP.h"' "#include `"main_FLP.h`"`r`n#include `"silk_trace.h`"" "stage anchor 13"
 $__old = "    /* Call NSQ */"
@@ -283,9 +284,9 @@ $__new = @"
 }
 "@
 $wrappers = Replace-Checked $wrappers $__old ($__new.Replace("`r`n", "`n")) "stage anchor 15"
-Set-Content "$bld\wrappers_FLP_instr.c" $wrappers
+Set-Content "$bld/wrappers_FLP_instr.c" $wrappers
 
-$nsqDelDec = Get-Content "$silk\NSQ_del_dec.c" -Raw
+$nsqDelDec = Get-Content "$silk/NSQ_del_dec.c" -Raw
 $nsqDelDec = $nsqDelDec.Replace("`r`n", "`n")
 $nsqDelDec = Replace-Checked $nsqDelDec '#include "stack_alloc.h"' "#include `"stack_alloc.h`"`r`n#include `"silk_trace.h`"" "stage anchor 16"
 $__old = "    opus_int16          *pxq;"
@@ -314,10 +315,10 @@ $__new = @"
     /* Save quantized speech signal */
 "@
 $nsqDelDec = Replace-Checked $nsqDelDec $__old ($__new.Replace("`r`n", "`n")) "stage anchor 19"
-Set-Content "$bld\NSQ_del_dec_instr.c" $nsqDelDec
+Set-Content "$bld/NSQ_del_dec_instr.c" $nsqDelDec
 
 # enc_API.c: dump the per-frame SILK target rate derivation.
-$encAPI = (Get-Content "$silk\enc_API.c" -Raw).Replace("`r`n", "`n")
+$encAPI = (Get-Content "$silk/enc_API.c" -Raw).Replace("`r`n", "`n")
 $encAPI = Replace-Checked $encAPI '#include "tuning_parameters.h"' "#include `"tuning_parameters.h`"`n#include `"silk_trace.h`"" "enc_API include"
 $targetDump = @'
             TargetRate_bps = silk_LIMIT( TargetRate_bps, encControl->bitRate, 5000 );
@@ -348,11 +349,11 @@ $chDump = @'
                     }
 '@
 $encAPI = Replace-Checked $encAPI "                if( channelRate_bps > 0 ) {`n" ($chDump.Replace("`r`n", "`n") + "`n") "enc_API channel dump"
-Set-Content "$bld\enc_API_instr.c" $encAPI -NoNewline
+Set-Content "$bld/enc_API_instr.c" $encAPI -NoNewline
 
 # celt_encoder.c: dump the pre-emphasised input, the MDCT, the band log
 # energies, the frame decisions and the coarse energy result.
-$celtEnc = (Get-Content "$celt\celt_encoder.c" -Raw).Replace("`r`n", "`n")
+$celtEnc = (Get-Content "$celt/celt_encoder.c" -Raw).Replace("`r`n", "`n")
 $celtEnc = Replace-Checked $celtEnc '#include "stack_alloc.h"' "#include `"stack_alloc.h`"`n#include `"silk_trace.h`"" "celt_encoder include"
 $celtMdctDump = @'
    compute_mdcts(mode, shortBlocks, in, freq, C, CC, LM, st->upsample, st->arch);
@@ -441,33 +442,33 @@ $celtPitch = "      pitch_index = max_period-pitch_index;`n      if (oracle_trac
 $celtEnc = Replace-Checked $celtEnc "      pitch_index = max_period-pitch_index;`n" $celtPitch "celt_encoder pitch dump"
 $celtPitch2 = "      if (pitch_index > max_period-QEXT_SCALE(2))`n         pitch_index = max_period-QEXT_SCALE(2);`n      if (oracle_trace_enabled) { fprintf(stderr, `"[CELT_ENC_PITCH2] index=%d gain=%.9g\n`", pitch_index, (double)gain1); oracle_silk_dump_float(`"CELT_ENC_PITCH_BUF`", pitch_buf, (max_period+N)>>1); }`n"
 $celtEnc = Replace-Checked $celtEnc "      if (pitch_index > max_period-QEXT_SCALE(2))`n         pitch_index = max_period-QEXT_SCALE(2);`n" $celtPitch2 "celt_encoder pitch dump 2"
-Set-Content "$bld\celt_encoder_instr.c" $celtEnc -NoNewline
+Set-Content "$bld/celt_encoder_instr.c" $celtEnc -NoNewline
 
 # bands.c: per-band range coder position after quant_all_bands codes a band.
-$bandsSrc = (Get-Content "$celt\bands.c" -Raw).Replace("`r`n", "`n")
+$bandsSrc = (Get-Content "$celt/bands.c" -Raw).Replace("`r`n", "`n")
 $bandsSrc = Replace-Checked $bandsSrc '#include "rate.h"' "#include `"rate.h`"`n#include `"silk_trace.h`"" "bands include"
 $bandsQab = "      balance += pulses[i] + tell;`n      if (encode && oracle_trace_enabled) fprintf(stderr, `"[CELT_ENC_QAB] i=%d N=%d b=%d tell_frac=%d cm=%u seed=%u\n`", i, N, b, (int)ec_tell_frac(ec), x_cm, (unsigned)ctx.seed);`n"
 $bandsSrc = Replace-Checked $bandsSrc "      balance += pulses[i] + tell;`n" $bandsQab "bands qab dump"
-Set-Content "$bld\bands_instr.c" $bandsSrc -NoNewline
+Set-Content "$bld/bands_instr.c" $bandsSrc -NoNewline
 
-$celtSrcs = Get-ChildItem "$celt\*.c" | Where-Object { $_.Name -notmatch '^(opus_custom_demo|dump_modes|.*_test.*|celt_encoder|bands)' } | ForEach-Object { $_.FullName }
-$celtSrcs += "$bld\celt_encoder_instr.c"
-$celtSrcs += "$bld\bands_instr.c"
-$silkSrcs = Get-ChildItem "$silk\*.c" | ForEach-Object { $_.FullName }
+$celtSrcs = Get-ChildItem "$celt/*.c" | Where-Object { $_.Name -notmatch '^(opus_custom_demo|dump_modes|.*_test.*|celt_encoder|bands)' } | ForEach-Object { $_.FullName }
+$celtSrcs += "$bld/celt_encoder_instr.c"
+$celtSrcs += "$bld/bands_instr.c"
+$silkSrcs = Get-ChildItem "$silk/*.c" | ForEach-Object { $_.FullName }
 $instrFloat = @('encode_frame_FLP.c','find_LPC_FLP.c','find_pred_coefs_FLP.c','noise_shape_analysis_FLP.c','process_gains_FLP.c','wrappers_FLP.c')
 $silkSrcs = $silkSrcs | Where-Object { $_ -notmatch 'NSQ_del_dec\.c$' -and $_ -notmatch 'enc_API\.c$' }
-$silkFloat = Get-ChildItem "$silk\float\*.c" | Where-Object { $instrFloat -notcontains $_.Name } | ForEach-Object { $_.FullName }
+$silkFloat = Get-ChildItem "$silk/float/*.c" | Where-Object { $instrFloat -notcontains $_.Name } | ForEach-Object { $_.FullName }
 $opusStock = @('opus','opus_decoder','extensions','opus_multistream','opus_multistream_encoder',
   'opus_multistream_decoder','repacketizer','opus_projection_encoder','opus_projection_decoder',
-  'mapping_matrix','analysis','mlp','mlp_data') | ForEach-Object { "$opusSrc\$_.c" }
+  'mapping_matrix','analysis','mlp','mlp_data') | ForEach-Object { "$opusSrc/$_.c" }
 $srcs = $celtSrcs + $silkSrcs + $silkFloat + $opusStock +
-        @("$bld\encode_frame_FLP_instr.c", "$bld\opus_encoder_instr.c",
-          "$bld\find_LPC_FLP_instr.c", "$bld\find_pred_coefs_FLP_instr.c", "$bld\noise_shape_analysis_FLP_instr.c",
-          "$bld\process_gains_FLP_instr.c", "$bld\wrappers_FLP_instr.c", "$bld\NSQ_del_dec_instr.c", "$bld\enc_API_instr.c",
-          "$bld\enc_oracle.c")
-$inc = @("-I$bld", "-I$celt", "-I$srcDir\include", "-I$srcDir", "-I$silk", "-I$silk\float", "-I$opusSrc")
+        @("$bld/encode_frame_FLP_instr.c", "$bld/opus_encoder_instr.c",
+          "$bld/find_LPC_FLP_instr.c", "$bld/find_pred_coefs_FLP_instr.c", "$bld/noise_shape_analysis_FLP_instr.c",
+          "$bld/process_gains_FLP_instr.c", "$bld/wrappers_FLP_instr.c", "$bld/NSQ_del_dec_instr.c", "$bld/enc_API_instr.c",
+          "$bld/enc_oracle.c")
+$inc = @("-I$bld", "-I$celt", "-I$srcDir/include", "-I$srcDir", "-I$silk", "-I$silk/float", "-I$opusSrc")
 
 # Float build, no SIMD/RTCD, no FMA contraction: plain scalar C like the
 # cgoref arch=0 comparisons. No CUSTOM_MODES so the static 48000/960 mode is used.
-& gcc -O1 -ffp-contract=off -DOPUS_BUILD -DVAR_ARRAYS -DHAVE_LRINTF @inc @srcs -lm -o "$bld\enc_oracle.exe"
-if ($LASTEXITCODE -eq 0) { Write-Host "OK: $bld\enc_oracle.exe" } else { Write-Host "BUILD FAILED"; exit 1 }
+& gcc -O1 -ffp-contract=off -DOPUS_BUILD -DVAR_ARRAYS -DHAVE_LRINTF @inc @srcs -lm -o "$bld/enc_oracle.exe"
+if ($LASTEXITCODE -eq 0) { Write-Host "OK: $bld/enc_oracle.exe" } else { Write-Host "BUILD FAILED"; exit 1 }

@@ -1087,7 +1087,14 @@ DTX follows libopus under `ModePolicyLibopus`: the generalized DTX
 SILK's own DTX when the tonality analysis is off (`TestDTXOracle`, 48 cells
 byte-identical). Multi-frame packets read the tonality analysis per 20 ms
 frame as libopus does. Under `ModePolicyLegacy` DTX keeps the Go encoder's
-minimal silent packets.
+minimal silent packets. `TestAutoModeOracleSweep` extends the gate to 2340
+configurations (all bitrate steps, CBR / CVBR / unconstrained VBR,
+complexities 0–10, the auto signal hint, 8–24 kHz input, 40–120 ms packets,
+forced and capped bandwidths, forced mono, int16 input, LSB depths, FEC and
+DTX at 8/12/24 kHz), and CI builds the instrumented oracle and runs these
+gates on Linux. The encoder's arithmetic is free of fused multiply-adds, so
+its output is identical on amd64, arm64 and the other FMA architectures (CI
+checks the arm64 build).
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

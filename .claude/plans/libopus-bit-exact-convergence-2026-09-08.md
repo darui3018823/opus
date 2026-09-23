@@ -1414,3 +1414,29 @@ libopus stays a non-goal.
 
 Remaining (encoder): none known beyond the Go policy's own decisions; the
 linked SIMD libopus stays a non-goal.
+
+### 2026-09-23 (night): CI gate, sweep, arm64 determinism
+
+- CI: the opusref workflow builds the instrumented oracle from the vendored
+  1.6.1 tree (`scripts/oracle/build_encoder.ps1`, path-portable, runs under
+  pwsh on Linux) and runs the CELT, hybrid, SILK, automatic-mode, sweep,
+  transition, FEC and DTX oracle tests. The Linux oracle prints NaN as
+  `-nan`; the trace parsers accept every C runtime's spelling.
+- `TestAutoModeOracleSweep` is a regular gate: 2340 configurations (every
+  bitrate step with CBR / CVBR / UVBR and complexities 0/3/7/10 with the
+  voice / music / auto hints, 8–24 kHz input, 40–120 ms packets, forced and
+  capped bandwidths, forced mono, int16 input and LSB depths 16/8, FEC and
+  DTX at 8/12/24 kHz), all byte-identical. The oracle takes an option string
+  and can skip its traces, which makes the sweep take seconds. It found one
+  gap: `OPUS_SET_MAX_BANDWIDTH(MEDIUMBAND)` capped with the CELT mapping
+  (wideband) instead of the SILK one.
+- arm64 determinism: gc fuses `x*y + z` into FMA instructions on arm64
+  (and ppc64le, s390x, riscv64, loong64), also across statements, through
+  `x *= y`, inlined calls and divisions by powers of two, so the float32
+  ports produced different packets there. Every product that reached an
+  addition is rounded by an explicit conversion (a no-op on amd64; found
+  from the `FMADD`/`FMSUB`/`FNM*` lines of an arm64 `-gcflags=-S` build);
+  CI fails if an arm64 build contains one again. The digest fixtures were
+  fixed the same way.
+- The parallel oracle run found a data race on a package-level trace
+  variable (introduced on this branch), fixed per call.

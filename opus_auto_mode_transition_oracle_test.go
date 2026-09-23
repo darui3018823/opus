@@ -23,7 +23,11 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
 	}
-	const rate = 48000
+	rate := 48000
+	if v := os.Getenv("OPUS_TRANSITION_RATE"); v != "" {
+		// Probe: another input rate (8/12/16/24 kHz).
+		rate, _ = strconv.Atoi(v)
+	}
 	frameMs := 20
 	if v := os.Getenv("OPUS_TRANSITION_FRAME_MS"); v != "" {
 		// Probe: 40 or 60 ms packets.
@@ -39,6 +43,7 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 		exact    bool
 		frames   int // 0 = 16
 		frameMs  int // 0 = 20
+		rate     int // 0 = the sweep rate (48 kHz unless probed)
 	}
 	// Each schedule switches at frame 6 (and some back at frame 11).
 	sched := func(a, b int) []int {
@@ -136,6 +141,24 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 						frameMs:  mf.ms,
 					})
 				}
+				// Input rates below 48 kHz: the CELT layer runs the 48 kHz
+				// mode on the zero-stuffed input, so a mode transition also
+				// prefills and codes its redundant frames from it.
+				if signal != "auto" {
+					for _, inputRate := range []int{8000, 12000, 16000, 24000} {
+						for _, tr := range []struct{ a, b int }{{12000, 128000}, {128000, 12000}, {8000, 24000}} {
+							cases = append(cases, transCase{
+								name:     fmt.Sprintf("%s/%s/ch%d/%dk-%dk/in%dk", app, signal, channels, tr.a/1000, tr.b/1000, inputRate/1000),
+								schedule: sched(tr.a, tr.b),
+								channels: channels,
+								signal:   signal,
+								app:      app,
+								exact:    true,
+								rate:     inputRate,
+							})
+						}
+					}
+				}
 			}
 		}
 	}
@@ -145,16 +168,19 @@ func TestAutoModeTransitionOracle(t *testing.T) {
 			if frames == 0 {
 				frames = 16
 			}
-			frameMs, frameSize := frameMs, frameSize
+			rate, frameMs, frameSize := rate, frameMs, frameSize
+			if tc.rate != 0 {
+				rate = tc.rate
+			}
 			if tc.frameMs != 0 {
 				frameMs = tc.frameMs
-				frameSize = rate * frameMs / 1000
 			}
+			frameSize = rate * frameMs / 1000
 			parts := make([]string, len(tc.schedule))
 			for i, b := range tc.schedule {
 				parts[i] = strconv.Itoa(b)
 			}
-			ref, oracleStderr := runCELTOracleCmdWithStderr(t, "ref-speech", "--auto-enc", "48000", "ref-speech", strconv.Itoa(frames), strings.Join(parts, ","), "1", strconv.Itoa(tc.channels), "5", tc.signal, tc.app, strconv.Itoa(frameMs))
+			ref, oracleStderr := runCELTOracleCmdWithStderr(t, "ref-speech", "--auto-enc", strconv.Itoa(rate), "ref-speech", strconv.Itoa(frames), strings.Join(parts, ","), "1", strconv.Itoa(tc.channels), "5", tc.signal, tc.app, strconv.Itoa(frameMs))
 			silkRef := parseEncOracleFrames(t, oracleStderr, frames)
 			app := ApplicationVOIP
 			if tc.app == "audio" {

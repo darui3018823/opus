@@ -395,8 +395,8 @@ static int run_auto_encoder_oracle(int argc, char **argv)
     signal = (argc >= 10) ? argv[9] : "voice";
     appname = (argc >= 11) ? argv[10] : "voip";
     frame_ms = (argc >= 12) ? atoi(argv[11]) : 20;
-    if (rate != 48000) {
-        fprintf(stderr, "--auto-enc rate must be 48000\n");
+    if (rate != 8000 && rate != 12000 && rate != 16000 && rate != 24000 && rate != 48000) {
+        fprintf(stderr, "--auto-enc rate must be 8000, 12000, 16000, 24000 or 48000\n");
         return 2;
     }
     if (frame_ms != 20 && frame_ms != 40 && frame_ms != 60) {

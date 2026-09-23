@@ -8,106 +8,322 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 )
 
-// TestAutoModeOracleSweep is an exploratory sweep over more bitrates, CBR
-// and complexities than TestAutoModeOracle. It only reports.
-func TestAutoModeOracleSweep(t *testing.T) {
-	if os.Getenv("OPUS_ORACLE_SWEEP") == "" {
-		t.Skip("set OPUS_ORACLE_SWEEP=1")
+// sweepCell is one ModePolicyLibopus configuration of TestAutoModeOracleSweep.
+type sweepCell struct {
+	rate, channels, bitrate, complexity, frameMs, frames, lossPerc int
+	vbr, constrained, int16In, dtx                                 bool
+	signal, app, fixture                                           string
+	bandwidth, maxBandwidth, forceChannels, lsbDepth               int
+}
+
+func (c sweepCell) name() string {
+	mode := "cbr"
+	if c.vbr && c.constrained {
+		mode = "cvbr"
+	} else if c.vbr {
+		mode = "uvbr"
 	}
+	n := fmt.Sprintf("in%dk/ch%d/%dk/%s/c%d/%dms/%s-%s", c.rate/1000, c.channels, c.bitrate/1000, mode, c.complexity, c.frameMs, c.app, c.signal)
+	if c.lossPerc > 0 {
+		n += fmt.Sprintf("/loss%d", c.lossPerc)
+	}
+	if c.dtx {
+		n += "/dtx"
+	}
+	if c.int16In {
+		n += "/int16"
+	}
+	if c.lsbDepth != 0 {
+		n += fmt.Sprintf("/lsb%d", c.lsbDepth)
+	}
+	if c.bandwidth != 0 {
+		n += "/bw-" + sweepBandwidthName(c.bandwidth)
+	}
+	if c.maxBandwidth != 0 {
+		n += "/maxbw-" + sweepBandwidthName(c.maxBandwidth)
+	}
+	if c.forceChannels != 0 {
+		n += fmt.Sprintf("/fc%d", c.forceChannels)
+	}
+	return n
+}
+
+func sweepBandwidthName(bw int) string {
+	switch bw {
+	case BandwidthNarrowband:
+		return "nb"
+	case BandwidthMediumband:
+		return "mb"
+	case BandwidthWideband:
+		return "wb"
+	case BandwidthSuperWideband:
+		return "swb"
+	case BandwidthFullband:
+		return "fb"
+	}
+	return strconv.Itoa(bw)
+}
+
+// oracleOptions is the oracle's trailing option string for the cell.
+func (c sweepCell) oracleOptions() string {
+	opts := []string{"notrace=1"}
+	if !c.constrained {
+		opts = append(opts, "vbrc=0")
+	}
+	if c.bandwidth != 0 {
+		opts = append(opts, "bw="+sweepBandwidthName(c.bandwidth))
+	}
+	if c.maxBandwidth != 0 {
+		opts = append(opts, "maxbw="+sweepBandwidthName(c.maxBandwidth))
+	}
+	if c.forceChannels != 0 {
+		opts = append(opts, "fc="+strconv.Itoa(c.forceChannels))
+	}
+	if c.int16In {
+		opts = append(opts, "int16=1")
+	}
+	if c.lsbDepth != 0 {
+		opts = append(opts, "lsb="+strconv.Itoa(c.lsbDepth))
+	}
+	return strings.Join(opts, ",")
+}
+
+// TestAutoModeOracleSweep checks ModePolicyLibopus against the libopus
+// oracle over a broad matrix (2340 cells) beyond the traced gate tests: every
+// bitrate step, CBR / constrained / unconstrained VBR, complexities 0-10, the
+// "auto" signal hint with the tonality analysis, 8-24 kHz input, 40-120 ms
+// packets, forced / capped bandwidths, forced mono, int16 input and a
+// reduced LSB depth, and DTX / FEC away from 16/48 kHz. The oracle runs
+// without its traces, so the whole sweep takes seconds; cells run in
+// parallel and a mismatching cell fails its subtest.
+func TestAutoModeOracleSweep(t *testing.T) {
+	t.Parallel()
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skip("encoder oracle not built")
 	}
-	const (
-		rate      = 48000
-		frameSize = rate / 50
-		frames    = 12
-	)
-	type cell struct {
-		bitrate, channels, complexity int
-		vbr                           bool
-		signal, app                   string
+	groups := map[string][]sweepCell{}
+	add := func(group string, c sweepCell) {
+		if c.frameMs == 0 {
+			c.frameMs = 20
+		}
+		if c.frames == 0 {
+			c.frames = 240 / c.frameMs
+		}
+		if c.fixture == "" {
+			c.fixture = "ref-speech"
+		}
+		groups[group] = append(groups[group], c)
 	}
-	var cells []cell
+	type rateMode struct{ vbr, constrained bool }
+	rateModes := []rateMode{{false, false}, {true, true}, {true, false}}
 	for _, app := range []string{"voip", "audio"} {
 		for _, signal := range []string{"voice", "music", "auto"} {
-			for _, channels := range []int{1, 2} {
-				for _, bitrate := range []int{8000, 16000, 20000, 32000, 40000, 64000, 96000, 160000, 256000} {
-					for _, vbr := range []bool{true, false} {
-						for _, cpx := range []int{0, 10} {
-							cells = append(cells, cell{bitrate, channels, cpx, vbr, signal, app})
+			for _, ch := range []int{1, 2} {
+				for _, kbps := range []int{8, 16, 24, 32, 48, 64, 96, 160, 256} {
+					for _, rm := range rateModes {
+						for _, cpx := range []int{0, 3, 7, 10} {
+							add("core", sweepCell{rate: 48000, channels: ch, bitrate: kbps * 1000, complexity: cpx, vbr: rm.vbr, constrained: rm.constrained, signal: signal, app: app})
+						}
+					}
+				}
+				for _, rate := range []int{8000, 12000, 16000, 24000} {
+					for _, kbps := range []int{8, 16, 32, 64} {
+						for _, cpx := range []int{0, 7, 10} {
+							add("rates", sweepCell{rate: rate, channels: ch, bitrate: kbps * 1000, complexity: cpx, vbr: true, constrained: true, signal: signal, app: app})
 						}
 					}
 				}
 			}
 		}
 	}
-	bad := 0
-	for _, tc := range cells {
-		name := fmt.Sprintf("%s/%s/ch%d/%dk/vbr%v/c%d", tc.app, tc.signal, tc.channels, tc.bitrate/1000, tc.vbr, tc.complexity)
-		vbrArg := "0"
-		if tc.vbr {
-			vbrArg = "1"
-		}
-		ref := runCELTOracleCmd(t, "ref-speech", "--auto-enc", "48000", "ref-speech", strconv.Itoa(frames), strconv.Itoa(tc.bitrate), vbrArg, strconv.Itoa(tc.channels), strconv.Itoa(tc.complexity), tc.signal, tc.app)
-		app := ApplicationVOIP
-		if tc.app == "audio" {
-			app = ApplicationAudio
-		}
-		enc, err := NewEncoder(rate, tc.channels, app)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := enc.SetModePolicy(ModePolicyLibopus); err != nil {
-			t.Fatal(err)
-		}
-		switch tc.signal {
-		case "voice":
-			enc.SetSignalType(SignalVoice)
-		case "music":
-			enc.SetSignalType(SignalMusic)
-		}
-		if err := enc.SetBitrate(tc.bitrate); err != nil {
-			t.Fatal(err)
-		}
-		enc.SetVBR(tc.vbr)
-		enc.SetVBRConstraint(true)
-		if err := enc.SetComplexity(tc.complexity); err != nil {
-			t.Fatal(err)
-		}
-		identical := 0
-		firstDiff := -1
-		var firstToc [2]byte
-		var firstLen [2]int
-		for f := 0; f < frames; f++ {
-			var pcm []float64
-			if tc.channels == 2 {
-				pcm = silkRefSpeechFrameStereo(rate, f*frameSize, frameSize)
-			} else {
-				pcm = encOracleRefSpeechFrame(rate, f*frameSize, frameSize)
+	for _, frameMs := range []int{40, 60, 80, 100, 120} {
+		for _, rate := range []int{16000, 48000} {
+			for _, ch := range []int{1, 2} {
+				for _, kbps := range []int{12, 24, 64} {
+					for _, signal := range []string{"voice", "music"} {
+						for _, cpx := range []int{5, 9} {
+							add("frames", sweepCell{rate: rate, channels: ch, bitrate: kbps * 1000, complexity: cpx, frameMs: frameMs, vbr: true, constrained: true, signal: signal, app: "voip"})
+						}
+					}
+				}
 			}
-			for i, v := range pcm {
-				pcm[i] = math.Floor(float64(float32(v))*32768+0.5) / 32768
-			}
-			pkt, err := enc.EncodeFloat(pcm, frameSize)
-			if err != nil {
-				t.Fatalf("%s frame %d: %v", name, f, err)
-			}
-			r := ref[f]
-			if bytes.Equal(pkt, r.packet) {
-				identical++
-			} else if firstDiff < 0 {
-				firstDiff = f
-				firstToc = [2]byte{pkt[0], r.packet[0]}
-				firstLen = [2]int{len(pkt), len(r.packet)}
-			}
-		}
-		if identical != frames {
-			bad++
-			t.Logf("%s: %d/%d identical, first diff frame %d Go TOC %#x %dB / C TOC %#x %dB", name, identical, frames, firstDiff, firstToc[0], firstLen[0], firstToc[1], firstLen[1])
 		}
 	}
-	t.Logf("%d/%d cells differ", bad, len(cells))
+	bws := []int{BandwidthNarrowband, BandwidthMediumband, BandwidthWideband, BandwidthSuperWideband, BandwidthFullband}
+	for _, ch := range []int{1, 2} {
+		for _, kbps := range []int{16, 32, 64} {
+			for _, signal := range []string{"voice", "music"} {
+				base := sweepCell{rate: 48000, channels: ch, bitrate: kbps * 1000, complexity: 5, vbr: true, constrained: true, signal: signal, app: "voip"}
+				for _, bw := range bws {
+					c := base
+					c.bandwidth = bw
+					add("forced", c)
+					if bw != BandwidthFullband {
+						c = base
+						c.maxBandwidth = bw
+						add("forced", c)
+					}
+				}
+				if ch == 2 {
+					c := base
+					c.forceChannels = 1
+					add("forced", c)
+				}
+				for _, cpx := range []int{5, 9} {
+					c := base
+					c.complexity = cpx
+					c.int16In = true
+					add("input", c)
+					c.int16In = false
+					c.lsbDepth = 16
+					add("input", c)
+					c.lsbDepth = 8
+					add("input", c)
+				}
+			}
+		}
+	}
+	for _, rate := range []int{8000, 12000, 24000} {
+		for _, ch := range []int{1, 2} {
+			for _, kbps := range []int{12, 24, 32} {
+				add("fec", sweepCell{rate: rate, channels: ch, bitrate: kbps * 1000, complexity: 5, vbr: true, constrained: true, signal: "voice", app: "voip", lossPerc: 20})
+			}
+			for _, kbps := range []int{12, 24} {
+				for _, cpx := range []int{5, 9} {
+					add("dtx", sweepCell{rate: rate, channels: ch, bitrate: kbps * 1000, complexity: cpx, vbr: true, constrained: true, signal: "voice", app: "voip", dtx: true, fixture: "ref-speech-gaps", frames: 120})
+				}
+			}
+		}
+	}
+
+	for _, group := range []string{"core", "rates", "frames", "forced", "input", "fec", "dtx"} {
+		cells := groups[group]
+		var bad atomic.Int32
+		t.Run(group, func(t *testing.T) {
+			for _, c := range cells {
+				t.Run(c.name(), func(t *testing.T) {
+					t.Parallel()
+					if !runSweepCell(t, c) {
+						bad.Add(1)
+					}
+				})
+			}
+		})
+		t.Logf("%s: %d/%d cells differ", group, bad.Load(), len(cells))
+	}
+}
+
+// runSweepCell encodes one sweep configuration with the Go encoder and the
+// oracle and reports whether every packet is byte-identical.
+func runSweepCell(t *testing.T, c sweepCell) bool {
+	vbrArg, dtxArg := "0", "0"
+	if c.vbr {
+		vbrArg = "1"
+	}
+	if c.dtx {
+		dtxArg = "1"
+	}
+	ref := runCELTOracleCmd(t, c.fixture, "--auto-enc", strconv.Itoa(c.rate), c.fixture, strconv.Itoa(c.frames),
+		strconv.Itoa(c.bitrate), vbrArg, strconv.Itoa(c.channels), strconv.Itoa(c.complexity), c.signal, c.app,
+		strconv.Itoa(c.frameMs), strconv.Itoa(c.lossPerc), dtxArg, c.oracleOptions())
+	app := ApplicationVOIP
+	if c.app == "audio" {
+		app = ApplicationAudio
+	}
+	enc, err := NewEncoder(c.rate, c.channels, app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetModePolicy(ModePolicyLibopus); err != nil {
+		t.Fatal(err)
+	}
+	switch c.signal {
+	case "voice":
+		enc.SetSignalType(SignalVoice)
+	case "music":
+		enc.SetSignalType(SignalMusic)
+	}
+	if err := enc.SetBitrate(c.bitrate); err != nil {
+		t.Fatal(err)
+	}
+	enc.SetVBR(c.vbr)
+	enc.SetVBRConstraint(c.constrained)
+	if err := enc.SetComplexity(c.complexity); err != nil {
+		t.Fatal(err)
+	}
+	if c.lossPerc > 0 {
+		enc.SetInbandFEC(true)
+		enc.SetPacketLossPerc(c.lossPerc)
+	}
+	enc.SetDTX(c.dtx)
+	if c.bandwidth != 0 {
+		if err := enc.SetBandwidth(c.bandwidth); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c.maxBandwidth != 0 {
+		if err := enc.SetMaxBandwidth(c.maxBandwidth); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c.forceChannels != 0 {
+		if err := enc.SetForceChannels(c.forceChannels); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c.lsbDepth != 0 {
+		if err := enc.SetLSBDepth(c.lsbDepth); err != nil {
+			t.Fatal(err)
+		}
+	}
+	frameSize := c.rate * c.frameMs / 1000
+	identical, firstDiff := 0, -1
+	for f := 0; f < c.frames; f++ {
+		var pcm []float64
+		switch {
+		case c.fixture == "ref-speech-gaps":
+			pcm = refSpeechGapsFrame(c.rate, c.channels, f*frameSize, frameSize)
+		case c.channels == 2:
+			pcm = silkRefSpeechFrameStereo(c.rate, f*frameSize, frameSize)
+		default:
+			pcm = encOracleRefSpeechFrame(c.rate, f*frameSize, frameSize)
+		}
+		for i, v := range pcm {
+			pcm[i] = math.Floor(float64(float32(v))*32768+0.5) / 32768
+		}
+		var pkt []byte
+		if c.int16In {
+			pcm16 := make([]int16, len(pcm))
+			for i, v := range pcm {
+				s := math.Floor(v*32768 + 0.5)
+				pcm16[i] = int16(math.Max(-32768, math.Min(32767, s)))
+			}
+			pkt, err = enc.Encode(pcm16, frameSize)
+		} else {
+			pkt, err = enc.EncodeFloat(pcm, frameSize)
+		}
+		if err != nil {
+			t.Fatalf("frame %d: %v", f, err)
+		}
+		r := ref[f]
+		if !r.havePacket {
+			t.Fatalf("frame %d: incomplete oracle trace", f)
+		}
+		if bytes.Equal(pkt, r.packet) {
+			identical++
+		} else if firstDiff < 0 {
+			firstDiff = f
+			t.Logf("frame %d: Go %d B TOC %#x / C %d B TOC %#x", f, len(pkt), pkt[0], len(r.packet), r.packet[0])
+		}
+	}
+	if identical != c.frames {
+		t.Errorf("%d/%d packets byte-identical (first difference at frame %d)", identical, c.frames, firstDiff)
+		return false
+	}
+	return true
 }

@@ -443,11 +443,16 @@ static int run_auto_encoder_oracle(int argc, char **argv)
     int schedule[AUTO_ENC_MAX_SCHEDULE], nschedule;
     const char *fixture, *signal, *appname;
     OpusEncoder *enc;
-    float pcm[2880 * 2];
+    static float pcm[5760 * 2];
+    static opus_int16 pcm16[5760 * 2];
     unsigned char packet[1500];
+    /* Options (argv[14], comma-separated key=value): vbrc=0|1 (default 1),
+       bw=/maxbw=nb|mb|wb|swb|fb, fc=1|2 (force channels), int16=1 (encode
+       through opus_encode), lsb=N (OPUS_SET_LSB_DEPTH), notrace=1. */
+    int opt_vbrc = 1, opt_bw = 0, opt_maxbw = 0, opt_fc = 0, opt_int16 = 0, opt_lsb = 0, opt_notrace = 0;
 
     if (argc < 4) {
-        fprintf(stderr, "usage: %s --auto-enc <rate> <fixture> [frames] [bitrate] [vbr] [channels] [complexity] [signal] [app] [frame_ms] [loss_perc] [dtx]\n", argv[0]);
+        fprintf(stderr, "usage: %s --auto-enc <rate> <fixture> [frames] [bitrate] [vbr] [channels] [complexity] [signal] [app] [frame_ms] [loss_perc] [dtx] [options]\n", argv[0]);
         return 2;
     }
     rate = atoi(argv[2]);
@@ -467,12 +472,31 @@ static int run_auto_encoder_oracle(int argc, char **argv)
     frame_ms = (argc >= 12) ? atoi(argv[11]) : 20;
     loss_perc = (argc >= 13) ? atoi(argv[12]) : 0;
     use_dtx = (argc >= 14) ? atoi(argv[13]) : 0;
+    if (argc >= 15 && argv[14][0] != '\0' && strcmp(argv[14], "-") != 0) {
+        char opts[512];
+        char *tok;
+        strncpy(opts, argv[14], sizeof(opts) - 1);
+        opts[sizeof(opts) - 1] = '\0';
+        for (tok = strtok(opts, ","); tok != NULL; tok = strtok(NULL, ",")) {
+            char *eq = strchr(tok, '=');
+            if (eq == NULL) { fprintf(stderr, "bad option %s\n", tok); return 2; }
+            *eq = '\0';
+            if (strcmp(tok, "vbrc") == 0) opt_vbrc = atoi(eq + 1);
+            else if (strcmp(tok, "bw") == 0) opt_bw = parse_bandwidth(eq + 1);
+            else if (strcmp(tok, "maxbw") == 0) opt_maxbw = parse_bandwidth(eq + 1);
+            else if (strcmp(tok, "fc") == 0) opt_fc = atoi(eq + 1);
+            else if (strcmp(tok, "int16") == 0) opt_int16 = atoi(eq + 1);
+            else if (strcmp(tok, "lsb") == 0) opt_lsb = atoi(eq + 1);
+            else if (strcmp(tok, "notrace") == 0) opt_notrace = atoi(eq + 1);
+            else { fprintf(stderr, "unknown option %s\n", tok); return 2; }
+        }
+    }
     if (rate != 8000 && rate != 12000 && rate != 16000 && rate != 24000 && rate != 48000) {
         fprintf(stderr, "--auto-enc rate must be 8000, 12000, 16000, 24000 or 48000\n");
         return 2;
     }
-    if (frame_ms != 20 && frame_ms != 40 && frame_ms != 60) {
-        fprintf(stderr, "--auto-enc frame_ms must be 20, 40 or 60\n");
+    if (frame_ms != 20 && frame_ms != 40 && frame_ms != 60 && frame_ms != 80 && frame_ms != 100 && frame_ms != 120) {
+        fprintf(stderr, "--auto-enc frame_ms must be 20, 40, 60, 80, 100 or 120\n");
         return 2;
     }
     app = strcmp(appname, "audio") == 0 ? OPUS_APPLICATION_AUDIO : OPUS_APPLICATION_VOIP;
@@ -485,7 +509,11 @@ static int run_auto_encoder_oracle(int argc, char **argv)
     opus_encoder_ctl(enc, OPUS_SET_BITRATE(bitrate));
     opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(complexity));
     opus_encoder_ctl(enc, OPUS_SET_VBR(vbr ? 1 : 0));
-    opus_encoder_ctl(enc, OPUS_SET_VBR_CONSTRAINT(1));
+    opus_encoder_ctl(enc, OPUS_SET_VBR_CONSTRAINT(opt_vbrc));
+    if (opt_bw) opus_encoder_ctl(enc, OPUS_SET_BANDWIDTH(opt_bw));
+    if (opt_maxbw) opus_encoder_ctl(enc, OPUS_SET_MAX_BANDWIDTH(opt_maxbw));
+    if (opt_fc) opus_encoder_ctl(enc, OPUS_SET_FORCE_CHANNELS(opt_fc));
+    if (opt_lsb) opus_encoder_ctl(enc, OPUS_SET_LSB_DEPTH(opt_lsb));
     if (use_dtx) opus_encoder_ctl(enc, OPUS_SET_DTX(1));
     if (loss_perc > 0) {
         opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1));
@@ -506,9 +534,19 @@ static int run_auto_encoder_oracle(int argc, char **argv)
         else fill_silk_fixture(pcm, rate, frame_size, frame, fixture);
         for (b = 0; b < frame_size * channels; b++)
             pcm[b] = (float)(floor((double)pcm[b] * 32768.0 + 0.5) / 32768.0);
-        oracle_trace_enabled = 1;
+        oracle_trace_enabled = !opt_notrace;
         fprintf(stderr, "[CELT_ENC_INPUT_FRAME] frame=%d bitrate=%d\n", frame, bitrate);
-        n = opus_encode_float(enc, pcm, frame_size, packet, (opus_int32)sizeof(packet));
+        if (opt_int16) {
+            for (b = 0; b < frame_size * channels; b++) {
+                double v = floor((double)pcm[b] * 32768.0 + 0.5);
+                if (v > 32767.0) v = 32767.0;
+                if (v < -32768.0) v = -32768.0;
+                pcm16[b] = (opus_int16)v;
+            }
+            n = opus_encode(enc, pcm16, frame_size, packet, (opus_int32)sizeof(packet));
+        } else {
+            n = opus_encode_float(enc, pcm, frame_size, packet, (opus_int32)sizeof(packet));
+        }
         if (n < 0) {
             fprintf(stderr, "encode frame %d failed: %d\n", frame, n);
             opus_encoder_destroy(enc);

@@ -1073,8 +1073,11 @@ like `encode_multiframe_packet`, including their transitions), and
 zero-stuffed input, `st->upsample`, instead of resampling; fixed bitrates
 and mode transitions are byte-identical). `celt_encode_with_ec`'s silence
 path (flag, two-byte VBR frame, pretend-filled `tell`, `oldBandE` = −28)
-replaces the earlier energy-based shortcut. The remaining encoder gaps are
-the digital-silence shortcut policy and `decide_fec` narrowing in hybrid.
+replaces the earlier energy-based shortcut. `decide_fec` runs in
+opus_encode_native's position (narrowing the bandwidth above 5 % loss) and
+`OPUS_SET_PACKET_LOSS_PERC` reaches the CELT encoder, so packets coded with
+in-band FEC (5/20/40 % loss, SILK-only and hybrid) are byte-identical too.
+The remaining encoder gap is the digital-silence shortcut policy.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

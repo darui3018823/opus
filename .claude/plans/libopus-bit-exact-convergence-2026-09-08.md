@@ -1338,3 +1338,23 @@ switch (user decision). The linked SIMD libopus stays a non-goal.
 Remaining (encoder): the digital-silence shortcut policy, `decide_fec`
 narrowing in hybrid, the default policy switch (user decision). The linked
 SIMD libopus stays a non-goal.
+
+### 2026-09-18 (evening): decide_fec narrowing and the CELT loss setting
+
+- `decideLibopusMode` runs `decide_fec` in opus_encode_native's position
+  (after the detected-bandwidth narrowing, before the mode fix-ups), so a
+  packet above 5 % loss narrows its bandwidth until the rate can carry the
+  redundant frames and a CELT-only packet clears `LBRR_coded`; the SILK
+  paths consume that one decision (`applyLBRRCoded`).
+- `OPUS_SET_PACKET_LOSS_PERC` is forwarded to the CELT encoder
+  (`celt.Encoder.SetLossRate`), which libopus does in its CTL. The loss
+  biases the coarse-energy intra decision (`intraBias`) and the prefilter
+  tapset; without it every hybrid packet coded with FEC diverged from
+  libopus at the coarse energy — that was the "decide_fec in hybrid" gap.
+- The auto-mode oracle takes a trailing packet-loss argument (it enables
+  in-band FEC), and `TestAutoModeOracle` gains 48 FEC cells (5/20/40 %
+  loss × 12/16/24/48 kbps × 16/48 kHz input × mono/stereo) — all
+  byte-identical and gated.
+
+Remaining (encoder): the digital-silence shortcut policy and the default
+policy switch (user decisions). The linked SIMD libopus stays a non-goal.

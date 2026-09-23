@@ -1305,3 +1305,36 @@ decision). The linked SIMD libopus stays a non-goal.
 Remaining (encoder): CELT/hybrid at 8–24 kHz input, the digital-silence
 shortcut (policy), `decide_fec` narrowing in hybrid, the default policy
 switch (user decision). The linked SIMD libopus stays a non-goal.
+
+### 2026-09-18 (afternoon): 8–24 kHz input and the libopus silence flow
+
+- Under the libopus policy the CELT layer no longer resamples an input
+  below 48 kHz: it runs the 48 kHz mode on the input zero-stuffed by
+  `resampling_factor(Fs)` (`celtUpsample`, `celtInputFrame`), and
+  `celt.Encoder.SetUpsample` mirrors `st->upsample` inside the encoder —
+  the MDCT bins below the input's Nyquist are scaled by the factor and the
+  rest cleared, in both the per-frame and the long-block (logE2) spectra.
+  The transition helpers take the input-rate signal and stuff it
+  themselves, and the 2.5 ms prefill tail is `Fs/400` samples.
+  `CELT_SET_END_BAND` is applied to `celt_enc` before a trailing redundant
+  frame's prefill, as libopus sets it once per packet.
+- `celt_encode_with_ec`'s silence path replaces the Go energy shortcut: the
+  silence flag (logp 15) is coded from libopus's input peak test, a silent
+  VBR frame shrinks to `nbFilledBytes+2` bytes, `tell` is pretended full
+  (`entcode.Encoder.AddTellBits`) so no later symbol fits, the prefilter
+  and the VBR drift adjustment are skipped, and `oldBandE` ends at −28 —
+  while the analysis still advances every state (that state divergence was
+  what broke the 8 kHz stereo transition). The Go DTX policy keeps its
+  minimal CBR packet by taking the same two-byte path.
+- `encodeRange` now reuses its per-frame buffers (`frameScratch`,
+  `dynallocScratch`, and the frame trace's slices, which are valid only
+  until the next frame): a 20 ms stereo frame allocates 139 instead of 177
+  times, a silent one 32 instead of 70.
+- `TestAutoModeOracle` gains 8/12/16/24 kHz input cells (12/24/64 kbps,
+  voice/music, mono/stereo, AUDIO) and `TestAutoModeTransitionOracle` the
+  `12k-128k`, `128k-12k` and `8k-24k` schedules at those input rates — all
+  byte-identical and gated.
+
+Remaining (encoder): the digital-silence shortcut policy, `decide_fec`
+narrowing in hybrid, the default policy switch (user decision). The linked
+SIMD libopus stays a non-goal.

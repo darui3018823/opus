@@ -1068,8 +1068,13 @@ rate transitions (`silk_LP_variable_cutoff`, `silk_control_audio_bandwidth`,
 `silk_bw_switch` with the prefill-2 re-init; `8k-24k` and 160-frame
 `24k-8k-long` cells), and 40/60 ms packets (native SILK multi-frame
 packets, and hybrid / CELT-only packets coded as repacketized 20 ms frames
-like `encode_multiframe_packet`, including their transitions). Non-48 kHz
-CELT/hybrid input and the silence shortcut remain.
+like `encode_multiframe_packet`, including their transitions), and
+8/12/16/24 kHz input (the CELT layer runs the 48 kHz mode on the
+zero-stuffed input, `st->upsample`, instead of resampling; fixed bitrates
+and mode transitions are byte-identical). `celt_encode_with_ec`'s silence
+path (flag, two-byte VBR frame, pretend-filled `tell`, `oldBandE` = −28)
+replaces the earlier energy-based shortcut. The remaining encoder gaps are
+the digital-silence shortcut policy and `decide_fec` narrowing in hybrid.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

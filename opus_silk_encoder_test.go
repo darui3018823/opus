@@ -1789,18 +1789,20 @@ func strictOpusMode(config int) string {
 }
 
 func strictSpeechLikeFrame(rate, channels, start, n int) []float64 {
+	// Products are rounded explicitly so the fixture is identical on every
+	// architecture (no fused multiply-add; see docs/DEVELOPER.md).
 	out := make([]float64, n*channels)
 	for i := 0; i < n; i++ {
-		t := float64(start+i) / float64(rate)
-		env := 0.42 + 0.18*math.Sin(2*math.Pi*2.7*t+0.3)
-		left := env * (0.34*math.Sin(2*math.Pi*175*t) +
-			0.13*math.Sin(2*math.Pi*350*t+0.4) +
-			0.07*math.Sin(2*math.Pi*700*t+0.8))
+		t := float64(float64(start+i) / float64(rate))
+		env := 0.42 + float64(0.18*math.Sin(float64(2*math.Pi*2.7*t)+0.3))
+		left := float64(env * (float64(0.34*math.Sin(float64(2*math.Pi*175*t))) +
+			float64(0.13*math.Sin(float64(2*math.Pi*350*t)+0.4)) +
+			float64(0.07*math.Sin(float64(2*math.Pi*700*t)+0.8))))
 		out[i*channels] = left
 		if channels == 2 {
-			right := env * (0.31*math.Sin(2*math.Pi*183*t+0.2) +
-				0.11*math.Sin(2*math.Pi*366*t+0.7) +
-				0.06*math.Sin(2*math.Pi*732*t+1.0))
+			right := float64(env * (float64(0.31*math.Sin(float64(2*math.Pi*183*t)+0.2)) +
+				float64(0.11*math.Sin(float64(2*math.Pi*366*t)+0.7)) +
+				float64(0.06*math.Sin(float64(2*math.Pi*732*t)+1.0))))
 			out[i*channels+1] = right
 		}
 	}
@@ -1808,17 +1810,19 @@ func strictSpeechLikeFrame(rate, channels, start, n int) []float64 {
 }
 
 func strictHybridWidebandFrame(rate, channels, start, n int) []float64 {
+	// Products are rounded explicitly so the fixture is identical on every
+	// architecture (no fused multiply-add; see docs/DEVELOPER.md).
 	out := strictSpeechLikeFrame(rate, channels, start, n)
 	highFreq := 10000.0
 	if rate >= 48000 {
 		highFreq = 16000.0
 	}
 	for i := 0; i < n; i++ {
-		t := float64(start+i) / float64(rate)
-		left := 0.045 * math.Sin(2*math.Pi*highFreq*t+0.11)
+		t := float64(float64(start+i) / float64(rate))
+		left := float64(0.045 * math.Sin(float64(float64(2*math.Pi*highFreq)*t)+0.11))
 		out[i*channels] += left
 		if channels == 2 {
-			right := 0.04 * math.Sin(2*math.Pi*highFreq*t+0.73)
+			right := float64(0.04 * math.Sin(float64(float64(2*math.Pi*highFreq)*t)+0.73))
 			out[i*channels+1] += right
 		}
 	}

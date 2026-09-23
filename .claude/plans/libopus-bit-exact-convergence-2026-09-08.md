@@ -1358,3 +1358,26 @@ SIMD libopus stays a non-goal.
 
 Remaining (encoder): the digital-silence shortcut policy and the default
 policy switch (user decisions). The linked SIMD libopus stays a non-goal.
+
+### 2026-09-23: public policy API and the forced-mono fix
+
+- Decision (user): v1.4.1 is released, so `NewEncoder` keeps the Go
+  policy by default for the v1 line. The policy is public as
+  `SetModePolicy(ModePolicyLegacy | ModePolicyLibopus)` (replacing the
+  unreleased `SetLibopusModePolicy` bool): it should be called before the
+  first `Encode`, and a change after encoding has started resets the stream
+  state like `Reset` (`TestSetModePolicyMidStreamResets` compares the
+  packets after a switch with a fresh encoder). `EncoderProfileLibopus`
+  selects `ModePolicyLibopus` (separate commit). The silence-flow and CELT
+  loss-rate fixes stay in the default path as v1.5.0 bug fixes.
+- `Reset` now also clears what `OPUS_RESET_STATE` clears: stream channels,
+  prev_channels, silk_bw_switch, nonfinal_frame, nPrevChannelsInternal and
+  the CELT prefill tail.
+- Fix: under the libopus policy a forced-mono stereo encoder — including
+  the state a 40/60 ms packet coded during the stereo->mono delay leaves
+  (libopus sets `force_channels = 1` for good) — keeps coding a mono stream
+  with its one encoder instead of the Go policy's separate mono encoder.
+  `48k-16k-40ms` / `48k-16k-60ms` transition cells are gated.
+
+Remaining (encoder): libopus DTX (`decide_dtx_mode`); the linked SIMD
+libopus stays a non-goal.

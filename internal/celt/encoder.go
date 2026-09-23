@@ -1354,11 +1354,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 	totalBitsQ3 := totalBits<<3 - antiCollapseRsv
 	bandTells := e.bandTellScratch[:0]
-	qabTellTrace = &bandTells
-	e.foldSeed = QuantAllBandsEncode(enc, bandE, start, end, X[:frameLen], Y, collapse,
+	e.foldSeed = quantAllBandsEncodeTrace(enc, bandE, start, end, X[:frameLen], Y, collapse,
 		pulses, isTransient, spread, dualStereo, intensity, tfRes,
-		totalBitsQ3, balance, lm, codedBands, e.foldSeed, e.disableInv, e.complexity)
-	qabTellTrace = nil
+		totalBitsQ3, balance, lm, codedBands, e.foldSeed, e.disableInv, e.complexity, &bandTells)
 	e.bandTellScratch = bandTells
 	e.lastTrace.BandTellFrac = bandTells
 

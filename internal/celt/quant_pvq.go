@@ -31,10 +31,6 @@ var qabDebug = false
 // exact symbol where the two desync can be located.
 var qabRangeTrace = os.Getenv("OPUS_QAB_TRACE") != ""
 
-// qabTellTrace, when non-nil, receives ec_tell_frac after each band the
-// encoder codes (the oracle's [CELT_ENC_QAB] dump).
-var qabTellTrace *[]int
-
 type qabBandTrace struct {
 	i, N, b, tellf int
 	rng            uint32
@@ -1061,7 +1057,7 @@ func QuantAllBands(dec *entcode.Decoder, start, end int, X, Y []float64,
 	seed uint32, disableInv bool) uint32 {
 	return quantAllBandsImpl(false, nil, dec, nil, start, end, X, Y,
 		collapseMasks, pulses, shortBlocks, spread, dualStereo, intensity, tfRes,
-		totalBitsQ3, balance, lm, codedBands, seed, disableInv, 0)
+		totalBitsQ3, balance, lm, codedBands, seed, disableInv, 0, nil)
 }
 
 // QuantAllBandsEncode is the encoder-side entry point. bandE holds per-band
@@ -1071,16 +1067,28 @@ func QuantAllBandsEncode(enc *entcode.Encoder, bandE []float64, start, end int, 
 	collapseMasks []byte, pulses []int, shortBlocks bool, spread int,
 	dualStereo bool, intensity int, tfRes []int, totalBitsQ3, balance, lm, codedBands int,
 	seed uint32, disableInv bool, complexity int) uint32 {
+	return quantAllBandsEncodeTrace(enc, bandE, start, end, X, Y, collapseMasks, pulses, shortBlocks, spread,
+		dualStereo, intensity, tfRes, totalBitsQ3, balance, lm, codedBands, seed, disableInv, complexity, nil)
+}
+
+// quantAllBandsEncodeTrace is QuantAllBandsEncode that also appends
+// ec_tell_frac after each coded band to *bandTells when it is non-nil (the
+// oracle's [CELT_ENC_QAB] dump). The trace is per call, so encoders running
+// concurrently do not share it.
+func quantAllBandsEncodeTrace(enc *entcode.Encoder, bandE []float64, start, end int, X, Y []float64,
+	collapseMasks []byte, pulses []int, shortBlocks bool, spread int,
+	dualStereo bool, intensity int, tfRes []int, totalBitsQ3, balance, lm, codedBands int,
+	seed uint32, disableInv bool, complexity int, bandTells *[]int) uint32 {
 	return quantAllBandsImpl(true, enc, nil, bandE, start, end, X, Y,
 		collapseMasks, pulses, shortBlocks, spread, dualStereo, intensity, tfRes,
-		totalBitsQ3, balance, lm, codedBands, seed, disableInv, complexity)
+		totalBitsQ3, balance, lm, codedBands, seed, disableInv, complexity, bandTells)
 }
 
 func quantAllBandsImpl(encode bool, enc *entcode.Encoder, dec *entcode.Decoder, bandE []float64,
 	start, end int, X, Y []float64,
 	collapseMasks []byte, pulses []int, shortBlocks bool, spread int,
 	dualStereo bool, intensity int, tfRes []int, totalBitsQ3, balance, lm, codedBands int,
-	seed uint32, disableInv bool, complexity int) uint32 {
+	seed uint32, disableInv bool, complexity int, bandTells *[]int) uint32 {
 	// theta_rdo: at complexity >= 8 the stereo encoder codes each joint band
 	// twice (theta rounded down and up) and keeps the better reconstruction.
 	thetaRdo := encode && Y != nil && !dualStereo && complexity >= 8
@@ -1300,8 +1308,8 @@ func quantAllBandsImpl(encode bool, enc *entcode.Encoder, dec *entcode.Decoder, 
 			fmt.Fprintln(os.Stderr)
 		}
 		balance += pulses[i] + tell
-		if encode && qabTellTrace != nil {
-			*qabTellTrace = append(*qabTellTrace, ctx.tellFrac())
+		if encode && bandTells != nil {
+			*bandTells = append(*bandTells, ctx.tellFrac())
 		}
 		updateLowband = b > (N << bitres)
 		ctx.avoidSplit = false

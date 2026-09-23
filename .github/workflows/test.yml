@@ -28,6 +28,15 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Vendor libopus source (generator input)
+        # internal/dsp's MDCT twiddle generator reads libopus 1.6.1's
+        # static_modes_float.h from ./libopus (not tracked in the repository).
+        run: |
+          curl -sL -o opus-src.tar.gz https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz
+          tar -xzf opus-src.tar.gz
+          mv opus-1.6.1 libopus
+          rm opus-src.tar.gz
+
       - name: Verify generated files
         run: |
           go generate ./...

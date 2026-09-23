@@ -1969,13 +1969,14 @@ func (e *Encoder) selectCELTEncoder(frameSize int) error {
 	next.SetSignalType(e.effectiveSignalType())
 	next.SetEnergyMask(e.surroundEnergyMask)
 	next.SetUpsample(e.celtUpsample())
-	// OPUS_SET_PACKET_LOSS_PERC is forwarded to celt_enc (it biases the
-	// coarse-energy intra decision and the prefilter tapset).
-	next.SetLossRate(e.packetLossPerc)
 	if next != e.celtEncoder {
 		next.CopyStateFrom(e.celtEncoder)
 		e.celtEncoder = next
 	}
+	// OPUS_SET_PACKET_LOSS_PERC is forwarded to celt_enc (it biases the
+	// coarse-energy intra decision and the prefilter tapset). Set after the
+	// state hand-over, which carries the per-frame settings.
+	next.SetLossRate(e.packetLossPerc)
 	e.internalFrameSize = internalSize
 	return nil
 }

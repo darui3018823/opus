@@ -15,7 +15,8 @@ import (
 
 // sweepCell is one ModePolicyLibopus configuration of TestAutoModeOracleSweep.
 type sweepCell struct {
-	rate, channels, bitrate, complexity, frameMs, frames, lossPerc int
+	// frameUs is the packet duration in microseconds (2.5 ms is 2500).
+	rate, channels, bitrate, complexity, frameUs, frames, lossPerc int
 	vbr, constrained, int16In, dtx                                 bool
 	signal, app, fixture                                           string
 	bandwidth, maxBandwidth, forceChannels, lsbDepth               int
@@ -28,7 +29,7 @@ func (c sweepCell) name() string {
 	} else if c.vbr {
 		mode = "uvbr"
 	}
-	n := fmt.Sprintf("in%dk/ch%d/%dk/%s/c%d/%dms/%s-%s", c.rate/1000, c.channels, c.bitrate/1000, mode, c.complexity, c.frameMs, c.app, c.signal)
+	n := fmt.Sprintf("in%dk/ch%d/%dk/%s/c%d/%gms/%s-%s", c.rate/1000, c.channels, c.bitrate/1000, mode, c.complexity, float64(c.frameUs)/1000, c.app, c.signal)
 	if c.lossPerc > 0 {
 		n += fmt.Sprintf("/loss%d", c.lossPerc)
 	}
@@ -108,11 +109,11 @@ func TestAutoModeOracleSweep(t *testing.T) {
 	}
 	groups := map[string][]sweepCell{}
 	add := func(group string, c sweepCell) {
-		if c.frameMs == 0 {
-			c.frameMs = 20
+		if c.frameUs == 0 {
+			c.frameUs = 20000
 		}
 		if c.frames == 0 {
-			c.frames = 240 / c.frameMs
+			c.frames = 240000 / c.frameUs
 		}
 		if c.fixture == "" {
 			c.fixture = "ref-speech"
@@ -147,7 +148,23 @@ func TestAutoModeOracleSweep(t *testing.T) {
 				for _, kbps := range []int{12, 24, 64} {
 					for _, signal := range []string{"voice", "music"} {
 						for _, cpx := range []int{5, 9} {
-							add("frames", sweepCell{rate: rate, channels: ch, bitrate: kbps * 1000, complexity: cpx, frameMs: frameMs, vbr: true, constrained: true, signal: signal, app: "voip"})
+							add("frames", sweepCell{rate: rate, channels: ch, bitrate: kbps * 1000, complexity: cpx, frameUs: frameMs * 1000, vbr: true, constrained: true, signal: signal, app: "voip"})
+						}
+					}
+				}
+			}
+		}
+	}
+	// Packets shorter than 20 ms: 2.5 and 5 ms are CELT-only, 10 ms may
+	// be SILK or hybrid; transitions to and from them come from bitrate
+	// schedules elsewhere.
+	for _, frameUs := range []int{2500, 5000, 10000} {
+		for _, rate := range []int{16000, 48000} {
+			for _, ch := range []int{1, 2} {
+				for _, kbps := range []int{12, 24, 64, 128} {
+					for _, signal := range []string{"voice", "music"} {
+						for _, app := range []string{"voip", "audio"} {
+							add("short", sweepCell{rate: rate, channels: ch, bitrate: kbps * 1000, complexity: 5, frameUs: frameUs, vbr: true, constrained: true, signal: signal, app: app})
 						}
 					}
 				}
@@ -201,7 +218,7 @@ func TestAutoModeOracleSweep(t *testing.T) {
 		}
 	}
 
-	for _, group := range []string{"core", "rates", "frames", "forced", "input", "fec", "dtx"} {
+	for _, group := range []string{"core", "rates", "frames", "forced", "input", "fec", "dtx", "short"} {
 		cells := groups[group]
 		var bad atomic.Int32
 		t.Run(group, func(t *testing.T) {
@@ -230,7 +247,7 @@ func runSweepCell(t *testing.T, c sweepCell) bool {
 	}
 	ref := runCELTOracleCmd(t, c.fixture, "--auto-enc", strconv.Itoa(c.rate), c.fixture, strconv.Itoa(c.frames),
 		strconv.Itoa(c.bitrate), vbrArg, strconv.Itoa(c.channels), strconv.Itoa(c.complexity), c.signal, c.app,
-		strconv.Itoa(c.frameMs), strconv.Itoa(c.lossPerc), dtxArg, c.oracleOptions())
+		strconv.FormatFloat(float64(c.frameUs)/1000, 'g', -1, 64), strconv.Itoa(c.lossPerc), dtxArg, c.oracleOptions())
 	app := ApplicationVOIP
 	if c.app == "audio" {
 		app = ApplicationAudio
@@ -281,7 +298,7 @@ func runSweepCell(t *testing.T, c sweepCell) bool {
 			t.Fatal(err)
 		}
 	}
-	frameSize := c.rate * c.frameMs / 1000
+	frameSize := c.rate * c.frameUs / 1000000
 	identical, firstDiff := 0, -1
 	for f := 0; f < c.frames; f++ {
 		var pcm []float64

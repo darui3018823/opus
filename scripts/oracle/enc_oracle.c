@@ -424,7 +424,8 @@ static int run_hybrid_encoder_oracle(int argc, char **argv)
    the SILK and CELT traces. signal = voice|music|auto, app = voip|audio.
    <bitrate> may be a comma-separated per-frame schedule ("12000,12000,64000"):
    frame f uses entry min(f, n-1), so the last entry repeats. An optional
-   trailing <frame_ms> (20, 40 or 60; default 20) sets the packet duration. */
+   trailing <frame_ms> (2.5, 5, 10, 20, 40, 60, 80, 100 or 120; default 20)
+   sets the packet duration. */
 #define AUTO_ENC_MAX_SCHEDULE 64
 static int parse_bitrate_schedule(const char *s, int *out, int max)
 {
@@ -439,7 +440,7 @@ static int parse_bitrate_schedule(const char *s, int *out, int max)
 
 static int run_auto_encoder_oracle(int argc, char **argv)
 {
-    int rate, frames, bitrate, complexity, vbr, channels, frame_size, err, frame, app, frame_ms, loss_perc, use_dtx;
+    int rate, frames, bitrate, complexity, vbr, channels, frame_size, err, frame, app, frame_us, loss_perc, use_dtx;
     int schedule[AUTO_ENC_MAX_SCHEDULE], nschedule;
     const char *fixture, *signal, *appname;
     OpusEncoder *enc;
@@ -469,7 +470,8 @@ static int run_auto_encoder_oracle(int argc, char **argv)
     complexity = (argc >= 9) ? atoi(argv[8]) : 5;
     signal = (argc >= 10) ? argv[9] : "voice";
     appname = (argc >= 11) ? argv[10] : "voip";
-    frame_ms = (argc >= 12) ? atoi(argv[11]) : 20;
+    /* The duration in microseconds, so that 2.5 ms is expressible. */
+    frame_us = (argc >= 12) ? (int)(atof(argv[11]) * 1000.0 + 0.5) : 20000;
     loss_perc = (argc >= 13) ? atoi(argv[12]) : 0;
     use_dtx = (argc >= 14) ? atoi(argv[13]) : 0;
     if (argc >= 15 && argv[14][0] != '\0' && strcmp(argv[14], "-") != 0) {
@@ -495,12 +497,13 @@ static int run_auto_encoder_oracle(int argc, char **argv)
         fprintf(stderr, "--auto-enc rate must be 8000, 12000, 16000, 24000 or 48000\n");
         return 2;
     }
-    if (frame_ms != 20 && frame_ms != 40 && frame_ms != 60 && frame_ms != 80 && frame_ms != 100 && frame_ms != 120) {
-        fprintf(stderr, "--auto-enc frame_ms must be 20, 40, 60, 80, 100 or 120\n");
+    if (frame_us != 2500 && frame_us != 5000 && frame_us != 10000 && frame_us != 20000 && frame_us != 40000 &&
+        frame_us != 60000 && frame_us != 80000 && frame_us != 100000 && frame_us != 120000) {
+        fprintf(stderr, "--auto-enc frame_ms must be 2.5, 5, 10, 20, 40, 60, 80, 100 or 120\n");
         return 2;
     }
     app = strcmp(appname, "audio") == 0 ? OPUS_APPLICATION_AUDIO : OPUS_APPLICATION_VOIP;
-    frame_size = rate * frame_ms / 1000;
+    frame_size = (int)((long)rate * frame_us / 1000000);
     enc = opus_encoder_create(rate, channels, app, &err);
     if (enc == NULL || err != OPUS_OK) {
         fprintf(stderr, "opus_encoder_create failed: %d\n", err);

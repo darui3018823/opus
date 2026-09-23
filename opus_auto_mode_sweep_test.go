@@ -20,6 +20,9 @@ type sweepCell struct {
 	vbr, constrained, int16In, dtx                                 bool
 	signal, app, fixture                                           string
 	bandwidth, maxBandwidth, forceChannels, lsbDepth               int
+	// schedule, when set, is the per-frame bitrate (the last entry holds);
+	// bitrate is then its first entry.
+	schedule []int
 }
 
 func (c sweepCell) name() string {
@@ -50,6 +53,17 @@ func (c sweepCell) name() string {
 	}
 	if c.forceChannels != 0 {
 		n += fmt.Sprintf("/fc%d", c.forceChannels)
+	}
+	if len(c.schedule) > 0 {
+		steps := []string{}
+		prev := -1
+		for _, b := range c.schedule {
+			if b != prev {
+				steps = append(steps, strconv.Itoa(b/1000)+"k")
+				prev = b
+			}
+		}
+		n += "/sched-" + strings.Join(steps, ">")
 	}
 	return n
 }
@@ -171,6 +185,49 @@ func TestAutoModeOracleSweep(t *testing.T) {
 			}
 		}
 	}
+	// Mode and bandwidth transitions with packets shorter than 20 ms: the
+	// switch rules change below 10 ms (no deferred switch to CELT, no
+	// redundancy).
+	for _, frameUs := range []int{2500, 5000, 10000} {
+		frames := 240000 / frameUs
+		k := min(frames/3, 30)
+		steps := func(rates ...int) []int {
+			var out []int
+			for i, r := range rates {
+				n := k
+				if i == len(rates)-1 {
+					n = 1
+				}
+				for j := 0; j < n; j++ {
+					out = append(out, r)
+				}
+			}
+			return out
+		}
+		for _, rate := range []int{16000, 48000} {
+			for _, ch := range []int{1, 2} {
+				for _, signal := range []string{"voice", "music"} {
+					for _, app := range []string{"voip", "audio"} {
+						for _, sched := range [][]int{steps(12000, 128000), steps(128000, 12000), steps(8000, 24000), steps(24000, 128000, 16000)} {
+							add("short-transitions", sweepCell{rate: rate, channels: ch, bitrate: sched[0], schedule: sched, complexity: 5, frameUs: frameUs, frames: frames, vbr: true, constrained: true, signal: signal, app: app})
+						}
+					}
+				}
+			}
+		}
+		for _, rate := range []int{16000, 48000} {
+			for _, ch := range []int{1, 2} {
+				for _, kbps := range []int{12, 24} {
+					for _, cpx := range []int{5, 9} {
+						add("short-dtx", sweepCell{rate: rate, channels: ch, bitrate: kbps * 1000, complexity: cpx, frameUs: frameUs, vbr: true, constrained: true, signal: "voice", app: "voip", dtx: true, fixture: "ref-speech-gaps", frames: 2400000 / frameUs})
+					}
+				}
+				for _, kbps := range []int{16, 32} {
+					add("short-fec", sweepCell{rate: rate, channels: ch, bitrate: kbps * 1000, complexity: 5, frameUs: frameUs, vbr: true, constrained: true, signal: "voice", app: "voip", lossPerc: 20})
+				}
+			}
+		}
+	}
 	bws := []int{BandwidthNarrowband, BandwidthMediumband, BandwidthWideband, BandwidthSuperWideband, BandwidthFullband}
 	for _, ch := range []int{1, 2} {
 		for _, kbps := range []int{16, 32, 64} {
@@ -218,7 +275,7 @@ func TestAutoModeOracleSweep(t *testing.T) {
 		}
 	}
 
-	for _, group := range []string{"core", "rates", "frames", "forced", "input", "fec", "dtx", "short"} {
+	for _, group := range []string{"core", "rates", "frames", "forced", "input", "fec", "dtx", "short", "short-transitions", "short-dtx", "short-fec"} {
 		cells := groups[group]
 		var bad atomic.Int32
 		t.Run(group, func(t *testing.T) {
@@ -250,8 +307,16 @@ func runSweepCell(t *testing.T, c sweepCell) bool {
 	if c.dtx {
 		dtxArg = "1"
 	}
+	bitrateArg := strconv.Itoa(c.bitrate)
+	if len(c.schedule) > 0 {
+		parts := make([]string, len(c.schedule))
+		for i, b := range c.schedule {
+			parts[i] = strconv.Itoa(b)
+		}
+		bitrateArg = strings.Join(parts, ",")
+	}
 	ref := runCELTOracleCmd(t, c.fixture, "--auto-enc", strconv.Itoa(c.rate), c.fixture, strconv.Itoa(c.frames),
-		strconv.Itoa(c.bitrate), vbrArg, strconv.Itoa(c.channels), strconv.Itoa(c.complexity), c.signal, c.app,
+		bitrateArg, vbrArg, strconv.Itoa(c.channels), strconv.Itoa(c.complexity), c.signal, c.app,
 		strconv.FormatFloat(float64(c.frameUs)/1000, 'g', -1, 64), strconv.Itoa(c.lossPerc), dtxArg, c.oracleOptions())
 	app := ApplicationVOIP
 	if c.app == "audio" {
@@ -305,7 +370,16 @@ func runSweepCell(t *testing.T, c sweepCell) bool {
 	}
 	frameSize := c.rate * c.frameUs / 1000000
 	identical, firstDiff := 0, -1
+	bitrate := c.bitrate
 	for f := 0; f < c.frames; f++ {
+		if len(c.schedule) > 0 {
+			if b := c.schedule[min(f, len(c.schedule)-1)]; b != bitrate {
+				bitrate = b
+				if err := enc.SetBitrate(bitrate); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
 		var pcm []float64
 		switch {
 		case c.fixture == "ref-speech-gaps":

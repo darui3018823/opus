@@ -292,7 +292,9 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 			bandwidth = framing.BandwidthWideband
 		}
 	}
-	if maxBW := publicToCeltFramingBW(e.maxBandwidth); e.maxBandwidth != BandwidthAuto && bandwidth > maxBW {
+	// max_bandwidth caps at a SILK bandwidth (mediumband included); CELT-only
+	// packets move mediumband up to wideband below.
+	if maxBW := publicToFramingBW(e.maxBandwidth); e.maxBandwidth != BandwidthAuto && bandwidth > maxBW {
 		bandwidth = maxBW
 	}
 	if e.forcedBandwidth != BandwidthAuto {

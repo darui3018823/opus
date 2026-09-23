@@ -225,9 +225,14 @@ func TestAutoModeOracleSweep(t *testing.T) {
 			for _, c := range cells {
 				t.Run(c.name(), func(t *testing.T) {
 					t.Parallel()
-					if !runSweepCell(t, c) {
-						bad.Add(1)
-					}
+					// Count every failed cell, including a t.Fatal (e.g. the
+					// oracle failing to run).
+					defer func() {
+						if t.Failed() {
+							bad.Add(1)
+						}
+					}()
+					runSweepCell(t, c)
 				})
 			}
 		})

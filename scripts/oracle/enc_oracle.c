@@ -503,7 +503,7 @@ static int run_auto_encoder_oracle(int argc, char **argv)
         return 2;
     }
     app = strcmp(appname, "audio") == 0 ? OPUS_APPLICATION_AUDIO : OPUS_APPLICATION_VOIP;
-    frame_size = (int)((long)rate * frame_us / 1000000);
+    frame_size = (int)((long long)rate * frame_us / 1000000);
     enc = opus_encoder_create(rate, channels, app, &err);
     if (enc == NULL || err != OPUS_OK) {
         fprintf(stderr, "opus_encoder_create failed: %d\n", err);

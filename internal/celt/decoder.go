@@ -23,6 +23,8 @@ const celtFloatScale = 1.0 / 32768.0
 
 // Decoder is a CELT decoder instance
 type Decoder struct {
+	// alloc is the bit allocation scratch reused between frames.
+	alloc         allocScratch
 	mode          *Mode
 	celtMode      *dsp.CELTMode     // long-block (N-point) IMDCT mode
 	shortCeltMode *dsp.CELTMode     // short-block (NBase-point) IMDCT mode for transient frames
@@ -553,7 +555,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 
 	// libopus-faithful compute_allocation: pulses[] are per-band Q3 PVQ budgets,
 	// balance is the leftover, codedBands the last coded band.
-	pulses, eBits, finePriority, balance, intensityV, codedBands, dualStereoV := computeAllocation(dec, numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets)
+	pulses, eBits, finePriority, balance, intensityV, codedBands, dualStereoV := computeAllocationScratch(dec, numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets, &d.alloc)
 	intensity, dualStereo = intensityV, dualStereoV
 
 	// Fine energy — raw bits from END (do NOT affect forward rng). FORWARD band order.

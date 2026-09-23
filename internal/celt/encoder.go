@@ -191,6 +191,7 @@ type Encoder struct {
 	// frame is the per-frame work storage of encodeRange, reused between
 	// frames (nothing outlives the frame: the trace copies what it keeps).
 	frame         frameScratch
+	alloc         allocScratch
 	dynalloc      dynallocScratch
 	mode          *Mode
 	celtMode      *dsp.CELTMode // forward (analysis) MDCT, N-point long block
@@ -1298,8 +1299,8 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 
 	pulses, eBits, finePriority, balance, intensity, codedBands, dualStereo :=
-		computeAllocationEncode(enc, encIntensity, encDualStereo,
-			numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets, e.lastCodedBands, e.signalBandwidth(end, equivRate))
+		computeAllocationEncodeScratch(enc, encIntensity, encDualStereo,
+			numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets, e.lastCodedBands, e.signalBandwidth(end, equivRate), &e.alloc)
 	// st->lastCodedBands moves by at most one band per frame.
 	if e.lastCodedBands != 0 {
 		v := codedBands

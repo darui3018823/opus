@@ -9,12 +9,16 @@ import "math"
 
 // bandEnergy32 mirrors compute_band_energies: 1e-27f plus the sequential
 // float32 inner product of the band's MDCT coefficients, then celt_sqrt.
+// The inner product is summed from zero and the floor added last, as in
+// libopus: starting the sum at 1e-27 rounds differently for the tiny
+// energies of a band that is almost silent.
 func bandEnergy32(coeffs []float64) float64 {
-	sum := float32(1e-27)
+	var prod float32
 	for _, v := range coeffs {
 		x := float32(v)
-		sum += float32(x * x)
+		prod += float32(x * x)
 	}
+	sum := float32(1e-27) + prod
 	return float64(float32(math.Sqrt(float64(sum))))
 }
 

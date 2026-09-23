@@ -1381,3 +1381,36 @@ policy switch (user decisions). The linked SIMD libopus stays a non-goal.
 
 Remaining (encoder): libopus DTX (`decide_dtx_mode`); the linked SIMD
 libopus stays a non-goal.
+
+### 2026-09-23 (later): libopus DTX, multi-frame analysis, band energy floor
+
+- DTX under `ModePolicyLibopus` (`encoder_dtx.go`): `is_digital_silence`
+  with the effective LSB depth, `peak_signal_energy` tracking,
+  `silk_mode.useDTX = use_dtx && !(analysis valid || silence)`, the
+  per-frame activity of `opus_encode_frame_native` (silence, the analysis'
+  activity probability with the pseudo-SNR against the peak energy, the
+  CELT-only energy test, SILK's signal type), `decide_dtx_mode` (TOC-only
+  packets after 200 ms without activity, a refresh every 400 ms), and SILK's
+  own DTX (`useDTX` / `inDTX` in the VAD, a zero-byte packet when every
+  coded channel is in DTX; `opus_encode_native` then returns the TOC before
+  the CELT processing, the delay-buffer update and the HB gain / stereo
+  width / previous-mode bookkeeping). SILK also takes the Opus layer's
+  activity: `VAD_NO_ACTIVITY` lowers an active SILK VAD to just under the
+  threshold (this affects coding without DTX too, at complexity >= 7).
+  A multi-frame packet made of DTX frames is not padded in CBR.
+  `OPUS_GET_IN_DTX` follows libopus under this policy; the CELT encoder's
+  own minimal-packet DTX is now a Go-policy feature only.
+- Multi-frame packets read the tonality analysis one 20 ms frame at a time
+  (`analysis_read_pos_bak`, `tonality_get_info`, `CELT_SET_ANALYSIS` per
+  frame): 40/60 ms hybrid / CELT-only packets at complexity >= 7 diverged
+  from their first frame before.
+- `compute_band_energies` adds the 1e-27 floor after the inner product
+  (the port started the sum at the floor, which rounds differently for the
+  almost-silent bands after digital silence).
+- `TestDTXOracle` (oracle fixture `ref-speech-gaps`: speech, digital
+  silence, -60 dBFS noise, LSB-level noise; 16/48 kHz, mono/stereo,
+  12/24/64 kbps, complexity 5/9, VOIP/AUDIO, CBR/VBR, 20/40/60 ms): all 48
+  cells byte-identical, including the number of DTX packets.
+
+Remaining (encoder): none known beyond the Go policy's own decisions; the
+linked SIMD libopus stays a non-goal.

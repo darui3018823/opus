@@ -1082,7 +1082,12 @@ replaces the earlier energy-based shortcut. `decide_fec` runs in
 opus_encode_native's position (narrowing the bandwidth above 5 % loss) and
 `OPUS_SET_PACKET_LOSS_PERC` reaches the CELT encoder, so packets coded with
 in-band FEC (5/20/40 % loss, SILK-only and hybrid) are byte-identical too.
-The remaining encoder gap is the digital-silence shortcut policy.
+DTX follows libopus under `ModePolicyLibopus`: the generalized DTX
+(`decide_dtx_mode`, TOC-only packets after 200 ms without activity) and
+SILK's own DTX when the tonality analysis is off (`TestDTXOracle`, 48 cells
+byte-identical). Multi-frame packets read the tonality analysis per 20 ms
+frame as libopus does. Under `ModePolicyLegacy` DTX keeps the Go encoder's
+minimal silent packets.
 
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against

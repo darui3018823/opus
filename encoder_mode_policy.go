@@ -210,10 +210,7 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 	case e.application == ApplicationRestrictedLowDelay:
 		mode = framing.ModeCELTOnly
 	default:
-		var stereoWidth float32
-		if e.channels == 2 && e.forceChannels != ChannelsMono {
-			stereoWidth = e.stereoWidth.compute(raw, frameSize, e.sampleRate)
-		}
+		stereoWidth := e.packetStereoWidth
 		// Interpolate based on stereo width, then on the speech/music probability.
 		modeVoice := int(float32(float32(1-stereoWidth)*float32(modeThresholds[0][0])) + float32(stereoWidth*float32(modeThresholds[1][0])))
 		modeMusic := int(float32(float32(1-stereoWidth)*float32(modeThresholds[1][1])) + float32(stereoWidth*float32(modeThresholds[1][1])))
@@ -357,6 +354,7 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 		mode = framing.ModeSILKOnly
 	}
 	e.libopusBandwidth = bandwidth
+	e.libopusMode = mode
 	// If we decided to go with CELT, make sure redundancy is off, no matter
 	// what we decided earlier; otherwise size it (none when too small).
 	if mode == framing.ModeCELTOnly {

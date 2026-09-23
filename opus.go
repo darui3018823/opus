@@ -215,6 +215,10 @@ type Encoder struct {
 	// the bandwidth kept across SILK/hybrid packets (-1 before the first).
 	stereoWidth      stereoWidthState
 	libopusBandwidth int
+	// libopusMode is st->mode (the last decided mode; hybrid initially);
+	// packetStereoWidth is the packet's compute_stereo_width result.
+	libopusMode       int
+	packetStereoWidth float32
 	// libopusModePolicy selects opus_encode_native's automatic mode /
 	// bandwidth decision (decideLibopusMode) instead of the Go encoder's
 	// bitrate-boundary rules; see SetModePolicy.
@@ -301,6 +305,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		hybridStereoWidthQ14: 1 << 14,
 		prevHBGain:           1,
 		libopusBandwidth:     -1,
+		libopusMode:          framing.ModeHybrid,
 		variableHPSmth2Q15:   variableHPSmth2Initial(),
 	}
 	enc.celtEncoders[3] = celtEnc
@@ -591,6 +596,13 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		// SILK's own DTX only runs when the generalized DTX cannot.
 		isSilence := isDigitalSilence(raw, lsbDepth)
 		e.trackPeakSignalEnergy(raw, isSilence, analysisInfo)
+		e.packetStereoWidth = 0
+		if e.channels == 2 && e.forceChannels != ChannelsMono {
+			e.packetStereoWidth = e.stereoWidth.compute(raw, frameSize, e.sampleRate)
+		}
+		if pkt, ok := e.libopusPLCFrame(frameSize, maxDataBytes); ok {
+			return pkt, nil
+		}
 		e.silkUseDTX = e.dtx && !(analysisInfo.Valid || isSilence)
 		e.frameIsSilence, e.frameAnalysis, e.packetLSBDepth = isSilence, analysisInfo, lsbDepth
 		defer func() { e.packetEquivRate = 0 }()
@@ -2773,6 +2785,7 @@ func (e *Encoder) Reset() error {
 	e.prevHBGain = 1
 	e.stereoWidth = stereoWidthState{}
 	e.libopusBandwidth = -1
+	e.libopusMode = framing.ModeHybrid
 	if e.inputResampler != nil {
 		e.inputResampler.Reset()
 	}

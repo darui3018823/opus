@@ -55,15 +55,15 @@ func silkWarpedAutocorrelationFLP32(corr, input []float64, warping float64, leng
 	for n := 0; n < length; n++ {
 		tmp1 := input[n]
 		for i := 0; i < order; i += 2 {
-			tmp2 := state[i] + warping*(state[i+1]-tmp1)
+			tmp2 := state[i] + float64(warping*(state[i+1]-tmp1))
 			state[i] = tmp1
-			c[i] += state[0] * tmp1
-			tmp1 = state[i+1] + warping*(state[i+2]-tmp2)
+			c[i] += float64(state[0] * tmp1)
+			tmp1 = state[i+1] + float64(warping*(state[i+2]-tmp2))
 			state[i+1] = tmp2
-			c[i+1] += state[0] * tmp2
+			c[i+1] += float64(state[0] * tmp2)
 		}
 		state[order] = tmp1
-		c[order] += state[0] * tmp1
+		c[order] += float64(state[0] * tmp1)
 	}
 	for i := 0; i <= order; i++ {
 		corr[i] = f32(c[i])

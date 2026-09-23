@@ -184,8 +184,8 @@ func silkSchurFLP32(reflCoef, autoCorr []float64, order int) float64 {
 		for n := 0; n < order-k; n++ {
 			ctmp1 := c[n+k+1][0]
 			ctmp2 := c[n][1]
-			c[n+k+1][0] = ctmp1 + ctmp2*rcTmp
-			c[n][1] = ctmp2 + ctmp1*rcTmp
+			c[n+k+1][0] = ctmp1 + float64(ctmp2*rcTmp)
+			c[n][1] = ctmp2 + float64(ctmp1*rcTmp)
 		}
 	}
 	return f32(c[0][1])
@@ -298,8 +298,8 @@ func silkPitchAnalysisCoreFLP32(
 		for d := minLag4kHz + 1; d <= maxLag4kHz; d++ {
 			basis--
 			crossCorr = xcorr[maxLag4kHz-d]
-			normalizer += frame4kHz[basis]*frame4kHz[basis] -
-				frame4kHz[basis+sfLength8kHz]*frame4kHz[basis+sfLength8kHz]
+			normalizer += float64(frame4kHz[basis]*frame4kHz[basis]) -
+				float64(frame4kHz[basis+sfLength8kHz]*frame4kHz[basis+sfLength8kHz])
 			c0[d] = f32(c0[d] + f32(2*crossCorr/normalizer))
 		}
 		target += sfLength8kHz
@@ -592,8 +592,8 @@ func silkPAnaCalcEnergySt3FLP32(frame []float64, startLag, sfLength, nbSubfr, co
 
 		lagDiff := lagRange(k, 1) - lagRange(k, 0) + 1
 		for i := 1; i < lagDiff; i++ {
-			energy -= frame[basis+sfLength-i] * frame[basis+sfLength-i]
-			energy += frame[basis-i] * frame[basis-i]
+			energy -= float64(frame[basis+sfLength-i] * frame[basis+sfLength-i])
+			energy += float64(frame[basis-i] * frame[basis-i])
 			scratch[lagCounter] = f32(energy)
 			lagCounter++
 		}

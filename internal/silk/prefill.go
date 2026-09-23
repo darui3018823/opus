@@ -103,7 +103,7 @@ func (e *Encoder) prefillFrame(frame []float64) {
 	for i := 0; i < 8; i++ {
 		idx := end - n + i*step
 		v := float32(e.xBuf[idx] * 32768)
-		v += float32(1-(i&2)) * 1e-6
+		v += float32(float32(1-(i&2)) * 1e-6)
 		e.xBuf[idx] = float64(v) / 32768
 	}
 	e.frameCounter++

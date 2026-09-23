@@ -334,7 +334,7 @@ func PVQDecode(dec *entcode.Decoder, n, k int) []float64 {
 	norm := 0.0
 	for i := 0; i < n; i++ {
 		output[i] = float64(y[i])
-		norm += output[i] * output[i]
+		norm += float64(output[i] * output[i])
 	}
 
 	if norm > 0 {

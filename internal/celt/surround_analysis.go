@@ -86,15 +86,15 @@ func (a *SurroundAnalyzer) Analyze(pcm []float64, frameSize int) ([]float64, err
 	for channel := 0; channel < a.channels; channel++ {
 		preemphasized := make([]float64, internalFrameSize)
 		for i := 0; i < frameSize; i++ {
-			preemphasized[i*upsample] = pcm[i*a.channels+channel] * 32768
+			preemphasized[i*upsample] = float64(pcm[i*a.channels+channel] * 32768)
 		}
 		mem := a.preemphMem[channel]
 		valid := true
 		var energy float64
 		for i, sample := range preemphasized {
 			preemphasized[i] = sample - mem
-			mem = 0.85 * sample
-			energy += preemphasized[i] * preemphasized[i]
+			mem = float64(0.85 * sample)
+			energy += float64(preemphasized[i] * preemphasized[i])
 			if math.IsNaN(preemphasized[i]) || math.IsInf(preemphasized[i], 0) {
 				valid = false
 			}
@@ -124,7 +124,7 @@ func (a *SurroundAnalyzer) Analyze(pcm []float64, frameSize int) ([]float64, err
 				hi := M * int(EBands48000[band+1])
 				var sum float64
 				for bin := lo; bin < hi; bin++ {
-					sum += coeffs[bin] * coeffs[bin]
+					sum += float64(coeffs[bin] * coeffs[bin])
 				}
 				if sum > bandEnergy[band] {
 					bandEnergy[band] = sum
@@ -133,7 +133,7 @@ func (a *SurroundAnalyzer) Analyze(pcm []float64, frameSize int) ([]float64, err
 		}
 		base := channel * NumBands48000
 		for band := 0; band < NumBands48000; band++ {
-			bandLogE[base+band] = 0.5 * math.Log2(math.Max(1e-27, bandEnergy[band]))
+			bandLogE[base+band] = float64(0.5 * math.Log2(math.Max(1e-27, bandEnergy[band])))
 		}
 		for band := 1; band < NumBands48000; band++ {
 			bandLogE[base+band] = math.Max(bandLogE[base+band], bandLogE[base+band-1]-1)
@@ -156,7 +156,7 @@ func (a *SurroundAnalyzer) Analyze(pcm []float64, frameSize int) ([]float64, err
 		}
 	}
 
-	channelOffset := 0.5 * math.Log2(2/float64(a.channels-1))
+	channelOffset := float64(0.5 * math.Log2(2/float64(a.channels-1)))
 	for band := 0; band < NumBands48000; band++ {
 		masks[1][band] = math.Min(masks[0][band], masks[2][band])
 		for role := range masks {
@@ -184,7 +184,7 @@ func surroundLogSum(a, b float64) float64 {
 	if diff >= 8 {
 		return a
 	}
-	return a + 0.5*math.Log2(1+math.Exp2(-2*diff))
+	return a + float64(0.5*math.Log2(1+math.Exp2(-2*diff)))
 }
 
 func surroundChannelRoles(channels int) []int {

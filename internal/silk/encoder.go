@@ -1360,7 +1360,7 @@ func (e *Encoder) currentFrameOutputRMS() float64 {
 	sum := 0.0
 	for _, s := range e.ltpState[start:] {
 		v := float64(s) / 32768.0
-		sum += v * v
+		sum += float64(v * v)
 	}
 	return math.Sqrt(sum / float64(e.frameSize))
 }
@@ -1441,7 +1441,7 @@ func (e *Encoder) analyzePitch(signal []float64) (int, float64) {
 
 	energy := 0.0
 	for _, v := range signal {
-		energy += v * v
+		energy += float64(v * v)
 	}
 	if energy <= 1e-12 {
 		return e.prevPitchLag, 0
@@ -1455,9 +1455,9 @@ func (e *Encoder) analyzePitch(signal []float64) (int, float64) {
 		for i := 0; i < windowLen; i++ {
 			current := signal[i+lag]
 			delayed := signal[i]
-			corr += current * delayed
-			currentEnergy += current * current
-			lagEnergy += delayed * delayed
+			corr += float64(current * delayed)
+			currentEnergy += float64(current * current)
+			lagEnergy += float64(delayed * delayed)
 		}
 		if currentEnergy <= 1e-12 || lagEnergy <= 1e-12 {
 			continue
@@ -1680,7 +1680,7 @@ func selectLTPGain(pitchGain float64) (int, int) {
 				want = target
 			}
 			diff := float64(tap) - want
-			err += diff * diff
+			err += float64(diff * diff)
 		}
 		if err < bestErr {
 			bestErr = err
@@ -1709,7 +1709,7 @@ func (e *Encoder) analysisExcitation(signal []float64, lpcQ12 []int16, signalTyp
 	for i := range signal {
 		pred := 0.0
 		for j := 0; j < e.lpcOrder && j < i; j++ {
-			pred += float64(lpcQ12[j]) / 4096.0 * signal[i-j-1]
+			pred += float64(float64(lpcQ12[j]) / 4096.0 * signal[i-j-1])
 		}
 		residual[i] = signal[i] - pred
 	}
@@ -1724,7 +1724,7 @@ func (e *Encoder) analysisExcitation(signal []float64, lpcQ12 []int16, signalTyp
 		ltpGain = 0.8
 	}
 	for i := pitchLag; i < len(excitation); i++ {
-		excitation[i] -= ltpGain * residual[i-pitchLag]
+		excitation[i] -= float64(ltpGain * residual[i-pitchLag])
 	}
 	return excitation
 }
@@ -1752,11 +1752,11 @@ func (e *Encoder) analyzeNoiseShape(signal []float64, signalType int, pitchGain 
 		prev := signal[start]
 		for i := start; i < end; i++ {
 			x := signal[i]
-			energy += x * x
+			energy += float64(x * x)
 			if i > start {
-				lag1 += x * prev
+				lag1 += float64(x * prev)
 				d := x - prev
-				diffEnergy += d * d
+				diffEnergy += float64(d * d)
 			}
 			prev = x
 		}
@@ -1778,15 +1778,15 @@ func (e *Encoder) analyzeNoiseShape(signal []float64, signalType int, pitchGain 
 		shape.tilt = 0.18 * tilt
 		shape.lf = clampFloat(-0.11*tilt, -0.10, 0.10)
 		shape.hf = clampFloat(0.14*(hfRatio-0.22), -0.05, 0.13)
-		shape.lambda *= clampFloat(1.10-0.12*activity+0.10*hfRatio, 0.82, 1.24)
+		shape.lambda *= clampFloat(1.10-float64(0.12*activity)+float64(0.10*hfRatio), 0.82, 1.24)
 		if signalType == SignalTypeVoiced {
-			shape.feedback = clampFloat(0.42+0.10*pitchGain+0.04*math.Max(tilt, 0), 0.40, 0.58)
-			shape.harmonic = clampFloat(0.10+0.42*pitchGain, 0, 0.55)
-			shape.lambda *= clampFloat(0.96-0.08*pitchGain, 0.86, 1.0)
+			shape.feedback = clampFloat(0.42+float64(0.10*pitchGain)+float64(0.04*math.Max(tilt, 0)), 0.40, 0.58)
+			shape.harmonic = clampFloat(0.10+float64(0.42*pitchGain), 0, 0.55)
+			shape.lambda *= clampFloat(0.96-float64(0.08*pitchGain), 0.86, 1.0)
 		} else {
-			shape.feedback = clampFloat(0.25+0.10*math.Max(tilt, 0)+0.09*hfRatio, 0.22, 0.42)
+			shape.feedback = clampFloat(0.25+float64(0.10*math.Max(tilt, 0))+float64(0.09*hfRatio), 0.22, 0.42)
 			shape.harmonic = 0
-			shape.lambda *= clampFloat(1.0+0.12*hfRatio, 1.0, 1.12)
+			shape.lambda *= clampFloat(1.0+float64(0.12*hfRatio), 1.0, 1.12)
 		}
 		out.subframes[sf] = shape
 	}
@@ -1800,7 +1800,7 @@ func defaultShapeSubframe(signalType int, pitchGain float64) silkShapeSubframe {
 	}
 	if signalType == SignalTypeVoiced {
 		shape.feedback = 0.50
-		shape.harmonic = clampFloat(0.10+0.42*pitchGain, 0, 0.55)
+		shape.harmonic = clampFloat(0.10+float64(0.42*pitchGain), 0, 0.55)
 		shape.lambda = 0.92
 	}
 	return shape
@@ -1910,7 +1910,7 @@ func (e *Encoder) shapeGainAnalysis(signal []float64, lpcQ12 []int16, lpcInterpQ
 	gainScale := 1.0
 	if signalType == SignalTypeVoiced {
 		ltpCodGainDB := e.ltpPredCodGainDB(signal, lpcQ12, e.ltpResidualEnergyPerSubframe(signal, lpcQ12, signalType, pitchLags, ltpCoeffsQ14), pitchLags, ltpCoeffsQ14)
-		gainScale = 1.0 - 0.5*silkSigmoid(0.25*(ltpCodGainDB-12.0))
+		gainScale = 1.0 - float64(0.5*silkSigmoid(0.25*(ltpCodGainDB-12.0)))
 		silkTraceSNR("process_gains voiced ltp_cod_gain=%.3fdB gain_scale=%.6f", ltpCodGainDB, gainScale)
 	}
 
@@ -1920,7 +1920,7 @@ func (e *Encoder) shapeGainAnalysis(signal []float64, lpcQ12 []int16, lpcInterpQ
 		// Soft limit on the ratio of residual energy to squared gain
 		// (silk_process_gains_FLP): raises the gain when the prediction residual
 		// is large, capping the number of pulses the NSQ has to spend.
-		gain = math.Sqrt(gain*gain + resNrg[sf]*invMaxSqr)
+		gain = math.Sqrt(float64(gain*gain) + float64(resNrg[sf]*invMaxSqr))
 		if gain > 32767 {
 			gain = 32767
 		}
@@ -1955,7 +1955,7 @@ func (e *Encoder) ltpResidualEnergyPerSubframe(signal []float64, lpcQ12 []int16,
 	for i := range buf {
 		pred := 0.0
 		for j := 0; j < e.lpcOrder && j <= i-1; j++ {
-			pred += float64(lpcQ12[j]) / 4096.0 * buf[i-j-1]
+			pred += float64(float64(lpcQ12[j]) / 4096.0 * buf[i-j-1])
 		}
 		res[i] = buf[i] - pred
 	}
@@ -1984,11 +1984,11 @@ func (e *Encoder) ltpResidualEnergyPerSubframe(signal []float64, lpcQ12 []int16,
 				for k := 0; k < 5; k++ {
 					src := idx - lag + 2 - k
 					if src >= 0 && src < len(res) {
-						v -= b[k] * res[src]
+						v -= float64(b[k] * res[src])
 					}
 				}
 			}
-			sum += v * v
+			sum += float64(v * v)
 		}
 		nrgs[sf] = sum * int16Scale
 	}
@@ -2525,7 +2525,7 @@ func nlsfTargetDistortion(cb *nlsfCBParams, cb1Idx int, nlsfQ15, targetQ15 []int
 	for i := 0; i < cb.order; i++ {
 		diff := float64(int(nlsfQ15[i]) - int(targetQ15[i]))
 		w := float64(cb.cb1WghtQ9[cb1Idx*cb.order+i]) / 512.0
-		cost += w * diff * diff
+		cost += float64(w * diff * diff)
 	}
 	return cost
 }
@@ -2599,10 +2599,10 @@ func lpcResidualEnergy(signal []float64, lpcQ12 []int16) float64 {
 	for i := range signal {
 		pred := 0.0
 		for j := 0; j < len(lpcQ12) && j < i; j++ {
-			pred += float64(lpcQ12[j]) / 4096.0 * signal[i-j-1]
+			pred += float64(float64(lpcQ12[j]) / 4096.0 * signal[i-j-1])
 		}
 		err := signal[i] - pred
-		energy += err * err
+		energy += float64(err * err)
 	}
 	return energy / float64(len(signal))
 }
@@ -2709,20 +2709,20 @@ func (e *Encoder) simpleNSQ(excitation []float64, gainIndices []int, signalType,
 			continue
 		}
 
-		target := excitation[i] + shape*err
+		target := excitation[i] + float64(shape*err)
 		if target > 2.0 {
 			target = 2.0
 		} else if target < -2.0 {
 			target = -2.0
 		}
 
-		desiredQ14 := int32(math.Round(target * (float64(int64(1)<<39) / float64(gainQ10))))
+		desiredQ14 := int32(math.Round(float64(target * (float64(float64(int64(1)<<39) / float64(gainQ10))))))
 		seed = 196314165*seed + 907633515
 		pulse := chooseNSQPulse(desiredQ14, offsetQ14, seed < 0)
 		pulses[i] = pulse
 
 		reconQ14 := decodedExcitationQ14(int(pulse), offsetQ14, seed < 0)
-		recon := float64(reconQ14) * float64(gainQ10) / float64(int64(1)<<39)
+		recon := float64(float64(float64(reconQ14)*float64(gainQ10)) / float64(int64(1)<<39))
 		err = target - recon
 		seed += int32(pulse)
 	}
@@ -2910,7 +2910,7 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 
 	lambdaQ10 := shape.Lambda_Q10
 	if rateScale > 1 {
-		lambdaQ10 = int32(float64(shape.Lambda_Q10) * (1.0 + 0.5*math.Log2(rateScale)))
+		lambdaQ10 = int32(float64(shape.Lambda_Q10) * (1.0 + float64(0.5*math.Log2(rateScale))))
 	}
 	if lambdaQ10 < 64 {
 		lambdaQ10 = 64
@@ -3093,21 +3093,21 @@ func (e *Encoder) closedLoopNSQHomebrew(
 			}
 			hfErr := shapeErr - prevShapeErr
 			target := signal[start+i] +
-				shape.feedback*shapeErr +
-				shape.tilt*prevShapeErr +
-				shape.lf*lfShapeErr +
-				shape.hf*hfErr +
-				shape.harmonic*harmonicErr
+				float64(shape.feedback*shapeErr) +
+				float64(shape.tilt*prevShapeErr) +
+				float64(shape.lf*lfShapeErr) +
+				float64(shape.hf*hfErr) +
+				float64(shape.harmonic*harmonicErr)
 			if target > 1.5 {
 				target = 1.5
 			} else if target < -1.5 {
 				target = -1.5
 			}
-			desiredQ14 := int32(math.Round(target * (float64(int64(1)<<39) / float64(gainQ10))))
+			desiredQ14 := int32(math.Round(float64(target * (float64(float64(int64(1)<<39) / float64(gainQ10))))))
 			desiredExcQ14 := desiredQ14 - predQ14 - ltpPredQ14
 
 			seed = 196314165*seed + 907633515
-			pulse := chooseNSQPulseShaped(desiredExcQ14, offsetQ14, seed < 0, pulseRatePenalty*shape.lambda)
+			pulse := chooseNSQPulseShaped(desiredExcQ14, offsetQ14, seed < 0, float64(pulseRatePenalty*shape.lambda))
 			pulses[start+i] = pulse
 
 			excQ14 := decodedExcitationQ14(int(pulse), offsetQ14, seed < 0)
@@ -3122,10 +3122,10 @@ func (e *Encoder) closedLoopNSQHomebrew(
 			pxq := silkRShiftRound(int64(silkSMULWW(v, gainQ10)), 8)
 			output[start+i] = clamp16(pxq)
 
-			recon := float64(output[start+i]) / 32768.0
+			recon := float64(float64(output[start+i]) / 32768.0)
 			prevShapeErr = shapeErr
 			shapeErr = signal[start+i] - recon
-			lfShapeErr = 0.94*lfShapeErr + shapeErr
+			lfShapeErr = float64(0.94*lfShapeErr) + shapeErr
 			errHist[ltpMemLen+start+i] = shapeErr
 			seed += int32(pulse)
 		}
@@ -3151,7 +3151,7 @@ func estimatePitchGainFromLTP(ltpCoeffsQ14 [][5]int16) float64 {
 		sum := 0.0
 		for _, c := range coeffs {
 			if c > 0 {
-				sum += float64(c) / 16384.0
+				sum += float64(float64(c) / 16384.0)
 			}
 		}
 		if sum > best {
@@ -3229,7 +3229,7 @@ func chooseNSQPulseShaped(desiredQ14, offsetQ14 int32, flipSign bool, pulseRateP
 		exc := decodedExcitationQ14(candidate, offsetQ14, flipSign)
 		err := float64(int64(exc) - int64(desiredQ14))
 		absPulse := math.Abs(float64(candidate))
-		cost := err*err + absPulse*absPulse*pulseRatePenalty
+		cost := float64(err*err) + float64(absPulse*absPulse*pulseRatePenalty)
 		if candidate == 0 {
 			cost *= 0.98
 		}
@@ -3587,7 +3587,7 @@ func computeEnergy(signal []float64) float64 {
 	}
 	energy := 0.0
 	for _, s := range signal {
-		energy += s * s
+		energy += float64(s * s)
 	}
 	return energy / float64(len(signal))
 }

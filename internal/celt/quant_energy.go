@@ -196,7 +196,7 @@ func QuantizeCoarseEnergy(
 			if oldE < -9.0 {
 				oldE = -9.0
 			}
-			predicted := coef*oldE + prev[c]
+			predicted := float64(coef*oldE) + prev[c]
 
 			// Quantise residual (nearest integer) — libopus floor(.5+f).
 			qi := int(math.Floor(0.5 + (logE[idx] - predicted)))
@@ -239,7 +239,7 @@ func QuantizeCoarseEnergy(
 				v = -28.0
 			}
 			quantLogE[idx] = v
-			prev[c] += float64(qi) - beta*float64(qi)
+			prev[c] += float64(qi) - float64(beta*float64(qi))
 		}
 	}
 
@@ -312,7 +312,7 @@ func UnquantizeCoarseEnergy(
 			if oldE < -9 {
 				oldE = -9
 			}
-			predicted := coef*oldE + prev[c]
+			predicted := float32(coef*oldE) + prev[c]
 
 			// Coding path selection must mirror the encoder exactly.
 			tell := dec.ECTell()
@@ -338,7 +338,7 @@ func UnquantizeCoarseEnergy(
 			v := predicted + float32(qi)
 			quantLogE[idx] = float64(v)
 			q := float32(qi)
-			prev[c] = prev[c] + q - beta*q
+			prev[c] = prev[c] + q - float32(beta*q)
 		}
 	}
 

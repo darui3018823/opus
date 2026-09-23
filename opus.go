@@ -3904,11 +3904,11 @@ func (d *Decoder) crossfadeRedundancy(out, red []float64, samplesPerFrame int) {
 	base := (frameSamplesPerCh - f25) * ch // first interleaved sample of the tail
 	for i := 0; i < f25; i++ {
 		wi := win[i*inc]
-		w := wi * wi
+		w := float64(wi * wi)
 		for c := 0; c < ch; c++ {
 			o := base + i*ch + c
 			r := (f25+i)*ch + c
-			out[o] = w*red[r] + (1.0-w)*out[o]
+			out[o] = float64(w*red[r]) + float64((1.0-w)*out[o])
 		}
 	}
 }
@@ -3930,10 +3930,10 @@ func (d *Decoder) crossfadeLeadingRedundancy(out, red []float64) {
 	}
 	for i := 0; i < f25; i++ {
 		w := win[i*inc]
-		w *= w
+		w = float64(w * w)
 		for c := 0; c < ch; c++ {
 			o := (f25+i)*ch + c
-			out[o] = (1.0-w)*red[o] + w*out[o]
+			out[o] = float64((1.0-w)*red[o]) + float64(w*out[o])
 		}
 	}
 }

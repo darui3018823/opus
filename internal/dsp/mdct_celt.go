@@ -56,7 +56,7 @@ func (m *CELTMode) IMDCT(X []float64) []float64 {
 		j := n + N/2
 		ang := math.Pi * float64(2*j+1) / float64(4*N)
 		zn := Z[(2*N-j)%(2*N)]
-		y[n] = (math.Cos(ang)*zn.Real - math.Sin(ang)*zn.Imag) * scale
+		y[n] = (float64(math.Cos(ang)*zn.Real) - float64(math.Sin(ang)*zn.Imag)) * scale
 	}
 
 	return y
@@ -76,8 +76,8 @@ func (m *CELTMode) IMDCTRaw(X []float64) []float64 {
 		xp2 := float32(X[N2-1-2*i])
 		t0 := libopusMDCTTwiddle(N, i)
 		t1 := libopusMDCTTwiddle(N, N4+i)
-		yr := xp2*t0 + xp1*t1
-		yi := xp1*t0 - xp2*t1
+		yr := float32(xp2*t0) + float32(xp1*t1)
+		yi := float32(xp1*t0) - float32(xp2*t1)
 		f[i] = Complex{Real: float64(yi), Imag: float64(yr)}
 	}
 	z := opusFFT(f)
@@ -95,8 +95,8 @@ func (m *CELTMode) IMDCTRaw(X []float64) []float64 {
 		im := float32(buf[yp0])
 		t0 := libopusMDCTTwiddle(N, i)
 		t1 := libopusMDCTTwiddle(N, N4+i)
-		yr := re*t0 + im*t1
-		yi := re*t1 - im*t0
+		yr := float32(re*t0) + float32(im*t1)
+		yi := float32(re*t1) - float32(im*t0)
 
 		re = float32(buf[yp1+1])
 		im = float32(buf[yp1])
@@ -105,8 +105,8 @@ func (m *CELTMode) IMDCTRaw(X []float64) []float64 {
 
 		t0 = libopusMDCTTwiddle(N, N4-i-1)
 		t1 = libopusMDCTTwiddle(N, N2-i-1)
-		yr = re*t0 + im*t1
-		yi = re*t1 - im*t0
+		yr = float32(re*t0) + float32(im*t1)
+		yi = float32(re*t1) - float32(im*t0)
 		buf[yp1] = float64(yr)
 		buf[yp0+1] = float64(yi)
 	}
@@ -170,9 +170,9 @@ func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
 	x := func(k int) float32 { return float32(in[k]) }
 	win := func(k int) float32 { return float32(w[k]) }
 	for ; i < nfold; i++ {
-		f[yp] = x(xp1+N2)*win(wp2) + x(xp2)*win(wp1)
+		f[yp] = float32(x(xp1+N2)*win(wp2)) + float32(x(xp2)*win(wp1))
 		yp++
-		f[yp] = x(xp1)*win(wp1) - x(xp2-N2)*win(wp2)
+		f[yp] = float32(x(xp1)*win(wp1)) - float32(x(xp2-N2)*win(wp2))
 		yp++
 		xp1 += 2
 		xp2 -= 2
@@ -191,9 +191,9 @@ func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
 		xp2 -= 2
 	}
 	for ; i < N4; i++ {
-		f[yp] = -x(xp1-N2)*win(wp1) + x(xp2)*win(wp2)
+		f[yp] = float32(-x(xp1-N2)*win(wp1)) + float32(x(xp2)*win(wp2))
 		yp++
-		f[yp] = x(xp1)*win(wp2) + x(xp2+N2)*win(wp1)
+		f[yp] = float32(x(xp1)*win(wp2)) + float32(x(xp2+N2)*win(wp1))
 		yp++
 		xp1 += 2
 		xp2 -= 2
@@ -208,8 +208,8 @@ func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
 		t1 := libopusMDCTTwiddle(N, N4+i)
 		re := f[2*i]
 		im := f[2*i+1]
-		yr := re*t0 - im*t1
-		yi := im*t0 + re*t1
+		yr := float32(re*t0) - float32(im*t1)
+		yi := float32(im*t0) + float32(re*t1)
 		fc[i] = Complex{Real: float64(yr * scale), Imag: float64(yi * scale)}
 	}
 
@@ -223,8 +223,8 @@ func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
 		t1 := libopusMDCTTwiddle(N, N4+i)
 		fr := float32(z[i].Real)
 		fi := float32(z[i].Imag)
-		yr := fi*t1 - fr*t0
-		yi := fr*t1 + fi*t0
+		yr := float32(fi*t1) - float32(fr*t0)
+		yi := float32(fr*t1) + float32(fi*t0)
 		out[2*i] = float64(yr)
 		out[N2-1-2*i] = float64(yi)
 	}
@@ -248,8 +248,8 @@ func (m *CELTMode) CLTMDCTBackward(X []float64, carry []float64) []float64 {
 		x2 := float32(buf[i])
 		wi := float32(m.Window[i])
 		wj := float32(m.Window[ov-1-i])
-		buf[i] = float64(wj*x2 - wi*x1)
-		buf[ov-1-i] = float64(wi*x2 + wj*x1)
+		buf[i] = float64(float32(wj*x2) - float32(wi*x1))
+		buf[ov-1-i] = float64(float32(wi*x2) + float32(wj*x1))
 	}
 
 	copy(carry, buf[N:N+half])
@@ -265,7 +265,7 @@ func (m *CELTMode) InverseOverlapAdd(y []float64, tail []float64) []float64 {
 	ov := m.Overlap
 	out := make([]float64, N)
 	for i := 0; i < ov; i++ {
-		out[i] = y[i]*m.Window[i] + tail[i]*m.Window[ov-1-i]
+		out[i] = float64(y[i]*m.Window[i]) + float64(tail[i]*m.Window[ov-1-i])
 	}
 	for i := ov; i < N; i++ {
 		out[i] = y[i]

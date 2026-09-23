@@ -73,7 +73,7 @@ func transientAnalysis(bufs [][]float64, length, C int) (bool, int, float64) {
 			x := in[i]
 			y := mem0 + x
 			mem00 := mem0
-			mem0 = mem0 - x + 0.5*mem1
+			mem0 = mem0 - x + float64(0.5*mem1)
 			mem1 = x - mem00
 			tmp[i] = y
 		}
@@ -86,9 +86,9 @@ func transientAnalysis(bufs [][]float64, length, C int) (bool, int, float64) {
 		var mean float64
 		mem0 = 0
 		for i := 0; i < len2; i++ {
-			x2 := tmp[2*i]*tmp[2*i] + tmp[2*i+1]*tmp[2*i+1]
+			x2 := float64(tmp[2*i]*tmp[2*i]) + float64(tmp[2*i+1]*tmp[2*i+1])
 			mean += x2
-			mem0 = x2 + (1.0-forwardDecay)*mem0
+			mem0 = x2 + float64((1.0-forwardDecay)*mem0)
 			tmp[i] = forwardDecay * mem0
 		}
 
@@ -96,7 +96,7 @@ func transientAnalysis(bufs [][]float64, length, C int) (bool, int, float64) {
 		mem0 = 0
 		var maxE float64
 		for i := len2 - 1; i >= 0; i-- {
-			mem0 = tmp[i] + 0.875*mem0
+			mem0 = tmp[i] + float64(0.875*mem0)
 			tmp[i] = 0.125 * mem0
 			if tmp[i] > maxE {
 				maxE = tmp[i]
@@ -138,7 +138,7 @@ func transientAnalysis(bufs [][]float64, length, C int) (bool, int, float64) {
 	if tfMax > 163 {
 		tfMax = 163
 	}
-	v := 0.0069*tfMax - 0.139
+	v := float64(0.0069*tfMax) - 0.139
 	if v < 0 {
 		v = 0
 	}
@@ -315,7 +315,7 @@ func medianOf5(x []float64) float64 {
 func innerProdF(a, b []float64, n int) float64 {
 	var s float64
 	for j := 0; j < n; j++ {
-		s += a[j] * b[j]
+		s += float64(a[j] * b[j])
 	}
 	return s
 }
@@ -414,9 +414,9 @@ func dynallocAnalysis(logE, logE2 []float64, numBands, end, C, lm int, isTransie
 	follower := make([]float64, C*numBands)
 	noiseFloor := make([]float64, numBands)
 	for i := 0; i < end; i++ {
-		noiseFloor[i] = 0.0625*float64(LogN400[i]) + 0.5 +
+		noiseFloor[i] = float64(0.0625*float64(LogN400[i])) + 0.5 +
 			float64(9-celtLSBDepth) - EMean(i) +
-			0.0062*float64((i+5)*(i+5))
+			float64(0.0062*float64((i+5)*(i+5)))
 	}
 	for c := 0; c < C; c++ {
 		f := follower[c*numBands : c*numBands+numBands]
@@ -472,7 +472,7 @@ func dynallocAnalysis(logE, logE2 []float64, numBands, end, C, lm int, isTransie
 		if d > 4.0 {
 			d = 4.0
 		}
-		importance[i] = int(math.Floor(0.5 + 13.0*math.Exp2(d)))
+		importance[i] = int(math.Floor(0.5 + float64(13.0*math.Exp2(d))))
 	}
 	if (!vbr || constrainedVbr) && !isTransient {
 		for i := 0; i < end; i++ {
@@ -512,7 +512,7 @@ func l1Metric(tmp []float64, n, lm int, bias float64) float64 {
 	for i := 0; i < n; i++ {
 		l1 += math.Abs(tmp[i])
 	}
-	l1 += float64(lm) * bias * l1
+	l1 += float64(float64(lm) * bias * l1)
 	return l1
 }
 
@@ -693,7 +693,7 @@ func allocTrimAnalysis(X, logE []float64, numBands, end, lm, C, frameLen, intens
 		trim = 4.0
 	case equivRate < 80000:
 		frac := float64(equivRate-64000) / 1024.0
-		trim = 4.0 + (1.0/16.0)*frac
+		trim = 4.0 + float64((1.0/16.0)*frac)
 	}
 
 	if C == 2 {
@@ -713,8 +713,8 @@ func allocTrimAnalysis(X, logE []float64, numBands, end, lm, C, frameLen, intens
 			minXC = math.Min(minXC, p)
 		}
 		minXC = math.Min(1.0, math.Abs(minXC))
-		logXC := math.Log2(1.001 - sum*sum)
-		_ = math.Max(0.5*logXC, math.Log2(1.001-minXC*minXC)) // logXC2: feeds stereo_saving (unused here)
+		logXC := math.Log2(1.001 - float64(sum*sum))
+		_ = math.Max(0.5*logXC, math.Log2(1.001-float64(minXC*minXC))) // logXC2: feeds stereo_saving (unused here)
 		trim += math.Max(-4.0, 0.75*logXC)
 	}
 
@@ -722,7 +722,7 @@ func allocTrimAnalysis(X, logE []float64, numBands, end, lm, C, frameLen, intens
 	diff := 0.0
 	for c := 0; c < C; c++ {
 		for i := 0; i < end-1; i++ {
-			diff += logE[c*numBands+i] * float64(2+2*i-end)
+			diff += float64(logE[c*numBands+i] * float64(2+2*i-end))
 		}
 	}
 	diff /= float64(C * (end - 1))
@@ -784,17 +784,17 @@ func spectralTonalitySlope(X, logE []float64, numBands, end, lm, C, frameLen int
 			off := c*frameLen + M*int(EBands48000[i])
 			var sum2, sum4 float64
 			for j := 0; j < N; j++ {
-				x2 := X[off+j] * X[off+j]
+				x2 := float64(X[off+j] * X[off+j])
 				sum2 += x2
-				sum4 += x2 * x2
+				sum4 += float64(x2 * x2)
 			}
 			if sum2 > 0 {
-				concentration := (float64(N)*sum4/(sum2*sum2) - 1) / float64(N-1)
+				concentration := (float64(float64(N)*sum4)/(float64(sum2*sum2)) - 1) / float64(N-1)
 				bandTonality += math.Max(0, math.Min(1, concentration))
 			}
 		}
 		bandTonality /= float64(C)
-		slope += bandTonality * float64(i-8)
+		slope += float64(bandTonality * float64(i-8))
 	}
 	return math.Max(-1, math.Min(1, slope/64))
 }
@@ -815,9 +815,9 @@ func surroundMaskTrim(mask []float64, channels, numBands, maskEnd int) float64 {
 				value *= 0.5
 			}
 			width := int(EBands48000[band+1] - EBands48000[band])
-			maskAverage += value * float64(width)
+			maskAverage += float64(value * float64(width))
 			count += width
-			slope += value * float64(1+2*band-maskEnd)
+			slope += float64(value * float64(1+2*band-maskEnd))
 		}
 	}
 	if count == 0 {
@@ -838,7 +838,7 @@ func surroundMaskTrim(mask []float64, channels, numBands, maskEnd int) float64 {
 		for channel := 1; channel < channels; channel++ {
 			unmask = math.Max(unmask, mask[channel*numBands+band])
 		}
-		unmask = math.Min(unmask, 0) - (maskAverage + slope*float64(band-middleBand))
+		unmask = math.Min(unmask, 0) - (maskAverage + float64(slope*float64(band-middleBand)))
 		if unmask > 0.25 {
 			unmaskedBands++
 		}

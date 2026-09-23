@@ -697,7 +697,7 @@ func allocTrimAnalysis32(X, bandLogE []float64, nbEBands, end, lm, C, N0 int, an
 			n := (int(EBands48000[i+1]) - int(EBands48000[i])) << uint(lm)
 			sum += innerProd64as32(X[lo:], X[N0+lo:], n)
 		}
-		sum = float32(1.0/8) * sum
+		sum = float32(float32(1.0/8) * sum)
 		if sum < 0 {
 			sum = -sum
 		}
@@ -726,18 +726,18 @@ func allocTrimAnalysis32(X, bandLogE []float64, nbEBands, end, lm, C, N0 int, an
 		logXC := float32(celtLog2F32(float64(float32(1.001) - float32(sum*sum))))
 		// mid-side savings estimations based on min correlation
 		logXC2 := float32(celtLog2F32(float64(float32(1.001) - float32(minXC*minXC))))
-		if h := float32(0.5) * logXC; h > logXC2 {
+		if h := float32(float32(0.5) * logXC); h > logXC2 {
 			logXC2 = h
 		}
-		if v := float32(0.75) * logXC; v > -4 {
+		if v := float32(float32(0.75) * logXC); v > -4 {
 			trim += v
 		} else {
 			trim += -4
 		}
-		if v := *stereoSaving + float32(0.25); v < -(float32(0.5) * logXC2) {
+		if v := *stereoSaving + float32(0.25); v < -(float32(float32(0.5) * logXC2)) {
 			*stereoSaving = v
 		} else {
-			*stereoSaving = -(float32(0.5) * logXC2)
+			*stereoSaving = -(float32(float32(0.5) * logXC2))
 		}
 	}
 	// Estimate spectral tilt.
@@ -757,7 +757,7 @@ func allocTrimAnalysis32(X, bandLogE []float64, nbEBands, end, lm, C, N0 int, an
 	}
 	trim -= tilt
 	trim -= surroundTrim
-	trim -= 2 * tfEstimate
+	trim -= float32(2 * tfEstimate)
 	if analysis.Valid {
 		v := float32(2 * (analysis.TonalitySlope + float32(0.05)))
 		if v > 2 {

@@ -208,7 +208,7 @@ func quantFineEnergy(enc *entcode.Encoder, start, end int, oldEBands, errOut []f
 				q2 = 0
 			}
 			enc.EncodeBits(uint32(q2), uint(extraQuant[i]))
-			offset := float32(float32(float32(q2)+0.5)*float32(int32(1)<<uint(14-extraQuant[i])))*float32(1.0/16384) - 0.5
+			offset := float32(float32(float32(float32(q2)+0.5)*float32(int32(1)<<uint(14-extraQuant[i])))*float32(1.0/16384)) - 0.5
 			oldEBands[idx] = float64(float32(oldEBands[idx]) + offset)
 			errOut[idx] = float64(float32(errOut[idx]) - offset)
 		}
@@ -229,7 +229,7 @@ func quantEnergyFinalise(enc *entcode.Encoder, start, end int, oldEBands, errOut
 					q2 = 0
 				}
 				enc.EncodeBits(uint32(q2), 1)
-				offset := float32(float32(float32(q2)-0.5)*float32(int32(1)<<uint(14-fineQuant[i]-1))) * float32(1.0/16384)
+				offset := float32(float32(float32(float32(q2)-0.5)*float32(int32(1)<<uint(14-fineQuant[i]-1))) * float32(1.0/16384))
 				oldEBands[idx] = float64(float32(oldEBands[idx]) + offset)
 				errOut[idx] = float64(float32(errOut[idx]) - offset)
 				bitsLeft--

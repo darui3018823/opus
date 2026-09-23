@@ -27,14 +27,14 @@ func (c Complex) Sub(other Complex) Complex {
 // Mul multiplies two complex numbers
 func (c Complex) Mul(other Complex) Complex {
 	return Complex{
-		Real: c.Real*other.Real - c.Imag*other.Imag,
-		Imag: c.Real*other.Imag + c.Imag*other.Real,
+		Real: float64(c.Real*other.Real) - float64(c.Imag*other.Imag),
+		Imag: float64(c.Real*other.Imag) + float64(c.Imag*other.Real),
 	}
 }
 
 // Abs returns the magnitude of the complex number
 func (c Complex) Abs() float64 {
-	return math.Sqrt(c.Real*c.Real + c.Imag*c.Imag)
+	return math.Sqrt(float64(c.Real*c.Real) + float64(c.Imag*c.Imag))
 }
 
 // Conj returns the complex conjugate
@@ -149,7 +149,7 @@ func Dot(a, b []float64) float64 {
 	}
 	sum := 0.0
 	for i := range a {
-		sum += a[i] * b[i]
+		sum += float64(a[i] * b[i])
 	}
 	return sum
 }
@@ -175,7 +175,7 @@ func Normalize(x []float64) {
 func Energy(x []float64) float64 {
 	sum := 0.0
 	for _, v := range x {
-		sum += v * v
+		sum += float64(v * v)
 	}
 	return sum
 }

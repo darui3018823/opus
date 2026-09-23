@@ -42,6 +42,19 @@ jobs:
           go generate ./...
           git diff --exit-code
 
+      - name: No fused multiply-add on FMA architectures
+        # The encoder must produce the same bytes on every architecture; see
+        # "Numerical considerations" in docs/DEVELOPER.md.
+        run: |
+          sites=$(GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -gcflags='all=-S' ./... 2>&1 \
+            | grep -E '\b(FMADD[SD]|FMSUB[SD]|FNMADD[SD]|FNMSUB[SD])\b' \
+            | grep -oE '\([^()]*\.go:[0-9]+\)' | grep -F "$GITHUB_WORKSPACE" | sort -u || true)
+          if [ -n "$sites" ]; then
+            echo "fused multiply-add in:"
+            echo "$sites"
+            exit 1
+          fi
+
       - name: go vet
         run: go vet ./...
 

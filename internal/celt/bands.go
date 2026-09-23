@@ -126,7 +126,7 @@ func (bp *BandProcessor) DecodeBandCoeffs(dec *entcode.Decoder, bandIdx int, pul
 	norm := 0.0
 	for i, v := range y {
 		output[i] = float64(v)
-		norm += output[i] * output[i]
+		norm += float64(output[i] * output[i])
 	}
 	if norm > 0 {
 		scale := 1.0 / math.Sqrt(norm)
@@ -155,15 +155,15 @@ func (bp *BandProcessor) ApplyFinalFineEnergy(bandIdx, q2, fb int) {
 		return
 	}
 	band := bp.bands[bandIdx]
-	offset := (float64(q2) - 0.5) * math.Exp2(float64(-fb-1))
-	band.Energy *= math.Exp2(2.0 * offset)
+	offset := float64((float64(q2) - 0.5) * math.Exp2(float64(-fb-1)))
+	band.Energy *= math.Exp2(float64(2.0 * offset))
 }
 
 // ComputeBandEnergy computes the energy of a band from coefficients
 func ComputeBandEnergy(coeffs []float64) float64 {
 	energy := 0.0
 	for _, c := range coeffs {
-		energy += c * c
+		energy += float64(c * c)
 	}
 	return energy
 }

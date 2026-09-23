@@ -298,19 +298,19 @@ func removeDoubling32(x []float32, maxPeriod, minPeriod, N, T0 int, prevPeriod i
 		} else if abs(T1-prevPeriod) <= 2 && 5*k*k < T0 {
 			cont = float32(0.5) * prevGain
 		}
-		thresh := float32(0.7)*g0 - cont
+		thresh := float32(float32(0.7)*g0) - cont
 		if thresh < 0.3 {
 			thresh = 0.3
 		}
 		// Bias against very high pitch (very short period) to avoid
 		// false-positives due to short-term correlation.
 		if T1 < 3*minPeriod {
-			thresh = float32(0.85)*g0 - cont
+			thresh = float32(float32(0.85)*g0) - cont
 			if thresh < 0.4 {
 				thresh = 0.4
 			}
 		} else if T1 < 2*minPeriod {
-			thresh = float32(0.9)*g0 - cont
+			thresh = float32(float32(0.9)*g0) - cont
 			if thresh < 0.5 {
 				thresh = 0.5
 			}
@@ -367,12 +367,12 @@ func combFilter32(y []float32, x []float32, xi, T0, T1, N int, g0, g1 float32, t
 	if T1 < combFilterMinPeriod {
 		T1 = combFilterMinPeriod
 	}
-	g00 := g0 * pfCombGains32[tapset0][0]
-	g01 := g0 * pfCombGains32[tapset0][1]
-	g02 := g0 * pfCombGains32[tapset0][2]
-	g10 := g1 * pfCombGains32[tapset1][0]
-	g11 := g1 * pfCombGains32[tapset1][1]
-	g12 := g1 * pfCombGains32[tapset1][2]
+	g00 := float32(g0 * pfCombGains32[tapset0][0])
+	g01 := float32(g0 * pfCombGains32[tapset0][1])
+	g02 := float32(g0 * pfCombGains32[tapset0][2])
+	g10 := float32(g1 * pfCombGains32[tapset1][0])
+	g11 := float32(g1 * pfCombGains32[tapset1][1])
+	g12 := float32(g1 * pfCombGains32[tapset1][2])
 	x1 := x[xi-T1+1]
 	x2 := x[xi-T1]
 	x3 := x[xi-T1-1]
@@ -384,7 +384,7 @@ func combFilter32(y []float32, x []float32, xi, T0, T1, N int, g0, g1 float32, t
 	i := 0
 	for ; i < overlap; i++ {
 		x0 := x[xi+i-T1+2]
-		f := window[i] * window[i]
+		f := float32(window[i] * window[i])
 		v := x[xi+i]
 		v += float32(float32((1-f)*g00) * x[xi+i-T0])
 		v += float32(float32((1-f)*g01) * (x[xi+i-T0+1] + x[xi+i-T0-1]))

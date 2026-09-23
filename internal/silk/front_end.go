@@ -220,7 +220,7 @@ func (e *Encoder) addAntiDenormalOffsets() {
 			break
 		}
 		v := float32(e.xBuf[idx] * 32768)
-		v += float32(1-(i&2)) * 1e-6
+		v += float32(float32(1-(i&2)) * 1e-6)
 		e.xBuf[idx] = float64(v) / 32768
 	}
 }

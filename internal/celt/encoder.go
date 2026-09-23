@@ -738,7 +738,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// pitch_change reads the previous period (clamped by run_prefilter) and
 	// gain, which are only replaced at the end of the frame.
 	pitchChange := (pf.gain > 0.4 || e.prefilterGain > 0.4) && (!e.analysis.Valid || e.analysis.Tonality > 0.3) &&
-		(float64(pf.pitchIndex) > 1.26*float64(e.prefilterPeriod) || float64(pf.pitchIndex) < 0.79*float64(e.prefilterPeriod))
+		(float64(pf.pitchIndex) > float64(1.26*float64(e.prefilterPeriod)) || float64(pf.pitchIndex) < float64(0.79*float64(e.prefilterPeriod)))
 	// Pass 2: forward MDCT (M interleaved short blocks on transients, else one
 	// long block), band energy, and per-band normalisation.
 	//
@@ -869,7 +869,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// long block IS the actual MDCT, so logE2==logE (libopus' OPUS_COPY fallback).
 	secondMdct := isTransient && e.complexity >= 8
 	if secondMdct {
-		computeLogE2Long(0.5 * float64(lm))
+		computeLogE2Long(float64(0.5 * float64(lm)))
 	} else {
 		copy(logE2, logE)
 	}
@@ -881,7 +881,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		follow := float32(-10)
 		var frameAvg, offset float32
 		if isTransient {
-			offset = float32(0.5) * float32(lm)
+			offset = float32(float32(0.5) * float32(lm))
 		}
 		for i := start; i < end; i++ {
 			f := follow - 1
@@ -904,7 +904,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		if temporalVBR < -1.5 {
 			temporalVBR = -1.5
 		}
-		e.specAvg += float32(0.02) * temporalVBR
+		e.specAvg += float32(float32(0.02) * temporalVBR)
 	}
 
 	// --- patch_transient_decision (energy-rise fallback transient detector) ---
@@ -922,7 +922,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			// The long-block logE just computed becomes the bandLogE2 estimate
 			// (good frequency resolution); add the +LM/2 scale correction. Then
 			// recompute the actual spectrum with short blocks.
-			corr := 0.5 * float64(lm)
+			corr := float64(0.5 * float64(lm))
 			for idx := range logE2 {
 				logE2[idx] = logE[idx] + corr
 			}
@@ -1468,8 +1468,8 @@ func hybridHighBandActivity(pcm []float64, channels int) float64 {
 		s := sample(i)
 		d := s - prev
 		prev = s
-		hpEnergy += d * d
-		energy += s * s
+		hpEnergy += float64(d * d)
+		energy += float64(s * s)
 	}
 	if energy < 1e-9 {
 		return 0

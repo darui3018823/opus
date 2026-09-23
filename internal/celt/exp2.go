@@ -37,7 +37,7 @@ func celtExp2RoundedFloat32(x float32) float32 {
 	} else {
 		adjacent = math.Nextafter32(result, 0)
 	}
-	midpoint := result64 + (float64(adjacent)-result64)*0.5
+	midpoint := result64 + float64((float64(adjacent)-result64)*0.5)
 	if math.Abs(y-midpoint) > math.Abs(y)*1e-12 {
 		return result
 	}

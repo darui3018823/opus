@@ -49,7 +49,7 @@ func applyGainFade(pcm []float64, g1, g2 float32, channels, sampleRate int) {
 	frameSize := len(pcm) / channels
 	for i := 0; i < overlap && i < frameSize; i++ {
 		w := window[i*inc]
-		w = w * w
+		w = float32(w * w)
 		g := float32(w*g2) + float32((1-w)*g1)
 		for c := 0; c < channels; c++ {
 			pcm[i*channels+c] = float64(g * float32(pcm[i*channels+c]))
@@ -75,8 +75,8 @@ func (e *Encoder) applyStereoWidthFade(pcm []float64, widthQ14 int) {
 	if e.hybridStereoWidthQ14 >= 1<<14 && widthQ14 >= 1<<14 {
 		return
 	}
-	g1 := float32(e.hybridStereoWidthQ14) * float32(1.0/16384)
-	g2 := float32(widthQ14) * float32(1.0/16384)
+	g1 := float32(float32(e.hybridStereoWidthQ14) * float32(1.0/16384))
+	g2 := float32(float32(widthQ14) * float32(1.0/16384))
 	inc := 48000 / e.sampleRate
 	if inc < 1 {
 		inc = 1
@@ -89,16 +89,16 @@ func (e *Encoder) applyStereoWidthFade(pcm []float64, widthQ14 int) {
 	i := 0
 	for ; i < overlap && i < frameSize; i++ {
 		w := window[i*inc]
-		w = w * w
+		w = float32(w * w)
 		g := float32(w*g2) + float32((1-w)*g1)
-		diff := float32(0.5) * (float32(pcm[2*i]) - float32(pcm[2*i+1]))
-		diff = g * diff
+		diff := float32(float32(0.5) * (float32(pcm[2*i]) - float32(pcm[2*i+1])))
+		diff = float32(g * diff)
 		pcm[2*i] = float64(float32(pcm[2*i]) - diff)
 		pcm[2*i+1] = float64(float32(pcm[2*i+1]) + diff)
 	}
 	for ; i < frameSize; i++ {
-		diff := float32(0.5) * (float32(pcm[2*i]) - float32(pcm[2*i+1]))
-		diff = g2 * diff
+		diff := float32(float32(0.5) * (float32(pcm[2*i]) - float32(pcm[2*i+1])))
+		diff = float32(g2 * diff)
 		pcm[2*i] = float64(float32(pcm[2*i]) - diff)
 		pcm[2*i+1] = float64(float32(pcm[2*i+1]) + diff)
 	}

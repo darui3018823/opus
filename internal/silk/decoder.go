@@ -2494,7 +2494,7 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 func DequantizeSubframeGains(indices []int) []float64 {
 	gains := make([]float64, len(indices))
 	for i, idx := range indices {
-		gainDB := float64(idx)*0.5 - 10.0
+		gainDB := float64(float64(idx)*0.5) - 10.0
 		gains[i] = math.Pow(10.0, gainDB/20.0)
 	}
 	return gains

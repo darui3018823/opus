@@ -130,28 +130,28 @@ func (r *Resampler) generateCoeffs() {
 	cutoff := r.cutoff
 	if r.outRate < r.inRate {
 		// Downsampling: cutoff relative to output Nyquist
-		cutoff = r.cutoff * float64(r.outRate) / float64(r.inRate)
+		cutoff = float64(float64(r.cutoff*float64(r.outRate)) / float64(r.inRate))
 	}
 
 	// Generate windowed sinc filter
-	center := float64(totalLen-1) / 2.0
+	center := float64(float64(totalLen-1) / 2.0)
 	for i := 0; i < totalLen; i++ {
 		// Distance from center (in units of input samples)
-		x := (float64(i) - center) / float64(r.oversample)
+		x := float64((float64(i) - center) / float64(r.oversample))
 
 		// Sinc function: sin(pi*cutoff*x) / (pi*x)
 		var sinc float64
 		if math.Abs(x) < 1e-10 {
 			sinc = cutoff
 		} else {
-			pix := math.Pi * x * cutoff
-			sinc = math.Sin(pix) / (math.Pi * x)
+			pix := float64(float64(math.Pi*x) * cutoff)
+			sinc = float64(math.Sin(pix) / (float64(math.Pi * x)))
 		}
 
 		// Kaiser window
-		kaiser := kaiserWindow(float64(i)/float64(totalLen-1), computeBeta(r.quality))
+		kaiser := kaiserWindow(float64(float64(i)/float64(totalLen-1)), computeBeta(r.quality))
 
-		r.coeffs[i] = sinc * kaiser
+		r.coeffs[i] = float64(sinc * kaiser)
 	}
 
 	// Normalize to unit gain at DC
@@ -162,7 +162,7 @@ func (r *Resampler) generateCoeffs() {
 	}
 
 	if math.Abs(sum) > 1e-10 {
-		scale := 1.0 / sum
+		scale := float64(1.0 / sum)
 		for i := range r.coeffs {
 			r.coeffs[i] *= scale
 		}
@@ -174,7 +174,7 @@ func kaiserWindow(x, beta float64) float64 {
 	// x should be in [0, 1]
 	// Kaiser window: I0(beta * sqrt(1 - (2x-1)^2)) / I0(beta)
 	arg := 2*x - 1
-	val := 1 - arg*arg
+	val := 1 - float64(arg*arg)
 	if val < 0 {
 		val = 0
 	}
@@ -186,12 +186,12 @@ func besselI0(x float64) float64 {
 	// Series approximation
 	sum := 1.0
 	term := 1.0
-	x2 := x * x / 4.0
+	x2 := float64(float64(x*x) / 4.0)
 
 	for k := 1; k < 50; k++ {
-		term *= x2 / float64(k*k)
+		term = float64(term * float64(x2/float64(k*k)))
 		sum += term
-		if term < 1e-12*sum {
+		if term < float64(1e-12*sum) {
 			break
 		}
 	}
@@ -202,7 +202,7 @@ func besselI0(x float64) float64 {
 // computeBeta computes Kaiser window beta parameter from quality.
 func computeBeta(quality int) float64 {
 	// Higher quality = higher beta = narrower transition band
-	return 3.0 + float64(quality)*0.5
+	return 3.0 + float64(float64(quality)*0.5)
 }
 
 // Process resamples input samples to output samples.
@@ -296,7 +296,7 @@ func (r *Resampler) processChannel(ch int, input []float64) []float64 {
 			// Get coefficient
 			coeffIdx := j*r.oversample + phaseIdx
 			if coeffIdx < len(r.coeffs) {
-				outSample += tapVal * r.coeffs[coeffIdx]
+				outSample += float64(tapVal * r.coeffs[coeffIdx])
 			}
 		}
 

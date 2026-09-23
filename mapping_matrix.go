@@ -101,7 +101,7 @@ func (m *MappingMatrix) multiplyFloat64(input []float64, frames, inputChannels i
 			sample := input[frame*m.cols+col] * q15
 			column := m.data[col*m.rows : (col+1)*m.rows]
 			for row, coefficient := range column {
-				out[frame*m.rows+row] += float64(coefficient) * sample
+				out[frame*m.rows+row] += float64(float64(coefficient) * sample)
 			}
 		}
 	}

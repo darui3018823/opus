@@ -74,7 +74,7 @@ func detectSignalBandwidthAndSparsity(pcm []float64, channels, sampleRate, prev 
 	var emax, sum, sumSquares float64
 	for k := 1; k < len(power); k++ {
 		sum += power[k]
-		sumSquares += power[k] * power[k]
+		sumSquares += float64(power[k] * power[k])
 		if power[k] > emax {
 			emax = power[k]
 		}
@@ -112,7 +112,7 @@ func isSpectrallySparse(pcm []float64, channels int) bool {
 	var sum, sumSquares float64
 	for k := 1; k < len(power); k++ {
 		sum += power[k]
-		sumSquares += power[k] * power[k]
+		sumSquares += float64(power[k] * power[k])
 	}
 	if sum == 0 || sumSquares == 0 {
 		return false
@@ -149,7 +149,7 @@ func signalSpectrumPower(pcm []float64, channels int) ([]float64, int, bool) {
 	// Hann window so a strong low tone does not leak enough into high bins to look
 	// like real high-frequency content, then zero-pad to a power-of-two FFT size.
 	for i := 0; i < n; i++ {
-		w := 0.5 - 0.5*math.Cos(2*math.Pi*float64(i)/float64(n-1))
+		w := 0.5 - float64(0.5*math.Cos(2*math.Pi*float64(i)/float64(n-1)))
 		mono[i] *= w
 	}
 	nfft := dsp.NextPowerOf2(n)
@@ -163,7 +163,7 @@ func signalSpectrumPower(pcm []float64, channels int) ([]float64, int, bool) {
 
 	power := make([]float64, len(spec))
 	for k := 1; k < len(spec); k++ {
-		p := spec[k].Real*spec[k].Real + spec[k].Imag*spec[k].Imag
+		p := float64(spec[k].Real*spec[k].Real) + float64(spec[k].Imag*spec[k].Imag)
 		power[k] = p
 	}
 	return power, nfft, true

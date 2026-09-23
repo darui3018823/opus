@@ -41,7 +41,7 @@ func SoftClipFloat32(pcm []float32, channels int, mem []float32) error {
 			if v*a >= 0 {
 				break
 			}
-			x[i*channels] = v + a*v*v
+			x[i*channels] = v + float32(a*v*v)
 		}
 
 		curr := 0
@@ -78,13 +78,13 @@ func SoftClipFloat32(pcm []float32, channels int, mem []float32) error {
 			// Compute a such that maxval + a*maxval^2 = 1, slightly boosted
 			// so rounding never leaves output outside ±1.
 			a = (maxval - 1) / (maxval * maxval)
-			a += a * 2.4e-7
+			a += float32(a * 2.4e-7)
 			if x[i*channels] > 0 {
 				a = -a
 			}
 			for j := start; j < end; j++ {
 				v := x[j*channels]
-				x[j*channels] = v + a*v*v
+				x[j*channels] = v + float32(a*v*v)
 			}
 
 			if special && peakPos >= 2 {

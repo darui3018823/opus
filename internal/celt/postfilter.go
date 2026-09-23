@@ -204,12 +204,12 @@ func (pf *PostFilter) combFilter(samples []float64, offset, n, period0, period1 
 	// opus_val16, celt_coef, and opus_val32 are all float in a floating-point
 	// libopus build. Keep every tap and accumulator operation in float32 rather
 	// than allowing Go's float64 storage to retain extra precision.
-	g00 := float32(gain0) * float32(pfCombGains[tapset0][0])
-	g01 := float32(gain0) * float32(pfCombGains[tapset0][1])
-	g02 := float32(gain0) * float32(pfCombGains[tapset0][2])
-	g10 := float32(gain1) * float32(pfCombGains[tapset1][0])
-	g11 := float32(gain1) * float32(pfCombGains[tapset1][1])
-	g12 := float32(gain1) * float32(pfCombGains[tapset1][2])
+	g00 := float32(float32(gain0) * float32(pfCombGains[tapset0][0]))
+	g01 := float32(float32(gain0) * float32(pfCombGains[tapset0][1]))
+	g02 := float32(float32(gain0) * float32(pfCombGains[tapset0][2]))
+	g10 := float32(float32(gain1) * float32(pfCombGains[tapset1][0]))
+	g11 := float32(float32(gain1) * float32(pfCombGains[tapset1][1]))
+	g12 := float32(float32(gain1) * float32(pfCombGains[tapset1][2]))
 
 	if gain0 == gain1 && period0 == period1 && tapset0 == tapset1 {
 		overlap = 0
@@ -229,15 +229,15 @@ func (pf *PostFilter) combFilter(samples []float64, offset, n, period0, period1 
 		pos := offset + i
 		x0 := float32(pf.getHistorySample(samples, pos-period1+2))
 		w := float32(window[i])
-		f := w * w
+		f := float32(w * w)
 		oneMinusF := float32(1) - f
 		y := float32(pf.getHistorySample(samples, pos))
-		y += (oneMinusF * g00) * float32(pf.getHistorySample(samples, pos-period0))
-		y += (oneMinusF * g01) * (float32(pf.getHistorySample(samples, pos-period0+1)) + float32(pf.getHistorySample(samples, pos-period0-1)))
-		y += (oneMinusF * g02) * (float32(pf.getHistorySample(samples, pos-period0+2)) + float32(pf.getHistorySample(samples, pos-period0-2)))
-		y += (f * g10) * x2
-		y += (f * g11) * (x1 + x3)
-		y += (f * g12) * (x0 + x4)
+		y += float32((float32(oneMinusF * g00)) * float32(pf.getHistorySample(samples, pos-period0)))
+		y += float32((float32(oneMinusF * g01)) * (float32(pf.getHistorySample(samples, pos-period0+1)) + float32(pf.getHistorySample(samples, pos-period0-1))))
+		y += float32((float32(oneMinusF * g02)) * (float32(pf.getHistorySample(samples, pos-period0+2)) + float32(pf.getHistorySample(samples, pos-period0-2))))
+		y += float32((float32(f * g10)) * x2)
+		y += float32((float32(f * g11)) * (x1 + x3))
+		y += float32((float32(f * g12)) * (x0 + x4))
 		samples[pos] = float64(y)
 		x4 = x3
 		x3 = x2
@@ -263,9 +263,9 @@ func (pf *PostFilter) combFilterConst(samples []float64, offset, n, period int, 
 		pos := offset + i
 		x0 := float32(pf.getHistorySample(samples, pos-period+2))
 		y := float32(pf.getHistorySample(samples, pos))
-		y += g0 * x2
-		y += g1 * (x1 + x3)
-		y += g2 * (x0 + x4)
+		y += float32(g0 * x2)
+		y += float32(g1 * (x1 + x3))
+		y += float32(g2 * (x0 + x4))
 		samples[pos] = float64(y)
 		x4 = x3
 		x3 = x2

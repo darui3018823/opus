@@ -114,7 +114,7 @@ func silkResamplerDown2HP(S *[3]float32, out []float32, in []float32, inLen int)
 		in32 := in[2*k]
 		// All-pass section for even input sample.
 		Y := in32 - S[0]
-		X := float32(0.6074371) * Y
+		X := float32(float32(0.6074371) * Y)
 		out32 := S[0] + X
 		S[0] = in32 + X
 		out32HP := out32
@@ -122,19 +122,19 @@ func silkResamplerDown2HP(S *[3]float32, out []float32, in []float32, inLen int)
 		// All-pass section for odd input sample, and add to output of
 		// previous section.
 		Y = in32 - S[1]
-		X = float32(0.15063) * Y
+		X = float32(float32(0.15063) * Y)
 		out32 = out32 + S[1]
 		out32 = out32 + X
 		S[1] = in32 + X
 
 		Y = -in32 - S[2]
-		X = float32(0.15063) * Y
+		X = float32(float32(0.15063) * Y)
 		out32HP = out32HP + S[2]
 		out32HP = out32HP + X
 		S[2] = -in32 + X
 
 		hpEner += float32(out32HP * out32HP)
-		out[k] = float32(0.5) * out32
+		out[k] = float32(float32(0.5) * out32)
 	}
 	return hpEner
 }
@@ -163,7 +163,7 @@ func downmixAndResample(x []float64, y []float32, S *[3]float32, subframe, offse
 	}
 	for c := 1; c < C; c++ {
 		for j := 0; j < subframe; j++ {
-			tmp[j] += float32(x[(j+offset)*C+c]) * 32768
+			tmp[j] += float32(float32(x[(j+offset)*C+c]) * 32768)
 		}
 	}
 	// Cap signal to +6 dBFS to avoid problems in the analysis.
@@ -210,22 +210,22 @@ func fastAtan2f(y, x float32) float32 {
 		cC = float32(0.08595542)
 		cE = float32(math.Pi / 2)
 	)
-	x2 := x * x
-	y2 := y * y
+	x2 := float32(x * x)
+	y2 := float32(y * y)
 	// For very small values, we don't care about the answer, so we can just
 	// return 0.
 	if x2+y2 < 1e-18 {
 		return 0
 	}
 	if x2 < y2 {
-		den := float32(y2+float32(cB*x2)) * float32(y2+float32(cC*x2))
+		den := float32(float32(y2+float32(cB*x2)) * float32(y2+float32(cC*x2)))
 		s := cE
 		if y < 0 {
 			s = -cE
 		}
 		return float32(float32(float32(-x*y)*float32(y2+float32(cA*x2)))/den) + s
 	}
-	den := float32(x2+float32(cB*y2)) * float32(x2+float32(cC*y2))
+	den := float32(float32(x2+float32(cB*y2)) * float32(x2+float32(cC*y2)))
 	s := cE
 	if y < 0 {
 		s = -cE
@@ -284,10 +284,10 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 		t.memFill = 240
 		t.initialized = true
 	}
-	alpha := float32(1) / float32(minInt(10, 1+t.count))
-	alphaE := float32(1) / float32(minInt(25, 1+t.count))
+	alpha := float32(float32(1) / float32(minInt(10, 1+t.count)))
+	alphaE := float32(float32(1) / float32(minInt(25, 1+t.count)))
 	// Noise floor related decay for bandwidth detection: -2.2 dB/second.
-	alphaE2 := float32(1) / float32(minInt(100, 1+t.count))
+	alphaE2 := float32(float32(1) / float32(minInt(100, 1+t.count)))
 	if t.count <= 1 {
 		alphaE2 = 1
 	}
@@ -317,10 +317,10 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 	re, im := t.fftRe, t.fftIm
 	for i := 0; i < N2; i++ {
 		w := analysisWindow[i]
-		re[i] = w * t.inmem[i]
-		im[i] = w * t.inmem[N2+i]
-		re[N-i-1] = w * t.inmem[N-i-1]
-		im[N-i-1] = w * t.inmem[N+N2-i-1]
+		re[i] = float32(w * t.inmem[i])
+		im[i] = float32(w * t.inmem[N2+i])
+		re[N-i-1] = float32(w * t.inmem[N-i-1])
+		im[N-i-1] = float32(w * t.inmem[N+N2-i-1])
 	}
 	copy(t.inmem[:240], t.inmem[analysisBufSize-240:])
 	remaining := length - (analysisBufSize - t.memFill)
@@ -348,29 +348,29 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 		X2r := im[i] + im[N-i]
 		X2i := re[N-i] - re[i]
 
-		angle := halfOverPi * fastAtan2f(X1i, X1r)
+		angle := float32(halfOverPi * fastAtan2f(X1i, X1r))
 		dAngle := angle - A[i]
 		d2Angle := dAngle - dA[i]
 
-		angle2 := halfOverPi * fastAtan2f(X2i, X2r)
+		angle2 := float32(halfOverPi * fastAtan2f(X2i, X2r))
 		dAngle2 := angle2 - angle
 		d2Angle2 := dAngle2 - dAngle
 
 		mod1 := d2Angle - float32(float2int(d2Angle))
 		noisiness[i] = abs32(mod1)
-		mod1 *= mod1
-		mod1 *= mod1
+		mod1 = float32(mod1 * mod1)
+		mod1 = float32(mod1 * mod1)
 
 		mod2 := d2Angle2 - float32(float2int(d2Angle2))
 		noisiness[i] += abs32(mod2)
-		mod2 *= mod2
-		mod2 *= mod2
+		mod2 = float32(mod2 * mod2)
+		mod2 = float32(mod2 * mod2)
 
-		avgMod := float32(0.25) * float32(float32(d2A[i]+mod1)+2*mod2)
+		avgMod := float32(float32(0.25) * float32(float32(d2A[i]+mod1)+float32(2*mod2)))
 		// This introduces an extra delay of 2 frames in the detection.
-		tonality[i] = float32(1)/(1+float32(float32(float32(40*16)*pi4)*avgMod)) - float32(0.015)
+		tonality[i] = float32(float32(1)/(1+float32(float32(float32(40*16)*pi4)*avgMod))) - float32(0.015)
 		// No delay on this detection, but it's less reliable.
-		tonality2[i] = float32(1)/(1+float32(float32(float32(40*16)*pi4)*mod2)) - float32(0.015)
+		tonality2[i] = float32(float32(1)/(1+float32(float32(float32(40*16)*pi4)*mod2))) - float32(0.015)
 
 		A[i] = angle2
 		dA[i] = dAngle2
@@ -381,7 +381,7 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 		if m := max32(tonality2[i-1], tonality2[i+1]); m < tt {
 			tt = m
 		}
-		tonality[i] = float32(0.9) * max32(tonality[i], tt-float32(0.1))
+		tonality[i] = float32(float32(0.9) * max32(tonality[i], tt-float32(0.1)))
 	}
 	var frameTonality, maxFrameTonality float32
 	info.Activity = 0
@@ -399,20 +399,20 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 	const scaleEner = float32(1.0 / 32768 / 32768)
 	// The energy of the very first band is special because of DC.
 	{
-		X1r := 2 * re[0]
-		X2r := 2 * im[0]
+		X1r := float32(2 * re[0])
+		X2r := float32(2 * im[0])
 		E := float32(X1r*X1r) + float32(X2r*X2r)
 		for i := 1; i < 4; i++ {
 			E += binEnergy(i)
 		}
-		E = scaleEner * E
-		bandLog2[0] = float32(0.5*1.442695) * float32(math.Log(float64(E+1e-10)))
+		E = float32(scaleEner * E)
+		bandLog2[0] = float32(float32(0.5*1.442695) * float32(math.Log(float64(E+1e-10))))
 	}
 	for b := 0; b < analysisNBTBands; b++ {
 		var E, tE, nE float32
 		for i := analysisTBands[b]; i < analysisTBands[b+1]; i++ {
 			binE := binEnergy(i)
-			binE = scaleEner * binE
+			binE = float32(scaleEner * binE)
 			E += binE
 			tE += float32(binE * max32(0, tonality[i]))
 			nE += float32(float32(binE*2) * (float32(0.5) - noisiness[i]))
@@ -423,11 +423,11 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 			return
 		}
 		t.e[t.eCount][b] = E
-		frameNoisiness += nE / (float32(1e-15) + E)
+		frameNoisiness += float32(nE / (float32(1e-15) + E))
 
 		frameLoudness += float32(math.Sqrt(float64(E + 1e-10)))
 		logE[b] = float32(math.Log(float64(E + 1e-10)))
-		bandLog2[b+1] = float32(0.5*1.442695) * float32(math.Log(float64(E+1e-10)))
+		bandLog2[b+1] = float32(float32(0.5*1.442695) * float32(math.Log(float64(E+1e-10))))
 		t.logE[t.eCount][b] = logE[b]
 		if t.count == 0 {
 			t.highE[b] = logE[b]
@@ -447,21 +447,21 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 			t.lowE[b] = logE[b]
 			t.highE[b] = min32(t.lowE[b]+15, t.highE[b])
 		}
-		relativeE += (logE[b] - t.lowE[b]) / (float32(1e-5) + (t.highE[b] - t.lowE[b]))
+		relativeE += float32((logE[b] - t.lowE[b]) / (float32(1e-5) + (t.highE[b] - t.lowE[b])))
 
 		var L1, L2 float32
 		for i := 0; i < analysisNBFrames; i++ {
 			L1 += float32(math.Sqrt(float64(t.e[i][b])))
 			L2 += t.e[i][b]
 		}
-		stationarity := L1 / float32(math.Sqrt(1e-15+float64(float32(analysisNBFrames)*L2)))
+		stationarity := float32(L1 / float32(math.Sqrt(1e-15+float64(float32(analysisNBFrames)*L2))))
 		if stationarity > 0.99 {
 			stationarity = 0.99
 		}
-		stationarity *= stationarity
-		stationarity *= stationarity
+		stationarity = float32(stationarity * stationarity)
+		stationarity = float32(stationarity * stationarity)
 		frameStationarity += stationarity
-		bandTonality[b] = max32(tE/(float32(1e-15)+E), float32(stationarity*t.prevBandTonality[b]))
+		bandTonality[b] = max32(float32(tE/(float32(1e-15)+E)), float32(stationarity*t.prevBandTonality[b]))
 		frameTonality += bandTonality[b]
 		if b >= analysisNBTBands-analysisNBTonalSkip {
 			frameTonality -= bandTonality[b-analysisNBTBands+analysisNBTonalSkip]
@@ -476,12 +476,12 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 	leakageFrom[0] = bandLog2[0]
 	leakageTo[0] = bandLog2[0] - leakageOffset
 	for b := 1; b < analysisNBTBands+1; b++ {
-		leakSlope := float32(leakageSlope*float32(analysisTBands[b]-analysisTBands[b-1])) / 4
+		leakSlope := float32(float32(leakageSlope*float32(analysisTBands[b]-analysisTBands[b-1])) / 4)
 		leakageFrom[b] = min32(leakageFrom[b-1]+leakSlope, bandLog2[b])
 		leakageTo[b] = max32(leakageTo[b-1]-leakSlope, bandLog2[b]-leakageOffset)
 	}
 	for b := analysisNBTBands - 2; b >= 0; b-- {
-		leakSlope := float32(leakageSlope*float32(analysisTBands[b+1]-analysisTBands[b])) / 4
+		leakSlope := float32(float32(leakageSlope*float32(analysisTBands[b+1]-analysisTBands[b])) / 4)
 		leakageFrom[b] = min32(leakageFrom[b+1]+leakSlope, leakageFrom[b])
 		leakageTo[b] = max32(leakageTo[b+1]-leakSlope, leakageTo[b])
 	}
@@ -515,11 +515,11 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 		}
 		specVariability += mindist
 	}
-	specVariability = float32(math.Sqrt(float64(specVariability / analysisNBFrames / analysisNBTBands)))
+	specVariability = float32(math.Sqrt(float64(float32(specVariability/analysisNBFrames) / analysisNBTBands)))
 	var bandwidthMask float32
 	bandwidth := 0
 	var maxE float32
-	noiseFloor := float32(5.7e-4) / float32(int32(1)<<uint(maxInt(0, lsbDepth-8)))
+	noiseFloor := float32(float32(5.7e-4) / float32(int32(1)<<uint(maxInt(0, lsbDepth-8))))
 	noiseFloor *= noiseFloor
 	var belowMaxPitch, aboveMaxPitch float32
 	b := 0
@@ -530,7 +530,7 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 		for i := bandStart; i < bandEnd; i++ {
 			E += binEnergy(i)
 		}
-		E = scaleEner * E
+		E = float32(scaleEner * E)
 		maxE = max32(maxE, E)
 		if bandStart < 64 {
 			belowMaxPitch += E
@@ -552,12 +552,12 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 		}
 		isMasked[b] = E < float32(maskCoef*bandwidthMask)
 		// Use a simple follower with 13 dB/Bark slope for spreading function.
-		bandwidthMask = max32(float32(0.05)*bandwidthMask, E)
+		bandwidthMask = max32(float32(float32(0.05)*bandwidthMask), E)
 	}
 	// Special case for the last two bands, for which we don't have spectrum
 	// but only the energy above 12 kHz.
 	if t.fs == 48000 {
-		E := hpEner * float32(1.0/(60*60))
+		E := float32(hpEner * float32(1.0/(60*60)))
 		noiseRatio := float32(30)
 		if t.prevBandwidth == 20 {
 			noiseRatio = 10
@@ -575,7 +575,7 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 		isMasked[b] = E < float32(maskCoef*bandwidthMask)
 	}
 	if aboveMaxPitch > belowMaxPitch {
-		info.MaxPitchRatio = belowMaxPitch / aboveMaxPitch
+		info.MaxPitchRatio = float32(belowMaxPitch / aboveMaxPitch)
 	} else {
 		info.MaxPitchRatio = 1
 	}
@@ -590,9 +590,9 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 	if t.count <= 2 {
 		bandwidth = 20
 	}
-	frameLoudness = 20 * float32(math.Log10(float64(frameLoudness)))
+	frameLoudness = float32(20 * float32(math.Log10(float64(frameLoudness))))
 	t.eTracker = max32(t.eTracker-float32(0.003), frameLoudness)
-	t.lowECount *= 1 - alphaE
+	t.lowECount = float32(t.lowECount * (1 - alphaE))
 	if frameLoudness < t.eTracker-30 {
 		t.lowECount += alphaE
 	}
@@ -619,7 +619,7 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 	}
 	frameNoisiness /= analysisNBTBands
 	info.Activity = frameNoisiness + float32((1-frameNoisiness)*relativeE)
-	frameTonality = maxFrameTonality / float32(analysisNBTBands-analysisNBTonalSkip)
+	frameTonality = float32(maxFrameTonality / float32(analysisNBTBands-analysisNBTonalSkip))
 	frameTonality = max32(frameTonality, float32(t.prevTonality*float32(0.8)))
 	t.prevTonality = frameTonality
 

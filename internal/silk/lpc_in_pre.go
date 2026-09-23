@@ -89,7 +89,7 @@ func buildLPCInPre(x []float64, subframeLengths []int, invGains []float64, ltpCo
 						if j < len(coefs) {
 							b = float32(coefs[j])
 						}
-						v -= b * float32(sampleAt(x, lagPtr+ltpOrder/2-j))
+						v -= float32(b * float32(sampleAt(x, lagPtr+ltpOrder/2-j)))
 					}
 				}
 				out[dst+i] = float64(v * invGain)
@@ -182,10 +182,10 @@ func firstHalfStackedLPCResidual(preSignal []float64, lpcQ12 []int16, order, sub
 		for i := order; i < subfrLength; i++ {
 			pred := 0.0
 			for j := 0; j < order; j++ {
-				pred += float64(lpcQ12[j]) / 4096.0 * preSignal[base+i-j-1]
+				pred += float64(float64(lpcQ12[j]) / 4096.0 * preSignal[base+i-j-1])
 			}
 			err := preSignal[base+i] - pred
-			energy += err * err
+			energy += float64(err * err)
 		}
 	}
 	return energy

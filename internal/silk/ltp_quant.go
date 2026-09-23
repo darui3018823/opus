@@ -376,7 +376,7 @@ func (e *Encoder) lpcResidualInt16Domain(signal []float64, lpcQ12 []int16) ([]fl
 	for i := range buf {
 		pred := 0.0
 		for j := 0; j < e.lpcOrder && j <= i-1; j++ {
-			pred += float64(lpcQ12[j]) / 4096.0 * buf[i-j-1]
+			pred += float64(float64(lpcQ12[j]) / 4096.0 * buf[i-j-1])
 		}
 		// silk_float residual: the exact LTP stages expect float32 values.
 		res[i] = f32((buf[i] - pred) * 32768.0)

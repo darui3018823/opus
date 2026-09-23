@@ -34,7 +34,7 @@ func silkBurgModifiedFLP(x []float64, minInvGain float64, subfrLength, nbSubfr, 
 	}
 	copy(CLastRow, CFirstRow)
 
-	CAb[0] = C0 + float64(findLPCCondFac32)*C0 + float64(float32(1e-9))
+	CAb[0] = C0 + float64(float64(findLPCCondFac32)*C0) + float64(float32(1e-9))
 	CAf[0] = CAb[0]
 	invGain := 1.0
 	reachedMaxGain := false
@@ -51,20 +51,20 @@ func silkBurgModifiedFLP(x []float64, minInvGain float64, subfrLength, nbSubfr, 
 				CFirstRow[k] -= float64(float32(xn) * float32(silkFloat32Value(xp[n-k-1])))
 				CLastRow[k] -= float64(float32(xlast) * float32(silkFloat32Value(xp[subfrLength-n+k])))
 				atmp := Af[k]
-				tmp1 += silkFloat32Value(xp[n-k-1]) * atmp
-				tmp2 += silkFloat32Value(xp[subfrLength-n+k]) * atmp
+				tmp1 += float64(silkFloat32Value(xp[n-k-1]) * atmp)
+				tmp2 += float64(silkFloat32Value(xp[subfrLength-n+k]) * atmp)
 			}
 			for k := 0; k <= n; k++ {
-				CAf[k] -= tmp1 * silkFloat32Value(xp[n-k])
-				CAb[k] -= tmp2 * silkFloat32Value(xp[subfrLength-n+k-1])
+				CAf[k] -= float64(tmp1 * silkFloat32Value(xp[n-k]))
+				CAb[k] -= float64(tmp2 * silkFloat32Value(xp[subfrLength-n+k-1]))
 			}
 		}
 		tmp1 := CFirstRow[n]
 		tmp2 := CLastRow[n]
 		for k := 0; k < n; k++ {
 			atmp := Af[k]
-			tmp1 += CLastRow[n-k-1] * atmp
-			tmp2 += CFirstRow[n-k-1] * atmp
+			tmp1 += float64(CLastRow[n-k-1] * atmp)
+			tmp2 += float64(CFirstRow[n-k-1] * atmp)
 		}
 		CAf[n+1] = tmp1
 		CAb[n+1] = tmp2
@@ -75,15 +75,15 @@ func silkBurgModifiedFLP(x []float64, minInvGain float64, subfrLength, nbSubfr, 
 		nrgF := CAf[0]
 		for k := 0; k < n; k++ {
 			atmp := Af[k]
-			num += CAb[n-k] * atmp
-			nrgB += CAb[k+1] * atmp
-			nrgF += CAf[k+1] * atmp
+			num += float64(CAb[n-k] * atmp)
+			nrgB += float64(CAb[k+1] * atmp)
+			nrgF += float64(CAf[k+1] * atmp)
 		}
 
 		rc := -2.0 * num / (nrgF + nrgB)
 
 		// Bound the inverse prediction gain.
-		t := invGain * (1.0 - rc*rc)
+		t := invGain * (1.0 - float64(rc*rc))
 		if t <= minInvGain {
 			rc = math.Sqrt(1.0 - minInvGain/invGain)
 			if num > 0 {
@@ -99,8 +99,8 @@ func silkBurgModifiedFLP(x []float64, minInvGain float64, subfrLength, nbSubfr, 
 		for k := 0; k < (n+1)>>1; k++ {
 			t1 := Af[k]
 			t2 := Af[n-k-1]
-			Af[k] = t1 + rc*t2
-			Af[n-k-1] = t2 + rc*t1
+			Af[k] = t1 + float64(rc*t2)
+			Af[n-k-1] = t2 + float64(rc*t1)
 		}
 		Af[n] = rc
 
@@ -114,8 +114,8 @@ func silkBurgModifiedFLP(x []float64, minInvGain float64, subfrLength, nbSubfr, 
 		// Update C*Af and C*Ab.
 		for k := 0; k <= n+1; k++ {
 			t1 := CAf[k]
-			CAf[k] += rc * CAb[n-k+1]
-			CAb[n-k+1] += rc * t1
+			CAf[k] += float64(rc * CAb[n-k+1])
+			CAb[n-k+1] += float64(rc * t1)
 		}
 	}
 
@@ -133,11 +133,11 @@ func silkBurgModifiedFLP(x []float64, minInvGain float64, subfrLength, nbSubfr, 
 		tmp1 := 1.0
 		for k := 0; k < D; k++ {
 			atmp := Af[k]
-			nrgF += CAf[k+1] * atmp
-			tmp1 += atmp * atmp
+			nrgF += float64(CAf[k+1] * atmp)
+			tmp1 += float64(atmp * atmp)
 			A[k] = float64(float32(-atmp))
 		}
-		nrgF -= float64(findLPCCondFac32) * C0 * tmp1
+		nrgF -= float64(float64(findLPCCondFac32) * C0 * tmp1)
 	}
 	return A, float64(float32(nrgF))
 }
@@ -156,11 +156,11 @@ func silkEnergyFLP32(x []float64) float64 {
 		x1 := silkFloat32Value(x[i+1])
 		x2 := silkFloat32Value(x[i+2])
 		x3 := silkFloat32Value(x[i+3])
-		result += x0*x0 + x1*x1 + x2*x2 + x3*x3
+		result += float64(x0*x0) + float64(x1*x1) + float64(x2*x2) + float64(x3*x3)
 	}
 	for ; i < len(x); i++ {
 		v := silkFloat32Value(x[i])
-		result += v * v
+		result += float64(v * v)
 	}
 	return result
 }
@@ -169,13 +169,13 @@ func silkInnerProductFLP32(x, y []float64, n int) float64 {
 	result := 0.0
 	i := 0
 	for ; i < n-3; i += 4 {
-		result += silkFloat32Value(x[i])*silkFloat32Value(y[i]) +
-			silkFloat32Value(x[i+1])*silkFloat32Value(y[i+1]) +
-			silkFloat32Value(x[i+2])*silkFloat32Value(y[i+2]) +
-			silkFloat32Value(x[i+3])*silkFloat32Value(y[i+3])
+		result += float64(silkFloat32Value(x[i])*silkFloat32Value(y[i])) +
+			float64(silkFloat32Value(x[i+1])*silkFloat32Value(y[i+1])) +
+			float64(silkFloat32Value(x[i+2])*silkFloat32Value(y[i+2])) +
+			float64(silkFloat32Value(x[i+3])*silkFloat32Value(y[i+3]))
 	}
 	for ; i < n; i++ {
-		result += silkFloat32Value(x[i]) * silkFloat32Value(y[i])
+		result += float64(silkFloat32Value(x[i]) * silkFloat32Value(y[i]))
 	}
 	return result
 }

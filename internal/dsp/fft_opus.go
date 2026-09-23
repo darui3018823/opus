@@ -20,10 +20,10 @@ func opusCSub(a, b opusComplex) opusComplex {
 }
 
 func opusCMul(a, b opusComplex) opusComplex {
-	arbr := a.r * b.r
-	aibi := a.i * b.i
-	arbi := a.r * b.i
-	aibr := a.i * b.r
+	arbr := float32(a.r * b.r)
+	aibi := float32(a.i * b.i)
+	arbi := float32(a.r * b.i)
+	aibr := float32(a.i * b.r)
 	return opusComplex{r: arbr - aibi, i: arbi + aibr}
 }
 
@@ -240,8 +240,8 @@ func (p opusFFTPlan) bfly3(fout []opusComplex, fstride, m, groups, mm int) {
 			s2 := opusCMul(fout[i0+2*m], p.twiddles[j*fstride*2])
 			s3 := opusCAdd(s1, s2)
 			s0 := opusCSub(s1, s2)
-			mid := opusComplex{r: fout[i0].r - 0.5*s3.r, i: fout[i0].i - 0.5*s3.i}
-			s0 = opusComplex{r: s0.r * epi, i: s0.i * epi}
+			mid := opusComplex{r: fout[i0].r - float32(0.5*s3.r), i: fout[i0].i - float32(0.5*s3.i)}
+			s0 = opusComplex{r: float32(s0.r * epi), i: float32(s0.i * epi)}
 			fout[i0] = opusCAdd(fout[i0], s3)
 			fout[i0+2*m] = opusComplex{r: mid.r + s0.i, i: mid.i - s0.r}
 			fout[i0+m] = opusComplex{r: mid.r - s0.i, i: mid.i + s0.r}
@@ -265,22 +265,22 @@ func (p opusFFTPlan) bfly5(fout []opusComplex, fstride, m, groups, mm int) {
 			s8, s9 := opusCAdd(s2, s3), opusCSub(s2, s3)
 			fout[i0] = opusCAdd(s0, opusCAdd(s7, s8))
 			s5 := opusComplex{
-				r: s0.r + (s7.r*ya.r + s8.r*yb.r),
-				i: s0.i + (s7.i*ya.r + s8.i*yb.r),
+				r: s0.r + (float32(s7.r*ya.r) + float32(s8.r*yb.r)),
+				i: s0.i + (float32(s7.i*ya.r) + float32(s8.i*yb.r)),
 			}
 			s6 := opusComplex{
-				r: s10.i*ya.i + s9.i*yb.i,
-				i: -(s10.r*ya.i + s9.r*yb.i),
+				r: float32(s10.i*ya.i) + float32(s9.i*yb.i),
+				i: -(float32(s10.r*ya.i) + float32(s9.r*yb.i)),
 			}
 			fout[i0+m] = opusCSub(s5, s6)
 			fout[i0+4*m] = opusCAdd(s5, s6)
 			s11 := opusComplex{
-				r: s0.r + (s7.r*yb.r + s8.r*ya.r),
-				i: s0.i + (s7.i*yb.r + s8.i*ya.r),
+				r: s0.r + (float32(s7.r*yb.r) + float32(s8.r*ya.r)),
+				i: s0.i + (float32(s7.i*yb.r) + float32(s8.i*ya.r)),
 			}
 			s12 := opusComplex{
-				r: s9.i*ya.i - s10.i*yb.i,
-				i: s10.r*yb.i - s9.r*ya.i,
+				r: float32(s9.i*ya.i) - float32(s10.i*yb.i),
+				i: float32(s10.r*yb.i) - float32(s9.r*ya.i),
 			}
 			fout[i0+2*m] = opusCAdd(s11, s12)
 			fout[i0+3*m] = opusCSub(s11, s12)

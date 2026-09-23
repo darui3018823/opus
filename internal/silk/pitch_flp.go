@@ -175,7 +175,7 @@ func silkResamplerDown2_3(S []int32, out, in []int16) {
 // winType 1: 0..pi/2; winType 2: pi/2..pi. length must be a multiple of 4.
 func silkApplySineWindowFLP(out, in []float64, winType, length int) {
 	freq := math.Pi / float64(length+1)
-	c := 2.0 - freq*freq
+	c := 2.0 - float64(freq*freq)
 	var s0, s1 float64
 	if winType < 2 {
 		s0 = 0.0
@@ -187,17 +187,17 @@ func silkApplySineWindowFLP(out, in []float64, winType, length int) {
 	for k := 0; k < length; k += 4 {
 		out[k+0] = in[k+0] * 0.5 * (s0 + s1)
 		out[k+1] = in[k+1] * s1
-		s0 = c*s1 - s0
+		s0 = float64(c*s1) - s0
 		out[k+2] = in[k+2] * 0.5 * (s1 + s0)
 		out[k+3] = in[k+3] * s0
-		s1 = c*s0 - s1
+		s1 = float64(c*s0) - s1
 	}
 }
 
 func silkInnerProductFLP(a, b []float64, n int) float64 {
 	sum := 0.0
 	for i := 0; i < n; i++ {
-		sum += a[i] * b[i]
+		sum += float64(a[i] * b[i])
 	}
 	return sum
 }
@@ -233,8 +233,8 @@ func silkSchurFLP(reflCoef, autoCorr []float64, order int) float64 {
 		for n := 0; n < order-k; n++ {
 			ctmp1 := c[n+k+1][0]
 			ctmp2 := c[n][1]
-			c[n+k+1][0] = ctmp1 + ctmp2*rcTmp
-			c[n][1] = ctmp2 + ctmp1*rcTmp
+			c[n+k+1][0] = ctmp1 + float64(ctmp2*rcTmp)
+			c[n][1] = ctmp2 + float64(ctmp1*rcTmp)
 		}
 	}
 	return c[0][1]
@@ -247,8 +247,8 @@ func silkK2aFLP(a, rc []float64, order int) {
 		for n := 0; n < (k+1)>>1; n++ {
 			tmp1 := a[n]
 			tmp2 := a[k-n-1]
-			a[n] = tmp1 + tmp2*rck
-			a[k-n-1] = tmp2 + tmp1*rck
+			a[n] = tmp1 + float64(tmp2*rck)
+			a[k-n-1] = tmp2 + float64(tmp1*rck)
 		}
 		a[k] = -rck
 	}
@@ -273,7 +273,7 @@ func silkLPCAnalysisFilterFLP(r, predCoef, s []float64, length, order int) {
 	for ix := order; ix < length; ix++ {
 		pred := 0.0
 		for k := 0; k < order; k++ {
-			pred += s[ix-1-k] * predCoef[k]
+			pred += float64(s[ix-1-k] * predCoef[k])
 		}
 		r[ix] = s[ix] - pred
 	}
@@ -403,5 +403,5 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64, va
 // pitchEstimationThreshold_Q16 = SILK_FIX_CONST(x, 16) for the complexity.
 func (e *Encoder) pitchEstimationThresholdQ16() int {
 	_, _, thres := e.pitchEstParams()
-	return int(int32(thres*65536 + 0.5))
+	return int(int32(float64(thres*65536) + 0.5))
 }

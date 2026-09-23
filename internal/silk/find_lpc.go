@@ -107,7 +107,7 @@ func silkLPCAnalysisFilterFLP32(r, predCoef, s []float64, length, order int) {
 	for ix := order; ix < length; ix++ {
 		pred := float32(0)
 		for k := 0; k < order; k++ {
-			pred += float32(s[ix-1-k]) * float32(predCoef[k])
+			pred += float32(float32(s[ix-1-k]) * float32(predCoef[k]))
 		}
 		r[ix] = float64(float32(s[ix]) - pred)
 	}

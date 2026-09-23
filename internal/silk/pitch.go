@@ -35,7 +35,7 @@ func (pa *PitchAnalyzer) Analyze(signal []float64) (lag int, gain float64) {
 	// Compute energy of signal
 	energy := 0.0
 	for i := 0; i < n; i++ {
-		energy += signal[i] * signal[i]
+		energy += float64(signal[i] * signal[i])
 	}
 	if energy < 1e-10 {
 		return 0, 0.0
@@ -50,8 +50,8 @@ func (pa *PitchAnalyzer) Analyze(signal []float64) (lag int, gain float64) {
 		corr := 0.0
 		lagEnergy := 0.0
 		for i := lag; i < n; i++ {
-			corr += signal[i] * signal[i-lag]
-			lagEnergy += signal[i-lag] * signal[i-lag]
+			corr += float64(signal[i] * signal[i-lag])
+			lagEnergy += float64(signal[i-lag] * signal[i-lag])
 		}
 
 		// Normalize correlation
@@ -127,9 +127,9 @@ func (pa *PitchAnalyzer) RefinePitch(signal []float64, coarseLag int) (fineLag f
 			frac := testLag - math.Floor(testLag)
 			idx := int(math.Floor(testLag))
 			if idx >= 0 && idx+1 < i {
-				interpVal := signal[i-idx-1]*(1.0-frac) + signal[i-idx]*frac
-				corr += signal[i] * interpVal
-				energy += interpVal * interpVal
+				interpVal := float64(signal[i-idx-1]*(1.0-frac)) + float64(signal[i-idx]*frac)
+				corr += float64(signal[i] * interpVal)
+				energy += float64(interpVal * interpVal)
 				count++
 			}
 		}
@@ -160,7 +160,7 @@ func (pa *PitchAnalyzer) ApplyPitchFilter(signal []float64, lag int, gain float6
 
 	for i := 0; i < n; i++ {
 		if i >= lag {
-			filtered[i] = signal[i] - gain*signal[i-lag]
+			filtered[i] = signal[i] - float64(gain*signal[i-lag])
 		} else {
 			filtered[i] = signal[i]
 		}
@@ -176,7 +176,7 @@ func (pa *PitchAnalyzer) SynthesizePitch(residual []float64, lag int, gain float
 
 	for i := 0; i < n; i++ {
 		if i >= lag {
-			signal[i] = residual[i] + gain*signal[i-lag]
+			signal[i] = residual[i] + float64(gain*signal[i-lag])
 		} else {
 			signal[i] = residual[i]
 		}
@@ -237,7 +237,7 @@ func ComputeSubframeGains(signal []float64, numSubframes int) []float64 {
 		// Compute RMS energy for subframe
 		energy := 0.0
 		for j := start; j < end; j++ {
-			energy += signal[j] * signal[j]
+			energy += float64(signal[j] * signal[j])
 		}
 		energy /= float64(end - start)
 		gains[i] = math.Sqrt(energy)

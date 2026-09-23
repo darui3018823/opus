@@ -166,15 +166,15 @@ func expRotation1(X []float64, length, stride int, c, s float32) {
 	for i := 0; i < length-stride; i++ {
 		x1 := float32(X[i])
 		x2 := float32(X[i+stride])
-		X[i+stride] = float64(c*x2 + s*x1)
-		X[i] = float64(c*x1 + ms*x2)
+		X[i+stride] = float64(float32(c*x2) + float32(s*x1))
+		X[i] = float64(float32(c*x1) + float32(ms*x2))
 	}
 	// backward
 	for i := length - 2*stride - 1; i >= 0; i-- {
 		x1 := float32(X[i])
 		x2 := float32(X[i+stride])
-		X[i+stride] = float64(c*x2 + s*x1)
-		X[i] = float64(c*x1 + ms*x2)
+		X[i+stride] = float64(float32(c*x2) + float32(s*x1))
+		X[i] = float64(float32(c*x1) + float32(ms*x2))
 	}
 }
 
@@ -185,7 +185,7 @@ func expRotation(X []float64, length, dir, stride, k, spread int) {
 	}
 	factor := spreadFactor[spread-1]
 	gain := float32(length) / float32(length+factor*k)
-	theta := float32(0.5) * gain * gain
+	theta := float32(float32(float32(0.5)*gain) * gain)
 	c := celtCosNorm(theta)
 	s := celtCosNorm(float32(1.0) - theta) // sin(theta*pi/2)
 	stride2 := 0
@@ -241,7 +241,7 @@ func renormaliseVector(X []float64, n int, gain float64) {
 	e := float32(1e-15)
 	for i := 0; i < n; i++ {
 		x := float32(X[i])
-		e += x * x
+		e += float32(x * x)
 	}
 	g := (float32(1.0) / float32(math.Sqrt(float64(e)))) * float32(gain)
 	for i := 0; i < n; i++ {
@@ -255,8 +255,8 @@ func haar1(X []float64, n0, stride int) {
 	const s = float32(0.70710678)
 	for i := 0; i < stride; i++ {
 		for j := 0; j < n0; j++ {
-			t1 := s * float32(X[stride*2*j+i])
-			t2 := s * float32(X[stride*(2*j+1)+i])
+			t1 := float32(s * float32(X[stride*2*j+i]))
+			t2 := float32(s * float32(X[stride*(2*j+1)+i]))
 			X[stride*2*j+i] = float64(t1 + t2)
 			X[stride*(2*j+1)+i] = float64(t1 - t2)
 		}
@@ -352,25 +352,25 @@ func celtAtanNorm(x float32) float32 {
 		a15 = float32(-4.3554059229791164398193359375e-03)
 	)
 	xSq := x * x
-	p := a13 + xSq*a15
-	p = a11 + xSq*p
-	p = a09 + xSq*p
-	p = a07 + xSq*p
-	p = a05 + xSq*p
-	p = a03 + xSq*p
-	return float32(0.636619772367581) * (x + x*xSq*p)
+	p := a13 + float32(xSq*a15)
+	p = a11 + float32(xSq*p)
+	p = a09 + float32(xSq*p)
+	p = a07 + float32(xSq*p)
+	p = a05 + float32(xSq*p)
+	p = a03 + float32(xSq*p)
+	return float32(float32(0.636619772367581) * (x + float32(x*xSq*p)))
 }
 
 // celtAtan2pNorm is libopus celt_atan2p_norm (float build): atan2(y, x)
 // normalised to [0, 1] for non-negative arguments.
 func celtAtan2pNorm(y, x float32) float32 {
-	if x*x+y*y < 1e-18 {
+	if float32(x*x)+float32(y*y) < 1e-18 {
 		return 0
 	}
 	if y < x {
-		return celtAtanNorm(y / x)
+		return celtAtanNorm(float32(y / x))
 	}
-	return 1 - celtAtanNorm(x/y)
+	return 1 - celtAtanNorm(float32(x/y))
 }
 
 // stereoIthetaF is the float32 port of libopus stereo_itheta (vq.c),
@@ -398,7 +398,7 @@ func stereoIthetaF(X, Y []float64, stereo bool, n int) int {
 	}
 	mid := float32(math.Sqrt(float64(Emid)))
 	side := float32(math.Sqrt(float64(Eside)))
-	ithetaQ30 := int32(math.Floor(float64(float32(0.5) + float32(65536.0*16384)*celtAtan2pNorm(side, mid))))
+	ithetaQ30 := int32(math.Floor(float64(float32(0.5) + float32(float32(65536.0*16384)*celtAtan2pNorm(side, mid)))))
 	return int(ithetaQ30 >> 16)
 }
 
@@ -422,8 +422,8 @@ func intensityStereo(ctx *bandCtx, X, Y []float64, n int) {
 func stereoSplit(X, Y []float64, n int) {
 	const c = float32(0.70710678)
 	for j := 0; j < n; j++ {
-		l := c * float32(X[j])
-		r := c * float32(Y[j])
+		l := float32(c * float32(X[j]))
+		r := float32(c * float32(Y[j]))
 		X[j] = float64(l + r)
 		Y[j] = float64(r - l)
 	}
@@ -929,7 +929,7 @@ func quantBandStereo(ctx *bandCtx, X, Y []float64, n, b, B int, lowband []float6
 		sign := 0
 		if sbits != 0 {
 			if ctx.encode {
-				if x2[0]*y2[1]-x2[1]*y2[0] < 0 {
+				if float64(x2[0]*y2[1])-float64(x2[1]*y2[0]) < 0 {
 					sign = 1
 				}
 				ctx.enc.EncodeBits(uint32(sign), 1)
@@ -937,19 +937,19 @@ func quantBandStereo(ctx *bandCtx, X, Y []float64, n, b, B int, lowband []float6
 				sign = int(ctx.dec.DecodeBits(1))
 			}
 		}
-		signf := 1.0 - 2.0*float64(sign)
+		signf := 1.0 - float64(2.0*float64(sign))
 		cm = quantBand(ctx, x2, n, mbits, B, lowband, lm, lowbandOut, 1.0, lowbandScratch, origFill)
-		y2[0] = -signf * x2[1]
-		y2[1] = signf * x2[0]
+		y2[0] = float64(-signf * x2[1])
+		y2[1] = float64(signf * x2[0])
 		// The floating-point libopus build stores celt_norm, opus_val32, and
 		// the MULT32_32_Q31/ADD32/SUB32 results as float. Preserve those
 		// intermediate roundings instead of carrying the N=2 stereo rotation
 		// through Go's float64 coefficient storage.
 		mid32, side32 := float32(mid), float32(side)
-		x0 := mid32 * float32(X[0])
-		x1 := mid32 * float32(X[1])
-		y0 := side32 * float32(Y[0])
-		y1 := side32 * float32(Y[1])
+		x0 := float32(mid32 * float32(X[0]))
+		x1 := float32(mid32 * float32(X[1]))
+		y0 := float32(side32 * float32(Y[0]))
+		y1 := float32(side32 * float32(Y[1]))
 		X[0] = float64(x0 - y0)
 		Y[0] = float64(x0 + y0)
 		X[1] = float64(x1 - y1)
@@ -1001,22 +1001,22 @@ func stereoMerge(X, Y []float64, mid float64, n int) {
 	for j := 0; j < n; j++ {
 		x := float32(X[j])
 		y := float32(Y[j])
-		xp += y * x
-		side += y * y
+		xp += float32(y * x)
+		side += float32(y * y)
 	}
 	mid32 := float32(mid)
-	xp *= mid32
+	xp = float32(xp * mid32)
 	mid2 := mid32 // SHR16(mid,1) is no-op in float build (libopus arch.h), so mid2=mid
-	El := mid2*mid2 + side - 2*xp
-	Er := mid2*mid2 + side + 2*xp
+	El := float32(mid2*mid2) + side - float32(2*xp)
+	Er := float32(mid2*mid2) + side + float32(2*xp)
 	if Er < 6e-4 || El < 6e-4 {
 		copy(Y[:n], X[:n])
 		return
 	}
-	lgain := float32(1.0) / float32(math.Sqrt(float64(El)))
-	rgain := float32(1.0) / float32(math.Sqrt(float64(Er)))
+	lgain := float32(float32(1.0) / float32(math.Sqrt(float64(El))))
+	rgain := float32(float32(1.0) / float32(math.Sqrt(float64(Er))))
 	for j := 0; j < n; j++ {
-		l := mid32 * float32(X[j])
+		l := float32(mid32 * float32(X[j]))
 		r := float32(Y[j])
 		X[j] = float64(lgain * (l - r))
 		Y[j] = float64(rgain * (l + r))

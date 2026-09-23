@@ -663,7 +663,9 @@ func (e *Encoder) encodeDecidedFrame(pcm []float64, frameSize, nFrames, maxDataB
 			if err := e.selectSILKInternalRate(frameSize, decision.bandwidth); err != nil {
 				return nil, err
 			}
-			if silkBW, ok := nativeSilkFramingBandwidth(e.silkSampleRate); ok {
+			if e.libopusModePolicy {
+				e.applyLBRRCoded(decision.lbrrCoded)
+			} else if silkBW, ok := nativeSilkFramingBandwidth(e.silkSampleRate); ok {
 				e.updateLBRRCoded(framing.ModeSILKOnly, silkBW, e.sampleRate/frameSize)
 			}
 			out, err = e.encodeSILKOnlyPacket(pcm, raw, celtPCM, nFrames, celtToSilk)
@@ -720,7 +722,11 @@ func (e *Encoder) encodeDecidedFrame(pcm []float64, frameSize, nFrames, maxDataB
 	}
 
 	if hybrid {
-		e.updateLBRRCoded(framing.ModeHybrid, bw, e.sampleRate/frameSize)
+		if e.libopusModePolicy {
+			e.applyLBRRCoded(decision.lbrrCoded)
+		} else {
+			e.updateLBRRCoded(framing.ModeHybrid, bw, e.sampleRate/frameSize)
+		}
 		out, redundancyEmitted, err := e.encodeHybridPacket(pcm, celtPCM, nFrames, bw, redundancy, celtToSilk, redundancyBytes, silkPrefill, decision.silkPrefill2, maxDataBytes, decision.bitrate)
 		if err == nil {
 			// to_celt: after the deferred frame the real switch happens, so the
@@ -1816,6 +1822,9 @@ func (e *Encoder) selectCELTEncoder(frameSize int) error {
 	next.SetSignalType(e.effectiveSignalType())
 	next.SetEnergyMask(e.surroundEnergyMask)
 	next.SetUpsample(e.celtUpsample())
+	// OPUS_SET_PACKET_LOSS_PERC is forwarded to celt_enc (it biases the
+	// coarse-energy intra decision and the prefilter tapset).
+	next.SetLossRate(e.packetLossPerc)
 	if next != e.celtEncoder {
 		next.CopyStateFrom(e.celtEncoder)
 		e.celtEncoder = next

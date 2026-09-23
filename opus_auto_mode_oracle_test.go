@@ -32,6 +32,7 @@ func TestAutoModeOracle(t *testing.T) {
 		exact      bool
 		frameMs    int // 0 = 20
 		rate       int // 0 = 48000
+		lossPerc   int // > 0 also enables in-band FEC
 	}
 	var cases []autoCase
 	for _, app := range []string{"voip", "audio"} {
@@ -93,6 +94,28 @@ func TestAutoModeOracle(t *testing.T) {
 			}
 		}
 	}
+	// In-band FEC: decide_fec picks LBRR_coded from the equivalent rate and,
+	// above 5 % loss, narrows the bandwidth until the rate can carry it.
+	for _, lossPerc := range []int{5, 20, 40} {
+		for _, channels := range []int{1, 2} {
+			for _, bitrate := range []int{12000, 16000, 24000, 48000} {
+				for _, rate := range []int{16000, 48000} {
+					cases = append(cases, autoCase{
+						name:       fmt.Sprintf("voip/voice/ch%d/%dk/in%dk/loss%d", channels, bitrate/1000, rate/1000, lossPerc),
+						bitrate:    bitrate,
+						vbr:        true,
+						channels:   channels,
+						complexity: 5,
+						signal:     "voice",
+						app:        "voip",
+						exact:      true,
+						rate:       rate,
+						lossPerc:   lossPerc,
+					})
+				}
+			}
+		}
+	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			frameMs := tc.frameMs
@@ -108,7 +131,7 @@ func TestAutoModeOracle(t *testing.T) {
 			if tc.vbr {
 				vbrArg = "1"
 			}
-			ref := runCELTOracleCmd(t, "ref-speech", "--auto-enc", strconv.Itoa(rate), "ref-speech", strconv.Itoa(frames), strconv.Itoa(tc.bitrate), vbrArg, strconv.Itoa(tc.channels), strconv.Itoa(tc.complexity), tc.signal, tc.app, strconv.Itoa(frameMs))
+			ref := runCELTOracleCmd(t, "ref-speech", "--auto-enc", strconv.Itoa(rate), "ref-speech", strconv.Itoa(frames), strconv.Itoa(tc.bitrate), vbrArg, strconv.Itoa(tc.channels), strconv.Itoa(tc.complexity), tc.signal, tc.app, strconv.Itoa(frameMs), strconv.Itoa(tc.lossPerc))
 			app := ApplicationVOIP
 			if tc.app == "audio" {
 				app = ApplicationAudio
@@ -129,6 +152,10 @@ func TestAutoModeOracle(t *testing.T) {
 			}
 			enc.SetVBR(tc.vbr)
 			enc.SetVBRConstraint(true)
+			if tc.lossPerc > 0 {
+				enc.SetInbandFEC(true)
+				enc.SetPacketLossPerc(tc.lossPerc)
+			}
 			if err := enc.SetComplexity(tc.complexity); err != nil {
 				t.Fatal(err)
 			}

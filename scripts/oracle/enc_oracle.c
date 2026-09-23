@@ -369,7 +369,7 @@ static int parse_bitrate_schedule(const char *s, int *out, int max)
 
 static int run_auto_encoder_oracle(int argc, char **argv)
 {
-    int rate, frames, bitrate, complexity, vbr, channels, frame_size, err, frame, app, frame_ms;
+    int rate, frames, bitrate, complexity, vbr, channels, frame_size, err, frame, app, frame_ms, loss_perc;
     int schedule[AUTO_ENC_MAX_SCHEDULE], nschedule;
     const char *fixture, *signal, *appname;
     OpusEncoder *enc;
@@ -377,7 +377,7 @@ static int run_auto_encoder_oracle(int argc, char **argv)
     unsigned char packet[1500];
 
     if (argc < 4) {
-        fprintf(stderr, "usage: %s --auto-enc <rate> <fixture> [frames] [bitrate] [vbr] [channels] [complexity] [signal] [app]\n", argv[0]);
+        fprintf(stderr, "usage: %s --auto-enc <rate> <fixture> [frames] [bitrate] [vbr] [channels] [complexity] [signal] [app] [frame_ms] [loss_perc]\n", argv[0]);
         return 2;
     }
     rate = atoi(argv[2]);
@@ -395,6 +395,7 @@ static int run_auto_encoder_oracle(int argc, char **argv)
     signal = (argc >= 10) ? argv[9] : "voice";
     appname = (argc >= 11) ? argv[10] : "voip";
     frame_ms = (argc >= 12) ? atoi(argv[11]) : 20;
+    loss_perc = (argc >= 13) ? atoi(argv[12]) : 0;
     if (rate != 8000 && rate != 12000 && rate != 16000 && rate != 24000 && rate != 48000) {
         fprintf(stderr, "--auto-enc rate must be 8000, 12000, 16000, 24000 or 48000\n");
         return 2;
@@ -414,10 +415,14 @@ static int run_auto_encoder_oracle(int argc, char **argv)
     opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(complexity));
     opus_encoder_ctl(enc, OPUS_SET_VBR(vbr ? 1 : 0));
     opus_encoder_ctl(enc, OPUS_SET_VBR_CONSTRAINT(1));
+    if (loss_perc > 0) {
+        opus_encoder_ctl(enc, OPUS_SET_INBAND_FEC(1));
+        opus_encoder_ctl(enc, OPUS_SET_PACKET_LOSS_PERC(loss_perc));
+    }
     if (strcmp(signal, "voice") == 0) opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
     else if (strcmp(signal, "music") == 0) opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
-    fprintf(stderr, "AUTO_ENC_ORACLE rate=%d frame_size=%d fixture=%s frames=%d bitrate=%d vbr=%d channels=%d complexity=%d signal=%s app=%s\n",
-            rate, frame_size, fixture, frames, bitrate, vbr, channels, complexity, signal, appname);
+    fprintf(stderr, "AUTO_ENC_ORACLE rate=%d frame_size=%d fixture=%s frames=%d bitrate=%d vbr=%d channels=%d complexity=%d signal=%s app=%s loss=%d\n",
+            rate, frame_size, fixture, frames, bitrate, vbr, channels, complexity, signal, appname, loss_perc);
     for (frame = 0; frame < frames; frame++) {
         int n, b;
         int fb = schedule[frame < nschedule ? frame : nschedule - 1];

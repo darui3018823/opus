@@ -460,6 +460,22 @@ func (e *Encoder) EncodePrefill(samples []float64, startBand int) error {
 	return err
 }
 
+// SetLossRate is OPUS_SET_PACKET_LOSS_PERC on the CELT encoder: the expected
+// packet loss biases the coarse-energy intra decision and the prefilter's
+// tapset choice.
+func (e *Encoder) SetLossRate(perc int) {
+	if perc < 0 {
+		perc = 0
+	}
+	if perc > 100 {
+		perc = 100
+	}
+	e.lossRate = perc
+}
+
+// LossRate reports OPUS_SET_PACKET_LOSS_PERC.
+func (e *Encoder) LossRate() int { return e.lossRate }
+
 // SetPrediction is CELT_SET_PREDICTION: 0 disables the pitch prefilter and
 // forces intra energy coding, 1 only disables the prefilter, 2 enables both
 // (the normal setting).
@@ -1664,6 +1680,7 @@ func (e *Encoder) CopyConfigFrom(src *Encoder) {
 	e.dtx = src.dtx
 	e.disableInv = src.disableInv
 	e.upsample = src.upsample
+	e.lossRate = src.lossRate
 	e.energyMask = append(e.energyMask[:0], src.energyMask...)
 }
 

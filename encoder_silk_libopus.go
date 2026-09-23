@@ -97,7 +97,7 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 			return nil, err
 		}
 	}
-	e.updateLBRRCoded(framing.ModeSILKOnly, d.bandwidth, frameRate)
+	e.applyLBRRCoded(d.lbrrCoded)
 
 	// bits_target = min(8*(max_data_bytes - redundancy_bytes),
 	// bitrate_to_bits(bitrate)) - 8; SILK gets all of it.

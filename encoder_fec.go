@@ -322,6 +322,16 @@ func (e *Encoder) streamChannelsOrInput() int {
 	return e.channels
 }
 
+// applyLBRRCoded pushes a decision already made for the packet
+// (decideLibopusMode runs decide_fec once, as opus_encode_native does).
+func (e *Encoder) applyLBRRCoded(coded bool) {
+	if e.silkEncoder == nil {
+		return
+	}
+	e.lbrrCoded = coded
+	e.silkEncoder.SetLBRRCoded(coded)
+}
+
 // updateLBRRCoded runs the per-packet FEC decision for a SILK-only or
 // hybrid packet coded at bandwidth and pushes LBRR_coded to the SILK encoder.
 func (e *Encoder) updateLBRRCoded(mode, bandwidth, frameRate int) {

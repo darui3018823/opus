@@ -125,6 +125,7 @@ type modeDecision struct {
 	toCelt          bool
 	silkPrefill     bool
 	silkPrefill2    bool // silk_bw_switch: re-init keeping the LP transition
+	lbrrCoded       bool // decide_fec for the packet (libopus policy)
 	redundancyBytes int
 	// bitrate is st->bitrate_bps for the packet (rounded to cbr_bytes in CBR).
 	bitrate int
@@ -333,6 +334,13 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 			bandwidth = detected
 		}
 	}
+	// decide_fec: the packet's FEC flag, which also narrows the bandwidth
+	// until the rate can carry the redundant frames when the loss is over
+	// 5 % (opus_encode_native calls it with the packet's equivalent rate,
+	// and a CELT-only packet always clears it).
+	d.lbrrCoded, bandwidth = decideFEC(e.useInbandFEC, e.packetLossPerc, e.lbrrCoded, mode, bandwidth, equivRate)
+	e.lbrrCoded = d.lbrrCoded
+
 	// CELT mode doesn't support mediumband, use wideband instead.
 	if mode == framing.ModeCELTOnly && bandwidth == framing.BandwidthMediumband {
 		bandwidth = framing.BandwidthWideband

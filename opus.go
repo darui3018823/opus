@@ -718,10 +718,12 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 	if e.libopusModePolicy {
 		// The frame's CELT input tail becomes the next packet's tmp_prefill
 		// once this packet is done (a SILK prefill fades the current one);
-		// a SILK DTX packet returns before that.
+		// a SILK DTX packet returns before that. The tail is the unfaded
+		// input: celtPCM is replaced by faded copies below.
+		tail := celtPCM
 		defer func() {
 			if !e.silkEncoderDTX() {
-				e.rememberCELTPrefillTail(celtPCM)
+				e.rememberCELTPrefillTail(tail)
 			}
 		}()
 	}

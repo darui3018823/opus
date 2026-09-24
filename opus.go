@@ -898,7 +898,13 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 	if e.libopusModePolicy {
 		// A CELT-only packet after a SILK/hybrid one (only possible below
 		// 10 ms, where the switch is not deferred) starts from a reset,
-		// prefilled CELT state without prediction.
+		// prefilled CELT state without prediction. A previous hybrid
+		// packet's high-band attenuation fades out (gain_fade to unity).
+		if e.prevHBGain < 1 {
+			faded := append([]float64(nil), celtPCM...)
+			applyGainFade(faded, e.prevHBGain, 1, e.channels, e.sampleRate)
+			celtPCM = faded
+		}
 		e.prevHBGain = 1
 		if e.prevMode >= 0 && e.prevMode != framing.ModeCELTOnly {
 			if err := e.celtModeTransition(0); err != nil {

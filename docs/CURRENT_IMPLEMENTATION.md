@@ -1101,6 +1101,18 @@ does), their transitions, DTX and FEC, and libopus's TOC-only "PLC frames"
 when the budget is too small; the sweep's 2796 configurations are all
 byte-identical.
 
+The multistream, surround and projection encoders take the libopus policy
+too (`SetModePolicy`): `opus_multistream_encode_native`'s rate allocation
+(surround or ambisonics), per-stream packet budget and repacketized framing;
+mapping family 1's surround analysis and energy mask (VBR target, dynalloc,
+trim and SILK rate), the LFE stream (`OPUS_SET_LFE`), the forced CELT-only
+coupled / ambisonics streams, and the projection encoder's float32 mixing
+with the tonality analysis on the unmixed input.
+`TestMultistreamEncoderOracle` compares 171 configurations (generic
+multistream, families 0/1/255 with 1-11 channels, families 2/3 with 4-16
+channels; VBR/CVBR/CBR, 2.5-60 ms, 16/48 kHz, FEC, DTX, int16 and rate
+schedules), all byte-identical.
+
 Bit-exact convergence verification on 2026-09-15: SILK packet-loss
 concealment, comfort noise, and post-loss glue are sample-exact against
 libopus 1.6.1 for 8/12/16 kHz mono and stereo, 10-60 ms frames, single and
@@ -1442,10 +1454,10 @@ reference comparison.
   sample-accurate per-link seek metadata, but does not provide multiplexed-stream
   demux.
 - Multistream/surround provide core encode/decode, mapping, aggregate bitrate,
-  per-stream state access, and channel-role energy-mask analysis for CELT
-  allocation trim. They do not yet mirror every libopus multistream CTL or the
-  remaining surround-mask consumers: per-band dynalloc, mask-aware VBR and
-  SILK/hybrid rate offsets, and full LFE-special CELT policy.
+  per-stream state access, and libopus's surround analysis and energy mask
+  (VBR target, dynalloc, trim and SILK/hybrid rate) with LFE coding; under
+  `ModePolicyLibopus` they are byte-identical to libopus. They do not mirror
+  every libopus multistream CTL.
 - Public PLC covers CELT-only, SILK-only, and hybrid streams for mono, stereo,
   multistream, and surround output.
 - Top-level SILK/hybrid encoder selection is voice-oriented and now accounts

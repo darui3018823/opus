@@ -273,8 +273,19 @@ func runMSOracleCell(t *testing.T, c msCell) {
 			cStreams, _, errC := splitMultistreamPackets(r.packet, ms.streams, c.rate)
 			if errGo == nil && errC == nil {
 				for s := range goStreams {
-					t.Logf("  stream %d: Go %d B TOC %#x / C %d B TOC %#x equal=%v", s, len(goStreams[s]), goStreams[s][0],
-						len(cStreams[s]), cStreams[s][0], bytes.Equal(goStreams[s], cStreams[s]))
+					at := -1
+					for i := 0; i < min(len(goStreams[s]), len(cStreams[s])); i++ {
+						if goStreams[s][i] != cStreams[s][i] {
+							at = i
+							break
+						}
+					}
+					t.Logf("  stream %d: Go %d B TOC %#x / C %d B TOC %#x equal=%v first diff at byte %d", s, len(goStreams[s]), goStreams[s][0],
+						len(cStreams[s]), cStreams[s][0], bytes.Equal(goStreams[s], cStreams[s]), at)
+					if at >= 0 && len(goStreams[s]) <= 64 {
+						t.Logf("    Go %x", goStreams[s])
+						t.Logf("    C  %x", cStreams[s])
+					}
 				}
 			}
 		}
@@ -295,14 +306,65 @@ func TestMultistreamEncoderOracle(t *testing.T) {
 	var cells []msCell
 	base := msCell{rate: 48000, complexity: 5, frameUs: 20000, frames: 25, vbr: true, constrained: true,
 		signal: "auto", app: "audio", fixture: "mc"}
-	for _, fam := range []int{-1, 1} {
-		for _, ch := range []int{3, 6, 8} {
-			for _, br := range []int{0, 64000, 256000} {
-				c := base
-				c.family, c.channels, c.bitrate = fam, ch, br
-				cells = append(cells, c)
-			}
+	add := func(mod func(*msCell)) {
+		c := base
+		mod(&c)
+		cells = append(cells, c)
+	}
+	// Layouts and rates: the generic encoder, every family-1 layout, the
+	// families 0 and 255, and the ambisonics families 2 and 3.
+	layouts := []struct{ family, channels int }{
+		{-1, 3}, {-1, 6}, {-1, 8},
+		{1, 1}, {1, 2}, {1, 3}, {1, 4}, {1, 5}, {1, 6}, {1, 7}, {1, 8},
+		{0, 1}, {0, 2}, {255, 3}, {255, 11},
+		{2, 4}, {2, 9}, {2, 11}, {3, 4}, {3, 9}, {3, 16},
+	}
+	for _, l := range layouts {
+		for _, perChannel := range []int{0, 12000, 40000} {
+			add(func(c *msCell) {
+				c.family, c.channels = l.family, l.channels
+				c.bitrate = perChannel * l.channels
+			})
 		}
+	}
+	// Rate control, packet durations, input rates, applications, signal
+	// hints, complexities and int16 input on the 5.1 and ambisonics layouts.
+	for _, l := range []struct{ family, channels int }{{1, 6}, {1, 3}, {3, 9}, {2, 4}} {
+		for _, perChannel := range []int{8000, 24000} {
+			br := perChannel * l.channels
+			add(func(c *msCell) { c.family, c.channels, c.bitrate, c.vbr = l.family, l.channels, br, false })
+			add(func(c *msCell) { c.family, c.channels, c.bitrate, c.constrained = l.family, l.channels, br, false })
+			for _, us := range []int{2500, 10000, 40000, 60000} {
+				add(func(c *msCell) {
+					c.family, c.channels, c.bitrate, c.frameUs = l.family, l.channels, br, us
+					c.frames = max(10, 500000/us)
+				})
+			}
+			add(func(c *msCell) { c.family, c.channels, c.bitrate, c.rate = l.family, l.channels, br, 16000 })
+			add(func(c *msCell) {
+				c.family, c.channels, c.bitrate, c.app, c.signal = l.family, l.channels, br, "voip", "voice"
+			})
+			add(func(c *msCell) { c.family, c.channels, c.bitrate, c.signal = l.family, l.channels, br, "music" })
+			add(func(c *msCell) { c.family, c.channels, c.bitrate, c.complexity = l.family, l.channels, br, 10 })
+			add(func(c *msCell) { c.family, c.channels, c.bitrate, c.int16In = l.family, l.channels, br, true })
+			add(func(c *msCell) {
+				c.family, c.channels, c.bitrate, c.app, c.lossPerc = l.family, l.channels, br, "voip", 20
+			})
+			add(func(c *msCell) {
+				c.family, c.channels, c.bitrate, c.app, c.dtx, c.fixture = l.family, l.channels, br, "voip", true, "mc-gaps"
+				c.frames = 120
+			})
+		}
+		add(func(c *msCell) {
+			c.family, c.channels = l.family, l.channels
+			c.schedule = []int{}
+			for _, pc := range []int{8000, 48000, 16000} {
+				for i := 0; i < 8; i++ {
+					c.schedule = append(c.schedule, pc*l.channels)
+				}
+			}
+			c.bitrate = c.schedule[0]
+		})
 	}
 	for _, c := range cells {
 		t.Run(c.name(), func(t *testing.T) {

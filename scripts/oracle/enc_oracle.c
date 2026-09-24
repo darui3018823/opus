@@ -599,7 +599,8 @@ static double ms_fixture_sample(const char *fixture, long idx, int c, int rate)
    opus_multistream_surround_encoder_create with that mapping family, -1 is
    opus_multistream_encoder_create with the family-1 layout (family 255 above
    8 channels), and 3 is opus_projection_ambisonics_encoder_create. Options
-   as --auto-enc (vbrc, bw, maxbw, int16, lsb). */
+   as --auto-enc (vbrc, bw, maxbw, int16, lsb); trace=1 enables the stage
+   traces of every elementary encoder (interleaved by stream). */
 static int run_ms_encoder_oracle(int argc, char **argv)
 {
     int rate, frames, bitrate, complexity, vbr, channels, frame_size, err, frame, app, frame_us, loss_perc, use_dtx, family;
@@ -612,7 +613,7 @@ static int run_ms_encoder_oracle(int argc, char **argv)
     static float pcm[5760 * 255];
     static opus_int16 pcm16[5760 * 255];
     static unsigned char packet[1275 * 255];
-    int opt_vbrc = 1, opt_bw = 0, opt_maxbw = 0, opt_int16 = 0, opt_lsb = 0;
+    int opt_vbrc = 1, opt_bw = 0, opt_maxbw = 0, opt_int16 = 0, opt_lsb = 0, opt_trace = 0;
 
     if (argc < 15) {
         fprintf(stderr, "usage: %s --ms-enc <rate> <fixture> <frames> <bitrate> <vbr> <channels> <complexity> <signal> <app> <frame_ms> <loss_perc> <dtx> <family> [options]\n", argv[0]);
@@ -651,6 +652,7 @@ static int run_ms_encoder_oracle(int argc, char **argv)
             else if (strcmp(tok, "int16") == 0) opt_int16 = atoi(eq + 1);
             else if (strcmp(tok, "lsb") == 0) opt_lsb = atoi(eq + 1);
             else if (strcmp(tok, "notrace") == 0) (void)0;
+            else if (strcmp(tok, "trace") == 0) opt_trace = atoi(eq + 1);
             else { fprintf(stderr, "unknown option %s\n", tok); return 2; }
         }
     }
@@ -712,6 +714,7 @@ static int run_ms_encoder_oracle(int argc, char **argv)
             }
         }
         fprintf(stderr, "[CELT_ENC_INPUT_FRAME] frame=%d bitrate=%d\n", frame, bitrate);
+        oracle_trace_enabled = opt_trace;
         if (opt_int16) {
             for (b = 0; b < frame_size * channels; b++) {
                 double v = floor((double)pcm[b] * 32768.0 + 0.5);

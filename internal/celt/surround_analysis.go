@@ -174,7 +174,7 @@ func (a *SurroundAnalyzer) Analyze(pcm []float64, frameSize int) ([]float64, err
 	for i := 0; i < NumBands48000; i++ {
 		maskLogE[1][i] = min(maskLogE[0][i], maskLogE[2][i])
 	}
-	channelOffset := float32(0.5) * float32(celtLog2F32(float64(float32(2)/float32(a.channels-1))))
+	channelOffset := float32(float32(0.5) * float32(celtLog2F32(float64(float32(2)/float32(a.channels-1)))))
 	for c := range maskLogE {
 		for i := range maskLogE[c] {
 			maskLogE[c][i] += channelOffset

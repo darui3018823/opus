@@ -355,9 +355,9 @@ func msRepacketize(packet []byte, selfDelimited, pad bool, maxLen int) ([]byte, 
 		for _, f := range frames {
 			out = append(out, f...)
 		}
-		// The padding bytes are 0x01 (no extensions).
+		// Without extensions the padding is filled with zeros.
 		for len(out) < totSize {
-			out = append(out, 0x01)
+			out = append(out, 0)
 		}
 		return out, nil
 	}

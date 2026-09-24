@@ -199,8 +199,9 @@ go test -run='^$' -fuzz='^FuzzOggOpusReaderWriter$' -fuzztime=60s ./oggopus
 
 - The default `ModePolicyLegacy` makes the Go encoder's own mode and bandwidth
   decisions, which differ from libopus. `ModePolicyLibopus` reproduces libopus
-  for single-stream packets of every duration; the multistream, surround, and
-  projection encoders still use the Go decisions.
+  for single-stream packets of every duration and for the multistream,
+  surround (mapping families 0, 1 and 255), and projection / Ambisonics
+  (families 2 and 3) encoders, whose `SetModePolicy` selects it.
 - Byte identity is measured against libopus built without SIMD kernels; a
   libopus linked with SIMD kernels sums floats in a different order, so its
   CELT output differs.

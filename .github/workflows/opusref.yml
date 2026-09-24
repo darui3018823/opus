@@ -76,7 +76,7 @@ jobs:
       - name: Encoder bit-exactness vs the libopus oracle
         # CELT-only, hybrid, SILK, automatic mode, mode transitions, FEC and
         # DTX packets must stay byte-identical to libopus 1.6.1.
-        run: go test -tags opusref -count=1 -timeout 60m -run '^(TestCELTEncoderOracle|TestHybridEncoderOracle|TestSILKEncoder(InputPipeline|Stereo)Oracle.*|TestAutoModeOracle|TestAutoModeOracleSweep|TestAutoModeTransitionOracle|TestDTXOracle)$' .
+        run: go test -tags opusref -count=1 -timeout 60m -run '^(TestCELTEncoderOracle|TestHybridEncoderOracle|TestSILKEncoder(InputPipeline|Stereo)Oracle.*|TestAutoModeOracle|TestAutoModeOracleSweep|TestAutoModeTransitionOracle|TestDTXOracle|TestMultistreamEncoderOracle)$' .
 
       - name: Decoder reference (12/12 vectors)
         run: go test -tags opusref -count=1 -run TestCGORef .

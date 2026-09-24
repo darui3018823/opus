@@ -1467,4 +1467,35 @@ linked SIMD libopus stays a non-goal.
   configurations, all byte-identical.
 
 Remaining (encoder): the multistream, surround and projection encoders do
-not expose `ModePolicy`; the linked SIMD libopus stays a non-goal.
+not expose `ModePolicy` (done on 2026-09-24, below); the linked SIMD libopus
+stays a non-goal.
+
+### 2026-09-24: multistream, surround and projection encoders
+
+- `MultistreamEncoder.SetModePolicy` (inherited by `SurroundEncoder`) and
+  `ProjectionEncoder.SetModePolicy` select `opus_multistream_encode_native`:
+  surround_rate_allocation (also without a surround layout) or
+  ambisonics_rate_allocation, the CBR budget, each stream's out_data_bytes
+  (the last stream takes the rest; its CBR bitrate follows), OPUS_SET_BITRATE
+  clamped to [500, 750000 x channels], and the repacketizer's
+  self-delimited framing (padding zero-filled).
+- Family 1 with more than two channels: surround_analysis ported in float32,
+  the per-stream bandwidth from the aggregate rate (OPUS_AUTO gives
+  narrowband), forced CELT-only stereo coupled streams, OPUS_SET_LFE on the
+  LFE stream (CELT-only narrowband, clamped band energies, no transient / TF
+  / prefilter / tonality, max_decay 3, signalBandwidth 1), and the energy
+  mask in CELT (surround_dynalloc, surround_trim, compute_vbr's
+  surround_masking) and in the Opus layer (SILK rate offset, no HB_gain).
+- Family 2 forces CELT-only streams with ambisonics_rate_allocation;
+  family 3 mixes in float32 (mapping_matrix_multiply_channel_in_float) and
+  runs the tonality analysis on the unmixed input.
+- Fixes found on the way (all policies): OPUS_RESET_STATE clears CELT's
+  energy mask; transient_got_disabled is set for every frame whose
+  transient flag does not fit (silent frames advance consec_transient);
+  CELT VBR at OPUS_BITRATE_MAX codes the whole budget; a CELT-only packet
+  after a hybrid one fades HB_gain back to unity; a hybrid CELT share of
+  500 b/s or less leaves CELT at OPUS_BITRATE_MAX; SILK accepts rates below
+  5000 b/s (silk_LIMIT).
+- The oracle gains `--ms-enc` (the multistream, surround and projection
+  encoders, with a `trace=1` option); `TestMultistreamEncoderOracle`
+  (171 configurations, in the CI gate) is byte-identical.

@@ -282,7 +282,9 @@ func (e *ProjectionEncoder) encodeFloatDepth(pcm []float64, frameSize, lsbDepth 
 		}
 	}
 	mixed := pcm[:required]
-	if e.mappingFamily == MappingFamilyProjection {
+	if e.mappingFamily == MappingFamilyProjection && e.multistream.libopusPolicy {
+		mixed = e.mixing.multiplyFloat32(pcm, selectedFrameSize, e.channels, e.channels)
+	} else if e.mappingFamily == MappingFamilyProjection {
 		var err error
 		mixed, err = e.mixing.multiplyFloat64(mixed, frameSize, e.channels)
 		if err != nil {

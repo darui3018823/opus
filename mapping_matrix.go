@@ -108,6 +108,25 @@ func (m *MappingMatrix) multiplyFloat64(input []float64, frames, inputChannels i
 	return out, nil
 }
 
+// multiplyFloat32 is mapping_matrix_multiply_channel_in_float (the
+// projection encoder's input mixing under the libopus policy): each output
+// channel is the float32 sum over the input channels of coefficient x
+// sample, scaled by 1/32768. (The int16 variant gives the same values in
+// the float build.) outputs is the number of output channels computed.
+func (m *MappingMatrix) multiplyFloat32(input []float64, frames, inputChannels, outputs int) []float64 {
+	out := make([]float64, frames*outputs)
+	for i := 0; i < frames; i++ {
+		for row := 0; row < outputs; row++ {
+			var tmp float32
+			for col := 0; col < inputChannels; col++ {
+				tmp += float32(float32(m.data[col*m.rows+row]) * float32(input[i*inputChannels+col]))
+			}
+			out[i*outputs+row] = float64(float32(1.0/32768) * tmp)
+		}
+	}
+	return out
+}
+
 func identityMappingMatrix(channels int) (*MappingMatrix, error) {
 	data := make([]int16, channels*channels)
 	for i := 0; i < channels; i++ {

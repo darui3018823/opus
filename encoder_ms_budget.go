@@ -64,7 +64,7 @@ func (e *Encoder) surroundSILKRate(silkRate, bw int) int {
 		}
 	}
 	// Conservative rate reduction, we cut the masking in half.
-	maskingDepth := float32(maskSum/float32(end)) * float32(e.channels)
+	maskingDepth := float32(float32(maskSum/float32(end)) * float32(e.channels))
 	maskingDepth += 0.2
 	rateOffset := int(float32(float32(srate) * maskingDepth))
 	rateOffset = max(rateOffset, -2*silkRate/3)

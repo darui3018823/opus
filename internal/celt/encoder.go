@@ -652,8 +652,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	nbCompressedBytes := maxTargetBytes
 	vbrRate := 0
 	effectiveBytes := nbCompressedBytes - nbFilledBytes
-	if vbrOn {
-		// bitrate_to_bits(bitrate, Fs, frame_size) << BITRES
+	if vbrOn && e.bitrate > 0 {
+		// bitrate_to_bits(bitrate, Fs, frame_size) << BITRES (VBR without
+		// a bitrate, OPUS_BITRATE_MAX, codes the whole budget)
 		vbrRate = (e.bitrate * 6 / (6 * e.mode.SampleRate / frameSize)) << 3
 		effectiveBytes = vbrRate >> 6
 	}
@@ -984,9 +985,11 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	if lm > 0 && enc.ECTell()+3 <= totalBits {
 		enc.EncodeBitLogp(isTransient, 3)
 	} else {
+		// libopus sets transient_got_disabled whether or not the frame was
+		// transient (a silent frame too), which advances consec_transient.
+		transientGotDisabled = true
 		if isTransient {
 			isTransient = false
-			transientGotDisabled = true
 			computeSpectrum(false)
 			copy(logE2, logE)
 		}
@@ -1513,6 +1516,9 @@ func hybridHighBandActivity(pcm []float64, channels int) float64 {
 
 // Reset resets the encoder state.
 func (e *Encoder) Reset() {
+	// OPUS_RESET_STATE clears energy_mask too (it lies in the reset region):
+	// the multistream encoder sets it again before the next packet.
+	e.energyMask = e.energyMask[:0]
 	for c := range e.overlap {
 		for i := range e.overlap[c] {
 			e.overlap[c][i] = 0

@@ -268,8 +268,15 @@ func runMSOracleCell(t *testing.T, c msCell) {
 			identical++
 		} else if firstDiff < 0 {
 			firstDiff = f
-			t.Logf("frame %d: Go %d B / C %d B\n Go %x\n C  %x", f, len(pkt), len(r.packet),
-				pkt[:min(len(pkt), 24)], r.packet[:min(len(r.packet), 24)])
+			t.Logf("frame %d: Go %d B / C %d B", f, len(pkt), len(r.packet))
+			goStreams, _, errGo := splitMultistreamPackets(pkt, ms.streams, c.rate)
+			cStreams, _, errC := splitMultistreamPackets(r.packet, ms.streams, c.rate)
+			if errGo == nil && errC == nil {
+				for s := range goStreams {
+					t.Logf("  stream %d: Go %d B TOC %#x / C %d B TOC %#x equal=%v", s, len(goStreams[s]), goStreams[s][0],
+						len(cStreams[s]), cStreams[s][0], bytes.Equal(goStreams[s], cStreams[s]))
+				}
+			}
 		}
 	}
 	if identical != c.frames {
@@ -288,7 +295,7 @@ func TestMultistreamEncoderOracle(t *testing.T) {
 	var cells []msCell
 	base := msCell{rate: 48000, complexity: 5, frameUs: 20000, frames: 25, vbr: true, constrained: true,
 		signal: "auto", app: "audio", fixture: "mc"}
-	for _, fam := range []int{-1} {
+	for _, fam := range []int{-1, 1} {
 		for _, ch := range []int{3, 6, 8} {
 			for _, br := range []int{0, 64000, 256000} {
 				c := base

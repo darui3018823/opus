@@ -4,11 +4,11 @@ package celt
 // encoder without the tonality analysis: the VBR target in eighth bits for
 // this frame from the nominal base target, the dynalloc boost, the transient
 // estimate, the spectral depth and the temporal VBR follower. equivRate is
-// libopus equiv_rate; the surround masking terms are not used (energy_mask
-// is nil).
+// libopus equiv_rate; hasSurroundMask and surroundMasking are the surround
+// energy mask's presence and average masking.
 func computeVBR(baseTarget, lm, equivRate, lastCodedBands, C, intensity int, constrainedVBR bool,
 	stereoSaving float32, totBoost int, tfEstimate float32, maxDepth, temporalVBR float32,
-	analysis *AnalysisInfo, pitchChange bool) int {
+	analysis *AnalysisInfo, pitchChange, lfe, hasSurroundMask bool, surroundMasking float32) int {
 	codedBands := lastCodedBands
 	if codedBands == 0 {
 		codedBands = NumBands48000
@@ -51,7 +51,7 @@ func computeVBR(baseTarget, lm, equivRate, lastCodedBands, C, intensity int, con
 	// the identity in the float build).
 	target += int(float32(tfEstimate-float32(0.044)) * float32(target))
 	// Apply tonality boost (compensating for the average).
-	if analysis.Valid {
+	if analysis.Valid && !lfe {
 		tonal := analysis.Tonality - float32(0.15)
 		if tonal < 0 {
 			tonal = 0
@@ -62,6 +62,10 @@ func computeVBR(baseTarget, lm, equivRate, lastCodedBands, C, intensity int, con
 			tonalTarget += int(float32(codedBins<<3) * float32(0.8))
 		}
 		target = tonalTarget
+	}
+	if hasSurroundMask && !lfe {
+		surroundTarget := target + int(float32(surroundMasking*float32(codedBins<<3)))
+		target = max(target/4, surroundTarget)
 	}
 
 	{
@@ -76,10 +80,10 @@ func computeVBR(baseTarget, lm, equivRate, lastCodedBands, C, intensity int, con
 	}
 	// Make VBR less aggressive for constrained VBR because we can't keep a
 	// higher bitrate for long.
-	if constrainedVBR {
+	if (!hasSurroundMask || lfe) && constrainedVBR {
 		target = baseTarget + int(float32(0.67)*float32(target-baseTarget))
 	}
-	if tfEstimate < 0.2 {
+	if !hasSurroundMask && tfEstimate < 0.2 {
 		r := 96000 - equivRate
 		if r > 32000 {
 			r = 32000

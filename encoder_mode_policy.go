@@ -253,6 +253,9 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 	if frameSize < e.sampleRate/100 {
 		mode = framing.ModeCELTOnly
 	}
+	if e.lfe {
+		mode = framing.ModeCELTOnly
+	}
 
 	// Mode transitions to or from CELT-only carry a redundant CELT frame; a
 	// switch to CELT-only is deferred by one packet (the last SILK/hybrid
@@ -346,6 +349,9 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 	// CELT mode doesn't support mediumband, use wideband instead.
 	if mode == framing.ModeCELTOnly && bandwidth == framing.BandwidthMediumband {
 		bandwidth = framing.BandwidthWideband
+	}
+	if e.lfe {
+		bandwidth = framing.BandwidthNarrowband
 	}
 	// Chooses the appropriate mode for speech; never switch to/from
 	// CELT-only here.

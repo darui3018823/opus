@@ -161,6 +161,7 @@ func (e *SurroundEncoder) configureForPolicy() {
 	if !e.libopusPolicy {
 		for _, enc := range e.encoders {
 			enc.libopusForcedMode = -1
+			enc.lfe = false
 		}
 		e.configureSurroundStreams()
 		return
@@ -172,6 +173,10 @@ func (e *SurroundEncoder) configureForPolicy() {
 		enc := e.encoders[stream]
 		enc.SetPredictionDisabled(false)
 		_ = enc.SetForceChannels(ChannelsAuto)
+	}
+	if e.lfeStream >= 0 {
+		// opus_multistream_surround_encoder_init: OPUS_SET_LFE(1).
+		e.encoders[e.lfeStream].lfe = true
 	}
 }
 

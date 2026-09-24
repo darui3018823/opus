@@ -299,10 +299,12 @@ type Encoder struct {
 	// st->intensity), kept across frames so the hysteresis decision is stable.
 	// Zeroed by Reset, matching libopus OPUS_RESET_STATE.
 	intensity int
-	// energyMask is a per-frame, channel-major surround SMR supplied by the
-	// multistream surround analyzer. The first bounded consumer is allocation
-	// trim; later decisions deliberately remain independent.
+	// energyMask is st->energy_mask: the per-frame, channel-major surround
+	// SMR (21 bands per channel) of the multistream surround analysis; nil
+	// without one. lfe is st->lfe (OPUS_SET_LFE): the stream carries a
+	// low-frequency effects channel.
 	energyMask     []float64
+	lfe            bool
 	lastCodedBands int
 
 	// CVBR reservoir: accumulated bit surplus/deficit in Q8 bits. Positive means
@@ -428,8 +430,19 @@ func (e *Encoder) EncodeMax(samples []float64, maxBytes int) ([]byte, error) {
 // SetEnergyMask sets the transient per-frame surround SMR. It is internal to
 // the parent surround encoder and is copied so callers may reuse their buffer.
 func (e *Encoder) SetEnergyMask(mask []float64) {
+	if len(mask) == 0 {
+		e.energyMask = e.energyMask[:0]
+		return
+	}
 	e.energyMask = append(e.energyMask[:0], mask...)
 }
+
+// SetLFE is OPUS_SET_LFE: the stream is a low-frequency effects channel
+// (only the first bands are coded, no transient / TF / prefilter analysis).
+func (e *Encoder) SetLFE(lfe bool) { e.lfe = lfe }
+
+// LFE reports whether the stream is coded as a low-frequency effects channel.
+func (e *Encoder) LFE() bool { return e.lfe }
 
 // EncodeRedundant encodes a standalone fullband CELT frame of exactly nbytes,
 // used for the 5 ms redundant frame that smooths a hybrid->CELT transition. The
@@ -715,7 +728,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	tfChan := 0
 	tfEstimate := 0.0
 	weakTransient := false
-	if e.complexity >= 1 {
+	if e.complexity >= 1 && !e.lfe {
 		var tfEst32 float32
 		// Reduces the likelihood of energy instability on fricatives at low
 		// bitrate in hybrid mode.
@@ -734,7 +747,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// pitch search is enabled for this frame.
 	// libopus reads `tell` here, captured before the silence flag was coded
 	// (and replaced by the full budget on a silent frame).
-	pfEnabled := nbAvailableBytes > 12*ch && !shared && !silence && tell0+16 <= totalBits && !e.disablePF
+	pfEnabled := ((e.lfe && nbAvailableBytes > 3) || nbAvailableBytes > 12*ch) && !shared && !silence && tell0+16 <= totalBits && !e.disablePF
 	pf := e.runPrefilter(bufs, frameSize, ov, pfEnabled, float32(tfEstimate), nbAvailableBytes, toneFreq, toneishness, e.window32)
 	// pitch_change reads the previous period (clamped by run_prefilter) and
 	// gain, which are only replaced at the end of the frame.
@@ -821,6 +834,12 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 				hi := M * int(EBands48000[i+1])
 				// compute_band_energies / amp2Log2 / normalise_bands in float32.
 				amp := bandEnergy32(coeffs[lo:hi])
+				if e.lfe && i >= 2 && i < end {
+					// LFE: every band above the second is kept 40 dB below
+					// the first.
+					a := min(float32(amp), float32(float32(1e-4)*float32(bandE[c*nbEBands])))
+					amp = float64(max(a, float32(1e-15)))
+				}
 				bandE[c*nbEBands+i] = amp
 				logE[c*numBands+i] = amp2Log2Band(amp, i)
 				g := float32(normaliseGain32(amp))
@@ -875,10 +894,20 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		copy(logE2, logE)
 	}
 
+	// Surround masking between the channels of a multistream surround
+	// encoder (the energy mask): the average masking and its slope over the
+	// coded bands drive the VBR target and the allocation trim, and bands
+	// much less masked than that get a dynalloc boost.
+	var surroundDynalloc []float64
+	var surroundTrim, surroundMasking float32
+	if !shared && len(e.energyMask) > 0 && !e.lfe {
+		surroundDynalloc, surroundTrim, surroundMasking = surroundMaskAnalysis(e.energyMask, ch, numBands, max(2, e.lastCodedBands))
+	}
+
 	// Temporal VBR (libopus spec_avg follower), from the unbiased band log
-	// energies of the time-domain transient decision.
+	// energies of the time-domain transient decision (not for LFE).
 	var temporalVBR float32
-	{
+	if !e.lfe {
 		follow := float32(-10)
 		var frameAvg, offset float32
 		if isTransient {
@@ -915,7 +944,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// to limit pre-echo. libopus runs this at complexity>=5 on non-LFE frames
 	// whenever the transient flag still fits the budget (also on the first
 	// frame, against the zero energy history); silent frames returned above.
-	if lm > 0 && enc.ECTell()+3 <= totalBits && !isTransient && e.complexity >= 5 {
+	if lm > 0 && enc.ECTell()+3 <= totalBits && !isTransient && e.complexity >= 5 && !e.lfe {
 		threshold := 1.0 // libopus GCONST(1.f)
 		if patchTransientDecision(logE, e.prevBandEnergies, numBands, start, end, ch, threshold) {
 			isTransient = true
@@ -967,7 +996,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// unbiased band energies; the boost symbols are written later
 	// (dynallocEncode), after spread, to keep the bitstream in decoder order.
 	dyn := dynallocAnalysis32Scratch(logE, logE2, e.prevBandEnergies, numBands, start, end, ch, e.lsbDepth, lm,
-		isTransient, vbrOn, constrainedVBR, effectiveBytes, nil, toneFreq, toneishness, &e.analysis, &e.dynalloc)
+		isTransient, vbrOn, constrainedVBR, effectiveBytes, e.lfe, surroundDynalloc, toneFreq, toneishness, &e.analysis, &e.dynalloc)
 	offsets, importance := dyn.offsets, dyn.importance
 
 	// Time-frequency resolution. tf_analysis runs a Viterbi search over per-band
@@ -975,7 +1004,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// very low bitrate, below complexity 2 and on pure tones.
 	tfRes := scratchInt(&e.frame.tfRes, numBands)
 	tfSelect := 0
-	enableTFAnalysis := effectiveBytes >= 15*ch && !shared && e.complexity >= 2 && toneishness < 0.98
+	enableTFAnalysis := effectiveBytes >= 15*ch && !shared && e.complexity >= 2 && !e.lfe && toneishness < 0.98
 	if enableTFAnalysis {
 		lambda := 20480/effectiveBytes + 2
 		if lambda < 80 {
@@ -1061,6 +1090,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	spread := e.lastSpread
 	if enc.ECTell()+4 <= totalBits {
 		switch {
+		case e.lfe:
+			e.tapsetDecision = 0
+			spread = spreadNormal
 		case shared:
 			if e.complexity == 0 {
 				spread = spreadNone
@@ -1086,6 +1118,10 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	e.lastSpread = spread
 	etr(enc, "spread")
 
+	// For LFE, everything interesting is in the first band.
+	if e.lfe {
+		offsets[0] = min(8, effectiveBytes/3)
+	}
 	// Dynamic allocation boosts (decided above; written here in decoder order).
 	dynallocEncode(enc, offsets, numBands, start, end, lm, ch, totalBits)
 	etr(enc, "dynalloc")
@@ -1113,14 +1149,6 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 
 	// Allocation trim (spectral tilt + stereo correlation).
-	surroundTrim := 0.0
-	if len(e.energyMask) >= ch*numBands && start == 0 {
-		maskEnd := max(2, e.lastCodedBands)
-		if maskEnd > end {
-			maskEnd = end
-		}
-		surroundTrim = surroundMaskTrim(e.energyMask, ch, numBands, maskEnd)
-	}
 	allocTrim := 5
 	{
 		totalBoost := 0
@@ -1128,7 +1156,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			totalBoost += offsets[i]
 		}
 		if enc.TellFrac()+(6<<3) <= totalBits<<3-totalBoost {
-			if start > 0 {
+			if start > 0 || e.lfe {
 				e.stereoSaving = 0
 			} else {
 				allocTrim = allocTrimAnalysis32(X, logE, numBands, end, lm, ch, frameLen, &e.analysis, &e.stereoSaving,
@@ -1170,7 +1198,8 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 			baseTarget += e.vbrOffset >> uint(lmDiff)
 		}
 		target := computeVBR(baseTarget, lm, equivRate, e.lastCodedBands, ch, e.intensity, constrainedVBR,
-			e.stereoSaving, dyn.totBoost, float32(tfEstimate), dyn.maxDepth, temporalVBR, &e.analysis, pitchChange)
+			e.stereoSaving, dyn.totBoost, float32(tfEstimate), dyn.maxDepth, temporalVBR, &e.analysis, pitchChange,
+			e.lfe, len(e.energyMask) > 0, surroundMasking)
 		e.lastTrace.VBRTarget, e.lastTrace.VBRBaseTarget, e.lastTrace.LastCodedBandsIn = target, baseTarget, e.lastCodedBands
 		e.lastTrace.StereoSaving, e.lastTrace.TotBoost, e.lastTrace.MaxDepth, e.lastTrace.EquivRate = e.stereoSaving, dyn.totBoost, dyn.maxDepth, equivRate
 		// The current offset is removed from the target and the space used
@@ -1739,6 +1768,9 @@ func (e *Encoder) SetAnalysis(info AnalysisInfo) { e.analysis = info }
 // signalBandwidth is the last band the allocation may keep: end-1 without
 // the analysis, otherwise the detected bandwidth floored by the bitrate.
 func (e *Encoder) signalBandwidth(end, equivRate int) int {
+	if e.lfe {
+		return 1
+	}
 	if !e.analysis.Valid {
 		return end - 1
 	}

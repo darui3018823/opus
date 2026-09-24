@@ -401,8 +401,11 @@ func (e *Encoder) SetBitrate(bitrate int) error {
 	// libopus has no upper limit (MAX_TARGET_RATE_BPS is unused): the SNR
 	// table saturates, and the Opus layer passes the whole packet rate for
 	// stereo streams, which silk_stereo_LR_to_MS splits between mid and side.
-	if bitrate < 5000 {
-		return fmt.Errorf("bitrate must be at least 5000 bps, got %d", bitrate)
+	// encControl->bitRate may be below 5000 b/s (a multistream stream or
+	// a surround-masked SILK rate): the frame target is then limited to
+	// [bitrate, 5000] (silk_LIMIT).
+	if bitrate <= 0 {
+		return fmt.Errorf("bitrate must be positive, got %d", bitrate)
 	}
 	e.bitrate = bitrate
 	if e.side != nil {

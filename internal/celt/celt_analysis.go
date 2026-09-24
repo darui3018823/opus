@@ -799,52 +799,67 @@ func spectralTonalitySlope(X, logE []float64, numBands, end, lm, C, frameLen int
 	return math.Max(-1, math.Min(1, slope/64))
 }
 
-// surroundMaskTrim isolates libopus' mask-slope contribution to allocation
-// trim. The per-band dynalloc and VBR consumers are intentionally left for
-// separate measured decisions.
-func surroundMaskTrim(mask []float64, channels, numBands, maskEnd int) float64 {
-	if channels < 1 || maskEnd < 2 || len(mask) < channels*numBands {
-		return 0
-	}
-	var maskAverage, slope float64
+// surroundMaskAnalysis is celt_encode_with_ec's surround masking block:
+// from the energy mask over the first maskEnd bands it returns the
+// per-band dynalloc boosts (surround_dynalloc), the allocation trim offset
+// (surround_trim, 1/64 units) and the average masking (surround_masking).
+func surroundMaskAnalysis(mask []float64, C, nbEBands, maskEnd int) ([]float64, float32, float32) {
+	var maskAvg, diff float32
 	count := 0
-	for channel := 0; channel < channels; channel++ {
-		for band := 0; band < maskEnd; band++ {
-			value := math.Max(-2, math.Min(0.25, mask[channel*numBands+band]))
-			if value > 0 {
-				value *= 0.5
+	for c := 0; c < C; c++ {
+		for i := 0; i < maskEnd; i++ {
+			m := max(min(float32(mask[nbEBands*c+i]), 0.25), -2)
+			if m > 0 {
+				m = float32(0.5) * m
 			}
-			width := int(EBands48000[band+1] - EBands48000[band])
-			maskAverage += float64(value * float64(width))
+			width := int(EBands48000[i+1] - EBands48000[i])
+			maskAvg += float32(m * float32(width))
 			count += width
-			slope += float64(value * float64(1+2*band-maskEnd))
+			diff += float32(m * float32(1+2*i-maskEnd))
 		}
 	}
-	if count == 0 {
-		return 0
+	maskAvg = maskAvg / float32(count)
+	maskAvg += 0.2
+	diff = float32(diff*6) / float32(C*(maskEnd-1)*(maskEnd+1)*maskEnd)
+	// Again, being conservative.
+	diff = float32(0.5) * diff
+	diff = max(min(diff, 0.031), -0.031)
+	// Find the band that's in the middle of the coded spectrum.
+	midband := 0
+	for EBands48000[midband+1] < EBands48000[maskEnd]/2 {
+		midband++
 	}
-	maskAverage = maskAverage/float64(count) + 0.2
-	slope *= 6 / float64(channels*(maskEnd-1)*(maskEnd+1)*maskEnd)
-	slope *= 0.5
-	slope = math.Max(-0.031, math.Min(0.031, slope))
-
-	middleBand := 0
-	for middleBand+1 < maskEnd && EBands48000[middleBand+1] < EBands48000[maskEnd]/2 {
-		middleBand++
-	}
-	unmaskedBands := 0
-	for band := 0; band < maskEnd; band++ {
-		unmask := mask[band]
-		for channel := 1; channel < channels; channel++ {
-			unmask = math.Max(unmask, mask[channel*numBands+band])
+	dynalloc := make([]float64, nbEBands)
+	countDynalloc := 0
+	for i := 0; i < maskEnd; i++ {
+		lin := maskAvg + float32(diff*float32(i-midband))
+		unmask := float32(mask[i])
+		if C == 2 {
+			unmask = max(unmask, float32(mask[nbEBands+i]))
 		}
-		unmask = math.Min(unmask, 0) - (maskAverage + float64(slope*float64(band-middleBand)))
+		unmask = min(unmask, 0)
+		unmask -= lin
 		if unmask > 0.25 {
-			unmaskedBands++
+			dynalloc[i] = float64(unmask - 0.25)
+			countDynalloc++
 		}
 	}
-	if unmaskedBands >= 3 && maskAverage+0.25 > 0 {
-		return 0
+	if countDynalloc >= 3 {
+		// If we need dynalloc in many bands, it's probably because our
+		// initial masking rate was too low.
+		maskAvg += 0.25
+		if maskAvg > 0 {
+			// Something went really wrong in the original calculations,
+			// disabling masking.
+			maskAvg = 0
+			diff = 0
+			clear(dynalloc[:maskEnd])
+		} else {
+			for i := 0; i < maskEnd; i++ {
+				dynalloc[i] = float64(max(0, float32(dynalloc[i])-0.25))
+			}
+		}
 	}
-	return 64 * slope
+	maskAvg += 0.2
+	return dynalloc, float32(64 * diff), maskAvg
 }

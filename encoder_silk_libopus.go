@@ -105,8 +105,8 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 	if b := 8 * (maxDataBytes - d.redundancyBytes); b < bits {
 		bits = b
 	}
-	silkRate := bitsToBitrate(bits-8, e.sampleRate, frameSize)
-	if silkRate < 5000 {
+	silkRate := e.surroundSILKRate(bitsToBitrate(bits-8, e.sampleRate, frameSize), d.bandwidth)
+	if silkRate < 5000 && !e.libopusModePolicy {
 		silkRate = 5000
 	}
 	if err := e.silkEncoder.SetBitrate(silkRate); err != nil {

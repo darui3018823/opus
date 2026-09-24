@@ -42,13 +42,17 @@ func (e *Encoder) frameTargetRate(nFrames, frame, tell int) int {
 		bitsBalance := tell - e.nBitsUsedLBRR - nBits*frame
 		target -= bitsBalance * 1000 / silkBitReservoirDecayTimeMs
 	}
-	if target > e.bitrate {
-		target = e.bitrate
+	// Never exceed input bitrate.
+	return silkLimit(target, e.bitrate, 5000)
+}
+
+// silkLimit is silk_LIMIT: a clamped to the range between the two limits,
+// in either order.
+func silkLimit(a, limit1, limit2 int) int {
+	if limit1 > limit2 {
+		return max(limit2, min(a, limit1))
 	}
-	if target < 5000 {
-		target = 5000
-	}
-	return target
+	return max(limit1, min(a, limit2))
 }
 
 // finishPacketBitReservoir updates nBitsExceeded once the packet's SILK bits

@@ -40,13 +40,7 @@ func (e *Encoder) Prefill(pcm []float64) {
 		right := floatFrameToInt16(e.side.frontEndFrame(r, false))
 		// TargetRate_bps of the 10 ms prefill: the bitrate less the bit
 		// reservoir excess (no LBRR share), clamped to [5000, bitrate].
-		total := e.bitrate - e.nBitsExceeded*1000/silkBitReservoirDecayTimeMs
-		if total > e.bitrate {
-			total = e.bitrate
-		}
-		if total < 5000 {
-			total = 5000
-		}
+		total := silkLimit(e.bitrate-e.nBitsExceeded*1000/silkBitReservoirDecayTimeMs, e.bitrate, 5000)
 		predBefore := e.stereoState.predPrevQ13
 		ms := e.stereoState.lrToMS(left, right, fsKHz, n, int32(total), e.speechActivityQ8, e.toMono)
 		e.lastPrefillStereo = StereoFrameTrace{Ix: ms.ix, MidOnly: ms.midOnly, Rates: ms.midSideRates, TotalRate: total,

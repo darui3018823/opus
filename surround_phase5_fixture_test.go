@@ -96,7 +96,7 @@ func TestSurroundPhase5FixturesCoverChannelRoles(t *testing.T) {
 	}
 }
 
-func TestSurroundMaskTrimImprovesCenterAtIdenticalBytes(t *testing.T) {
+func TestSurroundMaskImprovesCenter(t *testing.T) {
 	const (
 		rate      = 48000
 		channels  = 6
@@ -112,7 +112,7 @@ func TestSurroundMaskTrimImprovesCenterAtIdenticalBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Package-private baseline used only to isolate the trim decision. Production
+	// Package-private baseline used only to isolate the masking. Production
 	// family-1 encoders always retain the analyzer callback.
 	withoutMask.beforeEncodeFloat = nil
 	for _, enc := range []*SurroundEncoder{withMask, withoutMask} {
@@ -193,13 +193,12 @@ func TestSurroundMaskTrimImprovesCenterAtIdenticalBytes(t *testing.T) {
 	if withSNR[1] < withoutSNR[1]+1.5 {
 		t.Fatalf("center SNR %.2f dB, baseline %.2f dB", withSNR[1], withoutSNR[1])
 	}
-	for _, channel := range []int{0, 2, 3, 4} {
+	// The mask also drives the VBR target and dynalloc (celt_encode_with_ec's
+	// surround masking), so every stream's rate moves; none may regress.
+	for _, channel := range []int{0, 2, 3, 4, 5} {
 		if withSNR[channel] < withoutSNR[channel]-0.3 {
 			t.Fatalf("channel %d SNR regressed %.2f -> %.2f dB", channel, withoutSNR[channel], withSNR[channel])
 		}
-	}
-	if math.Abs(withSNR[5]-withoutSNR[5]) > 1e-9 {
-		t.Fatalf("LFE SNR changed %.6f -> %.6f dB", withoutSNR[5], withSNR[5])
 	}
 }
 

@@ -1,6 +1,9 @@
 package opus
 
-import "github.com/darui3018823/opus/internal/celt"
+import (
+	framing "github.com/darui3018823/opus/internal"
+	"github.com/darui3018823/opus/internal/celt"
+)
 
 // setLibopusBitrate is OPUS_SET_BITRATE as opus_multistream_encode_native
 // issues it on an elementary encoder: numeric rates are clamped to
@@ -33,4 +36,41 @@ func (e *Encoder) applyOutDataBytes(frameSize int, maxDataBytes *int) error {
 	}
 	*maxDataBytes = min(*maxDataBytes, limit)
 	return nil
+}
+
+// surroundSILKRate is opus_encode_frame_native's surround masking for SILK
+// (libopus policy, VBR, not LFE): the SILK rate moves with the average
+// masking of the bands SILK codes, split with CELT in a hybrid packet. bw
+// is the packet's framing bandwidth.
+func (e *Encoder) surroundSILKRate(silkRate, bw int) int {
+	if !e.libopusModePolicy || len(e.surroundEnergyMask) == 0 || e.rateMode == celt.RateModeCBR || e.lfe {
+		return silkRate
+	}
+	end, srate := 17, 16000
+	switch bw {
+	case framing.BandwidthNarrowband:
+		end, srate = 13, 8000
+	case framing.BandwidthMediumband:
+		end, srate = 15, 12000
+	}
+	var maskSum float32
+	for c := 0; c < e.channels; c++ {
+		for i := 0; i < end; i++ {
+			m := max(min(float32(e.surroundEnergyMask[21*c+i]), 0.5), -2)
+			if m > 0 {
+				m = float32(0.5) * m
+			}
+			maskSum += m
+		}
+	}
+	// Conservative rate reduction, we cut the masking in half.
+	maskingDepth := float32(maskSum/float32(end)) * float32(e.channels)
+	maskingDepth += 0.2
+	rateOffset := int(float32(float32(srate) * maskingDepth))
+	rateOffset = max(rateOffset, -2*silkRate/3)
+	// Split the rate change between the SILK and CELT part for hybrid.
+	if bw == framing.BandwidthSuperwideband || bw == framing.BandwidthFullband {
+		return silkRate + 3*rateOffset/5
+	}
+	return silkRate + rateOffset
 }

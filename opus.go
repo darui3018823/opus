@@ -161,6 +161,9 @@ type Encoder struct {
 	outDataBytes      int
 	analysisInput     []float64
 	libopusForcedMode int
+	// lfe is st->lfe (OPUS_SET_LFE), set by the surround encoder on its
+	// low-frequency effects stream under the libopus policy.
+	lfe bool
 	// streamStarted is set by the first encode after construction or Reset:
 	// SetModePolicy resets the stream state only once encoding has begun.
 	streamStarted bool
@@ -1311,7 +1314,8 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 	if e.silkEncoder != nil {
 		total := bitsToBitrate(bitsTarget, e.sampleRate, unit)
 		silkRate = computeSILKRateForHybrid(total, bw, true, !cbr, e.lbrrCoded, streamChannels)
-		if silkRate < 5000 {
+		silkRate = e.surroundSILKRate(silkRate, bw)
+		if silkRate < 5000 && !e.libopusModePolicy {
 			silkRate = 5000
 		}
 		if err := e.silkEncoder.SetBitrate(silkRate); err != nil {
@@ -1405,6 +1409,10 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		// fewer bits (gain_fade from the previous frame's gain).
 		celtRate := bitsToBitrate(bitsTarget, e.sampleRate, unit) - silkRate
 		hbGain := float32(1) - float32(math.Exp(0.6931471805599453094*float64(float32(-celtRate)*float32(1.0/1024))))
+		if e.libopusModePolicy && len(e.surroundEnergyMask) > 0 {
+			// No high-band attenuation under surround masking.
+			hbGain = 1
+		}
 		if e.prevHBGain < 1 || hbGain < 1 {
 			celtChunk = append([]float64(nil), celtChunk...)
 			applyGainFade(celtChunk, e.prevHBGain, hbGain, e.channels, e.sampleRate)
@@ -1499,7 +1507,15 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 			e.celtEncoder.SetBitrateMax()
 		} else {
 			e.celtEncoder.SetRateMode(celt.RateModeVBR)
-			e.celtEncoder.SetBitrate(bitrateBps - silkRate)
+			// opus_encode_frame_native sets celt_enc's bitrate to
+			// OPUS_BITRATE_MAX on every frame; the CELT control rejects a
+			// share of 500 b/s or less (which surround masking of the SILK
+			// rate can cause), leaving CELT without a VBR target.
+			if celtRate := bitrateBps - silkRate; e.libopusModePolicy && celtRate <= 500 {
+				e.celtEncoder.SetBitrateMax()
+			} else {
+				e.celtEncoder.SetBitrate(celtRate)
+			}
 		}
 		// A hybrid packet after a SILK-only or CELT-only one starts from a
 		// reset CELT state prefilled with the 2.5 ms before the frame, without
@@ -1986,6 +2002,7 @@ func (e *Encoder) selectCELTEncoder(frameSize int) error {
 	next.SetPhaseInversionDisabled(e.phaseInversionDisabled)
 	next.SetSignalType(e.effectiveSignalType())
 	next.SetEnergyMask(e.surroundEnergyMask)
+	next.SetLFE(e.lfe)
 	next.SetUpsample(e.celtUpsample())
 	if next != e.celtEncoder {
 		next.CopyStateFrom(e.celtEncoder)

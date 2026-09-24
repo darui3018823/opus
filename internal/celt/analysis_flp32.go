@@ -225,7 +225,7 @@ func dynallocAnalysis32(bandLogE, bandLogE2, oldBandE []float64, nbEBands, start
 	isTransient, vbr, constrainedVBR bool, effectiveBytes int, surroundDynalloc []float64,
 	toneFreq, toneishness float32, analysis *AnalysisInfo) dynallocAnalysisResult {
 	return dynallocAnalysis32Scratch(bandLogE, bandLogE2, oldBandE, nbEBands, start, end, C, lsbDepth, lm,
-		isTransient, vbr, constrainedVBR, effectiveBytes, surroundDynalloc, toneFreq, toneishness, analysis, nil)
+		isTransient, vbr, constrainedVBR, effectiveBytes, false, surroundDynalloc, toneFreq, toneishness, analysis, nil)
 }
 
 // dynallocScratch holds dynallocAnalysis32's work buffers so a frame does
@@ -241,7 +241,7 @@ type dynallocScratch struct {
 // dynallocAnalysis32Scratch is dynallocAnalysis32 with reusable storage
 // (nil allocates).
 func dynallocAnalysis32Scratch(bandLogE, bandLogE2, oldBandE []float64, nbEBands, start, end, C, lsbDepth, lm int,
-	isTransient, vbr, constrainedVBR bool, effectiveBytes int, surroundDynalloc []float64,
+	isTransient, vbr, constrainedVBR bool, effectiveBytes int, lfe bool, surroundDynalloc []float64,
 	toneFreq, toneishness float32, analysis *AnalysisInfo, sc *dynallocScratch) dynallocAnalysisResult {
 	if sc == nil {
 		sc = &dynallocScratch{}
@@ -343,7 +343,7 @@ func dynallocAnalysis32Scratch(bandLogE, bandLogE2, oldBandE []float64, nbEBands
 	// Make sure that dynamic allocation can't make us bust the budget. We
 	// enable the feature starting at 24 kb/s for 20-ms frames and 96 kb/s for
 	// 2.5 ms frames.
-	if effectiveBytes < 30+5*lm {
+	if effectiveBytes < 30+5*lm || lfe {
 		for i := start; i < end; i++ {
 			res.importance[i] = 13
 		}

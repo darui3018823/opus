@@ -32,7 +32,7 @@ func lossDistortion(eBands, oldEBands []float64, start, end, nbEBands, C int) fl
 // flag when it fits, codes one residual per band and channel, updates
 // oldEBands in place and returns the badness (Σ|qi0-qi|).
 func quantCoarseEnergyImpl(enc *entcode.Encoder, start, end int, eBands, oldEBands []float64,
-	budget, tell int, probModel []uint8, errOut []float64, C, lm int, intra bool, maxDecay float32, nbEBands int) int {
+	budget, tell int, probModel []uint8, errOut []float64, C, lm int, intra bool, maxDecay float32, nbEBands int, lfe bool) int {
 	badness := 0
 	var prev [2]float32
 	var coef, beta float32
@@ -83,6 +83,9 @@ func quantCoarseEnergyImpl(enc *entcode.Encoder, start, end int, eBands, oldEBan
 					qi = -1
 				}
 			}
+			if lfe && i >= 2 && qi > 0 {
+				qi = 0
+			}
 			switch {
 			case budget-tell >= 15:
 				pi := 2 * i
@@ -118,6 +121,9 @@ func quantCoarseEnergyImpl(enc *entcode.Encoder, start, end int, eBands, oldEBan
 			prev[c] = float32(prev[c]+q) - float32(beta*q)
 		}
 	}
+	if lfe {
+		return 0
+	}
 	return badness
 }
 
@@ -146,6 +152,9 @@ func (e *Encoder) quantCoarseEnergy(enc *entcode.Encoder, start, end, effEnd int
 			maxDecay = d
 		}
 	}
+	if e.lfe {
+		maxDecay = 3
+	}
 	encStart := enc.Clone()
 
 	oldEBandsIntra := make([]float64, len(oldEBands))
@@ -155,7 +164,7 @@ func (e *Encoder) quantCoarseEnergy(enc *entcode.Encoder, start, end, effEnd int
 	badness1 := 0
 	if twoPass || intra {
 		badness1 = quantCoarseEnergyImpl(enc, start, end, eBands, oldEBandsIntra, budget, tell,
-			eProbModel[lm][1][:], errIntra, C, lm, true, maxDecay, nbEBands)
+			eProbModel[lm][1][:], errIntra, C, lm, true, maxDecay, nbEBands, e.lfe)
 	}
 
 	if !intra {
@@ -164,7 +173,7 @@ func (e *Encoder) quantCoarseEnergy(enc *entcode.Encoder, start, end, effEnd int
 		enc.Restore(encStart)
 		interIdx := 0
 		badness2 := quantCoarseEnergyImpl(enc, start, end, eBands, oldEBands, budget, tell,
-			eProbModel[lm][interIdx][:], errOut, C, lm, false, maxDecay, nbEBands)
+			eProbModel[lm][interIdx][:], errOut, C, lm, false, maxDecay, nbEBands, e.lfe)
 		if twoPass && (badness1 < badness2 || (badness1 == badness2 && int32(enc.TellFrac())+intraBias > tellIntra)) {
 			enc.Restore(encIntra)
 			// OPUS_COPY(..., C*m->nbEBands): the channel-major arrays have an

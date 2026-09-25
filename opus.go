@@ -3127,6 +3127,12 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 	// CELT output below 48 kHz: the CELT decoders clear the spectrum above
 	// the output Nyquist and decimate (libopus st->downsample); no resampler.
 
+	// celt_decoder_init: a mono decoder disables intensity-stereo phase
+	// inversion (a stereo stream is downmixed).
+	if channels == 1 {
+		dec.SetPhaseInversionDisabled(true)
+	}
+
 	return dec, nil
 }
 

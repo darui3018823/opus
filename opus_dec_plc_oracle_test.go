@@ -72,7 +72,7 @@ func TestDecoderPLCOracle(t *testing.T) {
 	}
 	type cell struct {
 		rate, channels, bitrate, frameUs, frames int
-		app, mask, signal, fixture              string
+		app, mask, signal, fixture               string
 	}
 	var cells []cell
 	for _, rate := range []int{48000, 16000} {

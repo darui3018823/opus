@@ -45,7 +45,7 @@ type Decoder struct {
 	// loss_duration, plc_duration, skip_plc, last_frame_type,
 	// prefilter_and_fold, last_pitch_index, the LPC of the pitch-based
 	// concealment and the extrapolated overlap it leaves (plcTail).
-	backgroundLogE   []float64
+	backgroundLogE []float64
 	// downsample is st->downsample: the output rate is 48 kHz/downsample
 	// (the spectrum above it is cleared and the de-emphasised output
 	// decimated), 1 by default.

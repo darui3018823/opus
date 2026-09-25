@@ -58,6 +58,9 @@ func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, ma
 		encoders:       encoders,
 		bitrate:        BitrateAuto,
 		lfeStream:      -1,
+		// The restricted SILK / CELT applications only have the libopus
+		// policy (their elementary encoders select it).
+		libopusPolicy: isRestrictedCodecApplication(application),
 	}, nil
 }
 
@@ -100,8 +103,9 @@ func (e *MultistreamEncoder) SetBitrate(bitrate int) error {
 		e.bitrate = bitrate
 		return nil
 	}
-	if bitrate < 6000*e.streams || bitrate > 510000*e.streams {
-		return fmt.Errorf("%w: invalid multistream bitrate %d", ErrBadArg, bitrate)
+	bitrate, err := clampMultistreamBitrate(bitrate, e.channels)
+	if err != nil {
+		return err
 	}
 	codedChannels := e.streams + e.coupledStreams
 	remaining := bitrate
@@ -131,6 +135,19 @@ func (e *MultistreamEncoder) SetBitrate(bitrate int) error {
 
 // Bitrate returns the configured aggregate bitrate policy.
 func (e *MultistreamEncoder) Bitrate() int { return e.bitrate }
+
+// clampMultistreamBitrate is the multistream OPUS_SET_BITRATE: positive
+// rates are clamped to [500, 750000] per input channel; BitrateAuto and
+// BitrateMax pass through.
+func clampMultistreamBitrate(bitrate, channels int) (int, error) {
+	if bitrate == BitrateAuto || bitrate == BitrateMax {
+		return bitrate, nil
+	}
+	if bitrate <= 0 {
+		return 0, fmt.Errorf("%w: invalid multistream bitrate %d (must be positive)", ErrBadArg, bitrate)
+	}
+	return max(500*channels, min(750000*channels, bitrate)), nil
+}
 
 // SetVBR applies the VBR setting to every elementary stream.
 func (e *MultistreamEncoder) SetVBR(enabled bool) {

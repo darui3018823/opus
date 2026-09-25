@@ -157,7 +157,7 @@ func TestPublicArgumentSentinelErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := enc.SetBitrate(1); !errors.Is(err, ErrBadArg) {
+	if err := enc.SetBitrate(0); !errors.Is(err, ErrBadArg) {
 		t.Fatalf("SetBitrate error = %v, want ErrBadArg", err)
 	}
 	if err := enc.SetComplexity(11); !errors.Is(err, ErrBadArg) {

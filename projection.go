@@ -84,6 +84,9 @@ func NewProjectionEncoder(sampleRate, channels, mappingFamily int, application A
 	}
 	ms.policyChanged = e.configureForPolicy
 	e.configureStreams()
+	if ms.libopusPolicy {
+		e.configureForPolicy()
+	}
 	return e, nil
 }
 
@@ -184,9 +187,9 @@ func (e *ProjectionEncoder) StreamEncoder(stream int) (*Encoder, error) {
 // SetBitrate sets the aggregate bitrate. Ambisonics divides numeric rates
 // equally between elementary streams, matching libopus' family-2 policy.
 func (e *ProjectionEncoder) SetBitrate(bitrate int) error {
-	if bitrate != BitrateAuto && bitrate != BitrateMax &&
-		(bitrate < 6000*e.streams || bitrate > 510000*e.streams) {
-		return fmt.Errorf("%w: invalid projection bitrate %d", ErrBadArg, bitrate)
+	bitrate, err := clampMultistreamBitrate(bitrate, e.channels)
+	if err != nil {
+		return err
 	}
 	e.bitrate = bitrate
 	e.multistream.bitrate = bitrate

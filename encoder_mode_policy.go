@@ -207,7 +207,9 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 
 	var mode int
 	switch {
-	case e.application == ApplicationRestrictedLowDelay:
+	case e.application == ApplicationRestrictedSILK:
+		mode = framing.ModeSILKOnly
+	case e.celtOnlyApplication():
 		mode = framing.ModeCELTOnly
 	case e.libopusForcedMode >= 0:
 		mode = e.libopusForcedMode
@@ -253,7 +255,7 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 	if frameSize < e.sampleRate/100 {
 		mode = framing.ModeCELTOnly
 	}
-	if e.lfe {
+	if e.lfe && e.application != ApplicationRestrictedSILK {
 		mode = framing.ModeCELTOnly
 	}
 
@@ -353,6 +355,9 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 	if e.lfe {
 		bandwidth = framing.BandwidthNarrowband
 	}
+	if e.application == ApplicationRestrictedSILK && bandwidth > framing.BandwidthWideband {
+		bandwidth = framing.BandwidthWideband
+	}
 	// Chooses the appropriate mode for speech; never switch to/from
 	// CELT-only here.
 	if mode == framing.ModeSILKOnly && bandwidth > framing.BandwidthWideband {
@@ -365,7 +370,7 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 	e.libopusMode = mode
 	// If we decided to go with CELT, make sure redundancy is off, no matter
 	// what we decided earlier; otherwise size it (none when too small).
-	if mode == framing.ModeCELTOnly {
+	if mode == framing.ModeCELTOnly || e.application == ApplicationRestrictedSILK {
 		d.redundancy = false
 	}
 	if d.redundancy {
@@ -489,6 +494,9 @@ func (e *Encoder) SetModePolicy(policy ModePolicy) error {
 		libopus = true
 	default:
 		return fmt.Errorf("%w: unsupported mode policy %d", ErrBadArg, policy)
+	}
+	if !libopus && isRestrictedCodecApplication(e.application) {
+		return fmt.Errorf("%w: application %d only has the libopus policy", ErrBadArg, e.application)
 	}
 	if libopus == e.libopusModePolicy {
 		return nil

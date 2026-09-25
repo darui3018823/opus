@@ -372,8 +372,8 @@ func TestBitrateControl(t *testing.T) {
 	}
 
 	// Validate bitrate range
-	if err := enc.SetBitrate(5000); err == nil {
-		t.Error("SetBitrate(5000) should fail (below 6000)")
+	if err := enc.SetBitrate(0); err == nil {
+		t.Error("SetBitrate(0) should fail")
 	}
 	if err := enc.SetBitrate(600000); err != nil {
 		t.Fatalf("SetBitrate(600000) should clamp successfully: %v", err)

@@ -193,13 +193,8 @@ func runMSOracleCell(t *testing.T, c msCell) {
 		strconv.FormatFloat(float64(c.frameUs)/1000, 'g', -1, 64), strconv.Itoa(c.lossPerc), dtxArg,
 		strconv.Itoa(c.family), optArg)
 
-	app := ApplicationVOIP
-	switch c.app {
-	case "audio":
-		app = ApplicationAudio
-	case "lowdelay":
-		app = ApplicationRestrictedLowDelay
-	}
+	app := map[string]Application{"voip": ApplicationVOIP, "audio": ApplicationAudio, "lowdelay": ApplicationRestrictedLowDelay,
+		"rsilk": ApplicationRestrictedSILK, "rcelt": ApplicationRestrictedCELT}[c.app]
 	enc, ms := newMSOracleEncoder(t, c, app)
 	if err := enc.SetModePolicy(ModePolicyLibopus); err != nil {
 		t.Fatal(err)
@@ -365,6 +360,17 @@ func TestMultistreamEncoderOracle(t *testing.T) {
 			}
 			c.bitrate = c.schedule[0]
 		})
+	}
+	// The restricted SILK / CELT applications (no surround analysis without
+	// CELT) and restricted low delay.
+	for _, l := range []struct{ family, channels int }{{-1, 3}, {1, 6}, {3, 4}} {
+		for _, app := range []string{"rsilk", "rcelt", "lowdelay"} {
+			for _, perChannel := range []int{8000, 32000} {
+				add(func(c *msCell) {
+					c.family, c.channels, c.app, c.bitrate = l.family, l.channels, app, perChannel*l.channels
+				})
+			}
+		}
 	}
 	for _, c := range cells {
 		t.Run(c.name(), func(t *testing.T) {

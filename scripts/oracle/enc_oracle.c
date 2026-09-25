@@ -423,7 +423,8 @@ static int run_hybrid_encoder_oracle(int argc, char **argv)
 
 /* --auto-enc <rate> <fixture> <frames> <bitrate> <vbr> <channels> <complexity> <signal> <app>:
    automatic mode / bandwidth / channel decisions (no forced mode), with
-   the SILK and CELT traces. signal = voice|music|auto, app = voip|audio.
+   the SILK and CELT traces. signal = voice|music|auto, app = voip|audio|
+   lowdelay|rsilk|rcelt.
    <bitrate> may be a comma-separated per-frame schedule ("12000,12000,64000"):
    frame f uses entry min(f, n-1), so the last entry repeats. An optional
    trailing <frame_ms> (2.5, 5, 10, 20, 40, 60, 80, 100 or 120; default 20)
@@ -438,6 +439,15 @@ static int parse_bitrate_schedule(const char *s, int *out, int max)
         if (*s == ',') s++;
     }
     return n;
+}
+
+static int parse_application(const char *name)
+{
+    if (strcmp(name, "audio") == 0) return OPUS_APPLICATION_AUDIO;
+    if (strcmp(name, "lowdelay") == 0) return OPUS_APPLICATION_RESTRICTED_LOWDELAY;
+    if (strcmp(name, "rsilk") == 0) return OPUS_APPLICATION_RESTRICTED_SILK;
+    if (strcmp(name, "rcelt") == 0) return OPUS_APPLICATION_RESTRICTED_CELT;
+    return OPUS_APPLICATION_VOIP;
 }
 
 static int run_auto_encoder_oracle(int argc, char **argv)
@@ -504,7 +514,7 @@ static int run_auto_encoder_oracle(int argc, char **argv)
         fprintf(stderr, "--auto-enc frame_ms must be 2.5, 5, 10, 20, 40, 60, 80, 100 or 120\n");
         return 2;
     }
-    app = strcmp(appname, "audio") == 0 ? OPUS_APPLICATION_AUDIO : OPUS_APPLICATION_VOIP;
+    app = parse_application(appname);
     frame_size = (int)((long long)rate * frame_us / 1000000);
     enc = opus_encoder_create(rate, channels, app, &err);
     if (enc == NULL || err != OPUS_OK) {
@@ -660,8 +670,7 @@ static int run_ms_encoder_oracle(int argc, char **argv)
         fprintf(stderr, "--ms-enc channels must be 1..255\n");
         return 2;
     }
-    app = strcmp(appname, "audio") == 0 ? OPUS_APPLICATION_AUDIO :
-        strcmp(appname, "lowdelay") == 0 ? OPUS_APPLICATION_RESTRICTED_LOWDELAY : OPUS_APPLICATION_VOIP;
+    app = parse_application(appname);
     frame_size = (int)((long long)rate * frame_us / 1000000);
     if (family == 3) {
         proj = opus_projection_ambisonics_encoder_create(rate, channels, 3, &streams, &coupled, app, &err);

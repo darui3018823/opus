@@ -443,7 +443,7 @@ func TestEncoderSetBitrate(t *testing.T) {
 		{"Valid 128kbps", 128000, false},
 		{"Automatic", BitrateAuto, false},
 		{"Maximum", BitrateMax, false},
-		{"Too low", 5000, true},
+		{"Low (clamped to 500 as libopus)", 100, false},
 		{"High request", 600000, false},
 		{"Non-positive", 0, true},
 	}

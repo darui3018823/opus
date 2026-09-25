@@ -259,10 +259,26 @@ func isValidOpusRate(rate int) bool {
 
 func isValidApplication(application Application) bool {
 	switch application {
-	case ApplicationVOIP, ApplicationAudio, ApplicationRestrictedLowDelay:
+	case ApplicationVOIP, ApplicationAudio, ApplicationRestrictedLowDelay,
+		ApplicationRestrictedSILK, ApplicationRestrictedCELT:
 		return true
 	}
 	return false
+}
+
+// isRestrictedCodecApplication reports the libopus 1.6 applications that
+// fix the codec at creation (RESTRICTED_SILK and RESTRICTED_CELT). They
+// have no Go-policy behaviour: their encoders always follow the libopus
+// policy.
+func isRestrictedCodecApplication(application Application) bool {
+	return application == ApplicationRestrictedSILK || application == ApplicationRestrictedCELT
+}
+
+// celtOnlyApplication reports the applications that only code CELT-only
+// packets without the Opus-layer delay compensation (RESTRICTED_LOWDELAY
+// and RESTRICTED_CELT).
+func (e *Encoder) celtOnlyApplication() bool {
+	return e.application == ApplicationRestrictedLowDelay || e.application == ApplicationRestrictedCELT
 }
 
 // NewEncoder creates a stateful Opus encoder using the legacy compatibility
@@ -341,6 +357,9 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 			return nil, err
 		}
 		enc.silkEncoder.SetRateMode(silk.RateModeCBR)
+	}
+	if isRestrictedCodecApplication(application) {
+		enc.libopusModePolicy = true
 	}
 
 	return enc, nil
@@ -568,7 +587,7 @@ func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 	e.celtEncoder.SetLSBDepth(lsbDepth)
 	var analysisInfo celt.AnalysisInfo
 	e.analysisReadPos, e.analysisReadSubframe = -1, -1
-	if e.complexity >= 7 && e.sampleRate >= 16000 && e.sampleRate <= 48000 {
+	if e.complexity >= 7 && e.sampleRate >= 16000 && e.sampleRate <= 48000 && e.application != ApplicationRestrictedSILK {
 		if e.analysis == nil {
 			e.analysis = celt.NewTonalityAnalysis(e.sampleRate)
 		}
@@ -1027,7 +1046,7 @@ func (e *Encoder) canDeferToHybrid(nFrames int) bool {
 	if e.silkEncoder == nil || e.silkSampleRate != 16000 {
 		return false
 	}
-	if e.application == ApplicationRestrictedLowDelay {
+	if e.celtOnlyApplication() {
 		return false
 	}
 	return nFrames >= 1 && nFrames <= 6
@@ -1135,7 +1154,7 @@ func (e *Encoder) shouldEncodeSILKOnly() bool {
 	if e.silkEncoder == nil {
 		return false
 	}
-	if e.application == ApplicationRestrictedLowDelay {
+	if e.celtOnlyApplication() {
 		return false
 	}
 
@@ -1175,7 +1194,7 @@ func (e *Encoder) shouldEncodeHybrid(nFrames int) bool {
 	if nFrames < 1 || nFrames > 6 {
 		return false
 	}
-	if e.application == ApplicationRestrictedLowDelay {
+	if e.celtOnlyApplication() {
 		return false
 	}
 	if !e.hasVoiceIntent() || e.bitrate <= e.silkOnlyBitrateLimit() ||
@@ -1960,6 +1979,9 @@ func (e *Encoder) selectEncodeFrameSize(frameSize int) (int, error) {
 	if _, err := e.validateFrameSize(selected); err != nil {
 		return 0, err
 	}
+	if e.application == ApplicationRestrictedSILK && selected*100 < e.sampleRate {
+		return 0, fmt.Errorf("%w: restricted SILK needs 10 ms frames or longer", ErrUnsupportedFrameSize)
+	}
 	return selected, nil
 }
 
@@ -2154,10 +2176,10 @@ func bitrateToBits(bitrate, fs, frameSize int) int {
 }
 
 // delayCompensation returns the Opus-layer input delay in samples at the
-// encoder rate: Fs/250 (4 ms) for every application except restricted low
-// delay, like opus_encoder_init.
+// encoder rate: Fs/250 (4 ms), none for the restricted applications
+// (opus_encode_native's delay_compensation).
 func (e *Encoder) delayCompensation() int {
-	if e.application == ApplicationRestrictedLowDelay {
+	if e.celtOnlyApplication() || e.application == ApplicationRestrictedSILK {
 		return 0
 	}
 	return e.sampleRate / 250
@@ -2247,7 +2269,13 @@ func (e *Encoder) Channels() int { return e.channels }
 // the CELT overlap (Fs/400) plus the Opus-layer delay compensation (Fs/250,
 // zero for restricted low delay), like OPUS_GET_LOOKAHEAD.
 func (e *Encoder) Lookahead() int {
-	return e.sampleRate/400 + e.delayCompensation()
+	// OPUS_GET_LOOKAHEAD adds st->delay_compensation except for the
+	// restricted low-delay and CELT applications (RESTRICTED_SILK reports
+	// it although it codes without it).
+	if e.celtOnlyApplication() {
+		return e.sampleRate / 400
+	}
+	return e.sampleRate/400 + e.sampleRate/250
 }
 
 // FinalRange returns the XOR of the entropy coder final ranges for the most
@@ -2394,12 +2422,12 @@ func (e *Encoder) monoEncoder() (*Encoder, error) {
 // EffectiveBitrate is additionally bounded by the per-frame byte limit.
 func (e *Encoder) SetBitrate(bitrate int) error {
 	if bitrate != BitrateAuto && bitrate != BitrateMax {
-		if bitrate < 6000 {
-			return fmt.Errorf("%w: invalid bitrate %d (must be at least 6000)", ErrBadArg, bitrate)
+		// OPUS_SET_BITRATE: positive rates are clamped to
+		// [500, 750000 x channels].
+		if bitrate <= 0 {
+			return fmt.Errorf("%w: invalid bitrate %d (must be positive)", ErrBadArg, bitrate)
 		}
-		if ceiling := 750000 * e.channels; bitrate > ceiling {
-			bitrate = ceiling
-		}
+		bitrate = max(500, min(750000*e.channels, bitrate))
 	}
 	oldSetting := e.bitrateSetting
 	e.bitrateSetting = bitrate
@@ -2602,6 +2630,13 @@ func (e *Encoder) syncSILKFEC() {
 func (e *Encoder) SetApplication(application Application) error {
 	if !isValidApplication(application) {
 		return fmt.Errorf("%w: unsupported application %d", ErrBadArg, application)
+	}
+	// libopus fixes the restricted SILK / CELT applications at creation.
+	if isRestrictedCodecApplication(e.application) || isRestrictedCodecApplication(application) {
+		if application == e.application {
+			return nil
+		}
+		return fmt.Errorf("%w: application %d is fixed at creation", ErrBadArg, e.application)
 	}
 	e.application = application
 	e.syncSignalType()

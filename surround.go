@@ -75,6 +75,9 @@ func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application App
 		ms.beforeEncodeFloat = s.analyzeSurroundFrame
 		ms.resetPolicy = func() { s.analyzer.Reset() }
 	}
+	if ms.libopusPolicy {
+		s.configureForPolicy()
+	}
 	return s, nil
 }
 
@@ -87,9 +90,9 @@ func (e *SurroundEncoder) LFEStream() int { return e.lfeStream }
 // SetBitrate sets the aggregate surround bitrate. It is distributed immediately
 // before each encode because libopus' allocation depends on frame duration.
 func (e *SurroundEncoder) SetBitrate(bitrate int) error {
-	if bitrate != BitrateAuto && bitrate != BitrateMax &&
-		(bitrate < 6000*e.streams || bitrate > 510000*e.streams) {
-		return fmt.Errorf("%w: invalid surround bitrate %d", ErrBadArg, bitrate)
+	bitrate, err := clampMultistreamBitrate(bitrate, e.channels)
+	if err != nil {
+		return err
 	}
 	e.bitrate = bitrate
 	e.MultistreamEncoder.bitrate = bitrate

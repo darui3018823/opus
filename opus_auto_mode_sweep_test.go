@@ -228,6 +228,26 @@ func TestAutoModeOracleSweep(t *testing.T) {
 			}
 		}
 	}
+	// The restricted applications: SILK-only (10 ms and longer, at most
+	// wideband) and CELT-only without delay compensation, next to the
+	// restricted low-delay application.
+	for _, rate := range []int{8000, 16000, 48000} {
+		for _, ch := range []int{1, 2} {
+			for _, kbps := range []int{10, 24, 64} {
+				for _, us := range []int{10000, 20000, 60000} {
+					add("restricted", sweepCell{rate: rate, channels: ch, bitrate: kbps * 1000, complexity: 9, frameUs: us, frames: max(10, 500000/us), vbr: true, constrained: true, signal: "voice", app: "rsilk"})
+				}
+				for _, us := range []int{2500, 20000} {
+					for _, app := range []string{"rcelt", "lowdelay"} {
+						add("restricted", sweepCell{rate: rate, channels: ch, bitrate: kbps * 1000, complexity: 9, frameUs: us, frames: max(10, 500000/us), vbr: true, constrained: true, signal: "music", app: app})
+					}
+				}
+			}
+			add("restricted", sweepCell{rate: rate, channels: ch, bitrate: 16000, complexity: 5, frameUs: 20000, vbr: true, constrained: true, signal: "voice", app: "rsilk", dtx: true, fixture: "ref-speech-gaps", frames: 120})
+			add("restricted", sweepCell{rate: rate, channels: ch, bitrate: 24000, complexity: 5, frameUs: 20000, frames: 25, vbr: true, constrained: true, signal: "voice", app: "rsilk", lossPerc: 20})
+			add("restricted", sweepCell{rate: rate, channels: ch, bitrate: 24000, complexity: 5, frameUs: 20000, frames: 25, signal: "voice", app: "rsilk"})
+		}
+	}
 	bws := []int{BandwidthNarrowband, BandwidthMediumband, BandwidthWideband, BandwidthSuperWideband, BandwidthFullband}
 	for _, ch := range []int{1, 2} {
 		for _, kbps := range []int{16, 32, 64} {
@@ -275,7 +295,7 @@ func TestAutoModeOracleSweep(t *testing.T) {
 		}
 	}
 
-	for _, group := range []string{"core", "rates", "frames", "forced", "input", "fec", "dtx", "short", "short-transitions", "short-dtx", "short-fec"} {
+	for _, group := range []string{"core", "rates", "frames", "forced", "input", "fec", "dtx", "short", "short-transitions", "short-dtx", "short-fec", "restricted"} {
 		cells := groups[group]
 		var bad atomic.Int32
 		t.Run(group, func(t *testing.T) {
@@ -318,10 +338,8 @@ func runSweepCell(t *testing.T, c sweepCell) bool {
 	ref := runCELTOracleCmd(t, c.fixture, "--auto-enc", strconv.Itoa(c.rate), c.fixture, strconv.Itoa(c.frames),
 		bitrateArg, vbrArg, strconv.Itoa(c.channels), strconv.Itoa(c.complexity), c.signal, c.app,
 		strconv.FormatFloat(float64(c.frameUs)/1000, 'g', -1, 64), strconv.Itoa(c.lossPerc), dtxArg, c.oracleOptions())
-	app := ApplicationVOIP
-	if c.app == "audio" {
-		app = ApplicationAudio
-	}
+	app := map[string]Application{"voip": ApplicationVOIP, "audio": ApplicationAudio, "lowdelay": ApplicationRestrictedLowDelay,
+		"rsilk": ApplicationRestrictedSILK, "rcelt": ApplicationRestrictedCELT}[c.app]
 	enc, err := NewEncoder(c.rate, c.channels, app)
 	if err != nil {
 		t.Fatal(err)

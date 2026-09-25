@@ -41,6 +41,24 @@ type Decoder struct {
 	prevLogE2    []float64
 	frameCount   int
 
+	// Packet loss concealment state (celt_decode_lost): backgroundLogE,
+	// loss_duration, plc_duration, skip_plc, last_frame_type,
+	// prefilter_and_fold, last_pitch_index, the LPC of the pitch-based
+	// concealment and the extrapolated overlap it leaves (plcTail).
+	backgroundLogE   []float64
+	// downsample is st->downsample: the output rate is 48 kHz/downsample
+	// (the spectrum above it is cleared and the de-emphasised output
+	// decimated), 1 by default.
+	downsample       int
+	lossDuration     int
+	plcDuration      int
+	skipPLC          bool
+	lastFrameType    int
+	prefilterAndFold bool
+	lastPitchIndex   int
+	plcLPC           [2][celtLPCOrder]float32
+	plcTail          [][]float64
+
 	// Post-filter (one per channel)
 	postFilter []*PostFilter
 	preemphMem []float32
@@ -125,6 +143,13 @@ func NewDecoderEx(frameSize, sampleRate, numBands, channels int) (*Decoder, erro
 		d.prevLogE[i] = -28.0
 		d.prevLogE2[i] = -28.0
 	}
+	d.backgroundLogE = make([]float64, nEBands)
+	d.downsample = 1
+	d.skipPLC = true
+	d.plcTail = make([][]float64, channels)
+	for i := range d.plcTail {
+		d.plcTail[i] = make([]float64, mode.Overlap)
+	}
 
 	// Initialize post-filters (one per channel)
 	d.postFilter = make([]*PostFilter, channels)
@@ -170,6 +195,17 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 
 	// === libopus celt_decode_with_ec symbol order ===
 
+	// Check if there are at least two packets received consecutively before
+	// turning on the pitch-based PLC.
+	if d.lossDuration == 0 {
+		d.skipPLC = false
+	}
+	if ch == 1 {
+		for i := 0; i < numBands; i++ {
+			d.prevEnergies[i] = max(d.prevEnergies[i], d.prevEnergies[numBands+i])
+		}
+	}
+
 	// Silence flag (1 bit, logp 15) — first symbol in the stream.
 	silence := false
 	if dec.ECTell() >= totalBits {
@@ -207,6 +243,11 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 		intra = dec.DecodeBitLogp(3)
 	}
 	htr(dec, "intra")
+	// If recovering from packet loss, make sure the energy prediction is
+	// safe to reduce the risk of loud artifacts.
+	if !intra && d.lossDuration != 0 {
+		d.safeLossPrediction(start, end, lm)
+	}
 
 	// Coarse band log-energies (Laplace, forward).
 	quantLogE := UnquantizeCoarseEnergy(
@@ -293,6 +334,23 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 		copy(d.prevEnergies[numBands:2*numBands], d.prevEnergies[:numBands])
 	}
 	d.updateLogEnergyHistory(isTransient)
+	// The noise floor may rise by up to 2.4 dB/second, or by the weight of
+	// all the missing packets after a loss.
+	maxBackgroundIncrease := float32(min(160, d.lossDuration+(1<<lm))) * float32(0.001)
+	for i := range d.backgroundLogE {
+		d.backgroundLogE[i] = float64(min(float32(d.backgroundLogE[i])+maxBackgroundIncrease, float32(d.prevEnergies[i])))
+	}
+	// In case start or end were to change.
+	for c := 0; c < 2 && (c+1)*numBands <= len(d.prevEnergies); c++ {
+		for i := 0; i < numBands; i++ {
+			if i >= start && i < end {
+				continue
+			}
+			d.prevEnergies[c*numBands+i] = 0
+			d.prevLogE[c*numBands+i] = -28
+			d.prevLogE2[c*numBands+i] = -28
+		}
+	}
 
 	// Apply energy denormalization per channel
 	frameSize := d.mode.FrameSize
@@ -311,6 +369,10 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			d.coefficientStageHook("denormalized", c, coeffs,
 				quantLogE[c*numBands:(c+1)*numBands])
 		}
+		// denormalise_bands' bound: nothing above the output Nyquist.
+		for i := frameSize / d.downsample; i < len(coeffs); i++ {
+			coeffs[i] = 0
+		}
 		mdctCoeffsPerCh[c] = coeffs
 	}
 
@@ -319,13 +381,16 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	// Perform IMDCT per channel.
 	// Transient frames (isTransient=true, lm>0) use M=2^lm separate NBase-point IMDCTs
 	// (libopus "shortMdct" path). Non-transient frames use a single N-point IMDCT.
-	output := make([]float64, frameSize*ch)
+	output := make([]float64, frameSize/d.downsample*ch)
 	nBase := d.mode.NBase // = NBase (e.g. 120 for 48kHz)
 	M := 1 << uint(lm)    // number of sub-frames for transient
 
 	for c := 0; c < ch; c++ {
 		coeffs := mdctCoeffsPerCh[c]
 		var samplesOut []float64
+		if d.prefilterAndFold {
+			d.prefilterAndFoldCarry(c)
+		}
 
 		if isTransient && lm > 0 {
 			// Transient synthesis: M separate NBase-point IMDCTs.
@@ -370,8 +435,8 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			d.synthesisStageHook("pcm", c, samplesOut)
 		}
 
-		for i := 0; i < len(samplesOut) && i < frameSize; i++ {
-			output[i*ch+c] = samplesOut[i] * celtFloatScale
+		for i := 0; i < frameSize/d.downsample; i++ {
+			output[i*ch+c] = samplesOut[i*d.downsample] * celtFloatScale
 		}
 	}
 
@@ -379,7 +444,46 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	d.lastStartBand = start
 	d.lastEndBand = end
 	d.frameCount++
+	d.lossDuration = 0
+	d.plcDuration = 0
+	d.lastFrameType = frameNormal
+	d.prefilterAndFold = false
 	return output, nil
+}
+
+// safeLossPrediction is celt_decode_with_ec's energy safety after a loss
+// (inter frames only): continue a falling energy trend or take the minimum
+// of the last frames, less a margin for short frames.
+func (d *Decoder) safeLossPrediction(start, end, lm int) {
+	nb := d.mode.Bands.NumBands
+	var safety float32
+	switch lm {
+	case 0:
+		safety = 1.5
+	case 1:
+		safety = 0.5
+	}
+	missing := min(10, d.lossDuration>>lm)
+	for c := 0; c < 2 && (c+1)*nb <= len(d.prevEnergies); c++ {
+		for i := start; i < end; i++ {
+			idx := c*nb + i
+			e0 := float32(d.prevEnergies[idx])
+			e1 := float32(d.prevLogE[idx])
+			e2 := float32(d.prevLogE2[idx])
+			if e0 < max(e1, e2) {
+				// If energy is going down already, continue the trend.
+				slope := max(e1-e0, float32(0.5)*(e2-e0))
+				slope = min(slope, 2)
+				e0 -= max(0, float32(float32(1+missing)*slope))
+				e0 = max(-20, e0)
+			} else {
+				// Otherwise take the min of the last frames.
+				e0 = min(min(e0, e1), e2)
+			}
+			// Shorter frames have more natural fluctuations -- play it safe.
+			d.prevEnergies[idx] = float64(e0 - safety)
+		}
+	}
 }
 
 // LastFinalRange returns the range coder rng after the most recent Decode call.
@@ -430,12 +534,14 @@ func (d *Decoder) CopyStateFrom(src *Decoder) {
 				d.prevEnergies[di] = 0
 				d.prevLogE[di] = -28
 				d.prevLogE2[di] = -28
+				d.backgroundLogE[di] = 0
 				continue
 			}
 			si := sc*srcBands + i
 			d.prevEnergies[di] = src.prevEnergies[si]
 			d.prevLogE[di] = src.prevLogE[si]
 			d.prevLogE2[di] = src.prevLogE2[si]
+			d.backgroundLogE[di] = src.backgroundLogE[si]
 		}
 	}
 
@@ -461,6 +567,19 @@ func (d *Decoder) CopyStateFrom(src *Decoder) {
 	d.lastFinalRange = src.lastFinalRange
 	d.lastStartBand = src.lastStartBand
 	d.lastEndBand = src.lastEndBand
+	d.lossDuration = src.lossDuration
+	d.plcDuration = src.plcDuration
+	d.skipPLC = src.skipPLC
+	d.lastFrameType = src.lastFrameType
+	d.prefilterAndFold = src.prefilterAndFold
+	d.lastPitchIndex = src.lastPitchIndex
+	d.plcLPC = src.plcLPC
+	for c := range d.plcTail {
+		sc := min(c, len(src.plcTail)-1)
+		if sc >= 0 {
+			copy(d.plcTail[c], src.plcTail[sc])
+		}
+	}
 }
 
 // CopyAllStateFrom copies the complete decoder configuration and streaming
@@ -492,6 +611,11 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 	d.prevEnergies = append([]float64(nil), src.prevEnergies...)
 	d.prevLogE = append([]float64(nil), src.prevLogE...)
 	d.prevLogE2 = append([]float64(nil), src.prevLogE2...)
+	d.backgroundLogE = append([]float64(nil), src.backgroundLogE...)
+	d.plcTail = make([][]float64, len(src.plcTail))
+	for c := range src.plcTail {
+		d.plcTail[c] = append([]float64(nil), src.plcTail[c]...)
+	}
 	d.postFilter = make([]*PostFilter, len(src.postFilter))
 	for ch, filter := range src.postFilter {
 		if filter != nil {
@@ -706,50 +830,14 @@ func (d *Decoder) updateLogEnergyHistory(isTransient bool) {
 	copy(d.prevLogE, d.prevEnergies)
 }
 
-// decodeLoss performs packet loss concealment
-func (d *Decoder) decodeLoss() []float64 {
-	// Simple PLC: fade out previous frame
-	output := make([]float64, d.mode.FrameSize*d.mode.Channels)
-
-	for ch := 0; ch < d.mode.Channels; ch++ {
-		// Fade out overlap buffer
-		for i := 0; i < len(d.overlap[ch]) && i < d.mode.FrameSize; i++ {
-			fade := 1.0 - float64(i)/float64(d.mode.FrameSize)
-			output[i*d.mode.Channels+ch] = d.overlap[ch][i] * fade * 0.5 * celtFloatScale
-		}
+// SetDownsample sets st->downsample: the decoder codes at 48 kHz and
+// outputs 48 kHz/n (n = 1, 2, 3, 4 or 6), as libopus's CELT decoder does
+// for a lower API rate.
+func (d *Decoder) SetDownsample(n int) {
+	if n < 1 {
+		n = 1
 	}
-
-	// Decay previous energies in log2-amplitude domain: subtract log2(1/0.8)
-	const logDecay = 0.32193 // log2(1.25) ≈ 0.322
-	for i := range d.prevEnergies {
-		d.prevEnergies[i] -= logDecay
-		d.prevLogE[i] -= logDecay
-		d.prevLogE2[i] -= logDecay
-	}
-
-	// Hybrid CELT PLC always uses the noise path in libopus because its start
-	// band is non-zero. Advance the same LCG once per active coefficient so the
-	// public hybrid-FEC final range matches OPUS_GET_FINAL_RANGE even though this
-	// decoder's concealment waveform remains the existing lightweight fade.
-	if d.lastStartBand > 0 {
-		start := d.lastStartBand
-		end := d.lastEndBand
-		if end > d.mode.Bands.NumBands {
-			end = d.mode.Bands.NumBands
-		}
-		seed := d.lastFinalRange
-		m := 1 << d.mode.LM
-		for ch := 0; ch < d.mode.Channels; ch++ {
-			for band := start; band < end; band++ {
-				for n := 0; n < d.mode.Bands.BandSizes[band]*m; n++ {
-					seed = celtLCGRand(seed)
-				}
-			}
-		}
-		d.lastFinalRange = seed
-	}
-
-	return output
+	d.downsample = n
 }
 
 // DecodePLC performs packet loss concealment (public API)
@@ -795,6 +883,19 @@ func (d *Decoder) Reset() {
 	d.lastFinalRange = 0
 	d.lastStartBand = 0
 	d.lastEndBand = 0
+	for i := range d.backgroundLogE {
+		d.backgroundLogE[i] = 0
+	}
+	d.lossDuration = 0
+	d.plcDuration = 0
+	d.skipPLC = true
+	d.lastFrameType = frameNone
+	d.prefilterAndFold = false
+	d.lastPitchIndex = 0
+	d.plcLPC = [2][celtLPCOrder]float32{}
+	for c := range d.plcTail {
+		clear(d.plcTail[c])
+	}
 
 	// Reset post-filters
 	for _, pf := range d.postFilter {

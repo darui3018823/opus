@@ -42,7 +42,9 @@ type PostFilter struct {
 // NewPostFilter allocates a PostFilter with an empty history.
 func NewPostFilter() *PostFilter {
 	return &PostFilter{
-		buf: make([]float64, combFilterMaxPeriod+MaxOverlap+2),
+		// The post-filter history is also libopus's decode_mem history,
+		// which the packet loss concealment reads.
+		buf: make([]float64, decodeBufferSize),
 	}
 }
 

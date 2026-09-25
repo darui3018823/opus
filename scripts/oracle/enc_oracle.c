@@ -751,8 +751,90 @@ static int run_ms_encoder_oracle(int argc, char **argv)
     return 0;
 }
 
+/* --dec-plc <rate> <channels> <fixture> <frames> <bitrate> <app> <frame_ms>
+   <lossmask> [signal]: encodes the fixture with libopus (VBR, complexity 9,
+   the signal hint), then decodes the packets with a libopus decoder at the
+   same rate, concealing the frames whose lossmask character is '1' (the
+   mask repeats) with opus_decode_float(NULL). Prints each packet and the
+   decoded float PCM of every frame. */
+static int run_dec_plc_oracle(int argc, char **argv)
+{
+    int rate, channels, frames, bitrate, app, frame_us, frame_size, err, frame, masklen;
+    const char *fixture, *mask, *signal;
+    OpusEncoder *enc;
+    OpusDecoder *dec;
+    static float pcm[5760 * 2];
+    static float out[5760 * 2];
+    unsigned char packet[1500];
+
+    if (argc < 10) {
+        fprintf(stderr, "usage: %s --dec-plc <rate> <channels> <fixture> <frames> <bitrate> <app> <frame_ms> <lossmask> [signal]\n", argv[0]);
+        return 2;
+    }
+    rate = atoi(argv[2]);
+    channels = atoi(argv[3]);
+    fixture = argv[4];
+    frames = atoi(argv[5]);
+    bitrate = atoi(argv[6]);
+    app = parse_application(argv[7]);
+    frame_us = (int)(atof(argv[8]) * 1000.0 + 0.5);
+    mask = argv[9];
+    signal = argc >= 11 ? argv[10] : "auto";
+    masklen = (int)strlen(mask);
+    if (masklen == 0) masklen = 1;
+    frame_size = (int)((long long)rate * frame_us / 1000000);
+    enc = opus_encoder_create(rate, channels, app, &err);
+    if (enc == NULL || err != OPUS_OK) {
+        fprintf(stderr, "opus_encoder_create failed: %d\n", err);
+        return 2;
+    }
+    dec = opus_decoder_create(rate, channels, &err);
+    if (dec == NULL || err != OPUS_OK) {
+        fprintf(stderr, "opus_decoder_create failed: %d\n", err);
+        return 2;
+    }
+    opus_encoder_ctl(enc, OPUS_SET_BITRATE(bitrate));
+    opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY(9));
+    if (strcmp(signal, "voice") == 0) opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_VOICE));
+    else if (strcmp(signal, "music") == 0) opus_encoder_ctl(enc, OPUS_SET_SIGNAL(OPUS_SIGNAL_MUSIC));
+    for (frame = 0; frame < frames; frame++) {
+        int n, b, lost, samples;
+        if (channels == 2) fill_silk_fixture_stereo(pcm, rate, frame_size, frame, fixture);
+        else fill_silk_fixture(pcm, rate, frame_size, frame, fixture);
+        for (b = 0; b < frame_size * channels; b++)
+            pcm[b] = (float)(floor((double)pcm[b] * 32768.0 + 0.5) / 32768.0);
+        n = opus_encode_float(enc, pcm, frame_size, packet, (opus_int32)sizeof(packet));
+        if (n < 0) {
+            fprintf(stderr, "encode frame %d failed: %d\n", frame, n);
+            return 1;
+        }
+        lost = mask[frame % masklen] == '1';
+        fprintf(stderr, "[CELT_ENC_INPUT_FRAME] frame=%d lost=%d\n", frame, lost);
+        fprintf(stderr, "[ENC_PACKET] n=%d", n);
+        for (b = 0; b < n; b++) fprintf(stderr, " %02x", packet[b]);
+        fprintf(stderr, "\n");
+        if (lost)
+            samples = opus_decode_float(dec, NULL, 0, out, frame_size, 0);
+        else
+            samples = opus_decode_float(dec, packet, n, out, frame_size, 0);
+        if (samples < 0) {
+            fprintf(stderr, "decode frame %d failed: %d\n", frame, samples);
+            return 1;
+        }
+        fprintf(stderr, "[DEC_PCM] n=%d", samples * channels);
+        for (b = 0; b < samples * channels; b++) fprintf(stderr, " %.9g", (double)out[b]);
+        fprintf(stderr, "\n");
+    }
+    opus_encoder_destroy(enc);
+    opus_decoder_destroy(dec);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "--dec-plc") == 0) {
+        return run_dec_plc_oracle(argc, argv);
+    }
     if (argc >= 2 && strcmp(argv[1], "--ms-enc") == 0) {
         return run_ms_encoder_oracle(argc, argv);
     }

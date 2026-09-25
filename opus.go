@@ -3068,6 +3068,9 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 			fs := celtLMFrameSize[lm]
 			for ch := 1; ch <= 2; ch++ {
 				d, err := celt.NewDecoderEx(fs, 48000, numBands, ch)
+				if err == nil {
+					d.SetDownsample(48000 / sampleRate)
+				}
 				if err != nil {
 					return nil, fmt.Errorf("failed to create CELT decoder (bw=%d lm=%d ch=%d): %w", bw, lm, ch, err)
 				}
@@ -3117,14 +3120,8 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 		}
 	}
 
-	// Create resampler for CELT output: 48kHz → sampleRate
-	if sampleRate != 48000 {
-		r, err := resampler.NewResampler(48000, sampleRate, channels, resampler.QualityDefault)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create CELT output resampler: %w", err)
-		}
-		dec.celtResampler = r
-	}
+	// CELT output below 48 kHz: the CELT decoders clear the spectrum above
+	// the output Nyquist and decimate (libopus st->downsample); no resampler.
 
 	return dec, nil
 }
@@ -4069,6 +4066,9 @@ func (d *Decoder) decodeRedundancy(frame []byte, pktChannels, endBand int, carry
 	}
 	actualCh := pktChannels
 	redDec, err := celt.NewDecoderEx(celt.FrameSize5ms, 48000, endBand, actualCh)
+	if err == nil {
+		redDec.SetDownsample(48000 / d.sampleRate)
+	}
 	if err != nil {
 		return nil, 0, nil
 	}

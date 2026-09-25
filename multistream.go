@@ -19,6 +19,13 @@ type MultistreamEncoder struct {
 	bitrate           int
 	beforeEncodeFloat func(pcm []float64, frameSize int) (commit func(), err error)
 	resetPolicy       func()
+	// libopusPolicy selects opus_multistream_encode_native (SetModePolicy);
+	// mappingType and lfeStream are its MappingType and lfe_stream, and
+	// policyChanged lets a wrapper reconfigure the streams for a policy.
+	libopusPolicy bool
+	mappingType   msMappingType
+	lfeStream     int
+	policyChanged func()
 }
 
 // NewMultistreamEncoder creates a multistream encoder. channels and streams
@@ -50,6 +57,10 @@ func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, ma
 		mapping:        append([]byte(nil), mapping...),
 		encoders:       encoders,
 		bitrate:        BitrateAuto,
+		lfeStream:      -1,
+		// The restricted SILK / CELT applications only have the libopus
+		// policy (their elementary encoders select it).
+		libopusPolicy: isRestrictedCodecApplication(application),
 	}, nil
 }
 
@@ -92,8 +103,9 @@ func (e *MultistreamEncoder) SetBitrate(bitrate int) error {
 		e.bitrate = bitrate
 		return nil
 	}
-	if bitrate < 6000*e.streams || bitrate > 510000*e.streams {
-		return fmt.Errorf("%w: invalid multistream bitrate %d", ErrBadArg, bitrate)
+	bitrate, err := clampMultistreamBitrate(bitrate, e.channels)
+	if err != nil {
+		return err
 	}
 	codedChannels := e.streams + e.coupledStreams
 	remaining := bitrate
@@ -123,6 +135,19 @@ func (e *MultistreamEncoder) SetBitrate(bitrate int) error {
 
 // Bitrate returns the configured aggregate bitrate policy.
 func (e *MultistreamEncoder) Bitrate() int { return e.bitrate }
+
+// clampMultistreamBitrate is the multistream OPUS_SET_BITRATE: positive
+// rates are clamped to [500, 750000] per input channel; BitrateAuto and
+// BitrateMax pass through.
+func clampMultistreamBitrate(bitrate, channels int) (int, error) {
+	if bitrate == BitrateAuto || bitrate == BitrateMax {
+		return bitrate, nil
+	}
+	if bitrate <= 0 {
+		return 0, fmt.Errorf("%w: invalid multistream bitrate %d (must be positive)", ErrBadArg, bitrate)
+	}
+	return max(500*channels, min(750000*channels, bitrate)), nil
+}
 
 // SetVBR applies the VBR setting to every elementary stream.
 func (e *MultistreamEncoder) SetVBR(enabled bool) {
@@ -347,7 +372,7 @@ func (e *MultistreamEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) 
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768
 	}
-	return e.encodeFloatSelected(floatPCM, selectedFrameSize)
+	return e.encodeFloatSelected(floatPCM, selectedFrameSize, 16)
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
@@ -365,7 +390,7 @@ func (e *MultistreamEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608
 	}
-	return e.encodeFloatSelected(floatPCM, selectedFrameSize)
+	return e.encodeFloatSelected(floatPCM, selectedFrameSize, 24)
 }
 
 // EncodeFloat32 encodes interleaved float32 PCM.
@@ -383,7 +408,7 @@ func (e *MultistreamEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i])
 	}
-	return e.encodeFloatSelected(floatPCM, selectedFrameSize)
+	return e.encodeFloatSelected(floatPCM, selectedFrameSize, 24)
 }
 
 // EncodeFloat encodes interleaved float64 PCM.
@@ -396,10 +421,15 @@ func (e *MultistreamEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	return e.encodeFloatSelected(pcm[:selectedFrameSize*e.channels], selectedFrameSize)
+	return e.encodeFloatSelected(pcm[:selectedFrameSize*e.channels], selectedFrameSize, 24)
 }
 
-func (e *MultistreamEncoder) encodeFloatSelected(pcm []float64, selectedFrameSize int) ([]byte, error) {
+// encodeFloatSelected encodes one packet; lsbDepth is the input's sample
+// depth (the libopus policy's lsb_depth).
+func (e *MultistreamEncoder) encodeFloatSelected(pcm []float64, selectedFrameSize, lsbDepth int) ([]byte, error) {
+	if e.libopusPolicy {
+		return e.encodeLibopus(pcm, selectedFrameSize, lsbDepth, nil)
+	}
 	var commitPolicy func()
 	if e.beforeEncodeFloat != nil {
 		var err error
@@ -628,15 +658,7 @@ func (d *MultistreamDecoder) Decode(data []byte, pcm []int16) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	for i, sample := range floatPCM {
-		scaled := sample * 32768
-		if scaled > 32767 {
-			scaled = 32767
-		} else if scaled < -32768 {
-			scaled = -32768
-		}
-		pcm[i] = int16(math.Round(scaled))
-	}
+	floatToInt16(pcm[:required], floatPCM)
 	return duration, nil
 }
 

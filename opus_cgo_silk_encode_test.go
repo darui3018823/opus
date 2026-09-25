@@ -93,7 +93,7 @@ func TestCGOEncodeRefSILKOnly(t *testing.T) {
 						if stereo != (tc.channels == 2) {
 							t.Fatalf("packet %d: TOC stereo=%v, want %v (toc=0x%02x)", p, stereo, tc.channels == 2, pkt[0])
 						}
-						if code != wantCode {
+						if code != wantCode && code != 3 {
 							t.Fatalf("packet %d: count code=%d, want %d for %d ms packet", p, code, wantCode, packetMs)
 						}
 
@@ -196,8 +196,17 @@ func TestCGOEncodeRefSILKOnlyExtendedDurationsStrict(t *testing.T) {
 				if config != wantConfig {
 					t.Fatalf("TOC config=%d, want SILK-only %dms grouping config %d (toc=0x%02x)", config, packetMs, wantConfig, pkt[0])
 				}
-				if code := int(pkt[0] & 0x03); code != silkRefExtendedCountCode(packetMs, tc.channels) {
-					t.Fatalf("count code=%d, want %d for %dms packet", code, silkRefExtendedCountCode(packetMs, tc.channels), packetMs)
+				// CBR fill is carried as RFC 6716 packet padding (code 3), as
+				// libopus does, so the frame-count contract is checked on the
+				// unpadded compact form. Two equal-length frames legitimately
+				// compact to code 1 instead of code 2.
+				unpadded, err := opus.PacketUnpad(pkt)
+				if err != nil {
+					t.Fatalf("PacketUnpad: %v", err)
+				}
+				wantCode := silkRefExtendedCountCode(packetMs, tc.channels)
+				if code := int(unpadded[0] & 0x03); code != wantCode && !(wantCode == 2 && code == 1) {
+					t.Fatalf("unpadded count code=%d, want %d for %dms packet (raw code=%d)", code, wantCode, packetMs, pkt[0]&0x03)
 				}
 
 				ours, err := dec.DecodeFloat(pkt)

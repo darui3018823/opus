@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-08-31
+Last reviewed: 2026-09-15
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -8,8 +8,11 @@ disagrees with older planning documents, treat this file as the current
 code-derived status.
 
 The compatibility target is RFC 6716 and core libopus behavior. DRED, QEXT,
-OSCE/DNN processing, Opus Custom, the libopus C ABI, and bit-exact encoder
-output are outside the compatibility claim. Opaque packet-extension transport
+OSCE/DNN processing, Opus Custom, and the libopus C ABI are outside the
+compatibility claim. Encoder packets are byte-identical to libopus 1.6.1 (a
+float build without SIMD kernels) only under the opt-in `ModePolicyLibopus`
+(also selected by `EncoderProfileLibopus` and by the restricted SILK / CELT
+applications); the default `ModePolicyLegacy` keeps the Go decisions. Opaque packet-extension transport
 does not imply extension codec support. See `docs/LIBOPUS_SCOPE.md` for the
 claim boundary.
 
@@ -189,8 +192,11 @@ The `oggopus` subpackage provides:
   `io.ReadSeeker` sources with RFC 7845 80 ms decoder pre-roll
 
 The decoder exposes `SampleRate`, `Channels`, `FinalRange`, and `Pitch`
-getters. `FinalRange` is the XOR of the constituent frame entropy ranges, as
-for the libopus single-stream CTL. `Pitch` is reported in output-rate samples.
+getters. For a single-stream packet, `FinalRange` is the final entropy range of
+the last constituent Opus frame, matching libopus; multistream `FinalRange` is
+the XOR across elementary streams. All 12 official vectors currently report
+zero `FinalRange` mismatches against libopus 1.6.1 and their `.bit` records.
+`Pitch` is reported in output-rate samples.
 Decoder output gain is available through `SetGain` and `Gain`, using Q8 dB.
 Single-stream encode/decode also supports signed 24-bit PCM stored in `int32`
 through `Encode24` and `Decode24`. Encoder and decoder phase-inversion controls
@@ -215,9 +221,14 @@ libopus' frame-size/sample-rate/channel formula. For requests longer than
 Opus frame rather than dividing one frame budget across the whole packet.
 
 `NewEncoder` preserves the historical defaults (64 kbit/s, complexity 5, CBR).
+`SetModePolicy` selects the automatic mode / channel / bandwidth policy:
+`ModePolicyLegacy` (the default, the Go encoder's rules) or
+`ModePolicyLibopus` (libopus 1.6.1's `opus_encode_native`). It should be
+called before the first `Encode`; a change after encoding has started resets
+the stream state as `Reset` does, keeping every setting.
 `NewEncoderWithProfile(..., EncoderProfileLibopus)` selects automatic bitrate,
-complexity 9, and constrained VBR without imposing a behavior change on
-existing callers.
+complexity 9, constrained VBR and (since v1.5.0) `ModePolicyLibopus`, without
+imposing a behavior change on `NewEncoder` callers.
 
 Encoder, decoder, multistream, surround, projection, and container reader/writer
 instances are stateful and are not safe for concurrent use. One instance owns
@@ -575,7 +586,10 @@ remain unchanged.
   folding seed; low-budget transient fallback recomputes long-block coefficients;
   and raw-only entropy `EncodeBits` flushes correctly.
 
-Current encoder limitations:
+Current encoder limitations of the default `ModePolicyLegacy` (under
+`ModePolicyLibopus` the mode, bandwidth, rate control, DTX and FEC follow
+libopus and the packets are byte-identical; see the libopus-policy notes
+under Test Status):
 
 - `application` and `SignalType` drive encoder heuristics and can select the
   limited low-bitrate SILK-only path, including stereo and 24/48 kHz input
@@ -587,8 +601,9 @@ Current encoder limitations:
 - Both float32 and float64 PCM encoding APIs are available.
 - The public encoder exposes limited SILK-only and hybrid speech paths; it does
   not yet expose full libopus-equivalent SILK/hybrid mode selection.
-- The CELT encoder path is functional but not verified as bit-exact against
-  libopus.
+- Under `ModePolicyLegacy` the packets are not bit-exact with libopus (the
+  CELT, SILK and hybrid layers are the ported libopus code, but the Go policy
+  chooses different modes, bandwidths and rates).
 
 ### Decoder
 
@@ -632,16 +647,29 @@ Packets whose decoded duration exceeds 120 ms are rejected as invalid.
 
 Current decoder behavior and limitations:
 
+- All single-stream and multistream int16 decode, PLC, and FEC entry points use
+  the floating-point libopus `FLOAT2INT16` conversion order: float32 scaling by
+  32768, saturation to the int16 domain, then nearest-even rounding. This makes
+  the API conversion itself C-faithful; codec synthesis is not yet generally
+  sample-exact with libopus.
 - `DecodePLC` supports CELT-only, SILK-only, and hybrid streams. Before the
   first successful packet and after reset it returns zero concealment, matching
   libopus. The requested duration may be any positive 2.5 ms multiple through
   120 ms. Hybrid concealment sums the independently concealed SILK low band and
   CELT high band through the normal resampler/channel paths. Successful PLC sets
-  `FinalRange` to zero. SILK PLC is stateful and interoperable but is not
-  bit-exact with libopus PLC. A hybrid packet ending in trailing SILK-to-CELT
-  redundancy marks the next loss for CELT-only concealment, matching libopus'
-  independent `prev_redundancy` state; FEC eligibility continues to use the
-  last received packet's framing mode.
+  `FinalRange` to zero. SILK PLC is a port of libopus `silk/PLC.c`,
+  `silk/CNG.c`, and the post-loss paths of `silk/decode_frame.c`,
+  `silk/decode_parameters.c`, and `silk/decode_core.c`; concealed frames,
+  comfort noise, the post-loss bandwidth expansion and LTP smoothing, and the
+  glue fade-in are sample-exact against libopus 1.6.1 at the SILK internal rate
+  (`TestCGOSILKPLCExact`, `TestCGOSILKFECGapExact`,
+  `TestCGOSILKOneBytePayloadExact`). CELT PLC is not bit-exact.
+  A SILK payload of at most one byte is treated as a lost frame and concealed,
+  reporting a zero final range, exactly as `opus_decode_frame` does; the
+  encoder reports zero for such frames too. A SILK-only or hybrid packet ending in trailing
+  SILK-to-CELT redundancy marks the next loss for CELT-only concealment,
+  matching libopus' independent `prev_redundancy` state; FEC eligibility
+  continues to use the last received packet's framing mode.
 - `DecodeFECWithDuration` takes the exact missing duration. It decodes LBRR from
   only the first Opus frame in a SILK-only or hybrid carrier, prefixes PLC when
   the loss is longer than that frame, and falls back to PLC when FEC cannot be
@@ -935,6 +963,11 @@ and the two outputs are resampled and time-domain summed. Both redundancy
 directions are handled: trailing SILK→CELT frames crossfade the packet tail and
 seed subsequent CELT state, while leading CELT→SILK/hybrid frames replace the
 first 2.5 ms and crossfade into the new mode over the next 2.5 ms.
+SILK-only transition redundancy follows libopus' implicit syntax: if enough
+bits remain after SILK, the next bit is the direction rather than a presence
+flag, every remaining byte belongs to the 5 ms CELT frame, and its final range
+is XORed with the main range. Encoder CBR fill uses RFC code-3 packet padding
+outside the SILK frame so padding cannot be misread as transition redundancy.
 
 ## Test Status
 
@@ -950,6 +983,169 @@ go vet ./...
 go test -count=1 ./...
 go test -count=1 -tags opusref ./...
 ```
+
+Bit-exact convergence verification on 2026-09-15 (encoder): on injected
+inputs the SILK VAD (`TestSILKVADOracle`), pitch analysis
+(`TestSILKQ2PitchOracle`), LTP correlation and gain quantization
+(`TestSILKQ2LTPOracle`), and LPC/NLSF analysis (`TestSILKQ1LPCNLSFOracle`) are
+bit-exact against libopus 1.6.1 (`go test -count=1 -tags opusref -run
+'TestSILK' -v ./internal/silk/`). Inside the production encoder these stages
+are wired like libopus (pitch residual feeds LTP and the quantizer-offset
+measure, one LTP quantization per frame, first frame after reset unvoiced),
+and the encoder now frames its input like libopus: the SILK encoder codes
+each frame from a `ltp_mem | frame | LA_SHAPE_MS` look-ahead buffer (the
+coded frame trails the caller's frame by 5 ms) and the Opus layer delays the
+CELT input by Fs/250, so `Lookahead()` reports Fs/400 + Fs/250 (312 samples
+at 48 kHz, Fs/400 for restricted low delay), and every packet's input is
+high-pass conditioned first (VOIP: `hp_cutoff` following the SILK
+pitch-driven cutoff; otherwise the 3 Hz `dc_reject`; unit-exact against the
+libopus float bodies, `TestCGOInputConditioningExact`,
+`TestSILKHPVariableCutoffOracle`), and the SILK front end quantises to
+int16 and applies the libopus equal-rate resampler delay and `inputBuf + 1`
+offset (`internal/silk/front_end.go`). Against the instrumented libopus
+1.6.1 encoder (`scripts/oracle/build_encoder.ps1`,
+`TestSILKEncoderInputPipelineOracle`) the conditioned input, SILK `x_buf`,
+VAD activity, and high-pass state are bit-exact through the first frame on
+the 8/12/16/24/48 kHz mono fixtures (the SILK input at 24/48 kHz goes
+through the encoder direction of the bit-exact `silk_resampler` port, and
+the end-to-end delay equals libopus in every mode). Packet bytes still
+differ from the first frame on: the oracle's stage trace shows NLSF, LPC,
+and the noise-shape analysis (AR/tilt/LF/harmonic shaping, Lambda — a
+float32 port of `noise_shape_analysis_FLP` fed by the libopus target rate)
+matching, and in VBR the gains too (`process_gains_FLP` / `silk_gains_quant`
+ports). With the frame-counter NSQ seed, int16-scale Burg analysis, the
+libopus rate-level tables and payload sizing, **mono SILK-only VBR/CVBR
+packets are byte-identical to libopus 1.6.1** for all 12 frames of every
+shared-state oracle fixture (steady-voiced, speech-like-harmonic,
+unvoiced-noise at 8/12/16/24/48 kHz input); `TestSILKEncoderInputPipelineOracle`
+fails on any difference. Digitally silent input still takes the Go one-byte
+shortcut (libopus codes such frames), so streams containing silence diverge
+from there (see `.claude/specs/encoder-input-pipeline-libopus.md`). In-band
+FEC is exact too: `silk_LBRR_encode_FLP`, `silk_LTP_scale_ctrl` and the
+Opus-layer `decide_fec` are ported, so the oracle is byte-identical at
+24 kbps with 20 % loss and at 32 kbps, and `TestCGOEncodeRefSILKByteExact`
+shows the Go encoder producing the same packets as the real libopus 1.6.1
+encoder (automatic mode, VOIP, CVBR, complexity 5) for 8–48 kHz input at
+16/24/32 kbps with and without FEC wherever libopus stays SILK-only. Stereo
+is exact as well: `silk_stereo_LR_to_MS` (fixed point, with its own cgoref
+oracle), the stereo packet flow (flag placeholder + patch, per-frame
+mid/side rate split, mid-only coding, the partial side reset) and
+`compute_silk_rate_for_hybrid` are ported. CBR is exact as well: the
+`encode_frame_FLP` quantiser loop (`internal/silk/encode_frame_loop.go`)
+re-quantises a frame against `silk_mode.maxBits`, CBR packets are sized to
+`cbr_bytes` and padded like `opus_packet_pad`. The rate-dependent stream
+channel decision is ported as well: a stereo input below the stereo
+threshold is coded as a mono SILK stream (libopus' L/R downmix, the delayed
+toMono transition and the mono↔stereo state hand-over), so 84 of the 99
+mono+stereo CVBR/FEC/CBR cells are byte-identical, and the automatic
+bandwidth decision sets the SILK internal rate before the first packet (NB
+at low bitrates through the encoder resampler, `TestCGOEncodeRefSILKAutoBandwidth`),
+and every complexity setting 0–10 is byte-identical (the plain `silk_NSQ`
+for one delayed-decision state is ported next to the delayed-decision
+quantiser, `TestCGOEncodeRefSILKComplexity`).
+The remaining cells are policy the Go encoder does not mirror: libopus
+picks hybrid for 24/48 kHz mono input and narrows the bandwidth for FEC;
+mid-stream SILK internal-rate switching and the hybrid path are not yet
+exact. The SILK AB loudness gate passes at 8/12/16 kHz since the shaping port.
+
+The CELT-only encoder is byte-identical to the plain-C libopus 1.6.1 build
+as well (2026-09-18): `celt_encode_with_ec` is ported stage by stage in
+float32 — pre-emphasis, `clt_mdct_forward` with the float KISS FFT, band
+energies and `amp2Log2`, `tone_detect`, `transient_analysis`,
+`dynalloc_analysis`, `tf_analysis`, `quant_coarse_energy` (delayed-intra
+follower and two-pass search), spreading, the trim, `interp_bits2pulses`'
+skip decision, `op_pvq_search_c`, `theta_rdo`, fine energies, the pitch
+prefilter (`run_prefilter`), `compute_vbr` with the reservoir bookkeeping,
+the stereo width fade and the tonality analysis (`analysis.c` + MLP) at
+complexity ≥ 7. `TestCELTEncoderOracle` gates 48 kHz mono (24/64/128 kbps)
+and stereo (32/96/192 kbps) × CBR/CVBR × complexity 0–10 (mono) / 0,5,10
+(stereo), 20 frames each. The *linked* libopus (SIMD RTCD kernels) sums
+floats in a different order, so `TestCGOEncodeRefCELTByteExact` only
+reports. Hybrid packets are byte-identical too (`TestHybridEncoderOracle`,
+48 kHz mono/stereo × CBR/CVBR × complexity 0/5/10): the SILK/CELT rate
+split, `silk_mode.maxBits`, `CELT_SET_SILK_INFO`, the hybrid tf/VBR rules,
+the HB gain and stereo width fades follow `opus_encode_native`. The
+automatic mode / bandwidth / channel policy of libopus is ported as
+`SetModePolicy(ModePolicyLibopus)` (`TestAutoModeOracle`: VOIP/AUDIO ×
+voice/music/auto × mono/stereo × 12–128 kbps, 60/60 automatic-mode cells
+byte-identical, including a stereo input coded as a mono CELT or hybrid
+stream via `CELT_SET_CHANNELS` MDCT averaging and the SILK downmix); the
+default remains the Go policy. Mode transitions follow `opus_encode_native`
+under that policy (`TestAutoModeTransitionOracle`, 108 bitrate-schedule
+cells byte-identical): the deferred switch to CELT-only with a trailing
+redundant frame, the leading redundant frame plus SILK re-init and 10 ms
+prefill after CELT-only, the CELT reset / 2.5 ms prefill / prediction-off
+on every mode change, SILK's `allowBandwidthSwitch`, and the SILK internal
+rate transitions (`silk_LP_variable_cutoff`, `silk_control_audio_bandwidth`,
+`silk_bw_switch` with the prefill-2 re-init; `8k-24k` and 160-frame
+`24k-8k-long` cells), and 40/60 ms packets (native SILK multi-frame
+packets, and hybrid / CELT-only packets coded as repacketized 20 ms frames
+like `encode_multiframe_packet`, including their transitions), and
+8/12/16/24 kHz input (the CELT layer runs the 48 kHz mode on the
+zero-stuffed input, `st->upsample`, instead of resampling; fixed bitrates
+and mode transitions are byte-identical). `celt_encode_with_ec`'s silence
+path (flag, two-byte VBR frame, pretend-filled `tell`, `oldBandE` = −28)
+replaces the earlier energy-based shortcut. `decide_fec` runs in
+opus_encode_native's position (narrowing the bandwidth above 5 % loss) and
+`OPUS_SET_PACKET_LOSS_PERC` reaches the CELT encoder, so packets coded with
+in-band FEC (5/20/40 % loss, SILK-only and hybrid) are byte-identical too.
+DTX follows libopus under `ModePolicyLibopus`: the generalized DTX
+(`decide_dtx_mode`, TOC-only packets after 200 ms without activity) and
+SILK's own DTX when the tonality analysis is off (`TestDTXOracle`, 48 cells
+byte-identical). Multi-frame packets read the tonality analysis per 20 ms
+frame as libopus does. Under `ModePolicyLegacy` DTX keeps the Go encoder's
+minimal silent packets. `TestAutoModeOracleSweep` extends the gate to 2340
+configurations (all bitrate steps, CBR / CVBR / unconstrained VBR,
+complexities 0–10, the auto signal hint, 8–24 kHz input, 40–120 ms packets,
+forced and capped bandwidths, forced mono, int16 input, LSB depths, FEC and
+DTX at 8/12/24 kHz), and CI builds the instrumented oracle and runs these
+gates on Linux. The encoder's arithmetic is free of fused multiply-adds, so
+its output is identical on amd64, arm64 and the other FMA architectures (CI
+checks the arm64 build). Packets shorter than 20 ms follow the libopus policy
+as well: 2.5/5 ms CELT-only packets, 10 ms SILK and hybrid packets (the SILK
+encoder switches between 10 and 20 ms frames in place, as silk_setup_fs
+does), their transitions, DTX and FEC, and libopus's TOC-only "PLC frames"
+when the budget is too small; the sweep's configurations are all
+byte-identical.
+
+libopus 1.6's restricted applications are available:
+`ApplicationRestrictedSILK` (SILK-only packets of 10 ms or longer, at most
+wideband, without redundancy or the tonality analysis) and
+`ApplicationRestrictedCELT` (CELT-only without delay compensation). Both are
+fixed at creation and always use the libopus policy; the sweep's
+`restricted` group (144 configurations, with restricted low delay) and 18
+multistream configurations are byte-identical. `SetBitrate` clamps positive
+requests to [500, 750000 x channels] like OPUS_SET_BITRATE (multistream,
+surround and projection: per input channel).
+
+The multistream, surround and projection encoders take the libopus policy
+too (`SetModePolicy`): `opus_multistream_encode_native`'s rate allocation
+(surround or ambisonics), per-stream packet budget and repacketized framing;
+mapping family 1's surround analysis and energy mask (VBR target, dynalloc,
+trim and SILK rate), the LFE stream (`OPUS_SET_LFE`), the forced CELT-only
+coupled / ambisonics streams, and the projection encoder's float32 mixing
+with the tonality analysis on the unmixed input.
+`TestMultistreamEncoderOracle` compares 171 configurations (generic
+multistream, families 0/1/255 with 1-11 channels, families 2/3 with 4-16
+channels; VBR/CVBR/CBR, 2.5-60 ms, 16/48 kHz, FEC, DTX, int16 and rate
+schedules), all byte-identical.
+
+Bit-exact convergence verification on 2026-09-15: SILK packet-loss
+concealment, comfort noise, and post-loss glue are sample-exact against
+libopus 1.6.1 for 8/12/16 kHz mono and stereo, 10-60 ms frames, single and
+repeated losses, in-band FEC with missing LBRR subframes, and one-byte
+payloads (`go test -count=1 -tags opusref -run 'TestCGOSILK' -v .`). The
+`opusref` encoder FEC and strict-duration tests now inspect unpadded packets
+so CBR padding cannot hide LBRR presence or the frame count.
+
+Bit-exact convergence verification on 2026-09-13: passing (`go vet ./...`,
+`go test -count=1 ./...`, `go test -count=1 -tags opusref ./...`, and
+`go test -race -count=1 ./...`). The libopus 1.6.1 official-vector oracle
+reports zero final-range mismatches for all 12 vectors. The scalar-source CELT
+stage oracle is exact across pure-CELT vectors 01, 07, and 11. Correcting the
+eighth fine-energy-bit cutoff raised installed-libopus exact int16 coverage to
+99.999% on vector 07, 96.404% on mixed-mode vector 09, and 84.982% on
+mixed-mode vector 10; the remaining differences retain exact final ranges.
 
 Result on 2026-06-16: passing (`go vet ./...`, `go test -count=1 ./...`,
 and `go test -count=1 -tags opusref ./...` exit 0).
@@ -976,12 +1172,12 @@ every tested mode with a 10 dB continuity floor. The mono 20/40/60 ms floor
 remains 6 dB. This is not a 60 ms-specific limitation: LBRR is intentionally not
 coded for VAD-inactive frames (matching libopus' single-VAD semantics), so a lost
 frame that was inactive has no redundant copy and is recovered via SILK PLC
-instead. SILK PLC is not bit-exact with libopus, and measuring aligned SNR on
-such a near-silent frame yields a small value. In the deterministic fixture the
-3 Hz amplitude-envelope trough makes exactly one 60 ms frame inactive, so its
-slot (subframe 0 of the recovered packet) is PLC-concealed by both Go and
-libopus rather than reconstructed from LBRR; the present-LBRR subframes match
-libopus closely (40 ms ~33 dB, present 60 ms subframes ~9-10 dB).
+instead. In the deterministic fixture the 3 Hz amplitude-envelope trough makes
+exactly one 60 ms frame inactive, so its slot (subframe 0 of the recovered
+packet) is PLC-concealed by both Go and libopus rather than reconstructed from
+LBRR. Since the 2026-09-15 SILK PLC port, that concealed slot, the LBRR
+subframes that follow it, and the normal frames after the recovery are
+sample-exact against libopus (`TestCGOSILKFECGapExact`).
 
 find_LPC FLP Phase 2 noise-shape input-boundary verification on 2026-06-29:
 passing (`go vet ./...`, `go test -count=1 ./...`,
@@ -1192,6 +1388,37 @@ Notes:
   needs a C toolchain plus libopus (reported `libopus 1.6.1` locally); it passes
   all 12 vectors. Normal builds use a `!opusref` stub so the codec stays
   CGO-free.
+- A constituent-frame oracle for testvector01 packet 0 additionally holds all
+  three CELT final ranges exact and requires exact int16 output for all
+  1920/1920 samples of every frame in both sequential and reset-state decoding.
+  The decoder mirrors the floating libopus build's float32 coarse/fine energy
+  and de-emphasis state semantics, including the standard 48 kHz
+  `27853/32768` de-emphasis coefficient and the absence of the fixed-point-only
+  `-28` coarse-energy clamp. A C oracle compiled directly from the checked-in
+  libopus 1.6.1 source proves bit-for-bit float32 equality for all four CELT FFT
+  sizes and all four inverse-MDCT sizes, including windowed overlap/carry. The
+  production transform uses generated copies of the standard 48 kHz mode's
+  static FFT, MDCT, and window bit patterns rather than regenerating the
+  twiddles from trigonometric functions. For tv01 frames 0 and 1 the oracle
+  proves all 21 normalized PVQ bands, all 21 fine-corrected energy words, and
+  both complete 960-value denormalized spectra bit-exact. The transient frame-0
+  path also consumes the decoded log energy directly and mirrors float32
+  anti-collapse arithmetic. The CWRS decoder now computes `U(N,K)` directly rather than
+  reconstructing it from already-saturated `V` values, and the float PVQ fold,
+  rotation, recursive gain, Haar, stereo-merge, and denormalization paths follow
+  libopus float32 operation order. The decoder also applies both fine-energy
+  passes before deriving synthesis amplitudes, uses the libopus eight-bit
+  final-fine cutoff, correctly rounds rare `exp2f` midpoint cases, and mirrors
+  float32 order in the comb filter and two-sample stereo resynthesis. A
+  stateful checked-in scalar C scan now matches every emitted normalized-energy,
+  denormalized-spectrum, synthesis, post-filter, and PCM hash across all three
+  pure-CELT official vectors (01, 07, and 11). Packet 33 contains the first
+  one-LSB int16 difference against the independently installed libopus build,
+  so the scalar match identifies that difference as build-specific compiler or
+  SIMD float arithmetic rather than a checked-in source-level mismatch. An
+  independently installed libopus build can still differ below one
+  int16 LSB in float output because its compiler/SIMD transform path is not the
+  scalar oracle; int16 output remains exact for this packet.
 - The pure-Go **encoder** is also cross-validated against libopus under the same
   tag: `TestCGOEncodeRef` encodes synthetic signals with our encoder and decodes
   the packets with libopus 1.6.1, then measures delay-aligned SNR. libopus
@@ -1200,8 +1427,9 @@ Notes:
   stereo 1 kHz after signal-driven bandwidth detection), and
   `TestCGOEncodeRefSilence` confirms silent input decodes to silence in libopus.
   This demonstrates standards interoperability for the covered fixtures rather
-  than only self-decoding. The encoder is still not bit-exact against libopus's
-  encoder, which is not required.
+  than only self-decoding. Under the default `ModePolicyLegacy` the packets are
+  not bit-exact with libopus's; `ModePolicyLibopus` makes them byte-identical
+  (the encoder oracle tests above).
 - `TestCGOEncodeRefSILKOnly` cross-checks the limited public SILK-only encoder
   path with libopus for 8/12/16 kHz mono, VOIP and explicit voice routing, and
   20/40/60 ms packet durations. It verifies SILK-only TOC configs, decoded
@@ -1244,15 +1472,16 @@ reference comparison.
   sample-accurate per-link seek metadata, but does not provide multiplexed-stream
   demux.
 - Multistream/surround provide core encode/decode, mapping, aggregate bitrate,
-  per-stream state access, and channel-role energy-mask analysis for CELT
-  allocation trim. They do not yet mirror every libopus multistream CTL or the
-  remaining surround-mask consumers: per-band dynalloc, mask-aware VBR and
-  SILK/hybrid rate offsets, and full LFE-special CELT policy.
+  per-stream state access, and libopus's surround analysis and energy mask
+  (VBR target, dynalloc, trim and SILK/hybrid rate) with LFE coding; under
+  `ModePolicyLibopus` they are byte-identical to libopus. They do not mirror
+  every libopus multistream CTL.
 - Public PLC covers CELT-only, SILK-only, and hybrid streams for mono, stereo,
   multistream, and surround output.
-- Top-level SILK/hybrid encoder selection is voice-oriented and now accounts
-  for rate, channels, bandwidth, CVBR, and active FEC, but it is not yet a full
-  libopus-equivalent mode/rate/quality policy. See
+- Under the default `ModePolicyLegacy`, top-level SILK/hybrid encoder
+  selection is voice-oriented and accounts for rate, channels, bandwidth, CVBR,
+  and active FEC, but it is not the libopus mode/rate/quality policy (the
+  opt-in `ModePolicyLibopus` is). See
   `docs/MODE_RATE_POLICY_DIFF.md` for the current gap map. The post-audit policy
   phase intentionally retained these gaps after two measured gate candidates
   failed its per-bit adoption criteria.
@@ -1260,8 +1489,9 @@ reference comparison.
   stereo, multistream, and surround output. Hybrid FEC reconstructs the
   redundant SILK low band; CELT elementary streams use PLC during multistream
   FEC recovery.
-- Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
-  to full libopus-compatible mode/rate-control behavior.
+- Under `ModePolicyLegacy`, application/signal mode, VBR/CVBR, and some
+  CTL-style constants are not wired to libopus-compatible mode/rate-control
+  behavior; `ModePolicyLibopus` wires them as libopus does.
 - The post-audit CVBR fix substantially reduces the deterministic CELT/music
   worst case without increasing its byte total. TF-estimate and stereo
   tonality-slope allocation-trim terms further reduce the remaining 24/32 kbps
@@ -1269,9 +1499,10 @@ reference comparison.
   5.55/5.40 dB. Stateful stereo saving and broader dynamic-allocation parity
   remain future measured candidates.
 - Decoder conformance and reference validation passes the official vectors and
-  the covered libopus comparisons. The larger remaining compatibility and
-  quality gaps are on the encoder side (bit-exact CELT and the broader
-  SILK/hybrid encoder paths).
+  the covered libopus comparisons. The remaining compatibility gaps are the
+  default encoder policy (Legacy; libopus parity is opt-in), CELT PLC and
+  some mixed-mode decoder samples that are not sample-exact, and parity with
+  a libopus built with SIMD kernels (a non-goal).
 
 ## Practical Use Today
 
@@ -1282,5 +1513,7 @@ output, and libopus decode cross-checks, plus a narrow low-bitrate SILK-only
 speech path, an initial high-bitrate 24/48 kHz hybrid voice path, and public
 multistream/surround/projection packet support cross-checked with libopus.
 Packet extensions and single-stream Ogg Opus containers are available through
-public Pure Go APIs. It is not bit-exact with libopus and does not yet provide
-full SILK/hybrid mode selection.
+public Pure Go APIs. With `SetModePolicy(ModePolicyLibopus)` (or
+`EncoderProfileLibopus`) the single-stream, multistream, surround and
+projection encoders produce packets byte-identical to libopus 1.6.1; the
+default `ModePolicyLegacy` keeps the Go mode selection and is not bit-exact.

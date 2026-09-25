@@ -1,0 +1,474 @@
+# Builds the libopus 1.6.1 *encoder* input-pipeline oracle from the checked-in
+# source tree (repo `libopus/`, the bit-exact convergence target).
+#
+#   pwsh scripts/oracle/build_encoder.ps1
+#   <os temp dir>/opusoracle/enc_oracle.exe --silk-enc <rate> <fixture> [targetFrame|-1] [frames] [bitrate] [bandwidth]
+#
+# The exe runs the real opus_encode_float with the AB-test settings and prints,
+# to stderr, for every traced frame: the conditioned pcm_buf that CELT/SILK
+# consume ([ENC_INPUT]/[ENC_PCM_BUF]), the SILK int16 inputBuf and float x_buf
+# ([SILK_ENC_XFRAME_INFO]/[SILK_ENC_INPUTBUF]/[SILK_ENC_XBUF]), and the packet
+# bytes ([ENC_PACKET]). Consumed by opus_silk_enc_oracle_test.go (opusref tag).
+#
+# Requires: gcc (msys2 mingw64 on Windows, the system gcc on Linux). Scalar build (no SIMD, no FMA): -O1 only.
+
+param([string]$Source = "")
+
+$ErrorActionPreference = 'Stop'
+# The oracle lands where the Go tests look for it (os.TempDir()/opusoracle).
+$bld = Join-Path ([System.IO.Path]::GetTempPath()) "opusoracle"
+New-Item -ItemType Directory -Force $bld | Out-Null
+
+$srcDir = if ($Source -ne "") { (Resolve-Path $Source).Path } else { (Resolve-Path (Join-Path $PSScriptRoot "../../libopus")).Path }
+Write-Host "libopus source: $srcDir"
+if (-not (Test-Path "$srcDir/silk/enc_API.c")) { throw "not a libopus source tree: $srcDir" }
+
+$celt = "$srcDir/celt"
+$silk = "$srcDir/silk"
+$opusSrc = "$srcDir/src"
+
+function Replace-Checked([string]$text, [string]$old, [string]$new, [string]$label) {
+    if (-not $text.Contains($old)) { throw "instrumentation anchor not found: $label" }
+    return $text.Replace($old, $new)
+}
+
+Copy-Item "$PSScriptRoot/silk_trace.h" "$bld/silk_trace.h" -Force
+Copy-Item "$PSScriptRoot/enc_oracle.c" "$bld/enc_oracle.c" -Force
+
+# opus_encoder.c: dump pcm_buf right after the input conditioning.
+$opusEnc = (Get-Content "$opusSrc/opus_encoder.c" -Raw).Replace("`r`n", "`n")
+$opusEnc = Replace-Checked $opusEnc '#include "opus_private.h"' "#include `"opus_private.h`"`n#include <stdio.h>`nextern int oracle_trace_enabled;" "opus_encoder include"
+$pcmBufDump = @'
+    (void)float_api;
+#endif
+    if (oracle_trace_enabled) {
+        int _i, _n = (total_buffer+frame_size)*st->channels;
+        fprintf(stderr, "[ENC_INPUT] frame_size=%d total_buffer=%d channels=%d mode=%d cutoff_Hz=%d smth2=%d hp_freq_smth1=%d\n",
+                frame_size, total_buffer, st->channels, st->mode, cutoff_Hz, st->variable_HP_smth2_Q15, hp_freq_smth1);
+        fprintf(stderr, "[ENC_PCM_BUF] n=%d", _n);
+        for (_i = 0; _i < _n; _i++) fprintf(stderr, " v[%d]=%.17g", _i, (double)pcm_buf[_i]);
+        fprintf(stderr, "\n");
+    }
+'@
+$opusEnc = Replace-Checked $opusEnc "    (void)float_api;`n#endif`n" ($pcmBufDump.Replace("`r`n", "`n") + "`n") "opus_encoder pcm_buf"
+# SILK prefill input.
+$opusEnc = Replace-Checked $opusEnc "            pcm_silk = st->delay_buffer;`n" "            pcm_silk = st->delay_buffer;`n            if (oracle_trace_enabled) { int _i; fprintf(stderr, `"[ENC_PREFILL] prefill=%d n=%d`", prefill, st->encoder_buffer*st->channels); for (_i = 0; _i < st->encoder_buffer*st->channels; _i++) fprintf(stderr, `" v[%d]=%.17g`", _i, (double)pcm_silk[_i]); fprintf(stderr, `"\n`"); }`n" "opus_encoder prefill dump"
+Set-Content "$bld/opus_encoder_instr.c" $opusEnc -NoNewline
+
+# encode_frame_FLP.c: dump inputBuf and x_buf once the new frame is in place.
+$encFrame = (Get-Content "$silk/float/encode_frame_FLP.c" -Raw).Replace("`r`n", "`n")
+$encFrame = Replace-Checked $encFrame '#include "stack_alloc.h"' "#include `"stack_alloc.h`"`n#include `"silk_trace.h`"" "encode_frame include"
+$xbufDump = @'
+        x_frame[ LA_SHAPE_MS * psEnc->sCmn.fs_kHz + i * ( psEnc->sCmn.frame_length >> 3 ) ] += ( 1 - ( i & 2 ) ) * 1e-6f;
+    }
+    if( oracle_trace_enabled ) {
+        fprintf(stderr, "[SILK_ENC_XFRAME_INFO] nFramesEncoded=%d frame_length=%d fs_kHz=%d ltp_mem_length=%d la_shape=%d first=%d prefill=%d speech_activity_Q8=%d variable_HP_smth1_Q15=%d\n",
+                psEnc->sCmn.nFramesEncoded, psEnc->sCmn.frame_length, psEnc->sCmn.fs_kHz, psEnc->sCmn.ltp_mem_length,
+                LA_SHAPE_MS * psEnc->sCmn.fs_kHz, psEnc->sCmn.first_frame_after_reset, psEnc->sCmn.prefillFlag,
+                psEnc->sCmn.speech_activity_Q8, psEnc->sCmn.variable_HP_smth1_Q15);
+        oracle_silk_dump_i16("ENC_INPUTBUF", psEnc->sCmn.inputBuf, psEnc->sCmn.frame_length + 2);
+        oracle_silk_dump_float("ENC_XBUF", psEnc->x_buf, psEnc->sCmn.ltp_mem_length + psEnc->sCmn.frame_length + LA_SHAPE_MS * psEnc->sCmn.fs_kHz);
+    }
+'@
+$encFrame = Replace-Checked $encFrame "        x_frame[ LA_SHAPE_MS * psEnc->sCmn.fs_kHz + i * ( psEnc->sCmn.frame_length >> 3 ) ] += ( 1 - ( i & 2 ) ) * 1e-6f;`n    }`n" ($xbufDump.Replace("`r`n", "`n") + "`n") "encode_frame x_buf"
+$loopDump = @'
+                nBits = ec_tell( psRangeEnc );
+                if( oracle_trace_enabled ) {
+                    fprintf(stderr, "[SILK_ENC_LOOP] iter=%d nBits=%d maxBits=%d useCBR=%d gainMult_Q8=%d gainsID=%d found_lower=%d found_upper=%d Lambda=%.9g quantOffset=%d gains=%d,%d,%d,%d\n",
+                        iter, nBits, maxBits, useCBR, gainMult_Q8, gainsID, found_lower, found_upper, sEncCtrl.Lambda, psEnc->sCmn.indices.quantOffsetType,
+                        psEnc->sCmn.indices.GainsIndices[0], psEnc->sCmn.indices.GainsIndices[1], psEnc->sCmn.indices.GainsIndices[2], psEnc->sCmn.indices.GainsIndices[3]);
+                }
+'@
+$encFrame = Replace-Checked $encFrame "                nBits = ec_tell( psRangeEnc );`n`n                /* If we still bust after the last iteration, do some damage control. */`n" ($loopDump.Replace("`r`n", "`n") + "`n                /* If we still bust after the last iteration, do some damage control. */`n") "encode_frame loop dump"
+$damageDump = @'
+                    nBits = ec_tell( psRangeEnc );
+                    if( oracle_trace_enabled ) {
+                        fprintf(stderr, "[SILK_ENC_LOOP_DAMAGE] iter=%d nBits=%d maxBits=%d\n", iter, nBits, maxBits);
+                    }
+                }
+'@
+$encFrame = Replace-Checked $encFrame "                    nBits = ec_tell( psRangeEnc );`n                }`n" ($damageDump.Replace("`r`n", "`n") + "`n") "encode_frame damage dump"
+$restoreDump = @'
+                if( found_lower && ( gainsID == gainsID_lower || nBits > maxBits ) ) {
+                    if( oracle_trace_enabled ) {
+                        fprintf(stderr, "[SILK_ENC_LOOP_RESTORE] nBits_lower=%d gainMult_lower=%d\n", nBits_lower, gainMult_lower);
+                    }
+'@
+$encFrame = Replace-Checked $encFrame "                if( found_lower && ( gainsID == gainsID_lower || nBits > maxBits ) ) {`n" ($restoreDump.Replace("`r`n", "`n") + "`n") "encode_frame restore dump"
+Set-Content "$bld/encode_frame_FLP_instr.c" $encFrame -NoNewline
+
+# SILK encoder analysis-stage instrumentation (shared with the legacy build.ps1
+# blocks, but every anchor is checked against the 1.6.1 sources).
+# Generate instrumented SILK encoder sources. These are used by
+# `oracle.exe --silk-enc ...` to dump the libopus encoder's per-frame analysis
+# and NSQ inputs for the mono SILK-only AB fixtures.
+$findLPC = Get-Content "$silk/float/find_LPC_FLP.c" -Raw
+$findLPC = $findLPC.Replace("`r`n", "`n")
+$findLPC = Replace-Checked $findLPC '#include "tuning_parameters.h"' "#include `"tuning_parameters.h`"`r`n#include `"silk_trace.h`"" "stage anchor 1"
+$__old = "    res_nrg = silk_burg_modified_FLP( a, x, minInvGain, subfr_length, psEncC->nb_subfr, psEncC->predictLPCOrder, arch );"
+$__new = @"
+    res_nrg = silk_burg_modified_FLP( a, x, minInvGain, subfr_length, psEncC->nb_subfr, psEncC->predictLPCOrder, arch );
+    if( oracle_trace_enabled ) {
+        fprintf(stderr, "[SILK_ENC_FIND_LPC] subfr_length=%d nb_subfr=%d order=%d minInvGain=%.17g full_res_nrg=%.17g useInterp=%d first=%d\n",
+                subfr_length, psEncC->nb_subfr, psEncC->predictLPCOrder, (double)minInvGain, (double)res_nrg,
+                psEncC->useInterpolatedNLSFs, psEncC->first_frame_after_reset);
+        oracle_silk_dump_float("ENC_FIND_LPC_FULL_AR", a, psEncC->predictLPCOrder);
+    }
+"@
+$findLPC = Replace-Checked $findLPC $__old ($__new.Replace("`r`n", "`n")) "stage anchor 2"
+$__old = "        silk_A2NLSF_FLP( NLSF_Q15, a_tmp, psEncC->predictLPCOrder );"
+$__new = @"
+        silk_A2NLSF_FLP( NLSF_Q15, a_tmp, psEncC->predictLPCOrder );
+        oracle_silk_dump_i16("ENC_FIND_LPC_LAST_HALF_NLSF_Q15", NLSF_Q15, psEncC->predictLPCOrder);
+"@
+$findLPC = Replace-Checked $findLPC $__old ($__new.Replace("`r`n", "`n")) "stage anchor 3"
+$__old = "            /* Determine whether current interpolated NLSFs are best so far */"
+$__new = @"
+            if( oracle_trace_enabled ) {
+                fprintf(stderr, "[SILK_ENC_NLSF_INTERP_CAND] k=%d res=%.17g best=%.17g second=%.17g\n",
+                        k, (double)res_nrg_interp, (double)res_nrg, (double)res_nrg_2nd);
+                oracle_silk_dump_i16("ENC_NLSF_INTERP_Q15", NLSF0_Q15, psEncC->predictLPCOrder);
+                oracle_silk_dump_float("ENC_NLSF_INTERP_AR", a_tmp, psEncC->predictLPCOrder);
+            }
+
+            /* Determine whether current interpolated NLSFs are best so far */
+"@
+$findLPC = Replace-Checked $findLPC $__old ($__new.Replace("`r`n", "`n")) "stage anchor 4"
+$__old = "    celt_assert( psEncC->indices.NLSFInterpCoef_Q2 == 4 ||"
+$__new = @"
+    if( oracle_trace_enabled ) {
+        fprintf(stderr, "[SILK_ENC_NLSF_TARGET] interp=%d\n", psEncC->indices.NLSFInterpCoef_Q2);
+        oracle_silk_dump_i16("ENC_NLSF_TARGET_Q15", NLSF_Q15, psEncC->predictLPCOrder);
+    }
+
+    celt_assert( psEncC->indices.NLSFInterpCoef_Q2 == 4 ||
+"@
+$findLPC = Replace-Checked $findLPC $__old ($__new.Replace("`r`n", "`n")) "stage anchor 5"
+Set-Content "$bld/find_LPC_FLP_instr.c" $findLPC
+
+$findPred = Get-Content "$silk/float/find_pred_coefs_FLP.c" -Raw
+$findPred = $findPred.Replace("`r`n", "`n")
+$__old = "    /* LPC_in_pre contains the LTP-filtered input for voiced, and the unfiltered input for unvoiced */`n"
+$__new = @"
+    /* LPC_in_pre contains the LTP-filtered input for voiced, and the unfiltered input for unvoiced */
+    if( oracle_trace_enabled ) {
+        oracle_silk_dump_float("ENC_LPC_IN_PRE", LPC_in_pre, psEnc->sCmn.nb_subfr * ( psEnc->sCmn.subfr_length + psEnc->sCmn.predictLPCOrder ));
+        oracle_silk_dump_float("ENC_INV_GAINS", invGains, psEnc->sCmn.nb_subfr);
+    }
+
+"@
+$findPred = Replace-Checked $findPred $__old ($__new.Replace("`r`n", "`n")) "find_pred_coefs LPC_in_pre"
+$findPred = Replace-Checked $findPred '#include "main_FLP.h"' "#include `"main_FLP.h`"`r`n#include `"silk_trace.h`"" "stage anchor 6"
+$__old = "    silk_process_NLSFs_FLP( &psEnc->sCmn, psEncCtrl->PredCoef, NLSF_Q15, psEnc->sCmn.prev_NLSFq_Q15 );"
+$__new = @"
+    silk_process_NLSFs_FLP( &psEnc->sCmn, psEncCtrl->PredCoef, NLSF_Q15, psEnc->sCmn.prev_NLSFq_Q15 );
+    if( oracle_trace_enabled ) {
+        fprintf(stderr, "[SILK_ENC_PRED_COEFS] signalType=%d interp=%d LTPredCodGain=%.17g\n",
+                psEnc->sCmn.indices.signalType, psEnc->sCmn.indices.NLSFInterpCoef_Q2,
+                (double)psEncCtrl->LTPredCodGain);
+        oracle_silk_dump_i16("ENC_NLSF_QUANT_Q15", NLSF_Q15, psEnc->sCmn.predictLPCOrder);
+        oracle_silk_dump_float("ENC_PREDCOEF0_FLP", psEncCtrl->PredCoef[0], psEnc->sCmn.predictLPCOrder);
+        oracle_silk_dump_float("ENC_PREDCOEF1_FLP", psEncCtrl->PredCoef[1], psEnc->sCmn.predictLPCOrder);
+        oracle_silk_dump_float("ENC_LTP_COEF_FLP", psEncCtrl->LTPCoef, psEnc->sCmn.nb_subfr * LTP_ORDER);
+        oracle_silk_dump_int("ENC_PITCHL", psEncCtrl->pitchL, psEnc->sCmn.nb_subfr);
+    }
+"@
+$findPred = Replace-Checked $findPred $__old ($__new.Replace("`r`n", "`n")) "stage anchor 7"
+$__old = "    silk_residual_energy_FLP( psEncCtrl->ResNrg, LPC_in_pre, psEncCtrl->PredCoef, psEncCtrl->Gains,`n        psEnc->sCmn.subfr_length, psEnc->sCmn.nb_subfr, psEnc->sCmn.predictLPCOrder );"
+$__new = @"
+    silk_residual_energy_FLP( psEncCtrl->ResNrg, LPC_in_pre, psEncCtrl->PredCoef, psEncCtrl->Gains,
+        psEnc->sCmn.subfr_length, psEnc->sCmn.nb_subfr, psEnc->sCmn.predictLPCOrder );
+    oracle_silk_dump_float("ENC_RESNRG_FLP", psEncCtrl->ResNrg, psEnc->sCmn.nb_subfr);
+"@
+$findPred = Replace-Checked $findPred $__old ($__new.Replace("`r`n", "`n")) "stage anchor 8"
+$__old = "        /* Quantize LTP gain parameters */`n"
+$__new = @"
+        if( oracle_trace_enabled ) {
+            oracle_silk_dump_float("ENC_LTP_XX", XXLTP, psEnc->sCmn.nb_subfr * LTP_ORDER * LTP_ORDER);
+            oracle_silk_dump_float("ENC_LTP_XX_IN", xXLTP, psEnc->sCmn.nb_subfr * LTP_ORDER);
+            oracle_silk_dump_float("ENC_RES_PITCH", res_pitch - psEnc->sCmn.ltp_mem_length, psEnc->sCmn.ltp_mem_length + psEnc->sCmn.frame_length + psEnc->sCmn.la_pitch);
+            fprintf(stderr, "[SILK_ENC_LTP_STATE] sum_log_gain_Q7=%d\n", psEnc->sCmn.sum_log_gain_Q7);
+        }
+        /* Quantize LTP gain parameters */
+"@
+$findPred = Replace-Checked $findPred $__old ($__new.Replace("`r`n", "`n")) "find_pred_coefs LTP dump"
+Set-Content "$bld/find_pred_coefs_FLP_instr.c" $findPred
+
+$noiseShape = Get-Content "$silk/float/noise_shape_analysis_FLP.c" -Raw
+$noiseShape = $noiseShape.Replace("`r`n", "`n")
+$noiseShape = Replace-Checked $noiseShape '#include "tuning_parameters.h"' "#include `"tuning_parameters.h`"`r`n#include `"silk_trace.h`"" "stage anchor 9"
+$__old = "        psEncCtrl->Tilt[ k ]           = psShapeSt->Tilt_smth;`n    }`n}"
+$__new = @"
+        psEncCtrl->Tilt[ k ]           = psShapeSt->Tilt_smth;
+    }
+    if( oracle_trace_enabled ) {
+        fprintf(stderr, "[SILK_ENC_NOISE_SHAPE] signalType=%d quantOffset=%d speechActivity=%.17g inputQuality=%.17g codingQuality=%.17g SNR_dB_Q7=%d warping_Q16=%d predGain=%.17g LTPCorr=%.17g useCBR=%d shapeWinLength=%d\n",
+                psEnc->sCmn.indices.signalType, psEnc->sCmn.indices.quantOffsetType,
+                (double)( psEnc->sCmn.speech_activity_Q8 * ( 1.0f / 256.0f ) ),
+                (double)psEncCtrl->input_quality, (double)psEncCtrl->coding_quality,
+                psEnc->sCmn.SNR_dB_Q7, psEnc->sCmn.warping_Q16, (double)psEncCtrl->predGain, (double)psEnc->LTPCorr,
+                psEnc->sCmn.useCBR, psEnc->sCmn.shapeWinLength);
+        oracle_silk_dump_float_strided("ENC_SHAPE_AR_FLP", psEncCtrl->AR, psEnc->sCmn.nb_subfr, MAX_SHAPE_LPC_ORDER, psEnc->sCmn.shapingLPCOrder);
+        oracle_silk_dump_float("ENC_SHAPE_GAINS_PRE_FLP", psEncCtrl->Gains, psEnc->sCmn.nb_subfr);
+        oracle_silk_dump_float("ENC_SHAPE_LF_MA_FLP", psEncCtrl->LF_MA_shp, psEnc->sCmn.nb_subfr);
+        oracle_silk_dump_float("ENC_SHAPE_LF_AR_FLP", psEncCtrl->LF_AR_shp, psEnc->sCmn.nb_subfr);
+        oracle_silk_dump_float("ENC_SHAPE_TILT_FLP", psEncCtrl->Tilt, psEnc->sCmn.nb_subfr);
+        oracle_silk_dump_float("ENC_SHAPE_HARM_FLP", psEncCtrl->HarmShapeGain, psEnc->sCmn.nb_subfr);
+    }
+}
+"@
+$noiseShape = Replace-Checked $noiseShape $__old ($__new.Replace("`r`n", "`n")) "stage anchor 10"
+Set-Content "$bld/noise_shape_analysis_FLP_instr.c" $noiseShape
+
+$processGains = Get-Content "$silk/float/process_gains_FLP.c" -Raw
+$processGains = $processGains.Replace("`r`n", "`n")
+$processGains = Replace-Checked $processGains '#include "tuning_parameters.h"' "#include `"tuning_parameters.h`"`r`n#include `"silk_trace.h`"" "stage anchor 11"
+$__old = "    silk_assert( psEncCtrl->Lambda > 0.0f );"
+$__new = @"
+    if( oracle_trace_enabled ) {
+        fprintf(stderr, "[SILK_ENC_PROCESS_GAINS] cond=%d signalType=%d quantOffset=%d lastGainPrev=%d Lambda=%.17g\n",
+                condCoding, psEnc->sCmn.indices.signalType, psEnc->sCmn.indices.quantOffsetType,
+                psEncCtrl->lastGainIndexPrev, (double)psEncCtrl->Lambda);
+        oracle_silk_dump_float("ENC_GAINS_FLP", psEncCtrl->Gains, psEnc->sCmn.nb_subfr);
+        oracle_silk_dump_i32("ENC_GAINS_UNQ_Q16", psEncCtrl->GainsUnq_Q16, psEnc->sCmn.nb_subfr);
+        oracle_silk_dump_i8("ENC_GAINS_IDX", psEnc->sCmn.indices.GainsIndices, psEnc->sCmn.nb_subfr);
+        oracle_silk_dump_scalar("ENC_LAMBDA_FLP", psEncCtrl->Lambda);
+    }
+
+    silk_assert( psEncCtrl->Lambda > 0.0f );
+"@
+$processGains = Replace-Checked $processGains $__old ($__new.Replace("`r`n", "`n")) "stage anchor 12"
+Set-Content "$bld/process_gains_FLP_instr.c" $processGains
+
+$wrappers = Get-Content "$silk/float/wrappers_FLP.c" -Raw
+$wrappers = $wrappers.Replace("`r`n", "`n")
+$wrappers = Replace-Checked $wrappers '#include "main_FLP.h"' "#include `"main_FLP.h`"`r`n#include `"silk_trace.h`"" "stage anchor 13"
+$__old = "    /* Call NSQ */"
+$__new = @"
+    if( oracle_trace_enabled ) {
+        fprintf(stderr, "[SILK_ENC_NSQ_INPUT] signalType=%d quantOffset=%d seed=%d Lambda_Q10=%d LTP_scale_Q14=%d\n",
+                psIndices->signalType, psIndices->quantOffsetType, psIndices->Seed, Lambda_Q10, LTP_scale_Q14);
+        oracle_silk_dump_i16("ENC_NSQ_X16", x16, psEnc->sCmn.frame_length);
+        oracle_silk_dump_i16_strided("ENC_NSQ_PREDCOEF_Q12", &PredCoef_Q12[0][0], 2, MAX_LPC_ORDER, psEnc->sCmn.predictLPCOrder);
+        {
+            int sf, j;
+            int lsf_interpolation_flag = psIndices->NLSFInterpCoef_Q2 == 4 ? 0 : 1;
+            fprintf(stderr, "[SILK_ENC_NSQ_SUBFR_PREDCOEF_Q12] rows=%d cols=%d", psEnc->sCmn.nb_subfr, psEnc->sCmn.predictLPCOrder);
+            for( sf = 0; sf < psEnc->sCmn.nb_subfr; sf++ ) {
+                int row = ( sf >> 1 ) | ( 1 - lsf_interpolation_flag );
+                for( j = 0; j < psEnc->sCmn.predictLPCOrder; j++ ) {
+                    fprintf(stderr, " v[%d,%d]=%d", sf, j, (int)PredCoef_Q12[row][j]);
+                }
+            }
+            fprintf(stderr, "\n");
+        }
+        oracle_silk_dump_i16("ENC_NSQ_LTPCOEF_Q14", LTPCoef_Q14, psEnc->sCmn.nb_subfr * LTP_ORDER);
+        oracle_silk_dump_i16_strided("ENC_NSQ_AR_Q13", AR_Q13, psEnc->sCmn.nb_subfr, MAX_SHAPE_LPC_ORDER, psEnc->sCmn.shapingLPCOrder);
+        oracle_silk_dump_i32("ENC_NSQ_GAINS_Q16", Gains_Q16, psEnc->sCmn.nb_subfr);
+        oracle_silk_dump_int("ENC_NSQ_PITCHL", psEncCtrl->pitchL, psEnc->sCmn.nb_subfr);
+        oracle_silk_dump_int("ENC_NSQ_TILT_Q14", Tilt_Q14, psEnc->sCmn.nb_subfr);
+        oracle_silk_dump_int("ENC_NSQ_HARM_Q14", HarmShapeGain_Q14, psEnc->sCmn.nb_subfr);
+        oracle_silk_dump_i32("ENC_NSQ_LF_Q14", LF_shp_Q14, psEnc->sCmn.nb_subfr);
+    }
+
+    /* Call NSQ */
+"@
+$wrappers = Replace-Checked $wrappers $__old ($__new.Replace("`r`n", "`n")) "stage anchor 14"
+$__old = "    } else {`n        silk_NSQ( &psEnc->sCmn, psNSQ, psIndices, x16, pulses, PredCoef_Q12[ 0 ], LTPCoef_Q14,`n            AR_Q13, HarmShapeGain_Q14, Tilt_Q14, LF_shp_Q14, Gains_Q16, psEncCtrl->pitchL, Lambda_Q10, LTP_scale_Q14, psEnc->sCmn.arch );`n    }`n}"
+$__new = @"
+    } else {
+        silk_NSQ( &psEnc->sCmn, psNSQ, psIndices, x16, pulses, PredCoef_Q12[ 0 ], LTPCoef_Q14,
+            AR_Q13, HarmShapeGain_Q14, Tilt_Q14, LF_shp_Q14, Gains_Q16, psEncCtrl->pitchL, Lambda_Q10, LTP_scale_Q14, psEnc->sCmn.arch );
+    }
+    oracle_silk_dump_i8("ENC_NSQ_PULSES", pulses, psEnc->sCmn.frame_length);
+}
+"@
+$wrappers = Replace-Checked $wrappers $__old ($__new.Replace("`r`n", "`n")) "stage anchor 15"
+Set-Content "$bld/wrappers_FLP_instr.c" $wrappers
+
+$nsqDelDec = Get-Content "$silk/NSQ_del_dec.c" -Raw
+$nsqDelDec = $nsqDelDec.Replace("`r`n", "`n")
+$nsqDelDec = Replace-Checked $nsqDelDec '#include "stack_alloc.h"' "#include `"stack_alloc.h`"`r`n#include `"silk_trace.h`"" "stage anchor 16"
+$__old = "    opus_int16          *pxq;"
+$__new = @"
+    opus_int16          *pxq;
+    opus_int8           *pulses_start;
+    opus_int16          *pxq_start;
+"@
+$nsqDelDec = Replace-Checked $nsqDelDec $__old ($__new.Replace("`r`n", "`n")) "stage anchor 17"
+$__old = "    pxq                   = &NSQ->xq[ psEncC->ltp_mem_length ];"
+$__new = @"
+    pxq                   = &NSQ->xq[ psEncC->ltp_mem_length ];
+    pulses_start          = pulses;
+    pxq_start             = pxq;
+"@
+$nsqDelDec = Replace-Checked $nsqDelDec $__old ($__new.Replace("`r`n", "`n")) "stage anchor 18"
+$__old = "    /* Save quantized speech signal */"
+$__new = @"
+    if( oracle_trace_enabled ) {
+        fprintf(stderr, "[SILK_ENC_NSQ_DEL_DEC_DONE] winner=%d rd=%d seed=%d lagPrev=%d\n",
+                Winner_ind, (int)RDmin_Q10, psIndices->Seed, NSQ->lagPrev);
+        oracle_silk_dump_i8("ENC_NSQ_DEL_DEC_PULSES", pulses_start, psEncC->frame_length);
+        oracle_silk_dump_i16("ENC_NSQ_DEL_DEC_XQ", pxq_start, psEncC->frame_length);
+    }
+
+    /* Save quantized speech signal */
+"@
+$nsqDelDec = Replace-Checked $nsqDelDec $__old ($__new.Replace("`r`n", "`n")) "stage anchor 19"
+Set-Content "$bld/NSQ_del_dec_instr.c" $nsqDelDec
+
+# enc_API.c: dump the per-frame SILK target rate derivation.
+$encAPI = (Get-Content "$silk/enc_API.c" -Raw).Replace("`r`n", "`n")
+$encAPI = Replace-Checked $encAPI '#include "tuning_parameters.h"' "#include `"tuning_parameters.h`"`n#include `"silk_trace.h`"" "enc_API include"
+$targetDump = @'
+            TargetRate_bps = silk_LIMIT( TargetRate_bps, encControl->bitRate, 5000 );
+            if( oracle_trace_enabled ) {
+                fprintf(stderr, "[SILK_ENC_TARGET] bitRate=%d payloadSize_ms=%d nBits=%d TargetRate_bps=%d nBitsExceeded=%d nBitsUsedLBRR=%d curr_nBitsUsedLBRR=%d nFramesEncoded=%d nFramesPerPacket=%d tell=%d useCBR=%d maxBits=%d\n",
+                        encControl->bitRate, encControl->payloadSize_ms, nBits, TargetRate_bps, psEnc->nBitsExceeded, psEnc->nBitsUsedLBRR, curr_nBitsUsedLBRR,
+                        psEnc->state_Fxx[ 0 ].sCmn.nFramesEncoded, psEnc->state_Fxx[ 0 ].sCmn.nFramesPerPacket, psRangeEnc ? ec_tell( psRangeEnc ) : -1, encControl->useCBR, encControl->maxBits);
+            }
+'@
+$encAPI = Replace-Checked $encAPI "            TargetRate_bps = silk_LIMIT( TargetRate_bps, encControl->bitRate, 5000 );`n" ($targetDump.Replace("`r`n", "`n") + "`n") "enc_API target rate"
+$stereoDump = @'
+                    if( oracle_trace_enabled ) {
+                        const opus_int8 *ix = &psEnc->sStereo.predIx[ psEnc->state_Fxx[ 0 ].sCmn.nFramesEncoded ][ 0 ][ 0 ];
+                        fprintf(stderr, "[SILK_ENC_STEREO] frame=%d ix=%d,%d,%d,%d,%d,%d midOnly=%d rates=%d,%d width_prev=%d smth_width=%d silent_side_len=%d pred_prev=%d,%d prev_decode_only_middle=%d\n",
+                            psEnc->state_Fxx[ 0 ].sCmn.nFramesEncoded, ix[0], ix[1], ix[2], ix[3], ix[4], ix[5],
+                            psEnc->sStereo.mid_only_flags[ psEnc->state_Fxx[ 0 ].sCmn.nFramesEncoded ], MStargetRates_bps[0], MStargetRates_bps[1],
+                            psEnc->sStereo.width_prev_Q14, psEnc->sStereo.smth_width_Q14, psEnc->sStereo.silent_side_len,
+                            psEnc->sStereo.pred_prev_Q13[0], psEnc->sStereo.pred_prev_Q13[1], psEnc->prev_decode_only_middle);
+                    }
+                if( psEnc->sStereo.mid_only_flags[ psEnc->state_Fxx[ 0 ].sCmn.nFramesEncoded ] == 0 ) {
+'@
+$encAPI = Replace-Checked $encAPI "                if( psEnc->sStereo.mid_only_flags[ psEnc->state_Fxx[ 0 ].sCmn.nFramesEncoded ] == 0 ) {`n" ($stereoDump.Replace("`r`n", "`n") + "`n") "enc_API stereo dump"
+$chDump = @'
+                if( channelRate_bps > 0 ) {
+                    if( oracle_trace_enabled ) {
+                        fprintf(stderr, "[SILK_ENC_CH] n=%d channelRate_bps=%d tell=%d speech_activity_Q8=%d first_frame_after_reset=%d\n",
+                            n, channelRate_bps, psRangeEnc ? ec_tell( psRangeEnc ) : -1, psEnc->state_Fxx[ n ].sCmn.speech_activity_Q8, psEnc->state_Fxx[ n ].sCmn.first_frame_after_reset);
+                    }
+'@
+$encAPI = Replace-Checked $encAPI "                if( channelRate_bps > 0 ) {`n" ($chDump.Replace("`r`n", "`n") + "`n") "enc_API channel dump"
+Set-Content "$bld/enc_API_instr.c" $encAPI -NoNewline
+
+# celt_encoder.c: dump the pre-emphasised input, the MDCT, the band log
+# energies, the frame decisions and the coarse energy result.
+$celtEnc = (Get-Content "$celt/celt_encoder.c" -Raw).Replace("`r`n", "`n")
+$celtEnc = Replace-Checked $celtEnc '#include "stack_alloc.h"' "#include `"stack_alloc.h`"`n#include `"silk_trace.h`"" "celt_encoder include"
+$celtMdctDump = @'
+   compute_mdcts(mode, shortBlocks, in, freq, C, CC, LM, st->upsample, st->arch);
+   if( oracle_trace_enabled ) {
+       fprintf(stderr, "[CELT_ENC_FRAME] N=%d LM=%d C=%d CC=%d overlap=%d silence=%d isTransient=%d shortBlocks=%d tf_estimate=%.9g tf_chan=%d pf_on=%d pitch_index=%d gain1=%.9g tapset=%d tell=%d total_bits=%d nbAvailableBytes=%d complexity=%d start=%d end=%d effEnd=%d\n",
+           N, LM, C, CC, overlap, silence, isTransient, shortBlocks, (double)tf_estimate, tf_chan, pf_on, pitch_index, (double)gain1, prefilter_tapset, ec_tell(enc), total_bits, nbAvailableBytes, st->complexity, start, end, effEnd);
+       fprintf(stderr, "[CELT_ENC_ANALYSIS] valid=%d tonality=%.9g tonality_slope=%.9g activity=%.9g music_prob=%.9g max_pitch_ratio=%.9g bandwidth=%d noisiness=%.9g activity_probability=%.9g pitch_change=%d\n",
+           st->analysis.valid, (double)st->analysis.tonality, (double)st->analysis.tonality_slope, (double)st->analysis.activity, (double)st->analysis.music_prob, (double)st->analysis.max_pitch_ratio, st->analysis.bandwidth, (double)st->analysis.noisiness, (double)st->analysis.activity_probability, pitch_change);
+       oracle_silk_dump_float("CELT_ENC_IN", in, CC*(N+overlap));
+       oracle_silk_dump_float("CELT_ENC_FREQ", freq, CC*N);
+   }
+'@
+$celtEnc = Replace-Checked $celtEnc "   compute_mdcts(mode, shortBlocks, in, freq, C, CC, LM, st->upsample, st->arch);`n   /* This should catch any NaN in the CELT input." ($celtMdctDump.Replace("`r`n", "`n") + "   /* This should catch any NaN in the CELT input.") "celt_encoder mdct dump"
+$celtBandDump = @'
+   amp2Log2(mode, effEnd, end, bandE, bandLogE, C);
+
+   if( oracle_trace_enabled ) {
+       oracle_silk_dump_float("CELT_ENC_BANDE", bandE, nbEBands*C);
+       oracle_silk_dump_float("CELT_ENC_BANDLOGE", bandLogE, nbEBands*C);
+   }
+   ALLOC(surround_dynalloc, C*nbEBands, celt_glog);
+'@
+$celtEnc = Replace-Checked $celtEnc "   amp2Log2(mode, effEnd, end, bandE, bandLogE, C);`n`n   ALLOC(surround_dynalloc, C*nbEBands, celt_glog);`n" ($celtBandDump.Replace("`r`n", "`n") + "`n") "celt_encoder band dump"
+$celtCoarseDump = @'
+   tf_encode(start, end, isTransient, tf_res, LM, tf_select, enc);
+   if( oracle_trace_enabled ) {
+       fprintf(stderr, "[CELT_ENC_COARSE] tell=%d intra=%d tf_select=%d\n", ec_tell(enc), st->delayedIntra != 0 ? 1 : 0, tf_select);
+       oracle_silk_dump_float("CELT_ENC_OLDBANDE", oldBandE, nbEBands*CC);
+       oracle_silk_dump_float("CELT_ENC_ERROR", error, nbEBands*C);
+       {
+           int __i;
+           fprintf(stderr, "[CELT_ENC_TF_RES] n=%d", end);
+           for (__i = 0; __i < end; __i++) fprintf(stderr, " v[%d]=%d", __i, tf_res[__i]);
+           fprintf(stderr, "\n");
+       }
+   }
+'@
+$celtEnc = Replace-Checked $celtEnc "   tf_encode(start, end, isTransient, tf_res, LM, tf_select, enc);`n" ($celtCoarseDump.Replace("`r`n", "`n") + "`n") "celt_encoder coarse dump"
+# After the allocation trim: spread, dynalloc boosts, trim, then the
+# allocation result and the PVQ / final position.
+$celtTrimDump = @'
+      ec_enc_icdf(enc, alloc_trim, trim_icdf, 7);
+      tell = ec_tell_frac(enc);
+   }
+   if( oracle_trace_enabled ) {
+       int __i;
+       fprintf(stderr, "[CELT_ENC_TRIM] tell_frac=%d spread=%d alloc_trim=%d total_boost=%d effectiveBytes=%d nbCompressedBytes=%d intensity=%d dual_stereo=%d\n",
+           (int)ec_tell_frac(enc), st->spread_decision, alloc_trim, total_boost, effectiveBytes, nbCompressedBytes, st->intensity, dual_stereo);
+       fprintf(stderr, "[CELT_ENC_OFFSETS] n=%d", end);
+       for (__i = 0; __i < end; __i++) fprintf(stderr, " v[%d]=%d", __i, offsets[__i]);
+       fprintf(stderr, "\n");
+   }
+'@
+$celtEnc = Replace-Checked $celtEnc "      ec_enc_icdf(enc, alloc_trim, trim_icdf, 7);`n      tell = ec_tell_frac(enc);`n   }`n" ($celtTrimDump.Replace("`r`n", "`n")) "celt_encoder trim dump"
+$celtAllocDump = @'
+   quant_fine_energy(mode, start, end, oldBandE, error, NULL, fine_quant, enc, C);
+   if( oracle_trace_enabled ) {
+       int __i;
+       fprintf(stderr, "[CELT_ENC_ALLOC] tell=%d bits=%d anti_collapse_rsv=%d codedBands=%d intensity=%d dual_stereo=%d balance=%d nbCompressedBytes=%d vbr_reservoir=%d vbr_drift=%d vbr_offset=%d\n",
+           ec_tell(enc), bits, anti_collapse_rsv, codedBands, st->intensity, dual_stereo, balance, nbCompressedBytes, st->vbr_reservoir, st->vbr_drift, st->vbr_offset);
+       fprintf(stderr, "[CELT_ENC_PULSES] n=%d", end);
+       for (__i = 0; __i < end; __i++) fprintf(stderr, " v[%d]=%d", __i, pulses[__i]);
+       fprintf(stderr, "\n");
+       fprintf(stderr, "[CELT_ENC_FINE_QUANT] n=%d", end);
+       for (__i = 0; __i < end; __i++) fprintf(stderr, " v[%d]=%d", __i, fine_quant[__i]);
+       fprintf(stderr, "\n");
+       fprintf(stderr, "[CELT_ENC_FINE_PRIORITY] n=%d", end);
+       for (__i = 0; __i < end; __i++) fprintf(stderr, " v[%d]=%d", __i, fine_priority[__i]);
+       fprintf(stderr, "\n");
+   }
+'@
+$celtEnc = Replace-Checked $celtEnc "   quant_fine_energy(mode, start, end, oldBandE, error, NULL, fine_quant, enc, C);`n" ($celtAllocDump.Replace("`r`n", "`n")) "celt_encoder alloc dump"
+$celtPvqDump = @'
+   if (qext_bytes == 0)
+      quant_energy_finalise(mode, start, end, oldBandE, error, fine_quant, fine_priority, nbCompressedBytes*8-ec_tell(enc), enc, C);
+   if( oracle_trace_enabled ) {
+       fprintf(stderr, "[CELT_ENC_FINAL] tell=%d rng=%u\n", ec_tell(enc), (unsigned)enc->rng);
+   }
+'@
+$celtEnc = Replace-Checked $celtEnc "   if (qext_bytes == 0)`n      quant_energy_finalise(mode, start, end, oldBandE, error, fine_quant, fine_priority, nbCompressedBytes*8-ec_tell(enc), enc, C);`n" ($celtPvqDump.Replace("`r`n", "`n")) "celt_encoder final dump"
+# compute_vbr inputs and result.
+$celtVbr = "        target = compute_vbr(mode, &st->analysis, base_target, LM, equiv_rate,`n           st->lastCodedBands, C, st->intensity, st->constrained_vbr,`n           st->stereo_saving, tot_boost, tf_estimate, pitch_change, maxDepth,`n           st->lfe, st->energy_mask!=NULL, surround_masking,`n           temporal_vbr ARG_QEXT(st->enable_qext));`n        if (oracle_trace_enabled) fprintf(stderr, `"[CELT_ENC_VBR] target=%d base_target=%d lastCodedBands=%d intensity=%d stereo_saving=%.9g tot_boost=%d tf_estimate=%.9g pitch_change=%d maxDepth=%.9g temporal_vbr=%.9g equiv_rate=%d vbr_reservoir=%d vbr_drift=%d vbr_offset=%d\n`", target, base_target, st->lastCodedBands, st->intensity, (double)st->stereo_saving, tot_boost, (double)tf_estimate, pitch_change, (double)maxDepth, (double)temporal_vbr, equiv_rate, st->vbr_reservoir, st->vbr_drift, st->vbr_offset);`n"
+$celtEnc = Replace-Checked $celtEnc "        target = compute_vbr(mode, &st->analysis, base_target, LM, equiv_rate,`n           st->lastCodedBands, C, st->intensity, st->constrained_vbr,`n           st->stereo_saving, tot_boost, tf_estimate, pitch_change, maxDepth,`n           st->lfe, st->energy_mask!=NULL, surround_masking,`n           temporal_vbr ARG_QEXT(st->enable_qext));`n" $celtVbr "celt_encoder vbr dump"
+# run_prefilter: pitch search intermediates.
+$celtPitch = "      pitch_index = max_period-pitch_index;`n      if (oracle_trace_enabled) fprintf(stderr, `"[CELT_ENC_PITCH] search=%d prev_period=%d prev_gain=%.9g\n`", pitch_index, st->prefilter_period, (double)st->prefilter_gain);`n"
+$celtEnc = Replace-Checked $celtEnc "      pitch_index = max_period-pitch_index;`n" $celtPitch "celt_encoder pitch dump"
+$celtPitch2 = "      if (pitch_index > max_period-QEXT_SCALE(2))`n         pitch_index = max_period-QEXT_SCALE(2);`n      if (oracle_trace_enabled) { fprintf(stderr, `"[CELT_ENC_PITCH2] index=%d gain=%.9g\n`", pitch_index, (double)gain1); oracle_silk_dump_float(`"CELT_ENC_PITCH_BUF`", pitch_buf, (max_period+N)>>1); }`n"
+$celtEnc = Replace-Checked $celtEnc "      if (pitch_index > max_period-QEXT_SCALE(2))`n         pitch_index = max_period-QEXT_SCALE(2);`n" $celtPitch2 "celt_encoder pitch dump 2"
+Set-Content "$bld/celt_encoder_instr.c" $celtEnc -NoNewline
+
+# bands.c: per-band range coder position after quant_all_bands codes a band.
+$bandsSrc = (Get-Content "$celt/bands.c" -Raw).Replace("`r`n", "`n")
+$bandsSrc = Replace-Checked $bandsSrc '#include "rate.h"' "#include `"rate.h`"`n#include `"silk_trace.h`"" "bands include"
+$bandsQab = "      balance += pulses[i] + tell;`n      if (encode && oracle_trace_enabled) fprintf(stderr, `"[CELT_ENC_QAB] i=%d N=%d b=%d tell_frac=%d cm=%u seed=%u\n`", i, N, b, (int)ec_tell_frac(ec), x_cm, (unsigned)ctx.seed);`n"
+$bandsSrc = Replace-Checked $bandsSrc "      balance += pulses[i] + tell;`n" $bandsQab "bands qab dump"
+Set-Content "$bld/bands_instr.c" $bandsSrc -NoNewline
+
+$celtSrcs = Get-ChildItem "$celt/*.c" | Where-Object { $_.Name -notmatch '^(opus_custom_demo|dump_modes|.*_test.*|celt_encoder|bands)' } | ForEach-Object { $_.FullName }
+$celtSrcs += "$bld/celt_encoder_instr.c"
+$celtSrcs += "$bld/bands_instr.c"
+$silkSrcs = Get-ChildItem "$silk/*.c" | ForEach-Object { $_.FullName }
+$instrFloat = @('encode_frame_FLP.c','find_LPC_FLP.c','find_pred_coefs_FLP.c','noise_shape_analysis_FLP.c','process_gains_FLP.c','wrappers_FLP.c')
+$silkSrcs = $silkSrcs | Where-Object { $_ -notmatch 'NSQ_del_dec\.c$' -and $_ -notmatch 'enc_API\.c$' }
+$silkFloat = Get-ChildItem "$silk/float/*.c" | Where-Object { $instrFloat -notcontains $_.Name } | ForEach-Object { $_.FullName }
+$opusStock = @('opus','opus_decoder','extensions','opus_multistream','opus_multistream_encoder',
+  'opus_multistream_decoder','repacketizer','opus_projection_encoder','opus_projection_decoder',
+  'mapping_matrix','analysis','mlp','mlp_data') | ForEach-Object { "$opusSrc/$_.c" }
+$srcs = $celtSrcs + $silkSrcs + $silkFloat + $opusStock +
+        @("$bld/encode_frame_FLP_instr.c", "$bld/opus_encoder_instr.c",
+          "$bld/find_LPC_FLP_instr.c", "$bld/find_pred_coefs_FLP_instr.c", "$bld/noise_shape_analysis_FLP_instr.c",
+          "$bld/process_gains_FLP_instr.c", "$bld/wrappers_FLP_instr.c", "$bld/NSQ_del_dec_instr.c", "$bld/enc_API_instr.c",
+          "$bld/enc_oracle.c")
+$inc = @("-I$bld", "-I$celt", "-I$srcDir/include", "-I$srcDir", "-I$silk", "-I$silk/float", "-I$opusSrc")
+
+# Float build, no SIMD/RTCD, no FMA contraction: plain scalar C like the
+# cgoref arch=0 comparisons. No CUSTOM_MODES so the static 48000/960 mode is used.
+& gcc -O1 -ffp-contract=off -DOPUS_BUILD -DVAR_ARRAYS -DHAVE_LRINTF @inc @srcs -lm -o "$bld/enc_oracle.exe"
+if ($LASTEXITCODE -eq 0) { Write-Host "OK: $bld/enc_oracle.exe" } else { Write-Host "BUILD FAILED"; exit 1 }

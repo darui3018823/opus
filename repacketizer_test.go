@@ -84,6 +84,17 @@ func TestPacketPadUnpad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	compact, err := PacketPad(packet, len(packet))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(compact, packet) {
+		t.Fatal("same-size padding changed the packet")
+	}
+	compact[0] ^= 0xff
+	if bytes.Equal(compact, packet) {
+		t.Fatal("same-size padding returned an aliased packet")
+	}
 	padded, err := PacketPad(packet, len(packet)+300)
 	if err != nil {
 		t.Fatal(err)
@@ -121,5 +132,15 @@ func TestRepacketizerRejectsMismatchAndOverDuration(t *testing.T) {
 	}
 	if err := rp.Cat(p20); !errors.Is(err, ErrInvalidPacket) {
 		t.Fatalf("over-duration error = %v, want ErrInvalidPacket", err)
+	}
+}
+
+func TestRepacketizerRejectsEmptyOutput(t *testing.T) {
+	rp := NewRepacketizer()
+	if _, err := rp.Out(); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("empty Out error = %v, want ErrBadArg", err)
+	}
+	if _, err := rp.OutRange(0, 1); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("empty OutRange error = %v, want ErrBadArg", err)
 	}
 }

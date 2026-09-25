@@ -22,11 +22,16 @@ func lpcMinInvGain(ltpPredCodGain, codingQuality float64, firstFrameAfterReset b
 	if firstFrameAfterReset {
 		return 1.0 / maxPredictionPowerGainAfterReset
 	}
-	denom := 0.25 + 0.75*codingQuality
+	// find_pred_coefs_FLP, in silk_float:
+	//   minInvGain = (silk_float)pow(2, LTPredCodGain / 3) / MAX_PREDICTION_POWER_GAIN;
+	//   minInvGain /= 0.25f + 0.75f * coding_quality;
+	g := f32(math.Pow(2.0, f32(ltpPredCodGain/3)))
+	g = f32(g / c32(maxPredictionPowerGain))
+	denom := f32(0.25 + f32(0.75*codingQuality))
 	if denom <= 0 {
 		denom = 0.25
 	}
-	return math.Pow(2.0, ltpPredCodGain/3.0) / maxPredictionPowerGain / denom
+	return f32(g / denom)
 }
 
 // buildLPCInPre builds the input domain used by libopus find_LPC_FLP. The input
@@ -57,14 +62,14 @@ func buildLPCInPre(x []float64, subframeLengths []int, invGains []float64, ltpCo
 		if subLen < 0 {
 			subLen = 0
 		}
-		invGain := 1.0
+		invGain := float32(1.0)
 		if sf < len(invGains) && invGains[sf] != 0 {
-			invGain = invGains[sf]
+			invGain = float32(invGains[sf])
 		}
 		xPtr := frameStart + cum - order
 		if !voiced {
 			for i := 0; i < subLen+order; i++ {
-				out[dst+i] = sampleAt(x, xPtr+i) * invGain
+				out[dst+i] = float64(float32(sampleAt(x, xPtr+i)) * invGain)
 			}
 		} else {
 			lag := 0
@@ -76,18 +81,18 @@ func buildLPCInPre(x []float64, subframeLengths []int, invGains []float64, ltpCo
 				coefs = ltpCoefs[sf]
 			}
 			for i := 0; i < subLen+order; i++ {
-				v := sampleAt(x, xPtr+i)
+				v := float32(sampleAt(x, xPtr+i))
 				if lag > 0 {
 					lagPtr := xPtr - lag + i
 					for j := 0; j < ltpOrder; j++ {
-						b := 0.0
+						b := float32(0.0)
 						if j < len(coefs) {
-							b = coefs[j]
+							b = float32(coefs[j])
 						}
-						v -= b * sampleAt(x, lagPtr+ltpOrder/2-j)
+						v -= float32(b * float32(sampleAt(x, lagPtr+ltpOrder/2-j)))
 					}
 				}
-				out[dst+i] = v * invGain
+				out[dst+i] = float64(v * invGain)
 			}
 		}
 		dst += subLen + order
@@ -177,10 +182,10 @@ func firstHalfStackedLPCResidual(preSignal []float64, lpcQ12 []int16, order, sub
 		for i := order; i < subfrLength; i++ {
 			pred := 0.0
 			for j := 0; j < order; j++ {
-				pred += float64(lpcQ12[j]) / 4096.0 * preSignal[base+i-j-1]
+				pred += float64(float64(lpcQ12[j]) / 4096.0 * preSignal[base+i-j-1])
 			}
 			err := preSignal[base+i] - pred
-			energy += err * err
+			energy += float64(err * err)
 		}
 	}
 	return energy

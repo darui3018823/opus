@@ -196,7 +196,7 @@ func QuantizeCoarseEnergy(
 			if oldE < -9.0 {
 				oldE = -9.0
 			}
-			predicted := coef*oldE + prev[c]
+			predicted := float64(coef*oldE) + prev[c]
 
 			// Quantise residual (nearest integer) — libopus floor(.5+f).
 			qi := int(math.Floor(0.5 + (logE[idx] - predicted)))
@@ -239,7 +239,7 @@ func QuantizeCoarseEnergy(
 				v = -28.0
 			}
 			quantLogE[idx] = v
-			prev[c] += float64(qi) - beta*float64(qi)
+			prev[c] += float64(qi) - float64(beta*float64(qi))
 		}
 	}
 
@@ -281,18 +281,20 @@ func UnquantizeCoarseEnergy(
 	}
 	probModel := eProbModel[lm][intraIdx]
 
-	coef := predCoef[lm]
-	beta := betaCoef[lm]
+	coef := float32(predCoef[lm])
+	beta := float32(betaCoef[lm])
 	if intra {
-		coef = 0.0
-		beta = betaIntra
+		coef = 0
+		beta = float32(betaIntra)
 	}
 
 	budget := totalBits // whole bits, matches libopus: budget = dec->storage*8
 
 	// quantLogE[c*numBands+i] matches libopus oldEBands[c*nbEBands+i].
 	quantLogE := make([]float64, numBands*channels)
-	prev := make([]float64, channels) // per-channel inter-band predictor
+	// The floating-point libopus build aliases opus_val16/32/64 and celt_glog
+	// to float, so its predictor and stored oldBandE values round to float32.
+	prev := make([]float32, channels) // per-channel inter-band predictor
 
 	for i := start; i < end; i++ {
 		pi := 2 * i
@@ -306,11 +308,11 @@ func UnquantizeCoarseEnergy(
 			// Inter-frame prediction — matches libopus unquant_coarse_energy:
 			//   tmp = coef * MAX(-9, oldEBands[c*nbEBands+i]) + prev[c]
 			idx := c*numBands + i
-			oldE := prevLogE[idx]
-			if oldE < -9.0 {
-				oldE = -9.0
+			oldE := float32(prevLogE[idx])
+			if oldE < -9 {
+				oldE = -9
 			}
-			predicted := coef*oldE + prev[c]
+			predicted := float32(coef*oldE) + prev[c]
 
 			// Coding path selection must mirror the encoder exactly.
 			tell := dec.ECTell()
@@ -333,12 +335,10 @@ func UnquantizeCoarseEnergy(
 			}
 
 			// Reconstruct mean-subtracted log2-amplitude.
-			v := predicted + float64(qi)
-			if v < -28.0 {
-				v = -28.0
-			}
-			quantLogE[idx] = v
-			prev[c] += float64(qi) - beta*float64(qi)
+			v := predicted + float32(qi)
+			quantLogE[idx] = float64(v)
+			q := float32(qi)
+			prev[c] = prev[c] + q - float32(beta*q)
 		}
 	}
 

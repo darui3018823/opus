@@ -22,6 +22,18 @@ const (
 	useResamplerDownFIR = 3
 )
 
+// delayMatrixEnc[rateID(in)][rateID(out)] — encoder input-delay compensation
+// (silk/resampler.c delay_matrix_enc, without the 96 kHz row).
+//
+//	in \ out   8  12  16
+var delayMatrixEnc = [5][3]int{
+	{6, 0, 3},    //  8
+	{0, 7, 3},    // 12
+	{0, 1, 10},   // 16
+	{0, 2, 6},    // 24
+	{18, 10, 12}, // 48
+}
+
 // delayMatrixDec[rateID(in)][rateID(out)] — decoder input-delay compensation.
 //
 //	in \ out   8  12  16  24  48
@@ -99,6 +111,7 @@ type Resampler struct {
 	fsOutKHz          int
 	inputDelay        int
 	coefs             []int16
+	forEnc            bool
 }
 
 // rateID maps [8000,12000,16000,24000,48000] to [0,1,2,3,4].
@@ -112,6 +125,27 @@ func rateID(r int) int {
 		s = 1
 	}
 	return (((r >> 12) - g) >> s) - 1
+}
+
+// NewEncoderResampler initializes an encoder-direction resampler (silk_Encode
+// input, forEnc = 1): Opus rates 8/12/16/24/48 kHz down to the SILK internal
+// rate 8/12/16 kHz, with delay_matrix_enc input-delay compensation.
+func NewEncoderResampler(fsHzIn, fsHzOut int) (*Resampler, error) {
+	switch fsHzIn {
+	case 8000, 12000, 16000, 24000, 48000:
+	default:
+		return nil, fmt.Errorf("silk resampler: unsupported encoder input rate %d", fsHzIn)
+	}
+	switch fsHzOut {
+	case 8000, 12000, 16000:
+	default:
+		return nil, fmt.Errorf("silk resampler: unsupported encoder output rate %d", fsHzOut)
+	}
+	s := &Resampler{fsHzIn: fsHzIn, fsHzOut: fsHzOut, forEnc: true}
+	if err := s.init(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 // NewResampler initializes a decoder-direction resampler for the given rates.
@@ -139,7 +173,11 @@ func (s *Resampler) init() error {
 	s.sFIR32 = [36]int32{}
 	s.delayBuf = [48]int16{}
 
-	s.inputDelay = delayMatrixDec[rateID(s.fsHzIn)][rateID(s.fsHzOut)]
+	if s.forEnc {
+		s.inputDelay = delayMatrixEnc[rateID(s.fsHzIn)][rateID(s.fsHzOut)]
+	} else {
+		s.inputDelay = delayMatrixDec[rateID(s.fsHzIn)][rateID(s.fsHzOut)]
+	}
 	s.fsInKHz = s.fsHzIn / 1000
 	s.fsOutKHz = s.fsHzOut / 1000
 	s.batchSize = s.fsInKHz * resamplerMaxBatchSizeMs

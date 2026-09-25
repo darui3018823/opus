@@ -23,6 +23,8 @@ const celtFloatScale = 1.0 / 32768.0
 
 // Decoder is a CELT decoder instance
 type Decoder struct {
+	// alloc is the bit allocation scratch reused between frames.
+	alloc         allocScratch
 	mode          *Mode
 	celtMode      *dsp.CELTMode     // long-block (N-point) IMDCT mode
 	shortCeltMode *dsp.CELTMode     // short-block (NBase-point) IMDCT mode for transient frames
@@ -41,13 +43,36 @@ type Decoder struct {
 
 	// Post-filter (one per channel)
 	postFilter []*PostFilter
-	preemphMem []float64
+	preemphMem []float32
 
 	// lastFinalRange is the range coder rng after the last Decode call.
 	lastFinalRange uint32
 	lastStartBand  int
 	lastEndBand    int
 	disableInv     bool
+
+	// normalizedCoeffHook is used by package tests to inspect the exact PVQ
+	// output before band-energy denormalization. Production decoders leave it
+	// nil, so the diagnostic does not allocate or retain coefficient buffers.
+	normalizedCoeffHook func(channel int, coeffs []float64)
+	// coefficientStageHook exposes compact scalar-oracle boundaries together
+	// with their fine-corrected energy state to conformance tests.
+	coefficientStageHook func(stage string, channel int, coeffs, energies []float64)
+	// synthesisStageHook is used by package tests to compare the time-domain
+	// synthesis pipeline with a directly compiled libopus oracle.
+	synthesisStageHook func(stage string, channel int, samples []float64)
+}
+
+// SetCoefficientStageHook installs an internal conformance-test hook.
+// The coefficient and energy slices are borrowed for the callback only.
+func (d *Decoder) SetCoefficientStageHook(hook func(stage string, channel int, coeffs, energies []float64)) {
+	d.coefficientStageHook = hook
+}
+
+// SetSynthesisStageHook installs an internal conformance-test hook. Production
+// callers inside the module leave it nil.
+func (d *Decoder) SetSynthesisStageHook(hook func(stage string, channel int, samples []float64)) {
+	d.synthesisStageHook = hook
 }
 
 // NewDecoder creates a new CELT decoder.
@@ -103,7 +128,7 @@ func NewDecoderEx(frameSize, sampleRate, numBands, channels int) (*Decoder, erro
 
 	// Initialize post-filters (one per channel)
 	d.postFilter = make([]*PostFilter, channels)
-	d.preemphMem = make([]float64, channels)
+	d.preemphMem = make([]float32, channels)
 	for i := range d.postFilter {
 		d.postFilter[i] = NewPostFilter()
 	}
@@ -218,45 +243,50 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 		}
 	}
 
-	// quantLogE[c*numBands+i] is mean-subtracted log2-amplitude. libopus
-	// denormalise_bands adds eMeans[i] when applying the final gain.
+	// Decode band coefficients: allocation, fine energy, PVQ, anti-collapse.
+	// The Q3 bit budget is computed inside from len(frameData) and ec_tell_frac.
+	// quant_all_bands also performs stereo (M/S→L/R) merge internally.
+	_, _, err := d.decodeBandCoeffs(dec, totalBytes, allocTrim, isTransient, spread, tfRes, offsets, quantLogE, start, end)
+	if err != nil {
+		return nil, err
+	}
+	htr(dec, "bandcoeffs")
+	if d.normalizedCoeffHook != nil {
+		for c := 0; c < ch; c++ {
+			d.normalizedCoeffHook(c, d.bandProcs[c].AssembleMDCT())
+		}
+	}
+	if d.coefficientStageHook != nil {
+		for c := 0; c < ch; c++ {
+			d.coefficientStageHook("normalized", c, d.bandProcs[c].AssembleMDCT(),
+				quantLogE[c*numBands:(c+1)*numBands])
+		}
+	}
+
+	// quantLogE now includes both the initial fine-energy pass and the final
+	// one-bit refinement. libopus denormalise_bands consumes that completed
+	// oldBandE value, so derive the linear amplitude only after band decoding.
 	for i := start; i < end; i++ {
 		for c := 0; c < ch; c++ {
-			amp := math.Exp2(quantLogE[c*numBands+i] + EMean(i))
-			e := amp * amp
+			amp := celtExp2RoundedFloat32(float32(quantLogE[c*numBands+i] + EMean(i)))
+			e := float64(amp) * float64(amp)
 			if e < 1e-20 {
 				e = 1e-20
 			}
 			d.bandProcs[c].bands[i].Energy = e
 		}
 	}
-
 	d.bandProcs[0].InterpolateBandEnergies()
 	if ch == 2 {
 		d.bandProcs[1].InterpolateBandEnergies()
 	}
 
-	// Decode band coefficients: allocation, fine energy, PVQ, anti-collapse.
-	// The Q3 bit budget is computed inside from len(frameData) and ec_tell_frac.
-	// quant_all_bands also performs stereo (M/S→L/R) merge internally.
-	_, _, err := d.decodeBandCoeffs(dec, totalBytes, allocTrim, isTransient, spread, tfRes, offsets, start, end)
-	if err != nil {
-		return nil, err
-	}
-	htr(dec, "bandcoeffs")
-
-	// Update oldBandE with fine-corrected mean-subtracted values.
+	// oldBandE is the fine-corrected, mean-subtracted log2 amplitude. libopus
+	// updates this same array throughout coarse and fine energy decoding; do not
+	// reconstruct it from linear energy through a lossy log2 round trip.
 	for i := start; i < end; i++ {
 		for c := 0; c < ch; c++ {
-			e := d.bandProcs[c].bands[i].Energy
-			if e < 1e-20 {
-				e = 1e-20
-			}
-			v := 0.5*math.Log2(e) - EMean(i)
-			if v < -28.0 {
-				v = -28.0
-			}
-			d.prevEnergies[c*numBands+i] = v
+			d.prevEnergies[c*numBands+i] = quantLogE[c*numBands+i]
 		}
 	}
 	if ch == 1 && len(d.prevEnergies) >= 2*numBands {
@@ -276,6 +306,10 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			ext := make([]float64, frameSize)
 			copy(ext, coeffs)
 			coeffs = ext
+		}
+		if d.coefficientStageHook != nil {
+			d.coefficientStageHook("denormalized", c, coeffs,
+				quantLogE[c*numBands:(c+1)*numBands])
 		}
 		mdctCoeffsPerCh[c] = coeffs
 	}
@@ -315,6 +349,9 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			// Non-transient: single N-point IMDCT.
 			samplesOut = d.celtMode.CLTMDCTBackward(coeffs, d.overlap[c])
 		}
+		if d.synthesisStageHook != nil {
+			d.synthesisStageHook("synthesis", c, samplesOut)
+		}
 
 		if !pfEnabled {
 			pfPeriod = 0
@@ -325,7 +362,13 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 		if start == 0 {
 			samplesOut = d.postFilter[c].Apply(samplesOut, pfPeriod, pfGain, pfTapset, d.mode.NBase, lm, d.celtMode.Window)
 		}
+		if d.synthesisStageHook != nil {
+			d.synthesisStageHook("postfilter", c, samplesOut)
+		}
 		d.applyDeemphasis(c, samplesOut)
+		if d.synthesisStageHook != nil {
+			d.synthesisStageHook("pcm", c, samplesOut)
+		}
 
 		for i := 0; i < len(samplesOut) && i < frameSize; i++ {
 			output[i*ch+c] = samplesOut[i] * celtFloatScale
@@ -456,16 +499,22 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 			d.postFilter[ch].copyFrom(filter)
 		}
 	}
-	d.preemphMem = append([]float64(nil), src.preemphMem...)
+	d.preemphMem = append([]float32(nil), src.preemphMem...)
 }
 
 func (d *Decoder) applyDeemphasis(ch int, samples []float64) {
-	const coef = 0.85
+	const (
+		coef      = float32(0.850006103515625) // libopus 48 kHz mode: 27853/32768
+		verySmall = float32(1e-30)
+	)
 	mem := d.preemphMem[ch]
-	for i, x := range samples {
-		y := x + mem
+	for i := range samples {
+		// libopus stores celt_sig as float and evaluates
+		// x[i] + VERY_SMALL + mem in that precision and order.
+		y := float32(samples[i]) + verySmall
+		y += mem
 		mem = coef * y
-		samples[i] = y
+		samples[i] = float64(y)
 	}
 	d.preemphMem[ch] = mem
 }
@@ -485,7 +534,7 @@ var spreadIcdf = [4]uint8{25, 23, 2, 0}
 // remaining is the PVQ budget (totalBits - tell, before stereo/skip bits).
 // Stereo parameters (intensity, dualStereo) are decoded inside computeAllocation.
 // Returns intensity and dualStereo for use by the caller's M/S conversion.
-func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int, isTransient bool, spread int, tfRes, offsets []int, start, end int) (intensity int, dualStereo bool, err error) {
+func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int, isTransient bool, spread int, tfRes, offsets []int, quantLogE []float64, start, end int) (intensity int, dualStereo bool, err error) {
 	numBands := d.mode.Bands.NumBands
 	lm := d.mode.LM
 	ch := d.mode.Channels
@@ -506,7 +555,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 
 	// libopus-faithful compute_allocation: pulses[] are per-band Q3 PVQ budgets,
 	// balance is the leftover, codedBands the last coded band.
-	pulses, eBits, finePriority, balance, intensityV, codedBands, dualStereoV := computeAllocation(dec, numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets)
+	pulses, eBits, finePriority, balance, intensityV, codedBands, dualStereoV := computeAllocationScratch(dec, numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets, &d.alloc)
 	intensity, dualStereo = intensityV, dualStereoV
 
 	// Fine energy — raw bits from END (do NOT affect forward rng). FORWARD band order.
@@ -518,6 +567,9 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 		for c := 0; c < ch; c++ {
 			q2 := int(dec.DecodeBits(uint(fb)))
 			d.bandProcs[c].ApplyFineEnergy(i, q2, fb)
+			offset := float32(float32((float32(q2)+0.5)*float32(int(1)<<uint(14-fb)))*(1.0/16384.0)) - 0.5
+			idx := c*numBands + i
+			quantLogE[idx] = float64(float32(quantLogE[idx]) + offset)
 		}
 	}
 
@@ -552,13 +604,16 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 			for c := 0; c < ch; c++ {
 				q2 := int(dec.DecodeBits(1))
 				d.bandProcs[c].ApplyFinalFineEnergy(i, q2, eBits[i])
+				offset := float32(float32((float32(q2)-0.5)*float32(int(1)<<uint(14-eBits[i]-1))) * (1.0 / 16384.0))
+				idx := c*numBands + i
+				quantLogE[idx] = float64(float32(quantLogE[idx]) + offset)
 				bitsLeft--
 			}
 		}
 	}
 
 	if antiCollapseOn {
-		d.antiCollapse(X, collapse, pulses, lm, frameLen, seed, start, end)
+		d.antiCollapse(X, collapse, pulses, quantLogE, lm, frameLen, seed, start, end)
 	}
 
 	// Copy decoded (unit-norm) band coefficients back into the band processors.
@@ -576,7 +631,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	return intensity, dualStereo, nil
 }
 
-func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, lm, frameLen int, seed uint32, start, end int) {
+func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, logE []float64, lm, frameLen int, seed uint32, start, end int) {
 	numBands := d.mode.Bands.NumBands
 	ch := d.mode.Channels
 	M := 1 << uint(lm)
@@ -587,30 +642,25 @@ func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, lm, f
 			continue
 		}
 		depth := ((1 + pulses[i]) / n0) >> uint(lm)
-		thresh := 0.5 * math.Exp2(-0.125*float64(depth))
-		sqrt1 := 1.0 / math.Sqrt(float64(n0*M))
+		thresh := float32(0.5) * celtExp2Float32(-float32(0.125)*float32(depth))
+		sqrt1 := float32(1.0) / float32(math.Sqrt(float64(n0*M)))
 
 		for c := 0; c < ch; c++ {
-			prev1 := d.prevLogE[c*numBands+i]
-			prev2 := d.prevLogE2[c*numBands+i]
+			prev1 := float32(d.prevLogE[c*numBands+i])
+			prev2 := float32(d.prevLogE2[c*numBands+i])
 			if ch == 1 && len(d.prevLogE) >= 2*numBands {
-				prev1 = max(prev1, d.prevLogE[numBands+i])
-				prev2 = max(prev2, d.prevLogE2[numBands+i])
+				prev1 = max(prev1, float32(d.prevLogE[numBands+i]))
+				prev2 = max(prev2, float32(d.prevLogE2[numBands+i]))
 			}
 
-			energy := d.bandProcs[c].bands[i].Energy
-			if energy < 1e-20 {
-				energy = 1e-20
-			}
-			logE := 0.5*math.Log2(energy) - EMean(i)
-			eDiff := logE - min(prev1, prev2)
+			eDiff := float32(logE[c*numBands+i]) - min(prev1, prev2)
 			if eDiff < 0 {
 				eDiff = 0
 			}
 
-			r := 2.0 * math.Exp2(-eDiff)
+			r := float32(2.0) * celtExp2Float32(-eDiff)
 			if lm == 3 {
-				r *= math.Sqrt2
+				r *= float32(1.41421356)
 			}
 			r = min(thresh, r) * sqrt1
 
@@ -630,7 +680,7 @@ func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, lm, f
 					if seed&0x8000 == 0 {
 						v = -v
 					}
-					X[offset+(j<<uint(lm))+k] = v
+					X[offset+(j<<uint(lm))+k] = float64(v)
 				}
 				renorm = true
 			}
@@ -639,6 +689,10 @@ func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, lm, f
 			}
 		}
 	}
+}
+
+func celtExp2Float32(x float32) float32 {
+	return float32(math.Exp(math.Ln2 * float64(x)))
 }
 
 func (d *Decoder) updateLogEnergyHistory(isTransient bool) {

@@ -89,7 +89,7 @@ func TestEncoderDTXOffCBRFixedSize(t *testing.T) {
 	_ = enc.SetBitrate(bitrate)
 	enc.SetVBR(false) // CBR, DTX off (default)
 
-	want := bitrate*20/1000/8 + 1 // CELT payload + TOC byte
+	want := (bitrate*20/1000 + 4) / 8 // cbr_bytes, TOC included (opus_encode_native)
 	silent := make([]float64, frameSize*channels)
 	for f := 0; f < 4; f++ {
 		pkt, err := enc.EncodeFloat(silent, frameSize)

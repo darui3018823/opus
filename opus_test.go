@@ -94,6 +94,12 @@ func TestNewEncoderWithProfile(t *testing.T) {
 	if !compatible.VBR() {
 		t.Fatal("libopus profile VBR = false")
 	}
+	if got := compatible.ModePolicy(); got != ModePolicyLibopus {
+		t.Fatalf("libopus profile mode policy = %d, want ModePolicyLibopus", got)
+	}
+	if got := legacy.ModePolicy(); got != ModePolicyLegacy {
+		t.Fatalf("legacy profile mode policy = %d, want ModePolicyLegacy", got)
+	}
 	packet, err := compatible.Encode(make([]int16, 960), 960)
 	if err != nil {
 		t.Fatal(err)
@@ -123,8 +129,8 @@ func TestCommonEncoderDecoderGetters(t *testing.T) {
 	if enc.Channels() != 2 || dec.Channels() != 2 {
 		t.Fatalf("channels = encoder %d decoder %d", enc.Channels(), dec.Channels())
 	}
-	if enc.Lookahead() != 120 {
-		t.Fatalf("lookahead = %d, want 120", enc.Lookahead())
+	if enc.Lookahead() != 312 {
+		t.Fatalf("lookahead = %d, want 312 (Fs/400 overlap + Fs/250 delay compensation)", enc.Lookahead())
 	}
 	if enc.VBRConstraint() {
 		t.Fatal("legacy CBR encoder reports constrained VBR")
@@ -437,7 +443,7 @@ func TestEncoderSetBitrate(t *testing.T) {
 		{"Valid 128kbps", 128000, false},
 		{"Automatic", BitrateAuto, false},
 		{"Maximum", BitrateMax, false},
-		{"Too low", 5000, true},
+		{"Low (clamped to 500 as libopus)", 100, false},
 		{"High request", 600000, false},
 		{"Non-positive", 0, true},
 	}
@@ -494,8 +500,10 @@ func TestEncoderBitratePolicies(t *testing.T) {
 	if got, want := mono.EffectiveBitrate(), 510000; got != want {
 		t.Fatalf("maximum effective bitrate = %d, want %d", got, want)
 	}
-	if len(packet) != MaxFrameBytes+1 {
-		t.Fatalf("maximum bitrate packet size = %d, want %d", len(packet), MaxFrameBytes+1)
+	// opus_encode_native: cbr_bytes = (bitrate_to_bits + 4) / 8 including the
+	// TOC = (10200 + 4) / 8 = 1275 at the maximum 20 ms rate.
+	if len(packet) != MaxFrameBytes {
+		t.Fatalf("maximum bitrate packet size = %d, want %d", len(packet), MaxFrameBytes)
 	}
 }
 
@@ -763,8 +771,31 @@ func TestDecoderPLCSILKAndHybrid(t *testing.T) {
 			if firstEnergy == 0 || secondEnergy == 0 {
 				t.Fatalf("PLC returned silence: first=%g second=%g", firstEnergy, secondEnergy)
 			}
-			if secondEnergy >= firstEnergy {
-				t.Fatalf("PLC energy did not decay: first=%g second=%g", firstEnergy, secondEnergy)
+			// libopus' PLC does not fade monotonically from the first
+			// concealed frame (its own hybrid-stereo run on these packets rises
+			// ~48% into the second frame — 5.37e10 to 7.95e10 — before the
+			// attenuation dominates, and the Go decoder tracks it within 0.5%),
+			// so bound the rise and require the decay to be established by the
+			// fourth concealed frame.
+			if secondEnergy > 1.5*firstEnergy {
+				t.Fatalf("PLC energy rose too much: first=%g second=%g", firstEnergy, secondEnergy)
+			}
+			longDec, err := NewDecoder(tc.rate, tc.channels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for p := 0; p < 4; p++ {
+				if _, err := longDec.Decode(packets[p], make([]int16, frameSize*tc.channels)); err != nil {
+					t.Fatalf("prime packet %d: %v", p, err)
+				}
+			}
+			long := make([]int16, 4*frameSize*tc.channels)
+			if _, err := longDec.DecodePLC(long, 4*frameSize); err != nil {
+				t.Fatalf("DecodePLC (4 frames): %v", err)
+			}
+			fourthEnergy := signalEnergyI16(long[3*frameSize*tc.channels:])
+			if fourthEnergy >= firstEnergy {
+				t.Fatalf("PLC energy did not decay: first=%g fourth=%g", firstEnergy, fourthEnergy)
 			}
 
 			recovered := make([]int16, frameSize*tc.channels)
@@ -935,8 +966,9 @@ func TestDecoderPLCAfterFEC(t *testing.T) {
 	}
 }
 
-// After digital-silence SILK packets, concealment must continue the silence
-// instead of replaying stale pre-silence speech from the synthesis history.
+// One-byte SILK payloads are concealed like lost frames (libopus semantics),
+// so a following explicit loss must continue that fade rather than restart
+// from the pre-silence synthesis history or drop to digital silence.
 func TestDecoderPLCAfterSILKSilence(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -969,10 +1001,6 @@ func TestDecoderPLCAfterSILKSilence(t *testing.T) {
 			if mode, err := PacketGetMode(packets[0]); err != nil || mode != ModeSILKOnly {
 				t.Fatalf("packet mode = %d, err=%v, want SILK-only", mode, err)
 			}
-			if packets[0][0]&0x03 != 0 {
-				t.Fatalf("expected a code-0 packet, TOC = %#02x", packets[0][0])
-			}
-
 			dec, err := NewDecoder(rate, tc.channels)
 			if err != nil {
 				t.Fatal(err)
@@ -983,12 +1011,26 @@ func TestDecoderPLCAfterSILKSilence(t *testing.T) {
 					t.Fatalf("prime packet %d: %v", p, err)
 				}
 			}
-			// RFC 6716 digital silence: same TOC, single zero payload byte.
-			silence := []byte{packets[0][0], 0x00}
+			speechEnergy := signalEnergyI16(out)
+
+			// A one-byte SILK payload tells the decoder to run its PLC
+			// (libopus opus_decode_frame treats len <= 1 as a lost frame), so
+			// the concealment fades the pre-silence state instead of jumping
+			// to digital silence, and the following explicit loss keeps fading.
+			silence := []byte{packets[0][0] &^ 0x03, 0x00}
+			prevEnergy := speechEnergy
 			for i := 0; i < 2; i++ {
 				if _, err := dec.Decode(silence, out); err != nil {
 					t.Fatalf("silence packet %d: %v", i, err)
 				}
+				if dec.FinalRange() != 0 {
+					t.Fatalf("silence packet %d: final range %08x, want 0", i, dec.FinalRange())
+				}
+				energy := signalEnergyI16(out)
+				if energy > prevEnergy {
+					t.Fatalf("silence packet %d: concealed energy %g exceeds previous %g", i, energy, prevEnergy)
+				}
+				prevEnergy = energy
 			}
 
 			plc := make([]int16, frameSize*tc.channels)
@@ -996,8 +1038,8 @@ func TestDecoderPLCAfterSILKSilence(t *testing.T) {
 			if err != nil || n != frameSize {
 				t.Fatalf("DecodePLC = (%d, %v), want (%d, nil)", n, err, frameSize)
 			}
-			if energy := signalEnergyI16(plc); energy != 0 {
-				t.Fatalf("PLC after digital silence has energy %g, want continued silence", energy)
+			if energy := signalEnergyI16(plc); energy > prevEnergy || energy >= speechEnergy {
+				t.Fatalf("PLC after one-byte frames has energy %g (previous %g, speech %g), want continued fade", energy, prevEnergy, speechEnergy)
 			}
 		})
 	}

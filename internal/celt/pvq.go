@@ -2,6 +2,7 @@ package celt
 
 import (
 	"math"
+	"sync"
 
 	"github.com/darui3018823/opus/internal/entcode"
 )
@@ -11,9 +12,9 @@ import (
 // Implements CWRS (Combinatorial Weights for Random Sparse) codebook
 // per RFC 6716 Section 5.4.3.3
 
-// vCache memoizes V(n,k) computations to avoid exponential recursion.
-// Values are stored as uint64; saturation at math.MaxUint32 prevents wrap-around.
-var vCache = make(map[[2]int]uint64)
+// uCache memoizes the symmetric CELT U(n,k) recurrence. sync.Map keeps
+// independent encoders/decoders race-free while plans are populated lazily.
+var uCache sync.Map
 
 const cwrsMax = uint64(math.MaxUint32)
 
@@ -24,42 +25,20 @@ func min64(a, b uint64) uint64 {
 	return b
 }
 
-// cwrsV computes V(n, k) — the number of signed PVQ code vectors with
-// n dimensions and k pulses (L1 norm equal to k).
-//
-// Recurrence from RFC 6716 §5.4.3.3:
-//
-//	V(0, 0) = 1
-//	V(0, k) = 0  for k > 0
-//	V(n, 0) = 1
-//	V(n, k) = V(n-1, k) + V(n, k-1) + V(n-1, k-1)  for n,k > 0
-//
-// The value is saturated at math.MaxUint32 so it never wraps to zero for
-// large inputs, which would cause divide-by-zero in the range coder.
+// cwrsV computes libopus CELT_PVQ_V(n,k) = U(n,k) + U(n,k+1), the number
+// of signed PVQ code vectors with n dimensions and k pulses. Computing V from
+// U is important near the uint32 limit: cwrsi needs individual U values that
+// still fit even when an adjacent V recurrence would already have saturated.
 func cwrsV(n, k int) uint64 {
 	if k < 0 || n < 0 {
 		return 0
 	}
-	if k == 0 {
-		return 1
+	a := celtPVQU(n, k)
+	b := celtPVQU(n, k+1)
+	if a > cwrsMax-b {
+		return cwrsMax
 	}
-	if n == 0 {
-		return 0
-	}
-	key := [2]int{n, k}
-	if v, ok := vCache[key]; ok {
-		return v
-	}
-	a := cwrsV(n-1, k)
-	b := cwrsV(n, k-1)
-	c := cwrsV(n-1, k-1)
-	v := a + b + c
-	// Saturate instead of wrapping to keep sentinel (0 = invalid) meaningful.
-	if v < a || v < b || v > cwrsMax {
-		v = cwrsMax
-	}
-	vCache[key] = v
-	return v
+	return a + b
 }
 
 // icwrs returns the uint32-clamped codebook size for n dimensions and k pulses.
@@ -355,7 +334,7 @@ func PVQDecode(dec *entcode.Decoder, n, k int) []float64 {
 	norm := 0.0
 	for i := 0; i < n; i++ {
 		output[i] = float64(y[i])
-		norm += output[i] * output[i]
+		norm += float64(output[i] * output[i])
 	}
 
 	if norm > 0 {
@@ -368,9 +347,13 @@ func PVQDecode(dec *entcode.Decoder, n, k int) []float64 {
 	return output
 }
 
-// celtPVQU returns libopus CELT_PVQ_U(n,k). U is symmetric, and
-// U(n,k) = (V(n-1,k-1)+V(n,k-1))/2 for n>0,k>0.
+// celtPVQU returns libopus CELT_PVQ_U(n,k). U is symmetric and follows
+// U(n,k)=U(n-1,k)+U(n,k-1)+U(n-1,k-1). Values outside libopus's supported
+// uint32 codebooks saturate, while every supported table entry stays exact.
 func celtPVQU(n, k int) uint64 {
+	if n < 0 || k < 0 {
+		return 0
+	}
 	if n > k {
 		n, k = k, n
 	}
@@ -380,10 +363,19 @@ func celtPVQU(n, k int) uint64 {
 		}
 		return 0
 	}
-	if k == 0 {
-		return 0
+	key := [2]int{n, k}
+	if cached, ok := uCache.Load(key); ok {
+		return cached.(uint64)
 	}
-	return (cwrsV(n-1, k-1) + cwrsV(n, k-1)) >> 1
+	a := celtPVQU(n-1, k)
+	b := celtPVQU(n, k-1)
+	c := celtPVQU(n-1, k-1)
+	value := cwrsMax
+	if a <= cwrsMax-b && a+b <= cwrsMax-c {
+		value = a + b + c
+	}
+	uCache.Store(key, value)
+	return value
 }
 
 // cwrsiLibopus decodes a CWRS index into a pulse vector matching libopus

@@ -50,7 +50,7 @@ func hannWindow(window []float64) {
 func hammingWindow(window []float64) {
 	n := len(window)
 	for i := 0; i < n; i++ {
-		window[i] = 0.54 - 0.46*math.Cos(2.0*math.Pi*float64(i)/float64(n-1))
+		window[i] = 0.54 - float64(0.46*math.Cos(2.0*math.Pi*float64(i)/float64(n-1)))
 	}
 }
 
@@ -60,7 +60,7 @@ func blackmanWindow(window []float64) {
 	n := len(window)
 	for i := 0; i < n; i++ {
 		t := float64(i) / float64(n-1)
-		window[i] = 0.42 - 0.5*math.Cos(2.0*math.Pi*t) + 0.08*math.Cos(4.0*math.Pi*t)
+		window[i] = 0.42 - float64(0.5*math.Cos(2.0*math.Pi*t)) + float64(0.08*math.Cos(4.0*math.Pi*t))
 	}
 }
 
@@ -115,6 +115,6 @@ func WindowedOverlapAdd(output []float64, input []float64, window []float64, off
 	}
 
 	for i := range input {
-		output[offset+i] += input[i] * window[i]
+		output[offset+i] += float64(input[i] * window[i])
 	}
 }

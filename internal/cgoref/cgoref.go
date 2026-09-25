@@ -5,7 +5,9 @@ package cgoref
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../libopus/include -IC:/msys64/mingw64/include/opus
-#cgo LDFLAGS: -LC:/msys64/mingw64/lib -lopus
+#cgo windows LDFLAGS: C:/msys64/mingw64/lib/libopus.a
+#cgo linux LDFLAGS: -Wl,-Bstatic -lopus -Wl,-Bdynamic -lm
+#cgo darwin LDFLAGS: -lopus
 #include <opus.h>
 #include <opus_multistream.h>
 #include <stdlib.h>
@@ -370,6 +372,26 @@ func (d *Decoder) DecodeFloat(packet []byte, maxSPC int) ([]float32, error) {
 	return pcm[:int(n)*d.channels], nil
 }
 
+// Decode decodes one packet through libopus' opus_decode int16 entry point.
+// It is intentionally separate from DecodeFloat so reference tests exercise
+// libopus' own FLOAT2INT16 conversion instead of reproducing it in Go.
+func (d *Decoder) Decode(packet []byte, maxSPC int) ([]int16, error) {
+	if maxSPC <= 0 {
+		return nil, fmt.Errorf("invalid maximum samples per channel: %d", maxSPC)
+	}
+	pcm := make([]int16, maxSPC*d.channels)
+	var ptr *C.uchar
+	if len(packet) > 0 {
+		ptr = (*C.uchar)(unsafe.Pointer(&packet[0]))
+	}
+	n := C.opus_decode(d.dec, ptr, C.opus_int32(len(packet)),
+		(*C.opus_int16)(unsafe.Pointer(&pcm[0])), C.int(maxSPC), 0)
+	if n < 0 {
+		return nil, fmt.Errorf("opus_decode: %s", C.GoString(C.opus_strerror(n)))
+	}
+	return pcm[:int(n)*d.channels], nil
+}
+
 // DecodeFloatFEC reconstructs the lost frame preceding packet via libopus'
 // in-band FEC path (opus_decode_float with decode_fec=1). packet must be the
 // next received packet (which carries the LBRR redundancy); frameSize is the
@@ -384,6 +406,22 @@ func (d *Decoder) DecodeFloatFEC(packet []byte, frameSize int) ([]float32, error
 		(*C.float)(unsafe.Pointer(&pcm[0])), C.int(frameSize), 1)
 	if n < 0 {
 		return nil, fmt.Errorf("opus_decode_float(FEC): %s", C.GoString(C.opus_strerror(n)))
+	}
+	return pcm[:int(n)*d.channels], nil
+}
+
+// DecodeFEC reconstructs the lost frame preceding packet through libopus'
+// opus_decode int16 entry point with decode_fec=1. Returns samples per channel.
+func (d *Decoder) DecodeFEC(packet []byte, frameSize int) ([]int16, error) {
+	if len(packet) == 0 {
+		return nil, fmt.Errorf("empty packet for FEC decode")
+	}
+	pcm := make([]int16, frameSize*d.channels)
+	n := C.opus_decode(d.dec,
+		(*C.uchar)(unsafe.Pointer(&packet[0])), C.opus_int32(len(packet)),
+		(*C.opus_int16)(unsafe.Pointer(&pcm[0])), C.int(frameSize), 1)
+	if n < 0 {
+		return nil, fmt.Errorf("opus_decode(FEC): %s", C.GoString(C.opus_strerror(n)))
 	}
 	return pcm[:int(n)*d.channels], nil
 }

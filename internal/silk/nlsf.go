@@ -86,11 +86,11 @@ func generateCodebooks16() {
 	// Generate 32 first-stage entries for order 16
 	for entry := 0; entry < 32; entry++ {
 		// Base spacing with variation per entry
-		baseOffset := float64(entry-16) / 16.0 * 0.15 // spectral tilt
+		baseOffset := float64(float64(entry-16) / 16.0 * 0.15) // spectral tilt
 		for i := 0; i < 16; i++ {
 			// Evenly-spaced baseline with per-entry variation
-			base := float64(i+1) / 17.0 * math.Pi
-			varied := base + baseOffset*base*(math.Pi-base)/math.Pi
+			base := float64(float64(i+1) / 17.0 * math.Pi)
+			varied := base + float64(float64(baseOffset*base)*(math.Pi-base))/math.Pi
 			// Clamp
 			if varied < 0.05 {
 				varied = 0.05
@@ -109,13 +109,13 @@ func generateCodebooks16() {
 			case 0:
 				nlsfCB2_WB[entry][i] = 0
 			case 1:
-				nlsfCB2_WB[entry][i] = int16(150 * math.Sin(float64(i)*math.Pi/8))
+				nlsfCB2_WB[entry][i] = int16(150 * math.Sin(float64(float64(i)*math.Pi)/8))
 			case 2:
-				nlsfCB2_WB[entry][i] = int16(-150 * math.Sin(float64(i)*math.Pi/8))
+				nlsfCB2_WB[entry][i] = int16(-150 * math.Sin(float64(float64(i)*math.Pi)/8))
 			case 3:
-				nlsfCB2_WB[entry][i] = int16(100 * math.Cos(float64(i)*math.Pi/8))
+				nlsfCB2_WB[entry][i] = int16(100 * math.Cos(float64(float64(i)*math.Pi)/8))
 			case 4:
-				nlsfCB2_WB[entry][i] = int16(-100 * math.Cos(float64(i)*math.Pi/8))
+				nlsfCB2_WB[entry][i] = int16(-100 * math.Cos(float64(float64(i)*math.Pi)/8))
 			case 5:
 				if i%2 == 0 {
 					nlsfCB2_WB[entry][i] = 120
@@ -142,10 +142,10 @@ func generateCodebooks16() {
 func generateCodebooks12() {
 	// Generate 32 first-stage entries for order 12
 	for entry := 0; entry < 32; entry++ {
-		baseOffset := float64(entry-16) / 16.0 * 0.15
+		baseOffset := float64(float64(entry-16) / 16.0 * 0.15)
 		for i := 0; i < 12; i++ {
-			base := float64(i+1) / 13.0 * math.Pi
-			varied := base + baseOffset*base*(math.Pi-base)/math.Pi
+			base := float64(float64(i+1) / 13.0 * math.Pi)
+			varied := base + float64(float64(baseOffset*base)*(math.Pi-base))/math.Pi
 			if varied < 0.05 {
 				varied = 0.05
 			}
@@ -163,13 +163,13 @@ func generateCodebooks12() {
 			case 0:
 				nlsfCB2_MB[entry][i] = 0
 			case 1:
-				nlsfCB2_MB[entry][i] = int16(150 * math.Sin(float64(i)*math.Pi/6))
+				nlsfCB2_MB[entry][i] = int16(150 * math.Sin(float64(float64(i)*math.Pi)/6))
 			case 2:
-				nlsfCB2_MB[entry][i] = int16(-150 * math.Sin(float64(i)*math.Pi/6))
+				nlsfCB2_MB[entry][i] = int16(-150 * math.Sin(float64(float64(i)*math.Pi)/6))
 			case 3:
-				nlsfCB2_MB[entry][i] = int16(100 * math.Cos(float64(i)*math.Pi/6))
+				nlsfCB2_MB[entry][i] = int16(100 * math.Cos(float64(float64(i)*math.Pi)/6))
 			case 4:
-				nlsfCB2_MB[entry][i] = int16(-100 * math.Cos(float64(i)*math.Pi/6))
+				nlsfCB2_MB[entry][i] = int16(-100 * math.Cos(float64(float64(i)*math.Pi)/6))
 			case 5:
 				if i%2 == 0 {
 					nlsfCB2_MB[entry][i] = 120
@@ -234,7 +234,7 @@ func (q *NLSFQuantizer) Quantize(nlsf []float64) ([]int, error) {
 		dist := 0.0
 		for i := 0; i < q.order; i++ {
 			diff := nlsfQ15[i] - float64(cb[i])
-			dist += weights[i] * diff * diff
+			dist += float64(weights[i] * diff * diff)
 		}
 		if dist < bestDist {
 			bestDist = dist
@@ -256,7 +256,7 @@ func (q *NLSFQuantizer) Quantize(nlsf []float64) ([]int, error) {
 		dist := 0.0
 		for i := 0; i < q.order; i++ {
 			diff := residual[i] - float64(cb[i])
-			dist += weights[i] * diff * diff
+			dist += float64(weights[i] * diff * diff)
 		}
 		if dist < bestDist {
 			bestDist = dist
@@ -334,15 +334,15 @@ func (q *NLSFQuantizer) getCodebookQ15(stage, index int) []int16 {
 		// For other orders (e.g. 18 for SWB), generate on-the-fly
 		if stage == 0 {
 			for i := 0; i < q.order; i++ {
-				base := float64(i+1) / float64(q.order+1) * math.Pi
-				offset := (float64(index)/32.0 - 0.5) * 0.15 * base * (math.Pi - base) / math.Pi
+				base := float64(float64(float64(i+1)/float64(q.order+1)) * math.Pi)
+				offset := float64(float64(float64(float64((float64(float64(index)/32.0)-0.5)*0.15)*base)*(math.Pi-base)) / math.Pi)
 				val := base + offset
-				result[i] = int16(val / math.Pi * 32768.0)
+				result[i] = int16(float64(val/math.Pi) * 32768.0)
 			}
 		} else {
 			// Stage 2: small residuals
 			for i := 0; i < q.order; i++ {
-				result[i] = int16(float64(index-4) * 50.0 * math.Sin(float64(i)*math.Pi/float64(q.order)))
+				result[i] = int16(float64(float64(index-4)*50.0) * math.Sin(float64(float64(float64(i)*math.Pi)/float64(q.order))))
 			}
 		}
 	}
@@ -400,7 +400,7 @@ func (q *NLSFQuantizer) EnforceStability(nlsf []float64) {
 		changed = false
 		for i := 0; i < len(nlsf)-1; i++ {
 			if nlsf[i+1]-nlsf[i] < NLSFMinSpacing {
-				avg := (nlsf[i] + nlsf[i+1]) / 2
+				avg := float64((nlsf[i] + nlsf[i+1]) / 2)
 				nlsf[i] = avg - NLSFMinSpacing/2
 				nlsf[i+1] = avg + NLSFMinSpacing/2
 				changed = true
@@ -426,7 +426,7 @@ func (q *NLSFQuantizer) ComputeWeights(nlsf []float64) []float64 {
 	for i := 0; i < q.order; i++ {
 		// Higher weight for lower frequencies (more perceptually important)
 		freq := nlsf[i] / math.Pi // Normalize to [0, 1]
-		weights[i] = 1.0 / (1.0 + freq*freq)
+		weights[i] = 1.0 / (1.0 + float64(freq*freq))
 	}
 
 	return weights
@@ -447,7 +447,7 @@ func (q *NLSFQuantizer) Interpolate(nlsf1, nlsf2 []float64, alpha float64) []flo
 
 	result := make([]float64, q.order)
 	for i := 0; i < q.order; i++ {
-		result[i] = (1-alpha)*nlsf1[i] + alpha*nlsf2[i]
+		result[i] = float64((1-alpha)*nlsf1[i]) + float64(alpha*nlsf2[i])
 	}
 
 	// Ensure stability
@@ -464,7 +464,7 @@ func InterpolateNLSF(nlsf1, nlsf2 []float64, factor float64) []float64 {
 
 	result := make([]float64, len(nlsf1))
 	for i := range nlsf1 {
-		result[i] = nlsf1[i]*(1-factor) + nlsf2[i]*factor
+		result[i] = float64(nlsf1[i]*(1-factor)) + float64(nlsf2[i]*factor)
 	}
 
 	return result

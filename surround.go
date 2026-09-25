@@ -64,13 +64,19 @@ func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application App
 		bandwidth:          BandwidthAuto,
 	}
 	s.configureSurroundStreams()
+	ms.policyChanged = s.configureForPolicy
 	if mappingFamily == MappingFamilyVorbis && channels > 2 {
+		ms.mappingType = msMappingSurround
+		ms.lfeStream = layout.lfeStream
 		s.analyzer, err = celt.NewSurroundAnalyzer(sampleRate, channels)
 		if err != nil {
 			return nil, err
 		}
 		ms.beforeEncodeFloat = s.analyzeSurroundFrame
 		ms.resetPolicy = func() { s.analyzer.Reset() }
+	}
+	if ms.libopusPolicy {
+		s.configureForPolicy()
 	}
 	return s, nil
 }
@@ -84,11 +90,12 @@ func (e *SurroundEncoder) LFEStream() int { return e.lfeStream }
 // SetBitrate sets the aggregate surround bitrate. It is distributed immediately
 // before each encode because libopus' allocation depends on frame duration.
 func (e *SurroundEncoder) SetBitrate(bitrate int) error {
-	if bitrate != BitrateAuto && bitrate != BitrateMax &&
-		(bitrate < 6000*e.streams || bitrate > 510000*e.streams) {
-		return fmt.Errorf("%w: invalid surround bitrate %d", ErrBadArg, bitrate)
+	bitrate, err := clampMultistreamBitrate(bitrate, e.channels)
+	if err != nil {
+		return err
 	}
 	e.bitrate = bitrate
+	e.MultistreamEncoder.bitrate = bitrate
 	return nil
 }
 
@@ -150,9 +157,38 @@ func (e *SurroundEncoder) configureSurroundStreams() {
 	}
 }
 
+// configureForPolicy sets up the elementary streams for the selected
+// policy: opus_multistream_encode_native configures them before every
+// packet itself, so the Go policy's per-stream settings are undone.
+func (e *SurroundEncoder) configureForPolicy() {
+	if !e.libopusPolicy {
+		for _, enc := range e.encoders {
+			enc.libopusForcedMode = -1
+			enc.lfe = false
+		}
+		e.configureSurroundStreams()
+		return
+	}
+	if e.mappingFamily != MappingFamilyVorbis {
+		return
+	}
+	for stream := 0; stream < e.coupledStreams; stream++ {
+		enc := e.encoders[stream]
+		enc.SetPredictionDisabled(false)
+		_ = enc.SetForceChannels(ChannelsAuto)
+	}
+	if e.lfeStream >= 0 {
+		// opus_multistream_surround_encoder_init: OPUS_SET_LFE(1).
+		e.encoders[e.lfeStream].lfe = true
+	}
+}
+
 func (e *SurroundEncoder) prepareFrame(frameSize int) error {
 	if len(e.encoders) == 0 {
 		return fmt.Errorf("%w: no surround streams", ErrInvalidState)
+	}
+	if e.libopusPolicy {
+		return nil
 	}
 	selectedFrameSize, err := e.MultistreamEncoder.selectEncodeFrameSize(frameSize)
 	if err != nil {

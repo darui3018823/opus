@@ -21,10 +21,10 @@ func TestPitchCoreDetectsPeriodicLag(t *testing.T) {
 		frameLen := (peLtpMemLengthMs + nbSubfr*peSubfrLengthMs) * tc.fsKHz
 		frame := make([]float64, frameLen)
 		for n := range frame {
-			frame[n] = math.Sin(2*math.Pi*float64(n)/float64(tc.period)) * 8000.0
+			frame[n] = f32(math.Sin(2*math.Pi*float64(n)/float64(tc.period)) * 8000.0)
 		}
 		ltpCorr := 0.0
-		pitchOut, lagIndex, contourIndex, voiced := silkPitchAnalysisCoreFLP(
+		pitchOut, lagIndex, contourIndex, voiced := silkPitchAnalysisCoreFLP32(
 			frame, &ltpCorr, 0, 0.7, 0.4, tc.fsKHz, silkPEMidComplex, nbSubfr)
 		if !voiced {
 			t.Fatalf("fs=%dkHz period=%d: expected voiced", tc.fsKHz, tc.period)
@@ -58,14 +58,17 @@ func TestPitchCoreRejectsNoise(t *testing.T) {
 		frame[n] = float64((seed>>16)&0xFFFF-32768) * 0.2
 	}
 	ltpCorr := 0.0
-	_, _, _, voiced := silkPitchAnalysisCoreFLP(
+	_, _, _, voiced := silkPitchAnalysisCoreFLP32(
 		frame, &ltpCorr, 0, 0.7, 0.5, fsKHz, silkPEMidComplex, nbSubfr)
 	if voiced {
 		t.Errorf("white noise classified as voiced (LTPCorr=%.3f)", ltpCorr)
 	}
 }
 
-func TestFirstFrameLongLagDisablesPitchPrediction(t *testing.T) {
+// TestFirstFrameAfterResetIsUnvoiced mirrors silk_find_pitch_lags_FLP: the
+// pitch estimator does not run on the first frame after a reset, so that
+// frame is coded unvoiced even for strongly periodic input.
+func TestFirstFrameAfterResetIsUnvoiced(t *testing.T) {
 	enc, err := NewEncoderWithFrameMs(16000, 1, 20)
 	if err != nil {
 		t.Fatalf("NewEncoder: %v", err)

@@ -8,11 +8,9 @@ import (
 const (
 	// COMBFILTER_MINPERIOD = 15 samples (≈ 3200 Hz at 48 kHz)
 	combFilterMinPeriod = 15
-	// COMBFILTER_MAXPERIOD = 1022 samples (period encoded as 10-bit field → max 1022+15-1)
-	combFilterMaxPeriod = 1022
-	// The period is coded as an offset from combFilterMinPeriod with range
-	// MAX_PERIOD - (COMBFILTER_MINPERIOD-1) = 1024-14 = 1010 values.
-	combFilterPeriodRange = combFilterMaxPeriod - combFilterMinPeriod + 1
+	// COMBFILTER_MAXPERIOD = 1024 samples: the prefilter history length and
+	// the pitch search range (the coded period is clamped to MAXPERIOD-2).
+	combFilterMaxPeriod = 1024
 )
 
 // pfGainTable maps 3-bit gain index (0..7) to the gain scalar used in
@@ -203,12 +201,15 @@ func (pf *PostFilter) combFilter(samples []float64, offset, n, period0, period1 
 		tapset1 = 0
 	}
 
-	g00 := gain0 * pfCombGains[tapset0][0]
-	g01 := gain0 * pfCombGains[tapset0][1]
-	g02 := gain0 * pfCombGains[tapset0][2]
-	g10 := gain1 * pfCombGains[tapset1][0]
-	g11 := gain1 * pfCombGains[tapset1][1]
-	g12 := gain1 * pfCombGains[tapset1][2]
+	// opus_val16, celt_coef, and opus_val32 are all float in a floating-point
+	// libopus build. Keep every tap and accumulator operation in float32 rather
+	// than allowing Go's float64 storage to retain extra precision.
+	g00 := float32(float32(gain0) * float32(pfCombGains[tapset0][0]))
+	g01 := float32(float32(gain0) * float32(pfCombGains[tapset0][1]))
+	g02 := float32(float32(gain0) * float32(pfCombGains[tapset0][2]))
+	g10 := float32(float32(gain1) * float32(pfCombGains[tapset1][0]))
+	g11 := float32(float32(gain1) * float32(pfCombGains[tapset1][1]))
+	g12 := float32(float32(gain1) * float32(pfCombGains[tapset1][2]))
 
 	if gain0 == gain1 && period0 == period1 && tapset0 == tapset1 {
 		overlap = 0
@@ -220,21 +221,24 @@ func (pf *PostFilter) combFilter(samples []float64, offset, n, period0, period1 
 		overlap = len(window)
 	}
 
-	x1 := pf.getHistorySample(samples, offset-period1+1)
-	x2 := pf.getHistorySample(samples, offset-period1)
-	x3 := pf.getHistorySample(samples, offset-period1-1)
-	x4 := pf.getHistorySample(samples, offset-period1-2)
+	x1 := float32(pf.getHistorySample(samples, offset-period1+1))
+	x2 := float32(pf.getHistorySample(samples, offset-period1))
+	x3 := float32(pf.getHistorySample(samples, offset-period1-1))
+	x4 := float32(pf.getHistorySample(samples, offset-period1-2))
 	for i := 0; i < overlap; i++ {
 		pos := offset + i
-		x0 := pf.getHistorySample(samples, pos-period1+2)
-		f := window[i] * window[i]
-		samples[pos] = pf.getHistorySample(samples, pos) +
-			(1-f)*g00*pf.getHistorySample(samples, pos-period0) +
-			(1-f)*g01*(pf.getHistorySample(samples, pos-period0+1)+pf.getHistorySample(samples, pos-period0-1)) +
-			(1-f)*g02*(pf.getHistorySample(samples, pos-period0+2)+pf.getHistorySample(samples, pos-period0-2)) +
-			f*g10*x2 +
-			f*g11*(x1+x3) +
-			f*g12*(x0+x4)
+		x0 := float32(pf.getHistorySample(samples, pos-period1+2))
+		w := float32(window[i])
+		f := float32(w * w)
+		oneMinusF := float32(1) - f
+		y := float32(pf.getHistorySample(samples, pos))
+		y += float32((float32(oneMinusF * g00)) * float32(pf.getHistorySample(samples, pos-period0)))
+		y += float32((float32(oneMinusF * g01)) * (float32(pf.getHistorySample(samples, pos-period0+1)) + float32(pf.getHistorySample(samples, pos-period0-1))))
+		y += float32((float32(oneMinusF * g02)) * (float32(pf.getHistorySample(samples, pos-period0+2)) + float32(pf.getHistorySample(samples, pos-period0-2))))
+		y += float32((float32(f * g10)) * x2)
+		y += float32((float32(f * g11)) * (x1 + x3))
+		y += float32((float32(f * g12)) * (x0 + x4))
+		samples[pos] = float64(y)
 		x4 = x3
 		x3 = x2
 		x2 = x1
@@ -247,18 +251,22 @@ func (pf *PostFilter) combFilter(samples []float64, offset, n, period0, period1 
 	pf.combFilterConst(samples, offset+overlap, n-overlap, period1, g10, g11, g12)
 }
 
-func (pf *PostFilter) combFilterConst(samples []float64, offset, n, period int, g0, g1, g2 float64) {
+func (pf *PostFilter) combFilterConst(samples []float64, offset, n, period int, g0, g1, g2 float32) {
 	if n <= 0 {
 		return
 	}
-	x4 := pf.getHistorySample(samples, offset-period-2)
-	x3 := pf.getHistorySample(samples, offset-period-1)
-	x2 := pf.getHistorySample(samples, offset-period)
-	x1 := pf.getHistorySample(samples, offset-period+1)
+	x4 := float32(pf.getHistorySample(samples, offset-period-2))
+	x3 := float32(pf.getHistorySample(samples, offset-period-1))
+	x2 := float32(pf.getHistorySample(samples, offset-period))
+	x1 := float32(pf.getHistorySample(samples, offset-period+1))
 	for i := 0; i < n; i++ {
 		pos := offset + i
-		x0 := pf.getHistorySample(samples, pos-period+2)
-		samples[pos] = pf.getHistorySample(samples, pos) + g0*x2 + g1*(x1+x3) + g2*(x0+x4)
+		x0 := float32(pf.getHistorySample(samples, pos-period+2))
+		y := float32(pf.getHistorySample(samples, pos))
+		y += float32(g0 * x2)
+		y += float32(g1 * (x1 + x3))
+		y += float32(g2 * (x0 + x4))
+		samples[pos] = float64(y)
 		x4 = x3
 		x3 = x2
 		x2 = x1

@@ -97,10 +97,10 @@ func benchmarkPerfLongEncode(b *testing.B, wl perfWorkload) {
 
 func TestPerfPredictivePacketRegression(t *testing.T) {
 	want := map[string]string{
-		"silk/mono/48k/20ms":     "9283a266eb02e57c13033cdcf88f00bf15a4ce720d42a97db0b92e63f5ba22f4",
-		"silk/stereo/48k/20ms":   "b549162a152534ca8f20485fe4f6daa59086a2a97648fa55fb57096224b58ff6",
-		"hybrid/mono/48k/20ms":   "ac302b15835713697d453237ce0ae6e34b72927baff54f40a63ae5ebf85e139f",
-		"hybrid/stereo/48k/20ms": "ea2513c3685530f438660e63d2163fa67c12de34fd2e015327267ef394ef2bf4",
+		"silk/mono/48k/20ms":     "6934dcf095c2138cd31d0049fcda44c74b4d0775657b9a55c664280206535b4e",
+		"silk/stereo/48k/20ms":   "5e6879700c6c343e1197884a7438bb18a4da363c431c5665f9d458f3fbba1cf8",
+		"hybrid/mono/48k/20ms":   "f21a316966521d7d10b56d6bda10fc3ffcc11f458d303416961fb95b19930421",
+		"hybrid/stereo/48k/20ms": "9cdc2349243bcf751163b31e751a33d6487b223c64f36b37a396e6affa9954f6",
 	}
 	for _, wl := range perfWorkloads() {
 		wantDigest, ok := want[wl.name]
@@ -293,20 +293,22 @@ func validatePerfPacketBytes(wl perfWorkload, pkt []byte) error {
 }
 
 func perfMusicFrame(start, n, channels int) []float64 {
+	// Products are rounded explicitly so the fixture is identical on every
+	// architecture (no fused multiply-add; see docs/DEVELOPER.md).
 	out := make([]float64, n*channels)
 	for i := 0; i < n; i++ {
-		t := float64(start+i) / perfSampleRate
-		env := 0.55 + 0.08*math.Sin(2*math.Pi*3.1*t)
-		left := env * (0.28*math.Sin(2*math.Pi*440*t) +
-			0.18*math.Sin(2*math.Pi*1760*t+0.2) +
-			0.10*math.Sin(2*math.Pi*6200*t+0.7) +
-			0.05*math.Sin(2*math.Pi*15500*t+1.1))
+		t := float64(float64(start+i) / perfSampleRate)
+		env := 0.55 + float64(0.08*math.Sin(float64(2*math.Pi*3.1*t)))
+		left := float64(env * (float64(0.28*math.Sin(float64(2*math.Pi*440*t))) +
+			float64(0.18*math.Sin(float64(2*math.Pi*1760*t)+0.2)) +
+			float64(0.10*math.Sin(float64(2*math.Pi*6200*t)+0.7)) +
+			float64(0.05*math.Sin(float64(2*math.Pi*15500*t)+1.1))))
 		out[i*channels] = left
 		if channels == 2 {
-			right := env * (0.25*math.Sin(2*math.Pi*554.37*t+0.3) +
-				0.16*math.Sin(2*math.Pi*2217.46*t+0.5) +
-				0.09*math.Sin(2*math.Pi*7600*t+0.9) +
-				0.05*math.Sin(2*math.Pi*14200*t+1.4))
+			right := float64(env * (float64(0.25*math.Sin(float64(2*math.Pi*554.37*t)+0.3)) +
+				float64(0.16*math.Sin(float64(2*math.Pi*2217.46*t)+0.5)) +
+				float64(0.09*math.Sin(float64(2*math.Pi*7600*t)+0.9)) +
+				float64(0.05*math.Sin(float64(2*math.Pi*14200*t)+1.4))))
 			out[i*channels+1] = right
 		}
 	}

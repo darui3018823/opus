@@ -64,8 +64,8 @@ func TestCGOEncodeRefSILKFEC(t *testing.T) {
 		}
 		pktsFEC[p] = a
 		pktsNo[p] = b
-		bytesFEC += len(a)
-		bytesNo += len(b)
+		bytesFEC += silkRefUnpaddedLen(t, a)
+		bytesNo += silkRefUnpaddedLen(t, b)
 
 		// Both must remain SILK-only WB 20 ms mono packets (config 9).
 		for _, pk := range [][]byte{a, b} {
@@ -73,14 +73,23 @@ func TestCGOEncodeRefSILKFEC(t *testing.T) {
 				t.Fatalf("packet %d: TOC config=%d, want SILK-only WB 20ms (9)", p, config)
 			}
 		}
+		// The no-FEC stream must never signal LBRR; the FEC stream must signal
+		// it once the encoder has a previous frame to protect.
+		if has, err := opus.PacketHasLBRR(b); err != nil || has {
+			t.Fatalf("packet %d: no-FEC packet LBRR=%v err=%v", p, has, err)
+		}
+		if has, err := opus.PacketHasLBRR(a); err != nil || (p > 0 && !has) {
+			t.Fatalf("packet %d: FEC packet LBRR=%v err=%v, want LBRR present", p, has, err)
+		}
 	}
 
-	// The redundancy must cost real bytes: the FEC stream is larger than the
-	// identical no-FEC stream (the LBRR frames are genuinely present).
+	// The redundancy must cost real bytes: the unpadded FEC stream is larger
+	// than the identical unpadded no-FEC stream (the LBRR frames are genuinely
+	// present, not hidden by CBR padding).
 	if bytesFEC <= bytesNo {
 		t.Fatalf("FEC stream not larger than no-FEC stream: fec=%d no=%d (LBRR absent?)", bytesFEC, bytesNo)
 	}
-	t.Logf("stream bytes: fec=%d no-fec=%d (+%d for LBRR)", bytesFEC, bytesNo, bytesFEC-bytesNo)
+	t.Logf("unpadded stream bytes: fec=%d no-fec=%d (+%d for LBRR)", bytesFEC, bytesNo, bytesFEC-bytesNo)
 
 	// 1) libopus must normal-decode the entire FEC stream without desync.
 	refDec, err := cgoref.NewDecoder(rate, channels)
@@ -125,11 +134,14 @@ func TestCGOEncodeRefSILKFEC(t *testing.T) {
 		}
 	}
 
-	// 2) FEC recovery: drop frame N, reconstruct it from packet N+1 via decode_fec.
-	const N = 6
+	// 2) FEC recovery: drop frame N, reconstruct it from packet N+1 via
+	// decode_fec. Every steady-state frame is tried, because the per-frame
+	// recovery quality of this ~2-byte LBRR (side information plus a sparse
+	// excitation) swings by several dB with the frame's pitch/gain decisions,
+	// so a single hard-coded frame would only measure the fixture.
 	maxDelay := frameSize / 2
 
-	recoverFrame := func(pkts [][]byte) []float64 {
+	recoverFrame := func(pkts [][]byte, N int) []float64 {
 		d, err := cgoref.NewDecoder(rate, channels)
 		if err != nil {
 			t.Fatalf("cgoref.NewDecoder: %v", err)
@@ -147,23 +159,33 @@ func TestCGOEncodeRefSILKFEC(t *testing.T) {
 		return toFloat64(out)
 	}
 
-	recFEC := recoverFrame(pktsFEC)
-	recPLC := recoverFrame(pktsNo)
-
-	snrFEC, rmseFEC, _, _ := silkRefAlignedSNR(refFrames[N], recFEC, maxDelay)
-	snrPLC, rmsePLC, _, _ := silkRefAlignedSNR(refFrames[N], recPLC, maxDelay)
-	t.Logf("frame %d recovery: FEC alignedSNR=%.2fdB rmse=%.4f | PLC(no-FEC) alignedSNR=%.2fdB rmse=%.4f",
-		N, snrFEC, rmseFEC, snrPLC, rmsePLC)
-
-	// The LBRR reconstruction must be a real match to the lost frame, and clearly
-	// better than the PLC extrapolation libopus falls back to with no redundancy.
-	// Measured ~25.8 dB on the deterministic fixture; floor well above the old
-	// placeholder so a real regression is caught.
-	if snrFEC < 10.0 {
-		t.Fatalf("FEC reconstruction too poor: alignedSNR=%.2fdB rmse=%.4f", snrFEC, rmseFEC)
+	var sumFEC, sumPLC float64
+	frames := 0
+	for N := 2; N < nPackets-1; N++ {
+		recFEC := recoverFrame(pktsFEC, N)
+		recPLC := recoverFrame(pktsNo, N)
+		snrFEC, rmseFEC, _, _ := silkRefAlignedSNR(refFrames[N], recFEC, maxDelay)
+		snrPLC, rmsePLC, _, _ := silkRefAlignedSNR(refFrames[N], recPLC, maxDelay)
+		t.Logf("frame %d recovery: FEC alignedSNR=%.2fdB rmse=%.4f | PLC(no-FEC) alignedSNR=%.2fdB rmse=%.4f",
+			N, snrFEC, rmseFEC, snrPLC, rmsePLC)
+		// Every LBRR reconstruction must be a real match to the lost frame.
+		if snrFEC < 10.0 {
+			t.Fatalf("frame %d: FEC reconstruction too poor: alignedSNR=%.2fdB rmse=%.4f", N, snrFEC, rmseFEC)
+		}
+		sumFEC += snrFEC
+		sumPLC += snrPLC
+		frames++
 	}
-	if snrFEC < snrPLC+3.0 {
-		t.Fatalf("FEC did not improve over PLC baseline: FEC=%.2fdB PLC=%.2fdB", snrFEC, snrPLC)
+	meanFEC := sumFEC / float64(frames)
+	meanPLC := sumPLC / float64(frames)
+	t.Logf("mean recovery over %d frames: FEC=%.2fdB PLC=%.2fdB", frames, meanFEC, meanPLC)
+
+	// On average the redundancy must clearly beat the PLC extrapolation libopus
+	// falls back to with no redundancy (this CBR stream measures ~19.7 dB vs
+	// ~15.6 dB; the Go encoder's CBR and CVBR SILK packets are byte-identical
+	// to libopus, see TestCGOEncodeRefSILKByteExact).
+	if meanFEC < meanPLC+3.0 {
+		t.Fatalf("FEC did not improve over PLC baseline: mean FEC=%.2fdB PLC=%.2fdB", meanFEC, meanPLC)
 	}
 }
 
@@ -203,7 +225,7 @@ func TestCGOEncodeRefSILKFECMultiFrame(t *testing.T) {
 
 			pktsFEC := make([][]byte, nPackets)
 			pktsNo := make([][]byte, nPackets)
-			var bytesFEC, bytesNo int
+			var bytesFEC, bytesNo, lbrrPackets int
 			for p := 0; p < nPackets; p++ {
 				in := silkRefSpeechFrame(rate, p*frameSize, frameSize, channels)
 				a, err := encFEC.EncodeFloat(in, frameSize)
@@ -219,11 +241,24 @@ func TestCGOEncodeRefSILKFECMultiFrame(t *testing.T) {
 				}
 				pktsFEC[p] = a
 				pktsNo[p] = b
-				bytesFEC += len(a)
-				bytesNo += len(b)
+				bytesFEC += silkRefUnpaddedLen(t, a)
+				bytesNo += silkRefUnpaddedLen(t, b)
+				has, err := opus.PacketHasLBRR(a)
+				if err != nil {
+					t.Fatalf("packet %d: PacketHasLBRR: %v", p, err)
+				}
+				if has {
+					lbrrPackets++
+				}
+			}
+			// Multi-frame LBRR is gated per frame by speech activity, so not
+			// every packet must carry it; the stream as a whole must.
+			t.Logf("%dms: %d/%d FEC packets signal LBRR; unpadded bytes fec=%d no=%d", packetMs, lbrrPackets, nPackets, bytesFEC, bytesNo)
+			if lbrrPackets < nPackets/2 {
+				t.Fatalf("only %d/%d FEC packets carry LBRR", lbrrPackets, nPackets)
 			}
 			if bytesFEC <= bytesNo {
-				t.Fatalf("FEC stream not larger: fec=%d no=%d", bytesFEC, bytesNo)
+				t.Fatalf("unpadded FEC stream not larger: fec=%d no=%d", bytesFEC, bytesNo)
 			}
 
 			// Grammar: libopus must normal-decode every packet (the per-frame LBRR
@@ -234,12 +269,17 @@ func TestCGOEncodeRefSILKFECMultiFrame(t *testing.T) {
 			}
 			defer refDec.Close()
 			refFrames := make([][]float64, nPackets)
+			refRanges := make([]uint32, nPackets)
 			for p := 0; p < nPackets; p++ {
 				out, err := refDec.DecodeFloat(pktsFEC[p], maxSPC)
 				if err != nil {
 					t.Fatalf("packet %d: libopus normal decode failed (grammar desync): %v", p, err)
 				}
 				refFrames[p] = toFloat64(out)
+				refRanges[p], err = refDec.FinalRange()
+				if err != nil {
+					t.Fatalf("packet %d: libopus final range: %v", p, err)
+				}
 			}
 
 			// Cross-check the same FEC packets with the Go decoder. This verifies
@@ -258,13 +298,19 @@ func TestCGOEncodeRefSILKFECMultiFrame(t *testing.T) {
 				if n != frameSize {
 					t.Fatalf("packet %d: Go decoded samples=%d, want %d", p, n, frameSize)
 				}
+				if gotRange := goDec.FinalRange(); gotRange != refRanges[p] {
+					t.Fatalf("packet %d: Go final range=%08x, libopus=%08x", p, gotRange, refRanges[p])
+				}
 				got := make([]float64, len(pcm))
 				for i, v := range pcm {
 					got[i] = float64(v) / 32768
 				}
-				s, _, _, _ := silkRefAlignedSNR(refFrames[p], got, frameSize/2)
-				if s < 8 {
+				s, rmse, _, _ := silkRefAlignedSNR(refFrames[p], got, frameSize/2)
+				if s < 8 && rmse > 0.002 {
 					t.Fatalf("packet %d: Go/libopus FEC-stream normal decode diverged: %.2f dB", p, s)
+				}
+				if s < 8 {
+					t.Logf("packet %d: near-silence comparison uses RMSE %.6f (SNR %.2f dB)", p, rmse, s)
 				}
 			}
 
@@ -287,10 +333,35 @@ func TestCGOEncodeRefSILKFECMultiFrame(t *testing.T) {
 			snr, rmse, dl, _ := silkRefAlignedSNR(refFrames[N], toFloat64(rec), frameSize/2)
 			t.Logf("%dms: bytes fec=%d no=%d (+%d) | frame %d FEC recovery alignedSNR=%.2fdB rmse=%.4f delay=%d len(rec)=%d len(ref)=%d",
 				packetMs, bytesFEC, bytesNo, bytesFEC-bytesNo, N, snr, rmse, dl, len(rec), len(refFrames[N]))
-			// Measured ~17.9 dB (40 ms) / ~13.4 dB (60 ms) on the deterministic
-			// fixture; floor at 10 dB leaves margin while catching regressions.
-			if snr < 10.0 {
-				t.Fatalf("multi-frame FEC reconstruction too poor: alignedSNR=%.2fdB", snr)
+			// LBRR is only coded for active SILK frames; a lost frame that was
+			// inactive is concealed rather than reconstructed, so the quality
+			// gate covers the subframes that actually carry redundancy.
+			present, err := silkMonoLBRRPresent(pktsFEC[N+1], packetMs/20)
+			if err != nil {
+				t.Fatalf("parse LBRR mask: %v", err)
+			}
+			subframe := rate / 50
+			var refPresent, recPresent []float64
+			refN := refFrames[N]
+			recF := toFloat64(rec)
+			for f, ok := range present {
+				if !ok {
+					t.Logf("%dms: subframe %d has no LBRR (concealed), excluded from the recovery gate", packetMs, f)
+					continue
+				}
+				refPresent = append(refPresent, refN[f*subframe:(f+1)*subframe]...)
+				recPresent = append(recPresent, recF[f*subframe:(f+1)*subframe]...)
+			}
+			if len(refPresent) == 0 {
+				t.Fatalf("%dms: recovery packet carries no LBRR subframes", packetMs)
+			}
+			presentSNR, _, _, _ := silkRefAlignedSNR(refPresent, recPresent, subframe/2)
+			t.Logf("%dms: FEC recovery over LBRR-present subframes alignedSNR=%.2fdB", packetMs, presentSNR)
+			// Measured ~19.8 dB (40 ms) / ~12 dB (60 ms present subframes) on
+			// the deterministic fixture; floor at 10 dB leaves margin while
+			// catching regressions.
+			if presentSNR < 10.0 {
+				t.Fatalf("multi-frame FEC reconstruction too poor: alignedSNR=%.2fdB over LBRR-present subframes", presentSNR)
 			}
 		})
 	}
@@ -412,6 +483,19 @@ func TestCGODecodeFECMatchesLibopus(t *testing.T) {
 	}
 }
 
+// silkRefUnpaddedLen returns the packet length after removing RFC 6716
+// padding. The Go encoder defaults to CBR and, like libopus, expresses CBR
+// fill as code-3 packet padding rather than SILK frame body bytes, so raw
+// packet sizes no longer reveal whether LBRR frames are present.
+func silkRefUnpaddedLen(t *testing.T, packet []byte) int {
+	t.Helper()
+	unpadded, err := opus.PacketUnpad(packet)
+	if err != nil {
+		t.Fatalf("PacketUnpad: %v", err)
+	}
+	return len(unpadded)
+}
+
 func silkMonoLBRRPresent(packet []byte, nFrames int) ([]bool, error) {
 	if nFrames < 1 {
 		nFrames = 1
@@ -420,6 +504,13 @@ func silkMonoLBRRPresent(packet []byte, nFrames int) ([]bool, error) {
 	if len(packet) < 2 {
 		return present, nil
 	}
+	// Strip CBR padding so a code-3 padded single-frame packet is inspected
+	// through the same SILK header grammar as its compact form.
+	unpadded, err := opus.PacketUnpad(packet)
+	if err != nil {
+		return nil, err
+	}
+	packet = unpadded
 
 	countCode := int(packet[0] & 0x03)
 	if countCode != 0 {

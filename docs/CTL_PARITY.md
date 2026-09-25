@@ -1,6 +1,6 @@
 # CTL and Helper Parity Matrix
 
-Last reviewed: 2026-08-31
+Last reviewed: 2026-09-25
 
 Baseline: libopus 1.6.1 public headers:
 
@@ -31,8 +31,8 @@ marked `Out of scope` rather than treated as core parity.
 
 | libopus CTL | Surface | Semantics | Evidence / note |
 |---|---:|---:|---|
-| `OPUS_SET_APPLICATION` / `OPUS_GET_APPLICATION` | Present | Partial | `SetApplication`, `Application`; state tests pass, but mode policy is narrower than libopus |
-| `OPUS_SET_BITRATE` / `OPUS_GET_BITRATE` | Present | Partial | `SetBitrate`, `Bitrate`, `EffectiveBitrate`; bitrate boundary tests cover auto/max, high-rate clamp, and per-frame limits. Positive requests below 6000 bit/s are unsupported |
+| `OPUS_SET_APPLICATION` / `OPUS_GET_APPLICATION` | Present | Full | `SetApplication`, `Application`; VOIP, AUDIO, RESTRICTED_LOWDELAY, and libopus 1.6's RESTRICTED_SILK / RESTRICTED_CELT (fixed at creation, as in libopus). The mode policy follows libopus under `ModePolicyLibopus` (the restricted SILK / CELT applications always use it); the default `ModePolicyLegacy` keeps the Go decisions. Unlike libopus, the three original applications may still be changed after the first packet |
+| `OPUS_SET_BITRATE` / `OPUS_GET_BITRATE` | Present | Full | `SetBitrate`, `Bitrate`, `EffectiveBitrate`; positive requests are clamped to [500, 750000 x channels] and non-positive ones rejected, as libopus does (multistream/surround/projection: [500, 750000] per input channel) |
 | `OPUS_SET_MAX_BANDWIDTH` / `OPUS_GET_MAX_BANDWIDTH` | Present | Equivalent | `SetMaxBandwidth`, `MaxBandwidth`; bandwidth selection and round-trip tests |
 | `OPUS_SET_BANDWIDTH` / `OPUS_GET_BANDWIDTH` | Present | Equivalent | `SetBandwidth`, `Bandwidth`, `GetBandwidth`; bandwidth selection and libopus reference tests |
 | `OPUS_SET_COMPLEXITY` / `OPUS_GET_COMPLEXITY` | Present | Equivalent | `SetComplexity`, `Complexity`; control tests cover accepted range and getter state |
@@ -43,8 +43,8 @@ marked `Out of scope` rather than treated as core parity.
 | `OPUS_SET_VBR_CONSTRAINT` / `OPUS_GET_VBR_CONSTRAINT` | Present | Partial | `SetVBRConstraint`, `VBRConstraint`; corpus byte-total evidence covers CELT, not full predictive CVBR policy |
 | `OPUS_SET_FORCE_CHANNELS` / `OPUS_GET_FORCE_CHANNELS` | Present | Equivalent | `SetForceChannels`, `ForceChannels`; forced-mono packet and state-propagation tests |
 | `OPUS_SET_SIGNAL` / `OPUS_GET_SIGNAL` | Present | Partial | `SetSignalType`, `SignalType`; request state is independent from Application, but mode and quality policy is narrower |
-| `OPUS_GET_LOOKAHEAD` | Present | Partial | `Lookahead` currently returns `sampleRate/400` for every application and selected mode; libopus delay is application/configuration dependent |
-| `OPUS_SET_LSB_DEPTH` / `OPUS_GET_LSB_DEPTH` | Present | Partial | `SetLSBDepth`, `LSBDepth`; range, storage, and forced-mono propagation are tested, but the value does not yet affect codec decisions |
+| `OPUS_GET_LOOKAHEAD` | Present | Full | `Lookahead` returns Fs/400 + Fs/250 (the Opus-layer delay compensation), or Fs/400 for RESTRICTED_LOWDELAY / RESTRICTED_CELT, as libopus |
+| `OPUS_SET_LSB_DEPTH` / `OPUS_GET_LSB_DEPTH` | Present | Full | `SetLSBDepth`, `LSBDepth`; min(call depth, setting) drives the CELT silence test and dynalloc noise floor, the tonality analysis and (libopus policy) the digital-silence / DTX decisions; the sweep covers it |
 | `OPUS_SET_EXPERT_FRAME_DURATION` / `OPUS_GET_EXPERT_FRAME_DURATION` | Present | Equivalent | `SetExpertFrameDuration`, `ExpertFrameDuration`; all-rate/PCM/multistream tests and `opusref` semantic comparisons |
 | `OPUS_SET_PREDICTION_DISABLED` / `OPUS_GET_PREDICTION_DISABLED` | Present | Equivalent | `SetPredictionDisabled`, `PredictionDisabled`; routing and transition tests |
 | `OPUS_SET_DRED_DURATION` / `OPUS_GET_DRED_DURATION` | Absent | Out of scope | DRED payload transport is opaque; neural recovery is outside the compatibility claim |

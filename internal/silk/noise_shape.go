@@ -69,6 +69,7 @@ type silkComplexityConfig struct {
 	shapingLPCOrder        int
 	laShape                int
 	nStatesDelayedDecision int
+	useInterpolatedNLSFs   bool
 	warpingQ16             int32
 }
 
@@ -114,19 +115,22 @@ func (e *Encoder) silkComplexityConfig() silkComplexityConfig {
 		cfg.shapingLPCOrder, cfg.laShape, cfg.nStatesDelayedDecision = 24, 5*fsKHz, 4
 	}
 	if e.complexity >= 4 {
-		cfg.warpingQ16 = silkFloat2Int(float64(fsKHz) * silkWarpingMultiplier * 65536.0)
+		cfg.useInterpolatedNLSFs = true
+		// silk_setup_complexity: fs_kHz * SILK_FIX_CONST(WARPING_MULTIPLIER, 16)
+		// = fs_kHz * 983 (rounding the product instead gives 15729 at 16 kHz).
+		cfg.warpingQ16 = int32(fsKHz) * 983
 	}
 	return cfg
 }
 
 func silkFloat2Int(x float64) int32 {
-	return int32(math.Floor(x + 0.5))
+	return int32(math.RoundToEven(float64(float32(x))))
 }
 
 func silkEnergyFLP(x []float64) float64 {
 	sum := 0.0
 	for _, v := range x {
-		sum += v * v
+		sum += float64(v * v)
 	}
 	return sum
 }
@@ -144,7 +148,7 @@ func silkQ8UnitFloat(x float64) float64 {
 	if q8 > 255 {
 		q8 = 255
 	}
-	return float64(q8) / 256.0
+	return float64(float64(q8) / 256.0)
 }
 
 func silkQ15UnitFloat(x float64) float64 {
@@ -152,7 +156,7 @@ func silkQ15UnitFloat(x float64) float64 {
 	if q15 > 32767 {
 		q15 = 32767
 	}
-	return float64(q15) / 32768.0
+	return float64(float64(q15) / 32768.0)
 }
 
 func silkWarpedAutocorrelationFLP(corr, input []float64, warping float64, length, order int) {
@@ -163,15 +167,15 @@ func silkWarpedAutocorrelationFLP(corr, input []float64, warping float64, length
 	for n := 0; n < length && n < len(input); n++ {
 		tmp1 := input[n]
 		for i := 0; i < order; i += 2 {
-			tmp2 := state[i] + warping*state[i+1] - warping*tmp1
+			tmp2 := state[i] + float64(warping*state[i+1]) - float64(warping*tmp1)
 			state[i] = tmp1
-			acc[i] += state[0] * tmp1
-			tmp1 = state[i+1] + warping*state[i+2] - warping*tmp2
+			acc[i] += float64(state[0] * tmp1)
+			tmp1 = state[i+1] + float64(warping*state[i+2]) - float64(warping*tmp2)
 			state[i+1] = tmp2
-			acc[i+1] += state[0] * tmp2
+			acc[i+1] += float64(state[0] * tmp2)
 		}
 		state[order] = tmp1
-		acc[order] += state[0] * tmp1
+		acc[order] += float64(state[0] * tmp1)
 	}
 	copy(corr, acc)
 }
@@ -180,16 +184,16 @@ func warpedGain(coefs []float64, lambda float64, order int) float64 {
 	lambda = -lambda
 	gain := coefs[order-1]
 	for i := order - 2; i >= 0; i-- {
-		gain = lambda*gain + coefs[i]
+		gain = float64(lambda*gain) + coefs[i]
 	}
-	return 1.0 / (1.0 - lambda*gain)
+	return 1.0 / (1.0 - float64(lambda*gain))
 }
 
 func warpedTrue2MonicCoefs(coefs []float64, lambda, limit float64, order int) {
 	for i := order - 1; i > 0; i-- {
-		coefs[i-1] -= lambda * coefs[i]
+		coefs[i-1] -= float64(lambda * coefs[i])
 	}
-	gain := (1.0 - lambda*lambda) / (1.0 + lambda*coefs[0])
+	gain := (1.0 - float64(lambda*lambda)) / (1.0 + float64(lambda*coefs[0]))
 	for i := 0; i < order; i++ {
 		coefs[i] *= gain
 	}
@@ -204,18 +208,18 @@ func warpedTrue2MonicCoefs(coefs []float64, lambda, limit float64, order int) {
 			return
 		}
 		for i := 1; i < order; i++ {
-			coefs[i-1] += lambda * coefs[i]
+			coefs[i-1] += float64(lambda * coefs[i])
 		}
 		invGain := 1.0 / gain
 		for i := 0; i < order; i++ {
 			coefs[i] *= invGain
 		}
-		chirp := 0.99 - (0.8+0.1*float64(iter))*(maxabs-limit)/(maxabs*float64(ind+1))
+		chirp := 0.99 - (0.8+float64(0.1*float64(iter)))*(maxabs-limit)/(maxabs*float64(ind+1))
 		silkBwexpanderFLP(coefs, order, chirp)
 		for i := order - 1; i > 0; i-- {
-			coefs[i-1] -= lambda * coefs[i]
+			coefs[i-1] -= float64(lambda * coefs[i])
 		}
-		gain = (1.0 - lambda*lambda) / (1.0 + lambda*coefs[0])
+		gain = (1.0 - float64(lambda*lambda)) / (1.0 + float64(lambda*coefs[0]))
 		for i := 0; i < order; i++ {
 			coefs[i] *= gain
 		}
@@ -233,7 +237,7 @@ func limitCoefs(coefs []float64, limit float64, order int) {
 		if maxabs <= limit {
 			return
 		}
-		chirp := 0.99 - (0.8+0.1*float64(iter))*(maxabs-limit)/(maxabs*float64(ind+1))
+		chirp := 0.99 - (0.8+float64(0.1*float64(iter)))*(maxabs-limit)/(maxabs*float64(ind+1))
 		silkBwexpanderFLP(coefs, order, chirp)
 	}
 }
@@ -247,8 +251,26 @@ func (e *Encoder) estimateQuantOffsetType(signal []float64, lpcQ12 []int16, sign
 	if nSamples <= 0 {
 		return 1
 	}
-	pitchRes := e.analysisExcitation(signal, lpcQ12, signalType, pitchLag, pitchGain)
 	nSegs := silkSubframeLengthMS * e.nSubframes / 2
+	// silk_noise_shape_analysis_FLP measures the sparseness of the
+	// pitch-analysis residual (res_pitch) over 2 ms segments in silk_float.
+	if len(e.pitchResidual) >= len(e.pitchHist)+nSegs*nSamples {
+		pitchRes := e.pitchResidual[len(e.pitchHist):]
+		energyVariation, logPrev := 0.0, 0.0
+		for k := 0; k < nSegs; k++ {
+			nrg := f32(float64(nSamples) + f32(silkEnergyFLP32(pitchRes[k*nSamples:(k+1)*nSamples])))
+			logEnergy := silkLog2FLP(nrg)
+			if k > 0 {
+				energyVariation = f32(energyVariation + f32(math.Abs(f32(logEnergy-logPrev))))
+			}
+			logPrev = logEnergy
+		}
+		if energyVariation > f32(f32(energyVariationQntOffset)*float64(nSegs-1)) {
+			return 0
+		}
+		return 1
+	}
+	pitchRes := e.analysisExcitation(signal, lpcQ12, signalType, pitchLag, pitchGain)
 	energyVariation, logPrev := 0.0, 0.0
 	for k := 0; k < nSegs; k++ {
 		start := k * nSamples
@@ -279,7 +301,7 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 	speechActivity = silkQ8UnitFloat(speechActivity)
 	inputQualityBand0 := silkQ15UnitFloat(e.inputQualityB[0])
 	inputQualityBand1 := silkQ15UnitFloat(e.inputQualityB[1])
-	inputQuality := 0.5 * (inputQualityBand0 + inputQualityBand1)
+	inputQuality := float64(0.5 * (inputQualityBand0 + inputQualityBand1))
 	out := silkNoiseShapeAnalysis{
 		QuantOffsetType: quantOffsetType,
 		ShapingLPCOrder: cfg.shapingLPCOrder,
@@ -293,7 +315,7 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 	}
 	sigEnergy := computeEnergy(signal) + 1e-12
 	resEnergy := lpcResidualEnergy(signal, lpcQ12) + 1e-12
-	out.PredGain = math.Sqrt(sigEnergy / resEnergy)
+	out.PredGain = math.Sqrt(float64(sigEnergy / resEnergy))
 	if out.PredGain < 1 {
 		out.PredGain = 1
 	}
@@ -305,7 +327,7 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 	if e.channels > 0 {
 		targetRate /= e.channels
 	}
-	oracleSNRDB := float64(silkControlSNR(targetRate, fsKHz, e.nSubframes)) / 128.0
+	oracleSNRDB := float64(float64(silkControlSNR(targetRate, fsKHz, e.nSubframes)) / 128.0)
 	snrDB := oracleSNRDB
 	if signalType == SignalTypeVoiced && e.useSNRTargetVBR {
 		snrDB -= voicedSNRTargetDecrDB(fsKHz, targetRate, pitchLag)
@@ -315,23 +337,23 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 	}
 	out.SNRdB = snrDB
 	snrAdjDB := snrDB
-	out.CodingQuality = silkSigmoid(0.25 * (snrAdjDB - 20.0))
+	out.CodingQuality = silkSigmoid(float64(0.25 * (snrAdjDB - 20.0)))
 	if e.rateMode != RateModeCBR {
 		// VBR path: reduce coding SNR during low speech activity.
 		b := 1.0 - speechActivity
-		snrAdjDB -= bgSNRDecrDB * out.CodingQuality * (0.5 + 0.5*out.InputQuality) * b * b
+		snrAdjDB -= float64(float64(float64(float64(bgSNRDecrDB*out.CodingQuality)*(0.5+float64(0.5*out.InputQuality)))*b) * b)
 	}
 	if signalType == SignalTypeVoiced {
-		snrAdjDB += harmSNRIncrDB * e.ltpCorrState
+		snrAdjDB += float64(harmSNRIncrDB * e.ltpCorrState)
 	} else {
-		snrAdjDB += (-0.4*snrDB + 6.0) * (1.0 - out.InputQuality)
+		snrAdjDB += float64((float64(-0.4*snrDB) + 6.0) * (1.0 - out.InputQuality))
 	}
 	silkTraceSNR("noise_shape fs=%dkHz rate=%d nb_subfr=%d signal=%d oracle_snr=%.3fdB target_snr=%.3fdB snr_adj=%.3fdB coding_quality=%.3f input_quality=%.3f ltp_corr=%.3f",
 		fsKHz, targetRate, e.nSubframes, signalType, oracleSNRDB, snrDB, snrAdjDB, out.CodingQuality, out.InputQuality, e.ltpCorrState)
 
-	strength := findPitchWhiteNoiseFrac * out.PredGain
-	bwExp := shapeBandwidthExpansion / (1.0 + strength*strength)
-	warping := float64(cfg.warpingQ16)/65536.0 + 0.01*out.CodingQuality
+	strength := float64(findPitchWhiteNoiseFrac * out.PredGain)
+	bwExp := float64(shapeBandwidthExpansion / (1.0 + float64(strength*strength)))
+	warping := float64(float64(cfg.warpingQ16)/65536.0) + float64(0.01*out.CodingQuality)
 
 	analysisBuf := e.noiseShapeAnalysisBuffer(signal, cfg.laShape)
 	var windowedBuf [silkMaxShapeWinLength]float64
@@ -356,7 +378,7 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 			if idx < 0 {
 				idx = 0
 			}
-			windowIn[i] = analysisBuf[idx] * 32768.0
+			windowIn[i] = float64(analysisBuf[idx] * 32768.0)
 		}
 		silkApplySineWindowFLP(windowed[:slopePart], windowIn[:slopePart], 1, slopePart)
 		copy(windowed[slopePart:slopePart+flatPart], windowIn[slopePart:slopePart+flatPart])
@@ -367,7 +389,7 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 		} else {
 			silkAutocorrelationFLP(autoCorr, windowed, shapeWinLength, cfg.shapingLPCOrder+1)
 		}
-		autoCorr[0] += autoCorr[0]*shapeWhiteNoiseFraction + 1.0
+		autoCorr[0] += float64(autoCorr[0]*shapeWhiteNoiseFraction) + 1.0
 		nrg := silkSchurFLP(rc, autoCorr, cfg.shapingLPCOrder)
 		clear(ar)
 		silkK2aFLP(ar, rc, cfg.shapingLPCOrder)
@@ -383,23 +405,23 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 			limitCoefs(ar, 3.999, cfg.shapingLPCOrder)
 		}
 		for j := 0; j < cfg.shapingLPCOrder; j++ {
-			out.AR_Q13[sf][j] = int16(silkFloat2Int(ar[j] * 8192.0))
+			out.AR_Q13[sf][j] = int16(silkFloat2Int(float64(ar[j] * 8192.0)))
 		}
 	}
 
 	// Gain tweaking (silk_noise_shape_analysis_FLP): scale the spectral-envelope
 	// gains by the SNR target and add a floor of MIN_QGAIN_DB. A higher SNR
 	// target shrinks gain_mult, lowering the gains, raising the pulse count.
-	gainMult := math.Pow(2.0, -0.16*snrAdjDB)
+	gainMult := math.Pow(2.0, float64(-0.16*snrAdjDB))
 	gainAdd := math.Pow(2.0, 0.16*minQGainDB)
 	silkTraceSNR("noise_shape gains gain_mult=%.6f gain_add=%.6f min_qgain_db=%.3f", gainMult, gainAdd, minQGainDB)
 	for sf := 0; sf < e.nSubframes; sf++ {
-		out.Gains[sf] = out.Gains[sf]*gainMult + gainAdd
+		out.Gains[sf] = float64(out.Gains[sf]*gainMult) + gainAdd
 	}
 
 	// libopus: LOW_FREQ_SHAPING * (1 + LOW_QUALITY_LF_SHAPING_DECR*(input_quality_bands[0]-1)).
-	strength = lowFreqShaping * (1.0 + lowQualityLFShapingDecr*(inputQualityBand0-1.0))
-	strength *= speechActivity
+	strength = float64(lowFreqShaping * (1.0 + float64(lowQualityLFShapingDecr*(inputQualityBand0-1.0))))
+	strength = float64(strength * speechActivity)
 	if signalType == SignalTypeVoiced {
 		for sf := 0; sf < e.nSubframes; sf++ {
 			lag := pitchLag
@@ -409,49 +431,52 @@ func (e *Encoder) analyzeNoiseShapeFLP(signal []float64, lpcQ12 []int16, signalT
 			if lag <= 0 {
 				lag = fsKHz * 10
 			}
-			b := 0.2/float64(fsKHz) + 3.0/float64(lag)
+			b := float64(0.2/float64(fsKHz)) + float64(3.0/float64(lag))
 			lfMA := -1.0 + b
-			lfAR := 1.0 - b - b*strength
+			lfAR := 1.0 - b - float64(b*strength)
 			out.LF_shp_Q14[sf] = packLFShapeQ14(lfAR, lfMA)
 		}
-		tilt := -hpNoiseCoef - (1.0-hpNoiseCoef)*harmHPNoiseCoef*speechActivity
-		harmShapeGain := harmonicShaping + highRateHarmonicShaping*(1.0-(1.0-out.CodingQuality)*out.InputQuality)
-		harmShapeGain *= math.Sqrt(clampFloat(e.ltpCorrState, 0, 1))
+		tilt := -hpNoiseCoef - float64((1.0-hpNoiseCoef)*harmHPNoiseCoef*speechActivity)
+		harmShapeGain := harmonicShaping + float64(highRateHarmonicShaping*(1.0-float64((1.0-out.CodingQuality)*out.InputQuality)))
+		harmShapeGain = float64(harmShapeGain * math.Sqrt(clampFloat(e.ltpCorrState, 0, 1)))
 		for sf := 0; sf < e.nSubframes; sf++ {
-			e.shapeHarmSmooth += subframeSmoothCoef * (harmShapeGain - e.shapeHarmSmooth)
-			e.shapeTiltSmooth += subframeSmoothCoef * (tilt - e.shapeTiltSmooth)
-			out.HarmShapeGain_Q14[sf] = silkFloat2Int(e.shapeHarmSmooth * 16384.0)
-			out.Tilt_Q14[sf] = silkFloat2Int(e.shapeTiltSmooth * 16384.0)
+			e.shapeHarmSmooth += float64(subframeSmoothCoef * (harmShapeGain - e.shapeHarmSmooth))
+			e.shapeTiltSmooth += float64(subframeSmoothCoef * (tilt - e.shapeTiltSmooth))
+			out.HarmShapeGain_Q14[sf] = silkFloat2Int(float64(e.shapeHarmSmooth * 16384.0))
+			out.Tilt_Q14[sf] = silkFloat2Int(float64(e.shapeTiltSmooth * 16384.0))
 		}
 	} else {
-		b := 1.3 / float64(fsKHz)
+		b := float64(1.3 / float64(fsKHz))
 		lfMA := -1.0 + b
-		lfAR := 1.0 - b - b*strength*0.6
+		lfAR := 1.0 - b - float64(float64(b*strength)*0.6)
 		for sf := 0; sf < e.nSubframes; sf++ {
 			out.LF_shp_Q14[sf] = packLFShapeQ14(lfAR, lfMA)
-			e.shapeHarmSmooth += subframeSmoothCoef * (0.0 - e.shapeHarmSmooth)
-			e.shapeTiltSmooth += subframeSmoothCoef * (-hpNoiseCoef - e.shapeTiltSmooth)
-			out.HarmShapeGain_Q14[sf] = silkFloat2Int(e.shapeHarmSmooth * 16384.0)
-			out.Tilt_Q14[sf] = silkFloat2Int(e.shapeTiltSmooth * 16384.0)
+			e.shapeHarmSmooth += float64(subframeSmoothCoef * (0.0 - e.shapeHarmSmooth))
+			e.shapeTiltSmooth += float64(subframeSmoothCoef * (-hpNoiseCoef - e.shapeTiltSmooth))
+			out.HarmShapeGain_Q14[sf] = silkFloat2Int(float64(e.shapeHarmSmooth * 16384.0))
+			out.Tilt_Q14[sf] = silkFloat2Int(float64(e.shapeTiltSmooth * 16384.0))
 		}
 	}
 
-	quantOffset := float64(silkQuantizationOffsetsQ10[signalType>>1][quantOffsetType]) / 1024.0
+	quantOffset := float64(float64(silkQuantizationOffsetsQ10[signalType>>1][quantOffsetType]) / 1024.0)
 	lambda := lambdaOffset +
-		lambdaDelayedDecisions*float64(cfg.nStatesDelayedDecision) +
-		lambdaSpeechAct*speechActivity +
-		lambdaInputQuality*out.InputQuality +
-		lambdaCodingQuality*out.CodingQuality +
-		lambdaQuantOffset*quantOffset
+		float64(lambdaDelayedDecisions*float64(cfg.nStatesDelayedDecision)) +
+		float64(lambdaSpeechAct*speechActivity) +
+		float64(lambdaInputQuality*out.InputQuality) +
+		float64(lambdaCodingQuality*out.CodingQuality) +
+		float64(lambdaQuantOffset*quantOffset)
 	if lambda < 0.05 {
 		lambda = 0.05
 	}
-	out.Lambda_Q10 = silkFloat2Int(lambda * 1024.0)
+	out.Lambda_Q10 = silkFloat2Int(float64(lambda * 1024.0))
 	return out
 }
 
+// noiseShapeAnalysisBuffer returns [la_shape past | frame | la_shape
+// look-ahead], the region silk_noise_shape_analysis_FLP windows around each
+// subframe (x_ptr = x - la_shape .. x + subfr_length + la_shape).
 func (e *Encoder) noiseShapeAnalysisBuffer(signal []float64, laShape int) []float64 {
-	n := laShape + len(signal)
+	n := 2*laShape + len(signal)
 	if cap(e.noiseShapeBuf) < n {
 		e.noiseShapeBuf = make([]float64, n)
 	}
@@ -464,6 +489,9 @@ func (e *Encoder) noiseShapeAnalysisBuffer(signal []float64, laShape int) []floa
 	clear(buf[:laShape-pastLen])
 	copy(buf[laShape-pastLen:laShape], e.pitchHist[pastStart:])
 	copy(buf[laShape:], signal)
+	future := buf[laShape+len(signal):]
+	clear(future)
+	copy(future, e.codedFrameLookahead())
 	return buf
 }
 

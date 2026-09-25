@@ -60,6 +60,12 @@ func TestPageRejectsCRCVersionFlagsAndTruncation(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	badCapture := append([]byte(nil), encoded...)
+	badCapture[0] = 'X'
+	if _, _, err := ParsePage(badCapture); !errors.Is(err, ErrInvalidCapture) {
+		t.Fatalf("capture error = %v, want ErrInvalidCapture", err)
+	}
+
 	corrupt := append([]byte(nil), encoded...)
 	corrupt[len(corrupt)-1] ^= 1
 	if _, _, err := ParsePage(corrupt); !errors.Is(err, ErrChecksum) {

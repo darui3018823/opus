@@ -49,7 +49,7 @@ func (lpc *LPCAnalysis) AnalyzeWindowed(signal []float64) error {
 	for lag := 0; lag <= lpc.order; lag++ {
 		sum := 0.0
 		for i := lag; i < n; i++ {
-			sum += windowed[i] * windowed[i-lag]
+			sum += float64(windowed[i] * windowed[i-lag])
 		}
 		// A light lag window follows the same intent as libopus's bandwidth
 		// expansion: keep the LPC filter comfortably inside the unit circle.
@@ -73,7 +73,7 @@ func (lpc *LPCAnalysis) AnalyzeWindowed(signal []float64) error {
 		// Compute reflection coefficient
 		lambda := 0.0
 		for j := 0; j <= i; j++ {
-			lambda -= workCoeffs[j] * autocorr[i+1-j]
+			lambda -= float64(workCoeffs[j] * autocorr[i+1-j])
 		}
 		lambda /= err
 
@@ -85,13 +85,13 @@ func (lpc *LPCAnalysis) AnalyzeWindowed(signal []float64) error {
 		newCoeffs[i+1] = lambda
 
 		for j := 1; j <= i; j++ {
-			newCoeffs[j] = workCoeffs[j] + lambda*workCoeffs[i+1-j]
+			newCoeffs[j] = workCoeffs[j] + float64(lambda*workCoeffs[i+1-j])
 		}
 
 		copy(workCoeffs, newCoeffs)
 
 		// Update error
-		err *= (1.0 - lambda*lambda)
+		err *= (1.0 - float64(lambda*lambda))
 		if err < 1e-10 {
 			err = 1e-10
 		}
@@ -123,10 +123,10 @@ func windowForLPC(signal []float64) []float64 {
 		w := 1.0
 		switch {
 		case i < taper:
-			w = 0.5 - 0.5*math.Cos(math.Pi*float64(i+1)/float64(taper+1))
+			w = 0.5 - float64(0.5*math.Cos(math.Pi*float64(i+1)/float64(taper+1)))
 		case i >= len(signal)-taper:
 			j := len(signal) - i
-			w = 0.5 - 0.5*math.Cos(math.Pi*float64(j)/float64(taper+1))
+			w = 0.5 - float64(0.5*math.Cos(math.Pi*float64(j)/float64(taper+1)))
 		}
 		out[i] = v * w
 	}
@@ -141,7 +141,7 @@ func (lpc *LPCAnalysis) ComputeResidual(signal []float64) []float64 {
 	for i := 0; i < n; i++ {
 		pred := 0.0
 		for j := 0; j < len(lpc.coeffs) && j < i; j++ {
-			pred += lpc.coeffs[j] * signal[i-j-1]
+			pred += float64(lpc.coeffs[j] * signal[i-j-1])
 		}
 		residual[i] = signal[i] - pred
 	}
@@ -157,7 +157,7 @@ func (lpc *LPCAnalysis) Synthesize(residual []float64) []float64 {
 	for i := 0; i < n; i++ {
 		pred := 0.0
 		for j := 0; j < len(lpc.coeffs) && j < i; j++ {
-			pred += lpc.coeffs[j] * signal[i-j-1]
+			pred += float64(lpc.coeffs[j] * signal[i-j-1])
 		}
 		signal[i] = residual[i] + pred
 	}
@@ -216,7 +216,7 @@ func (lpc *LPCAnalysis) FromLSF(lsf []float64) error {
 		newPP := make([]float64, len(pp)+2)
 		for i, v := range pp {
 			newPP[i] += v
-			newPP[i+1] += c * v
+			newPP[i+1] += float64(c * v)
 			newPP[i+2] += v
 		}
 		pp = newPP
@@ -229,7 +229,7 @@ func (lpc *LPCAnalysis) FromLSF(lsf []float64) error {
 		newQP := make([]float64, len(qp)+2)
 		for i, v := range qp {
 			newQP[i] += v
-			newQP[i+1] += c * v
+			newQP[i+1] += float64(c * v)
 			newQP[i+2] += v
 		}
 		qp = newQP
@@ -282,7 +282,7 @@ func (lpc *LPCAnalysis) SynthesizeWithHistory(residual, history []float64) []flo
 			} else if hi := len(history) + idx; hi >= 0 && hi < len(history) {
 				past = history[hi]
 			}
-			pred += lpc.coeffs[j] * past
+			pred += float64(lpc.coeffs[j] * past)
 		}
 		signal[i] = residual[i] + pred
 	}

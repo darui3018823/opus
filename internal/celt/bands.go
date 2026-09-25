@@ -65,18 +65,12 @@ func (bp *BandProcessor) DecodeBandEnergies(energyBits []int) {
 func (bp *BandProcessor) DenormalizeBands() {
 	for _, band := range bp.bands {
 		if band.Energy > 0 {
-			// Calculate current energy
-			currentEnergy := 0.0
-			for _, coeff := range band.Coeffs {
-				currentEnergy += coeff * coeff
-			}
-
-			if currentEnergy > 0 {
-				// Scale coefficients to match target energy
-				scale := math.Sqrt(band.Energy / currentEnergy)
-				for i := range band.Coeffs {
-					band.Coeffs[i] *= scale
-				}
+			// libopus denormalise_bands applies the decoded amplitude directly;
+			// the PVQ coefficients are already normalized and must not be
+			// measured and normalized a second time here.
+			scale := float32(math.Sqrt(band.Energy))
+			for i := range band.Coeffs {
+				band.Coeffs[i] = float64(float32(band.Coeffs[i]) * scale)
 			}
 		}
 	}
@@ -84,8 +78,10 @@ func (bp *BandProcessor) DenormalizeBands() {
 
 // AssembleMDCT assembles band coefficients into full MDCT spectrum
 func (bp *BandProcessor) AssembleMDCT() []float64 {
-	// Calculate total number of MDCT coefficients
-	totalCoeffs := 0
+	// libopus keeps a full N-coefficient spectrum and clears the uncoded tail
+	// above the final energy band. Starting at FrameSize preserves those zeros
+	// instead of returning only M*eBands[end] coefficients.
+	totalCoeffs := bp.mode.FrameSize
 	for _, band := range bp.bands {
 		totalCoeffs = max(totalCoeffs, band.Start+band.Size)
 	}
@@ -130,7 +126,7 @@ func (bp *BandProcessor) DecodeBandCoeffs(dec *entcode.Decoder, bandIdx int, pul
 	norm := 0.0
 	for i, v := range y {
 		output[i] = float64(v)
-		norm += output[i] * output[i]
+		norm += float64(output[i] * output[i])
 	}
 	if norm > 0 {
 		scale := 1.0 / math.Sqrt(norm)
@@ -159,15 +155,15 @@ func (bp *BandProcessor) ApplyFinalFineEnergy(bandIdx, q2, fb int) {
 		return
 	}
 	band := bp.bands[bandIdx]
-	offset := (float64(q2) - 0.5) * math.Exp2(float64(-fb-1))
-	band.Energy *= math.Exp2(2.0 * offset)
+	offset := float64((float64(q2) - 0.5) * math.Exp2(float64(-fb-1)))
+	band.Energy *= math.Exp2(float64(2.0 * offset))
 }
 
 // ComputeBandEnergy computes the energy of a band from coefficients
 func ComputeBandEnergy(coeffs []float64) float64 {
 	energy := 0.0
 	for _, c := range coeffs {
-		energy += c * c
+		energy += float64(c * c)
 	}
 	return energy
 }

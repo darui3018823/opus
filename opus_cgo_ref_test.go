@@ -8,8 +8,9 @@ package opus_test
 // Run with:
 //   go test -tags opusref -run TestCGORef ./...
 //
-// The test reports per-frame RMSE and an overall pass/fail for each vector.
-// It does NOT require the .dec reference files — it uses libopus as ground truth.
+// The test reports exact int16 sample agreement, first/max divergence, and
+// per-frame RMSE, with an overall pass/fail for each vector. It does NOT require
+// the .dec reference files — it uses libopus as ground truth.
 
 import (
 	"fmt"
@@ -31,14 +32,15 @@ func TestCGORef(t *testing.T) {
 	}
 
 	type vecCase struct {
-		num      int
-		channels int
-		rate     int
+		num                int
+		channels           int
+		rate               int
+		maxRangeMismatches int
 	}
 	cases := []vecCase{
-		{1, 2, 48000}, {2, 2, 48000}, {3, 2, 48000}, {4, 2, 48000},
-		{5, 2, 48000}, {6, 2, 48000}, {7, 2, 48000}, {8, 2, 48000},
-		{9, 2, 48000}, {10, 2, 48000}, {11, 2, 48000}, {12, 2, 48000},
+		{1, 2, 48000, 0}, {2, 2, 48000, 0}, {3, 2, 48000, 0}, {4, 2, 48000, 0},
+		{5, 2, 48000, 0}, {6, 2, 48000, 0}, {7, 2, 48000, 0}, {8, 2, 48000, 0},
+		{9, 2, 48000, 0}, {10, 2, 48000, 0}, {11, 2, 48000, 0}, {12, 2, 48000, 0},
 	}
 
 	for _, tc := range cases {
@@ -70,19 +72,37 @@ func TestCGORef(t *testing.T) {
 			const maxSPC = 5760 // max samples per channel (120ms @ 48kHz)
 
 			var (
-				totalSamples int
-				totalSqErr   float64
-				badFrames    int
+				totalSamples     int
+				exactSamples     int
+				totalSqErrLSB    float64
+				badFrames        int
+				maxAbsDiffLSB    int
+				firstDiffFrame   = -1
+				firstDiffSample  = -1
+				firstDiffGo      int16
+				firstDiffLibopus int16
+				rangeMismatches  int
+				firstRangeFrame  = -1
+				firstRangeGo     uint32
+				firstRangeWant   uint32
 			)
 
 			goPCM := make([]int16, maxSPC*tc.channels)
 
 			for i, f := range frames {
-				// libopus reference output (float32)
-				refOut, err := ref.DecodeFloat(f.packet, maxSPC)
+				// Use libopus' opus_decode int16 path so the oracle includes the
+				// FLOAT2INT16 conversion used by the C API.
+				refOut, err := ref.Decode(f.packet, maxSPC)
 				if err != nil {
 					t.Logf("frame %d: libopus error: %v", i, err)
 					continue
+				}
+				refRange, err := ref.FinalRange()
+				if err != nil {
+					t.Fatalf("frame %d: libopus final range: %v", i, err)
+				}
+				if refRange != f.finalRange {
+					t.Errorf("frame %d: libopus final range=%08x, bitstream=%08x", i, refRange, f.finalRange)
 				}
 
 				// our decoder output (int16)
@@ -92,21 +112,44 @@ func TestCGORef(t *testing.T) {
 					continue
 				}
 				goOut := goPCM[:n*tc.channels]
+				if goRange := got.FinalRange(); goRange != f.finalRange {
+					rangeMismatches++
+					if firstRangeFrame < 0 {
+						firstRangeFrame = i
+						firstRangeGo = goRange
+						firstRangeWant = f.finalRange
+					}
+				}
 
 				// compare
 				m := len(refOut)
 				if len(goOut) < m {
 					m = len(goOut)
 				}
-				frameSqErr := 0.0
+				frameSqErrLSB := 0.0
 				for j := 0; j < m; j++ {
-					d := float64(goOut[j])/32768.0 - float64(refOut[j])
-					frameSqErr += d * d
+					delta := int(goOut[j]) - int(refOut[j])
+					if delta == 0 {
+						exactSamples++
+					} else if firstDiffFrame < 0 {
+						firstDiffFrame = i
+						firstDiffSample = j
+						firstDiffGo = goOut[j]
+						firstDiffLibopus = refOut[j]
+					}
+					absDelta := delta
+					if absDelta < 0 {
+						absDelta = -absDelta
+					}
+					if absDelta > maxAbsDiffLSB {
+						maxAbsDiffLSB = absDelta
+					}
+					frameSqErrLSB += float64(delta * delta)
 				}
-				frameRMSE := math.Sqrt(frameSqErr / float64(m))
+				frameRMSE := math.Sqrt(frameSqErrLSB/float64(m)) / 32768
 
 				totalSamples += m
-				totalSqErr += frameSqErr
+				totalSqErrLSB += frameSqErrLSB
 
 				if frameRMSE > 0.001 {
 					badFrames++
@@ -114,7 +157,7 @@ func TestCGORef(t *testing.T) {
 						t.Logf("frame %d: RMSE=%.5f  go[0..3]=%v  ref[0..3]=%v",
 							i, frameRMSE,
 							formatI16(goOut, 4),
-							formatF32(refOut, 4))
+							formatI16(refOut, 4))
 					}
 				}
 			}
@@ -123,14 +166,20 @@ func TestCGORef(t *testing.T) {
 				t.Fatal("no samples decoded")
 			}
 
-			overallRMSE := math.Sqrt(totalSqErr / float64(totalSamples))
+			overallRMSE := math.Sqrt(totalSqErrLSB/float64(totalSamples)) / 32768
 			badPct := float64(badFrames) / float64(len(frames)) * 100
+			exactPct := float64(exactSamples) / float64(totalSamples) * 100
 
-			t.Logf("frames=%d  badFrames=%d (%.1f%%)  overallRMSE=%.5f",
-				len(frames), badFrames, badPct, overallRMSE)
+			t.Logf("frames=%d badFrames=%d (%.1f%%) exactSamples=%d/%d (%.3f%%) maxAbsDiff=%d LSB firstDiff=frame:%d sample:%d go:%d libopus:%d rangeMismatches=%d firstRange=frame:%d go:%08x want:%08x overallRMSE=%.5f",
+				len(frames), badFrames, badPct, exactSamples, totalSamples, exactPct,
+				maxAbsDiffLSB, firstDiffFrame, firstDiffSample, firstDiffGo, firstDiffLibopus,
+				rangeMismatches, firstRangeFrame, firstRangeGo, firstRangeWant, overallRMSE)
 
 			if overallRMSE > 0.001 {
 				t.Errorf("RMSE %.5f exceeds 0.001 threshold (libopus as reference)", overallRMSE)
+			}
+			if rangeMismatches > tc.maxRangeMismatches {
+				t.Errorf("final-range mismatches %d exceed baseline %d", rangeMismatches, tc.maxRangeMismatches)
 			}
 		})
 	}

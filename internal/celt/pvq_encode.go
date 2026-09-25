@@ -92,85 +92,100 @@ func encodePulses(enc *entcode.Encoder, iy []int, n, k int) {
 // (celt/vq.c). It mutates X (takes absolute values / pre-search scratch) and
 // returns yy = sum(iy[j]^2), which normalise_residual needs as 1/sqrt(yy).
 func opPVQSearch(X []float64, iy []int, k, n int) float64 {
-	y := make([]float64, n)
+	// Float32 port of libopus op_pvq_search_c (float build): every sum,
+	// product and comparison rounds to float32 exactly as opus_val16 /
+	// opus_val32 do there.
+	y := make([]float32, n)
 	signx := make([]int, n)
-	var sum, xy, yy float64
+	x := make([]float32, n)
+	var sum, xy, yy float32
 
-	// Strip the sign; remember it to reapply after the (non-negative) search.
+	// Get rid of the sign.
 	for j := 0; j < n; j++ {
-		if X[j] < 0 {
+		x[j] = float32(X[j])
+		if x[j] < 0 {
 			signx[j] = 1
+			x[j] = -x[j]
 		}
-		X[j] = math.Abs(X[j])
 		iy[j] = 0
 		y[j] = 0
 	}
 
 	pulsesLeft := k
 
-	// Pre-search by projecting onto the pyramid when K is large relative to N.
+	// Do a pre-search by projecting on the pyramid.
 	if k > (n >> 1) {
 		for j := 0; j < n; j++ {
-			sum += X[j]
+			sum += x[j]
 		}
-		// Guard against a degenerate (near-zero or huge) sum, like libopus.
-		if !(sum > 1e-9 && sum < 64) {
-			X[0] = 1.0
+		// Prevents infinities and NaNs from causing too many pulses to be
+		// allocated. 64 is an approximation of infinity here.
+		if !(sum > 1e-15 && sum < 64) {
+			x[0] = 1
 			for j := 1; j < n; j++ {
-				X[j] = 0
+				x[j] = 0
 			}
-			sum = 1.0
+			sum = 1
 		}
-		// K+0.8 with floor guarantees we never overshoot K pulses.
-		rcp := (float64(k) + 0.8) / sum
+		// Using K+e with e < 1 guarantees we cannot get more than K pulses.
+		rcp := float32(float32(k)+float32(0.8)) * (float32(1) / sum)
 		for j := 0; j < n; j++ {
-			iy[j] = int(math.Floor(rcp * X[j]))
-			y[j] = float64(iy[j])
-			yy += y[j] * y[j]
-			xy += X[j] * y[j]
-			y[j] *= 2 // y holds 2*iy so the greedy loop need not double it
+			iy[j] = int(math.Floor(float64(float32(rcp * x[j]))))
+			y[j] = float32(iy[j])
+			yy += float32(y[j] * y[j])
+			xy += float32(x[j] * y[j])
+			y[j] *= 2
 			pulsesLeft -= iy[j]
 		}
 	}
 
-	// Should never happen, but mirror libopus' safety distribution.
+	// This should never happen, but just in case it does (e.g. on silence)
+	// we fill the first bin with pulses.
 	if pulsesLeft > n+3 {
-		tmp := float64(pulsesLeft)
-		yy += tmp * tmp
-		yy += tmp * y[0]
+		tmp := float32(pulsesLeft)
+		yy += float32(tmp * tmp)
+		yy += float32(tmp * y[0])
 		iy[0] += pulsesLeft
 		pulsesLeft = 0
 	}
 
-	// Greedily add the remaining pulses one at a time, each time choosing the
-	// position that maximizes Rxy^2 / Ryy (cross-multiplied to avoid division).
 	for i := 0; i < pulsesLeft; i++ {
+		// The squared magnitude term gets added anyway, so we might as well
+		// add it outside the loop.
+		yy += 1
 		bestID := 0
-		var bestNum, bestDen float64
-		yy += 1.0 // the new pulse contributes +1 to yy regardless of position
-		for j := 0; j < n; j++ {
-			rxy := xy + X[j]
-			ryy := yy + y[j]
-			rxy = rxy * rxy
-			if j == 0 || bestDen*rxy > ryy*bestNum {
+		rxy := xy + x[0]
+		ryy := yy + y[0]
+		// Approximate score: we maximise Rxy/sqrt(Ryy) (we're guaranteed
+		// that Rxy is positive because the sign is pre-computed).
+		rxy = float32(rxy * rxy)
+		bestDen := ryy
+		bestNum := rxy
+		for j := 1; j < n; j++ {
+			rxy = xy + x[j]
+			ryy = yy + y[j]
+			rxy = float32(rxy * rxy)
+			// num/den >= best_num/best_den without any division.
+			if float32(bestDen*rxy) > float32(ryy*bestNum) {
 				bestDen = ryy
 				bestNum = rxy
 				bestID = j
 			}
 		}
-		xy += X[bestID]
+		xy += x[bestID]
 		yy += y[bestID]
 		y[bestID] += 2
 		iy[bestID]++
 	}
 
-	// Reapply the original signs.
+	// Put the original sign back.
 	for j := 0; j < n; j++ {
 		if signx[j] != 0 {
 			iy[j] = -iy[j]
 		}
+		X[j] = float64(x[j])
 	}
-	return yy
+	return float64(yy)
 }
 
 // algQuant is the encoder-side counterpart of algUnquant (celt/vq.c alg_quant,

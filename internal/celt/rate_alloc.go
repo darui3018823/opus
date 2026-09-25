@@ -308,20 +308,63 @@ func computeAllocation(
 	numBands, start, end, lm, ch, allocTrim, available int,
 	offsets []int,
 ) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
-	return computeAllocationShared(dec, nil, end, false, numBands, start, end, lm, ch, allocTrim, available, offsets)
+	return computeAllocationShared(dec, nil, end, false, numBands, start, end, lm, ch, allocTrim, available, offsets, 0, end-1, nil)
+}
+
+// computeAllocationScratch is computeAllocation with reusable storage (the
+// decoder's).
+func computeAllocationScratch(
+	dec *entcode.Decoder,
+	numBands, start, end, lm, ch, allocTrim, available int,
+	offsets []int, sc *allocScratch,
+) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
+	return computeAllocationShared(dec, nil, end, false, numBands, start, end, lm, ch, allocTrim, available, offsets, 0, end-1, sc)
 }
 
 // computeAllocationEncode is the encoder-side entry point. encIntensity and
 // encDualStereo are the encoder's chosen stereo parameters (written to the
 // stream); they are returned (possibly clamped) so quant_all_bands uses the same
 // values the decoder will read.
+// computeAllocationEncode is clt_compute_allocation(encode=1). prev is the
+// previous frame's coded band count (st->lastCodedBands, 0 on the first
+// frame) and signalBandwidth the last band the signal analysis considers
+// worth coding (end-1 without analysis); both steer the skip decision.
 func computeAllocationEncode(
 	enc *entcode.Encoder,
 	encIntensity int, encDualStereo bool,
 	numBands, start, end, lm, ch, allocTrim, available int,
-	offsets []int,
+	offsets []int, prev, signalBandwidth int,
 ) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
-	return computeAllocationShared(nil, enc, encIntensity, encDualStereo, numBands, start, end, lm, ch, allocTrim, available, offsets)
+	return computeAllocationShared(nil, enc, encIntensity, encDualStereo, numBands, start, end, lm, ch, allocTrim, available, offsets, prev, signalBandwidth, nil)
+}
+
+// allocScratch holds computeAllocationShared's per-frame arrays so an
+// encoder can reuse them; the returned pulses / eBits / finePriority alias
+// it until the next call.
+type allocScratch struct {
+	ints [9][NumBands48000]int
+}
+
+// computeAllocationEncodeScratch is computeAllocationEncode with reusable
+// storage.
+func computeAllocationEncodeScratch(
+	enc *entcode.Encoder,
+	encIntensity int, encDualStereo bool,
+	numBands, start, end, lm, ch, allocTrim, available int,
+	offsets []int, prev, signalBandwidth int, sc *allocScratch,
+) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
+	return computeAllocationShared(nil, enc, encIntensity, encDualStereo, numBands, start, end, lm, ch, allocTrim, available, offsets, prev, signalBandwidth, sc)
+}
+
+// scratchInts returns the i-th zeroed scratch array of n ints (a fresh
+// slice when sc is nil).
+func (sc *allocScratch) scratchInts(i, n int) []int {
+	if sc == nil || n > NumBands48000 {
+		return make([]int, n)
+	}
+	s := sc.ints[i][:n]
+	clear(s)
+	return s
 }
 
 func computeAllocationShared(
@@ -329,13 +372,13 @@ func computeAllocationShared(
 	enc *entcode.Encoder,
 	encIntensity int, encDualStereo bool,
 	numBands, start, end, lm, ch, allocTrim, available int,
-	offsets []int,
+	offsets []int, prev, signalBandwidth int, sc *allocScratch,
 ) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
 	encode := enc != nil
-	pulses = make([]int, numBands)
+	pulses = sc.scratchInts(0, numBands)
 	codedBands = end
-	eBits = make([]int, numBands)
-	finePriority = make([]int, numBands)
+	eBits = sc.scratchInts(1, numBands)
+	finePriority = sc.scratchInts(2, numBands)
 	intensity = end
 	dualStereo = false
 
@@ -343,15 +386,15 @@ func computeAllocationShared(
 		offsets = make([]int, numBands)
 	}
 
-	if available <= 0 {
-		return
-	}
-
 	// `available` is already the Q3 (eighth-bit) budget computed by the caller as
 	// (len*8<<BITRES) - ec_tell_frac - 1 - anti_collapse_rsv, matching libopus.
+	// clt_compute_allocation clamps it at zero and still runs the whole
+	// allocation: an empty budget (a silent frame, whose tell is pretended
+	// full) yields codedBands, intensity and dual_stereo that the encoder
+	// carries into the next frame (lastCodedBands, st->intensity).
 	total := available
-	if total <= 0 {
-		return
+	if total < 0 {
+		total = 0
 	}
 
 	// Reserve 1 Q3-bit for skip-band signaling.
@@ -387,9 +430,9 @@ func computeAllocationShared(
 	// trimOff = C*N0*alloc_trim_term * (end-j-1) * (1<<(LM+BITRES)) >> 6
 	//         = C * M * (alloc_trim-5-LM) * (end-j-1) >> 3
 	//         [ minus C<<BITRES if M==1 (N==1 at this LM) ]
-	thresh := make([]int, numBands)
-	cap := make([]int, numBands)
-	trimOff := make([]int, numBands)
+	thresh := sc.scratchInts(3, numBands)
+	cap := sc.scratchInts(4, numBands)
+	trimOff := sc.scratchInts(5, numBands)
 	for j := 0; j < numBands; j++ {
 		N0 := int(EBands48000[j+1] - EBands48000[j])
 		M := N0 << uint(lm)
@@ -479,8 +522,8 @@ func computeAllocationShared(
 	// When hi >= numAllocLevels: bits2j = cap[j] (libopus: hi>=nbAllocVectors → cap).
 	// offsets are added: bits1j += offsets[j] (only if lo>0); bits2j += offsets[j] always.
 	// skip_start is advanced to last boosted band.
-	bits1 := make([]int, numBands)
-	bits2 := make([]int, numBands)
+	bits1 := sc.scratchInts(6, numBands)
+	bits2 := sc.scratchInts(7, numBands)
 	skipStart = start
 	for j := start; j < end; j++ {
 		b1 := allocAtLevel(j, lo)
@@ -545,7 +588,7 @@ func computeAllocationShared(
 	// Phase 4: compute final bandBits[j] from loF.
 	// Matches libopus interp_bits2pulses: iterates BACKWARD with done+threshold flag.
 	// Bands below threshold and below done get allocFloor or 0, not the full interpolated value.
-	bandBits := make([]int, numBands)
+	bandBits := sc.scratchInts(8, numBands)
 	{
 		psum, done := 0, false
 		for j := end - 1; j >= start; j-- {
@@ -623,10 +666,22 @@ func computeAllocationShared(
 			skipThresh = allocFloor + 8
 		}
 		if bandBitsJ >= skipThresh {
-			// Encode/decode a 1-bit skip signal. The encoder keeps every band
-			// that reaches the threshold (no rate-driven skipping yet).
+			// Encode/decode a 1-bit skip signal. The encoder keeps the band
+			// when few bands are left, or when it gets enough bits per
+			// coefficient (7/16 bit if it was coded last frame, 9/16 otherwise,
+			// with no depth requirement once 17 or fewer bands remain) and lies
+			// within the signal bandwidth (libopus 1.6.1 interp_bits2pulses).
 			keepBand := true
 			if encode {
+				depthThreshold := 0
+				if codedBands > 17 {
+					depthThreshold = 9
+					if j < prev {
+						depthThreshold = 7
+					}
+				}
+				keepBand = codedBands <= start+2 ||
+					(bandBitsJ > (depthThreshold*bandWidthN0<<uint(lm)<<3)>>4 && j <= signalBandwidth)
 				enc.EncodeBitLogp(keepBand, 1)
 			} else if dec != nil {
 				keepBand = dec.DecodeBitLogp(1)

@@ -67,5 +67,16 @@ jobs:
           CGO_CFLAGS: -I${{ github.workspace }}/libopus/include -I${{ github.workspace }}/libopus/celt -I${{ github.workspace }}/libopus/src
         run: go test -tags "opusref opusextsrc" -count=1 -run '^TestPacketExtensionsLibopusOracle$' .
 
+      - name: Build the libopus encoder oracle
+        # A plain scalar C build (no SIMD, no FMA) of the vendored 1.6.1 tree
+        # with the trace instrumentation the encoder oracle tests parse.
+        shell: pwsh
+        run: ./scripts/oracle/build_encoder.ps1
+
+      - name: Encoder bit-exactness vs the libopus oracle
+        # CELT-only, hybrid, SILK, automatic mode, mode transitions, FEC and
+        # DTX packets must stay byte-identical to libopus 1.6.1.
+        run: go test -tags opusref -count=1 -timeout 60m -run '^(TestCELTEncoderOracle|TestHybridEncoderOracle|TestSILKEncoder(InputPipeline|Stereo)Oracle.*|TestAutoModeOracle|TestAutoModeOracleSweep|TestAutoModeTransitionOracle|TestDTXOracle|TestMultistreamEncoderOracle)$' .
+
       - name: Decoder reference (12/12 vectors)
         run: go test -tags opusref -count=1 -run TestCGORef .

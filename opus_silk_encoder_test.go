@@ -48,8 +48,8 @@ func TestEncoderSILKOnlyVOIPLowBitrateRoundTrip(t *testing.T) {
 			if config != tc.wantConfig {
 				t.Fatalf("TOC config=%d, want SILK-only 20ms config %d (toc=0x%02x)", config, tc.wantConfig, pkt[0])
 			}
-			if code := int(pkt[0] & 0x03); code != 0 {
-				t.Fatalf("count code=%d, want 0 for one 20ms SILK frame", code)
+			if code := int(pkt[0] & 0x03); code != 0 && code != 3 {
+				t.Fatalf("count code=%d, want one 20ms SILK frame", code)
 			}
 
 			dec, err := NewDecoder(tc.rate, 1)
@@ -62,6 +62,9 @@ func TestEncoderSILKOnlyVOIPLowBitrateRoundTrip(t *testing.T) {
 			}
 			if len(decoded) != frameSize {
 				t.Fatalf("decoded samples=%d, want %d", len(decoded), frameSize)
+			}
+			if dec.prevRedundancy {
+				t.Fatal("plain SILK packet was misread as transition redundancy")
 			}
 		})
 	}
@@ -103,12 +106,8 @@ func TestEncoderSILKOnlyVOIPMultiFrameRoundTrip(t *testing.T) {
 			if config != wantConfig {
 				t.Fatalf("TOC config=%d, want SILK NB config %d", config, wantConfig)
 			}
-			wantCode := 0
-			if mult == 6 {
-				wantCode = 2
-			}
-			if code := int(pkt[0] & 0x03); code != wantCode {
-				t.Fatalf("count code=%d, want %d", code, wantCode)
+			if code := int(pkt[0] & 0x03); code != 3 {
+				t.Fatalf("count code=%d, want code-3 packet padding", code)
 			}
 
 			dec, err := NewDecoder(rate, 1)
@@ -215,8 +214,9 @@ func TestEncoderSILKOnlyAllSupportedDurationsStrict(t *testing.T) {
 				if gotStereo := (pkt[0] & 0x04) != 0; gotStereo != (tc.channels == 2) {
 					t.Fatalf("%dms: TOC stereo=%v, want %v", mult*20, gotStereo, tc.channels == 2)
 				}
-				if code := int(pkt[0] & 0x03); code != strictSILKCountCode(mult, tc.channels) {
-					t.Fatalf("%dms: count code=%d, want %d", mult*20, code, strictSILKCountCode(mult, tc.channels))
+				wantCode := strictSILKCountCode(mult, tc.channels)
+				if code := int(pkt[0] & 0x03); code != wantCode && code != 3 {
+					t.Fatalf("%dms: count code=%d, want compact %d or padded 3", mult*20, code, wantCode)
 				}
 
 				decoded, err := dec.DecodeFloat(pkt)
@@ -541,9 +541,11 @@ func TestEncoderHybridToCELTWithoutRedundancyKeepsHybridState(t *testing.T) {
 
 	// At this tighter budget the deferred hybrid packet still fits, but its
 	// trailing redundancy does not. The emitted packet is therefore plain
-	// hybrid and must remain the predecessor for the next mode decision.
+	// hybrid and must remain the predecessor for the next mode decision. The
+	// SILK layer codes the warm-up frame's last 5 ms (LA_SHAPE look-ahead)
+	// ahead of the silent input, so the budget must leave room for that.
 	enc.SetSignalType(SignalMusic)
-	if err := enc.SetBitrate(10000); err != nil {
+	if err := enc.SetBitrate(16000); err != nil {
 		t.Fatalf("SetBitrate transition: %v", err)
 	}
 	transitionPCM := make([]float64, frameSize*channels)
@@ -697,8 +699,12 @@ func TestEncoderHybridToCELTRedundancyStateContinuity(t *testing.T) {
 	decoded = append(decoded, out...)
 	frame++
 
-	// Genuine CELT-only run carrying a steady tone.
+	// Genuine CELT-only run carrying a steady tone. The reference is the
+	// high-pass conditioned input the encoder coded (the VOIP hp_cutoff shifts
+	// the tone's phase by a fraction of a sample, which would cap an
+	// integer-aligned SNR against the raw tone near 26 dB).
 	celtStart := frame
+	var ref []float64
 	for ; frame < celtStart+postFrames; frame++ {
 		pkt, err := enc.EncodeFloat(tone(frame*frameSize, frameSize), frameSize)
 		if err != nil {
@@ -712,13 +718,11 @@ func TestEncoderHybridToCELTRedundancyStateContinuity(t *testing.T) {
 			t.Fatalf("post-transition decode %d: %v", frame, err)
 		}
 		decoded = append(decoded, out...)
+		ref = append(ref, enc.lastConditionedInput...)
 	}
 
 	totalFrames := frame
-	ref := make([]float64, totalFrames*frameSize)
-	for f := celtStart; f < totalFrames; f++ {
-		copy(ref[f*frameSize:(f+1)*frameSize], tone(f*frameSize, frameSize))
-	}
+	ref = append(make([]float64, celtStart*frameSize), ref...)
 
 	// Skip the first few CELT-only frames (transition crossfade) and measure to the
 	// end of the run.
@@ -1519,9 +1523,10 @@ func TestEncoderSILKOnlyCBRPacketSizeTracksBitrateAndDuration(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Encode: %v", err)
 			}
-			wantPayload := tc.bitrate * (20 * tc.mult) / 1000 / 8
-			if want := 1 + wantPayload; len(pkt) < want {
-				t.Fatalf("packet bytes=%d, want at least %d for active %d bps/%d ms CBR SILK", len(pkt), want, tc.bitrate, 20*tc.mult)
+			// opus_encode_native: a CBR packet is padded to cbr_bytes =
+			// (bitrate_to_bits + 4) / 8 including the TOC.
+			if want := (tc.bitrate*(20*tc.mult)/1000 + 4) / 8; len(pkt) != want {
+				t.Fatalf("packet bytes=%d, want %d for active %d bps/%d ms CBR SILK", len(pkt), want, tc.bitrate, 20*tc.mult)
 			}
 			if config := int(pkt[0] >> 3); config != 9 && config != 11 {
 				t.Fatalf("TOC config=%d, want SILK WB 20/60ms config", config)
@@ -1530,7 +1535,7 @@ func TestEncoderSILKOnlyCBRPacketSizeTracksBitrateAndDuration(t *testing.T) {
 	}
 }
 
-func TestEncoderSILKOnlyStereoSingleFrameCBRKeepsCode0(t *testing.T) {
+func TestEncoderSILKOnlyStereoSingleFrameCBRPadsToCBRBytes(t *testing.T) {
 	const (
 		rate      = 16000
 		channels  = 2
@@ -1572,8 +1577,10 @@ func TestEncoderSILKOnlyStereoSingleFrameCBRKeepsCode0(t *testing.T) {
 		if err != nil {
 			t.Fatalf("frame %d EncodeFloat: %v", i, err)
 		}
-		if code := int(pkt[0] & 0x03); code != 0 {
-			t.Fatalf("frame %d count code=%d, want compact single-frame code 0", i, code)
+		// opus_packet_pad: the stereo CBR packet is padded to cbr_bytes (code 3
+		// with padding unless the frame already fills the packet).
+		if want := (bitrate*20/1000 + 4) / 8; len(pkt) != want {
+			t.Fatalf("frame %d packet=%d bytes, want cbr_bytes %d", i, len(pkt), want)
 		}
 		if _, err := dec.DecodeFloat(pkt); err != nil {
 			t.Fatalf("frame %d DecodeFloat: %v", i, err)
@@ -1624,9 +1631,19 @@ func TestEncoderSILKOnlyVBRAndDTXDoNotUseCBRPadding(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Encode: %v", err)
 			}
-			if len(pkt) >= cbrBytes {
-				t.Fatalf("%s packet bytes=%d, want less than CBR padded size %d", tc.name, len(pkt), cbrBytes)
+			// VBR and DTX packets carry no RFC padding: the compact form is the
+			// packet itself, and the count code is never the padded code 3.
+			unpadded, err := PacketUnpad(pkt)
+			if err != nil {
+				t.Fatalf("PacketUnpad: %v", err)
 			}
+			if len(unpadded) != len(pkt) || pkt[0]&0x03 == 3 {
+				t.Fatalf("%s packet bytes=%d unpadded=%d code=%d, want no CBR padding", tc.name, len(pkt), len(unpadded), pkt[0]&0x03)
+			}
+			if len(pkt) == cbrBytes && tc.name == "dtx" {
+				t.Fatalf("%s packet bytes=%d equals the CBR padded size %d", tc.name, len(pkt), cbrBytes)
+			}
+			t.Logf("%s packet bytes=%d (CBR size %d)", tc.name, len(pkt), cbrBytes)
 			if config := int(pkt[0] >> 3); config != 9 {
 				t.Fatalf("TOC config=%d, want SILK WB 20ms config 9", config)
 			}
@@ -1772,18 +1789,20 @@ func strictOpusMode(config int) string {
 }
 
 func strictSpeechLikeFrame(rate, channels, start, n int) []float64 {
+	// Products are rounded explicitly so the fixture is identical on every
+	// architecture (no fused multiply-add; see docs/DEVELOPER.md).
 	out := make([]float64, n*channels)
 	for i := 0; i < n; i++ {
-		t := float64(start+i) / float64(rate)
-		env := 0.42 + 0.18*math.Sin(2*math.Pi*2.7*t+0.3)
-		left := env * (0.34*math.Sin(2*math.Pi*175*t) +
-			0.13*math.Sin(2*math.Pi*350*t+0.4) +
-			0.07*math.Sin(2*math.Pi*700*t+0.8))
+		t := float64(float64(start+i) / float64(rate))
+		env := 0.42 + float64(0.18*math.Sin(float64(2*math.Pi*2.7*t)+0.3))
+		left := float64(env * (float64(0.34*math.Sin(float64(2*math.Pi*175*t))) +
+			float64(0.13*math.Sin(float64(2*math.Pi*350*t)+0.4)) +
+			float64(0.07*math.Sin(float64(2*math.Pi*700*t)+0.8))))
 		out[i*channels] = left
 		if channels == 2 {
-			right := env * (0.31*math.Sin(2*math.Pi*183*t+0.2) +
-				0.11*math.Sin(2*math.Pi*366*t+0.7) +
-				0.06*math.Sin(2*math.Pi*732*t+1.0))
+			right := float64(env * (float64(0.31*math.Sin(float64(2*math.Pi*183*t)+0.2)) +
+				float64(0.11*math.Sin(float64(2*math.Pi*366*t)+0.7)) +
+				float64(0.06*math.Sin(float64(2*math.Pi*732*t)+1.0))))
 			out[i*channels+1] = right
 		}
 	}
@@ -1791,17 +1810,19 @@ func strictSpeechLikeFrame(rate, channels, start, n int) []float64 {
 }
 
 func strictHybridWidebandFrame(rate, channels, start, n int) []float64 {
+	// Products are rounded explicitly so the fixture is identical on every
+	// architecture (no fused multiply-add; see docs/DEVELOPER.md).
 	out := strictSpeechLikeFrame(rate, channels, start, n)
 	highFreq := 10000.0
 	if rate >= 48000 {
 		highFreq = 16000.0
 	}
 	for i := 0; i < n; i++ {
-		t := float64(start+i) / float64(rate)
-		left := 0.045 * math.Sin(2*math.Pi*highFreq*t+0.11)
+		t := float64(float64(start+i) / float64(rate))
+		left := float64(0.045 * math.Sin(float64(float64(2*math.Pi*highFreq)*t)+0.11))
 		out[i*channels] += left
 		if channels == 2 {
-			right := 0.04 * math.Sin(2*math.Pi*highFreq*t+0.73)
+			right := float64(0.04 * math.Sin(float64(float64(2*math.Pi*highFreq)*t)+0.73))
 			out[i*channels+1] += right
 		}
 	}

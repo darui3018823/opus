@@ -24,6 +24,8 @@ type Encoder struct {
 	nendBits  uint
 	endBytes  []byte
 	nbitsRaw  int // total raw bits emitted (for Tell)
+	// nbitsExtra is added to the reported bit count (AddTellBits).
+	nbitsExtra int
 
 	// capacity is the target packet size; raw bits are placed at offset capacity
 	// (the absolute end) so a fixed-size packet keeps a zeroed gap between the
@@ -135,8 +137,13 @@ func (enc *Encoder) Tell() int {
 		nbytes++
 	}
 	nbytes += int(enc.ext)
-	return nbytes*8 + (32 - ILog(enc.rng)) + enc.nbitsRaw
+	return nbytes*8 + (32 - ILog(enc.rng)) + enc.nbitsRaw + enc.nbitsExtra
 }
+
+// AddTellBits adds n bits to the reported bit count (libopus
+// `enc->nbits_total += ...`: celt_encode_with_ec pretends a silent frame
+// has used its whole budget so that no further symbol fits).
+func (enc *Encoder) AddTellBits(n int) { enc.nbitsExtra += n }
 
 // ecNbitsTotal returns the libopus encoder nbits_total value. libopus tracks
 // nbits_total = (EC_CODE_BITS+1) + EC_SYM_BITS*(symbols shifted out) + raw bits.
@@ -148,7 +155,7 @@ func (enc *Encoder) ecNbitsTotal() int {
 		nbytes++
 	}
 	nbytes += int(enc.ext)
-	return nbytes*8 + (CodeBits + 1) + enc.nbitsRaw
+	return nbytes*8 + (CodeBits + 1) + enc.nbitsRaw + enc.nbitsExtra
 }
 
 // ECTell returns bits consumed using the libopus ec_tell convention (== 1
@@ -172,6 +179,48 @@ func (enc *Encoder) TellFrac() int {
 	}
 	l = (l << 3) + int(b)
 	return nbits - l
+}
+
+// Clone returns a deep copy of the encoder state (silk_encode_frame_FLP keeps
+// ec_enc copies to retry a frame); Restore puts a clone back.
+func (enc *Encoder) Clone() *Encoder {
+	c := *enc
+	c.buf = append([]byte(nil), enc.buf...)
+	c.endBytes = append([]byte(nil), enc.endBytes...)
+	return &c
+}
+
+// Restore resets the encoder to a state captured by Clone.
+func (enc *Encoder) Restore(c *Encoder) {
+	buf := append(enc.buf[:0], c.buf...)
+	endBytes := append(enc.endBytes[:0], c.endBytes...)
+	*enc = *c
+	enc.buf = buf
+	enc.endBytes = endBytes
+}
+
+// PatchInitialBits overwrites the first nbits (<= 8) of the stream with val,
+// like ec_enc_patch_initial_bits: the SILK encoder reserves them with a
+// placeholder symbol and fills in the VAD/LBRR flags once every frame of the
+// packet has been analysed. It returns false when fewer than nbits have been
+// encoded so far.
+func (enc *Encoder) PatchInitialBits(val uint32, nbits uint) bool {
+	shift := SymBits - nbits
+	mask := uint32((1<<nbits)-1) << shift
+	switch {
+	case len(enc.buf) > 0:
+		// The first byte has been finalized.
+		enc.buf[0] = byte((uint32(enc.buf[0]) &^ mask) | val<<shift)
+	case enc.rem >= 0:
+		// The first byte is still awaiting carry propagation.
+		enc.rem = int((uint32(enc.rem) &^ mask) | val<<shift)
+	case enc.rng <= CodeTop>>nbits:
+		// The renormalization loop has never been run.
+		enc.val = (enc.val &^ (mask << CodeShift)) | val<<(CodeShift+shift)
+	default:
+		return false
+	}
+	return true
 }
 
 // carryOut handles carry propagation - matches ec_enc_carry_out in libopus.

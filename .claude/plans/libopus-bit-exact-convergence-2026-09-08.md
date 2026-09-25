@@ -1499,3 +1499,19 @@ stays a non-goal.
 - The oracle gains `--ms-enc` (the multistream, surround and projection
   encoders, with a `trace=1` option); `TestMultistreamEncoderOracle`
   (171 configurations, in the CI gate) is byte-identical.
+
+### 2026-09-25: restricted applications, bitrate range, docs
+
+- `ApplicationRestrictedSILK` / `ApplicationRestrictedCELT` (libopus 1.6):
+  fixed at creation, always the libopus policy (SetModePolicy(Legacy) is
+  ErrBadArg). RESTRICTED_SILK codes SILK-only (>= 10 ms, <= wideband, no
+  redundancy, no tonality analysis, no surround analysis in multistream);
+  RESTRICTED_CELT is CELT-only without delay compensation. Lookahead follows
+  libopus (RESTRICTED_SILK still reports the delay compensation).
+- `SetBitrate` clamps positive rates to [500, 750000 x channels] (and
+  multistream / surround / projection per input channel) instead of
+  rejecting rates below 6000.
+- Sweep `restricted` group (144 configurations) and 18 multistream
+  configurations are byte-identical.
+- Stale Legacy-era statements in CURRENT_IMPLEMENTATION, CTL_PARITY and
+  MODE_RATE_POLICY_DIFF were updated.

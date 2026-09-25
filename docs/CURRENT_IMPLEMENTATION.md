@@ -8,8 +8,11 @@ disagrees with older planning documents, treat this file as the current
 code-derived status.
 
 The compatibility target is RFC 6716 and core libopus behavior. DRED, QEXT,
-OSCE/DNN processing, Opus Custom, the libopus C ABI, and bit-exact encoder
-output are outside the compatibility claim. Opaque packet-extension transport
+OSCE/DNN processing, Opus Custom, and the libopus C ABI are outside the
+compatibility claim. Encoder packets are byte-identical to libopus 1.6.1 (a
+float build without SIMD kernels) only under the opt-in `ModePolicyLibopus`
+(also selected by `EncoderProfileLibopus` and by the restricted SILK / CELT
+applications); the default `ModePolicyLegacy` keeps the Go decisions. Opaque packet-extension transport
 does not imply extension codec support. See `docs/LIBOPUS_SCOPE.md` for the
 claim boundary.
 
@@ -583,7 +586,10 @@ remain unchanged.
   folding seed; low-budget transient fallback recomputes long-block coefficients;
   and raw-only entropy `EncodeBits` flushes correctly.
 
-Current encoder limitations:
+Current encoder limitations of the default `ModePolicyLegacy` (under
+`ModePolicyLibopus` the mode, bandwidth, rate control, DTX and FEC follow
+libopus and the packets are byte-identical; see the libopus-policy notes
+under Test Status):
 
 - `application` and `SignalType` drive encoder heuristics and can select the
   limited low-bitrate SILK-only path, including stereo and 24/48 kHz input
@@ -595,8 +601,9 @@ Current encoder limitations:
 - Both float32 and float64 PCM encoding APIs are available.
 - The public encoder exposes limited SILK-only and hybrid speech paths; it does
   not yet expose full libopus-equivalent SILK/hybrid mode selection.
-- The CELT encoder path is functional but not verified as bit-exact against
-  libopus.
+- Under `ModePolicyLegacy` the packets are not bit-exact with libopus (the
+  CELT, SILK and hybrid layers are the ported libopus code, but the Go policy
+  chooses different modes, bandwidths and rates).
 
 ### Decoder
 
@@ -1098,8 +1105,18 @@ checks the arm64 build). Packets shorter than 20 ms follow the libopus policy
 as well: 2.5/5 ms CELT-only packets, 10 ms SILK and hybrid packets (the SILK
 encoder switches between 10 and 20 ms frames in place, as silk_setup_fs
 does), their transitions, DTX and FEC, and libopus's TOC-only "PLC frames"
-when the budget is too small; the sweep's 2796 configurations are all
+when the budget is too small; the sweep's configurations are all
 byte-identical.
+
+libopus 1.6's restricted applications are available:
+`ApplicationRestrictedSILK` (SILK-only packets of 10 ms or longer, at most
+wideband, without redundancy or the tonality analysis) and
+`ApplicationRestrictedCELT` (CELT-only without delay compensation). Both are
+fixed at creation and always use the libopus policy; the sweep's
+`restricted` group (144 configurations, with restricted low delay) and 18
+multistream configurations are byte-identical. `SetBitrate` clamps positive
+requests to [500, 750000 x channels] like OPUS_SET_BITRATE (multistream,
+surround and projection: per input channel).
 
 The multistream, surround and projection encoders take the libopus policy
 too (`SetModePolicy`): `opus_multistream_encode_native`'s rate allocation
@@ -1410,8 +1427,9 @@ Notes:
   stereo 1 kHz after signal-driven bandwidth detection), and
   `TestCGOEncodeRefSilence` confirms silent input decodes to silence in libopus.
   This demonstrates standards interoperability for the covered fixtures rather
-  than only self-decoding. The encoder is still not bit-exact against libopus's
-  encoder, which is not required.
+  than only self-decoding. Under the default `ModePolicyLegacy` the packets are
+  not bit-exact with libopus's; `ModePolicyLibopus` makes them byte-identical
+  (the encoder oracle tests above).
 - `TestCGOEncodeRefSILKOnly` cross-checks the limited public SILK-only encoder
   path with libopus for 8/12/16 kHz mono, VOIP and explicit voice routing, and
   20/40/60 ms packet durations. It verifies SILK-only TOC configs, decoded
@@ -1460,9 +1478,10 @@ reference comparison.
   every libopus multistream CTL.
 - Public PLC covers CELT-only, SILK-only, and hybrid streams for mono, stereo,
   multistream, and surround output.
-- Top-level SILK/hybrid encoder selection is voice-oriented and now accounts
-  for rate, channels, bandwidth, CVBR, and active FEC, but it is not yet a full
-  libopus-equivalent mode/rate/quality policy. See
+- Under the default `ModePolicyLegacy`, top-level SILK/hybrid encoder
+  selection is voice-oriented and accounts for rate, channels, bandwidth, CVBR,
+  and active FEC, but it is not the libopus mode/rate/quality policy (the
+  opt-in `ModePolicyLibopus` is). See
   `docs/MODE_RATE_POLICY_DIFF.md` for the current gap map. The post-audit policy
   phase intentionally retained these gaps after two measured gate candidates
   failed its per-bit adoption criteria.
@@ -1470,8 +1489,9 @@ reference comparison.
   stereo, multistream, and surround output. Hybrid FEC reconstructs the
   redundant SILK low band; CELT elementary streams use PLC during multistream
   FEC recovery.
-- Application/signal mode, VBR/CVBR, and some CTL-style constants are not wired
-  to full libopus-compatible mode/rate-control behavior.
+- Under `ModePolicyLegacy`, application/signal mode, VBR/CVBR, and some
+  CTL-style constants are not wired to libopus-compatible mode/rate-control
+  behavior; `ModePolicyLibopus` wires them as libopus does.
 - The post-audit CVBR fix substantially reduces the deterministic CELT/music
   worst case without increasing its byte total. TF-estimate and stereo
   tonality-slope allocation-trim terms further reduce the remaining 24/32 kbps
@@ -1479,9 +1499,10 @@ reference comparison.
   5.55/5.40 dB. Stateful stereo saving and broader dynamic-allocation parity
   remain future measured candidates.
 - Decoder conformance and reference validation passes the official vectors and
-  the covered libopus comparisons. The larger remaining compatibility and
-  quality gaps are on the encoder side (bit-exact CELT and the broader
-  SILK/hybrid encoder paths).
+  the covered libopus comparisons. The remaining compatibility gaps are the
+  default encoder policy (Legacy; libopus parity is opt-in), CELT PLC and
+  some mixed-mode decoder samples that are not sample-exact, and parity with
+  a libopus built with SIMD kernels (a non-goal).
 
 ## Practical Use Today
 
@@ -1492,5 +1513,7 @@ output, and libopus decode cross-checks, plus a narrow low-bitrate SILK-only
 speech path, an initial high-bitrate 24/48 kHz hybrid voice path, and public
 multistream/surround/projection packet support cross-checked with libopus.
 Packet extensions and single-stream Ogg Opus containers are available through
-public Pure Go APIs. It is not bit-exact with libopus and does not yet provide
-full SILK/hybrid mode selection.
+public Pure Go APIs. With `SetModePolicy(ModePolicyLibopus)` (or
+`EncoderProfileLibopus`) the single-stream, multistream, surround and
+projection encoders produce packets byte-identical to libopus 1.6.1; the
+default `ModePolicyLegacy` keeps the Go mode selection and is not bit-exact.

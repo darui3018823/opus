@@ -2,6 +2,13 @@
 
 Last reviewed: 2026-07-17
 
+> **Status (2026-09-25):** this document describes the Go policy, which is
+> now `ModePolicyLegacy` (still `NewEncoder`'s default). The opt-in
+> `ModePolicyLibopus` ports libopus's decisions listed below (mode
+> thresholds and hysteresis, bandwidth switching, SILK internal rate, hybrid
+> allocation, stereo width, DTX, FEC) and is byte-identical to libopus
+> 1.6.1; see `docs/CURRENT_IMPLEMENTATION.md`.
+
 Scope: Phase D-1 only. This document compares libopus 1.6.1 mode decision and
 rate-control policy against the current Go implementation. It deliberately does
 not change any mode gate; Phase D-2 must use the real-corpus scoreboard before

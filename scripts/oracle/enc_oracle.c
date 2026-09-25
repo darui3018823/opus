@@ -830,8 +830,79 @@ static int run_dec_plc_oracle(int argc, char **argv)
     return 0;
 }
 
+/* --dec-bit <in.bit> <rate> <channels> <out.raw>: decodes an opus_demo .bit
+   stream (big-endian length and final range per packet) with opus_decode
+   as opus_demo does (a zero-length packet is concealed with the last
+   packet duration) and writes the int16 PCM, little-endian, to out.raw.
+   Prints the number of packets and final-range mismatches. */
+static int run_dec_bit_oracle(int argc, char **argv)
+{
+    FILE *in, *out;
+    int rate, channels, err, packets = 0, mismatches = 0;
+    OpusDecoder *dec;
+    static unsigned char data[1500 * 8];
+    static opus_int16 pcm[5760 * 2];
+    if (argc < 6) {
+        fprintf(stderr, "usage: %s --dec-bit <in.bit> <rate> <channels> <out.raw>\n", argv[0]);
+        return 2;
+    }
+    in = fopen(argv[2], "rb");
+    rate = atoi(argv[3]);
+    channels = atoi(argv[4]);
+    out = fopen(argv[5], "wb");
+    if (in == NULL || out == NULL) {
+        fprintf(stderr, "cannot open files\n");
+        return 2;
+    }
+    dec = opus_decoder_create(rate, channels, &err);
+    if (dec == NULL || err != OPUS_OK) {
+        fprintf(stderr, "opus_decoder_create failed: %d\n", err);
+        return 2;
+    }
+    for (;;) {
+        unsigned char hdr[8];
+        opus_uint32 len, range, got_range;
+        int n, i;
+        if (fread(hdr, 1, 8, in) != 8) break;
+        len = ((opus_uint32)hdr[0] << 24) | ((opus_uint32)hdr[1] << 16) | ((opus_uint32)hdr[2] << 8) | hdr[3];
+        range = ((opus_uint32)hdr[4] << 24) | ((opus_uint32)hdr[5] << 16) | ((opus_uint32)hdr[6] << 8) | hdr[7];
+        if (len > sizeof(data) || fread(data, 1, len, in) != len) {
+            fprintf(stderr, "bad packet %d\n", packets);
+            return 1;
+        }
+        if (len == 0) {
+            opus_int32 last = 0;
+            opus_decoder_ctl(dec, OPUS_GET_LAST_PACKET_DURATION(&last));
+            n = opus_decode(dec, NULL, 0, pcm, last, 0);
+        } else {
+            n = opus_decode(dec, data, (opus_int32)len, pcm, 5760, 0);
+        }
+        if (n < 0) {
+            fprintf(stderr, "decode packet %d failed: %d\n", packets, n);
+            return 1;
+        }
+        opus_decoder_ctl(dec, OPUS_GET_FINAL_RANGE(&got_range));
+        if (len != 0 && got_range != range) mismatches++;
+        for (i = 0; i < n * channels; i++) {
+            unsigned char b[2];
+            b[0] = (unsigned char)(pcm[i] & 0xff);
+            b[1] = (unsigned char)((pcm[i] >> 8) & 0xff);
+            fwrite(b, 1, 2, out);
+        }
+        packets++;
+    }
+    fclose(in);
+    fclose(out);
+    opus_decoder_destroy(dec);
+    fprintf(stderr, "DEC_BIT packets=%d range_mismatches=%d\n", packets, mismatches);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "--dec-bit") == 0) {
+        return run_dec_bit_oracle(argc, argv);
+    }
     if (argc >= 2 && strcmp(argv[1], "--dec-plc") == 0) {
         return run_dec_plc_oracle(argc, argv);
     }

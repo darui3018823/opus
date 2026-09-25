@@ -227,9 +227,13 @@ type Decoder struct {
 	cng     cngState
 
 	// Stereo packets code mid and side as separate SILK channel states.
-	side                 *Decoder
-	stereoPredPrevQ13    [2]int32
-	stereoMid            [2]int16
+	side              *Decoder
+	stereoPredPrevQ13 [2]int32
+	stereoMid         [2]int16
+	// apiMono is nChannelsAPI == 1 for a stereo stream: silk_Decode skips
+	// the mid/side to left/right conversion and outputs the mid channel,
+	// buffered through sMid like a mono stream (by the caller).
+	apiMono              bool
 	stereoSide           [2]int16
 	prevDecodeOnlyMiddle bool
 
@@ -525,7 +529,7 @@ func (d *Decoder) DecodePLC(nFrames int) ([]float64, error) {
 				return nil, err
 			}
 		}
-		out = append(out, d.stereoMSToLR(mid, side, d.stereoPredPrevQ13)...)
+		out = append(out, d.stereoOutput(mid, side, d.stereoPredPrevQ13)...)
 	}
 	return out, nil
 }
@@ -613,7 +617,7 @@ func (d *Decoder) decodeFECStereo(dec *entcode.Decoder, nFrames int) ([]float64,
 			}
 		}
 
-		out = append(out, d.stereoMSToLR(mid, side, predQ13)...)
+		out = append(out, d.stereoOutput(mid, side, predQ13)...)
 		d.prevDecodeOnlyMiddle = decodeOnlyMiddle
 	}
 	return out, nil
@@ -832,7 +836,7 @@ func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]floa
 			}
 		}
 
-		allPCM = append(allPCM, d.stereoMSToLR(mid, side, predQ13)...)
+		allPCM = append(allPCM, d.stereoOutput(mid, side, predQ13)...)
 		d.prevDecodeOnlyMiddle = decodeOnlyMiddle
 	}
 	return allPCM, nil
@@ -943,6 +947,35 @@ func silkRShiftRound(v int64, shift int) int32 {
 		return int32((v >> 1) + (v & 1))
 	}
 	return int32(((v >> (shift - 1)) + 1) >> 1)
+}
+
+// SetAPIMono selects nChannelsAPI == 1 for a stereo stream: the decoded
+// frames are the mid channel only (see stereoOutput).
+func (d *Decoder) SetAPIMono(mono bool) { d.apiMono = mono }
+
+// StereoMid and SetStereoMid expose sStereo.sMid, the two mid samples
+// silk_Decode carries between frames (shared with the mono path).
+func (d *Decoder) StereoMid() [2]int16 { return d.stereoMid }
+
+// SetStereoMid sets sStereo.sMid.
+func (d *Decoder) SetStereoMid(m [2]int16) { d.stereoMid = m }
+
+// ResetStereoPrediction is silk_Decode's reset on a switch to a stereo
+// stream with stereo output: the previous stereo predictors and the side
+// history are cleared.
+func (d *Decoder) ResetStereoPrediction() {
+	d.stereoPredPrevQ13 = [2]int32{}
+	d.stereoSide = [2]int16{}
+}
+
+// stereoOutput is the stereo stream's output stage: silk_stereo_MS_to_LR
+// for a stereo output, the mid channel alone (the predictors and the side
+// history kept) for a mono output.
+func (d *Decoder) stereoOutput(mid, side []float64, predQ13 [2]int32) []float64 {
+	if d.apiMono {
+		return append([]float64(nil), mid[:d.frameSize]...)
+	}
+	return d.stereoMSToLR(mid, side, predQ13)
 }
 
 func (d *Decoder) stereoMSToLR(mid, side []float64, predQ13 [2]int32) []float64 {

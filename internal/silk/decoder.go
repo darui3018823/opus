@@ -511,12 +511,21 @@ func (d *Decoder) DecodePLC(nFrames int) ([]float64, error) {
 		if err != nil {
 			return nil, err
 		}
-		side, err := d.side.concealPacketLoss()
-		if err != nil {
-			return nil, err
+		// silk_Decode on a loss: the side channel is only concealed when
+		// the previous frame coded it (has_side = !prev_decode_only_middle);
+		// otherwise it is silent. Every channel's gain clamping is removed
+		// and prev_decode_only_middle is left as it was.
+		var side []float64
+		if d.prevDecodeOnlyMiddle {
+			side = make([]float64, len(mid))
+			d.side.prevGainIndex = 10
+		} else {
+			side, err = d.side.concealPacketLoss()
+			if err != nil {
+				return nil, err
+			}
 		}
 		out = append(out, d.stereoMSToLR(mid, side, d.stereoPredPrevQ13)...)
-		d.prevDecodeOnlyMiddle = false
 	}
 	return out, nil
 }

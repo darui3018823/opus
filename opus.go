@@ -3701,16 +3701,12 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 		pktChannels = 2
 	}
 
-	// Select the CELT decoder matching this packet's bandwidth and frame size.
+	// Select the CELT decoder matching this packet's bandwidth and frame
+	// size. Like libopus's celt_dec it has the output channels and decodes
+	// the packet's coded channels (CELT_SET_CHANNELS).
 	bwIdx := celtConfigBWIdx(config)
 	lmIdx := celtConfigLMIdx(config)
-	chIdx := pktChannels - 1
-	if chIdx < 0 {
-		chIdx = 0
-	}
-	if chIdx > 1 {
-		chIdx = 1
-	}
+	chIdx := d.channels - 1
 	activeCeltDec := d.celtDecoders[bwIdx][lmIdx][chIdx]
 	if activeCeltDec == nil {
 		// Fallback: mono decoder
@@ -3729,6 +3725,7 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 		if d.lastCeltDec != nil && d.lastCeltDec != activeCeltDec {
 			activeCeltDec.CopyStateFrom(d.lastCeltDec)
 		}
+		activeCeltDec.SetStreamChannels(pktChannels)
 		pcm, err := activeCeltDec.Decode(frame)
 		if err != nil {
 			return nil, fmt.Errorf("CELT decoding failed: %w", err)
@@ -3741,8 +3738,6 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 		if d.celtResampler != nil {
 			pcm = d.celtResampler.Process(pcm)
 		}
-		// Convert packet channels → output channels
-		pcm = adjustChannels(pcm, pktChannels, d.channels)
 		// Compute expected frame size at output rate
 		targetLen := celtFrameSamples(config, d.sampleRate) * d.channels
 		pcm = padOrTrim(pcm, targetLen)
@@ -4064,10 +4059,11 @@ func (d *Decoder) decodeRedundancy(frame []byte, pktChannels, endBand int, carry
 	if len(frame) < 2 {
 		return nil, 0, nil
 	}
-	actualCh := pktChannels
+	actualCh := d.channels
 	redDec, err := celt.NewDecoderEx(celt.FrameSize5ms, 48000, endBand, actualCh)
 	if err == nil {
 		redDec.SetDownsample(48000 / d.sampleRate)
+		redDec.SetStreamChannels(pktChannels)
 	}
 	if err != nil {
 		return nil, 0, nil
@@ -4107,12 +4103,9 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		celtLMIdx = 2 // 10ms -> 480 samples
 	}
 	const celtBWIdx = 3 // fullband (21 bands)
-	celtActualCh := pktChannels
-	celtDec := d.celtDecoders[celtBWIdx][celtLMIdx][ci]
-	if celtDec == nil {
-		celtDec = d.celtDecoders[celtBWIdx][celtLMIdx][0]
-		celtActualCh = 1
-	}
+	celtActualCh := d.channels
+	celtDec := d.celtDecoders[celtBWIdx][celtLMIdx][d.channels-1]
+	celtDec.SetStreamChannels(pktChannels)
 
 	if d.silkDecoders[ri][ci] == nil {
 		return nil, false, fmt.Errorf("SILK decoder not initialized for hybrid rate=%dkHz ch=%d", rateKHz, pktChannels)
@@ -4631,7 +4624,7 @@ func (d *Decoder) decodeCELTPLCFrame(frameSize int) ([]float64, error) {
 	if bw < 0 || bw >= len(d.celtDecoders) {
 		return nil, fmt.Errorf("%w: invalid CELT bandwidth %d", ErrInvalidState, bandwidth)
 	}
-	active := d.celtDecoders[bw][lm][d.lastPacketChannels-1]
+	active := d.celtDecoders[bw][lm][d.channels-1]
 	if active == nil {
 		return nil, fmt.Errorf("%w: missing CELT PLC decoder", ErrInvalidState)
 	}

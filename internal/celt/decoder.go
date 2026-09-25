@@ -49,7 +49,12 @@ type Decoder struct {
 	// downsample is st->downsample: the output rate is 48 kHz/downsample
 	// (the spectrum above it is cleared and the de-emphasised output
 	// decimated), 1 by default.
-	downsample       int
+	downsample int
+	// streamChannels is CELT_SET_CHANNELS (st->stream_channels, C): the
+	// coded channels of the packet, while mode.Channels (CC) is the output.
+	// A mono stream is duplicated to both output channels and a stereo
+	// stream downmixed in the frequency domain; 0 means CC.
+	streamChannels   int
 	lossDuration     int
 	plcDuration      int
 	skipPLC          bool
@@ -121,10 +126,10 @@ func NewDecoderEx(frameSize, sampleRate, numBands, channels int) (*Decoder, erro
 		shortCeltMode: shortCeltMode,
 		overlap:       make([][]float64, channels),
 	}
+	// Two band processors whatever the output channels: a mono output
+	// may decode a stereo stream.
 	d.bandProcs[0] = NewBandProcessor(mode)
-	if channels == 2 {
-		d.bandProcs[1] = NewBandProcessor(mode)
-	}
+	d.bandProcs[1] = NewBandProcessor(mode)
 
 	for i := 0; i < channels; i++ {
 		d.overlap[i] = make([]float64, mode.Overlap)
@@ -191,7 +196,8 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 
 	numBands := d.mode.Bands.NumBands
 	lm := d.mode.LM
-	ch := d.mode.Channels
+	ch := d.codedChannels()
+	cc := d.mode.Channels
 
 	// === libopus celt_decode_with_ec symbol order ===
 
@@ -375,18 +381,31 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 		}
 		mdctCoeffsPerCh[c] = coeffs
 	}
+	// celt_synthesis: a mono stream feeds both output channels, a stereo
+	// stream on a mono output is averaged before the IMDCT.
+	synth := mdctCoeffsPerCh
+	switch {
+	case ch == 1 && cc == 2:
+		synth = [][]float64{mdctCoeffsPerCh[0], append([]float64(nil), mdctCoeffsPerCh[0]...)}
+	case ch == 2 && cc == 1:
+		mixed := make([]float64, len(mdctCoeffsPerCh[0]))
+		for i := range mixed {
+			mixed[i] = float64(float32(float32(0.5)*float32(mdctCoeffsPerCh[0][i])) + float32(float32(0.5)*float32(mdctCoeffsPerCh[1][i])))
+		}
+		synth = [][]float64{mixed}
+	}
 
 	// Note: stereo M/S→L/R merge is handled inside quant_all_bands (quant_band_stereo).
 
 	// Perform IMDCT per channel.
 	// Transient frames (isTransient=true, lm>0) use M=2^lm separate NBase-point IMDCTs
 	// (libopus "shortMdct" path). Non-transient frames use a single N-point IMDCT.
-	output := make([]float64, frameSize/d.downsample*ch)
+	output := make([]float64, frameSize/d.downsample*cc)
 	nBase := d.mode.NBase // = NBase (e.g. 120 for 48kHz)
 	M := 1 << uint(lm)    // number of sub-frames for transient
 
-	for c := 0; c < ch; c++ {
-		coeffs := mdctCoeffsPerCh[c]
+	for c := 0; c < cc; c++ {
+		coeffs := synth[c]
 		var samplesOut []float64
 		if d.prefilterAndFold {
 			d.prefilterAndFoldCarry(c)
@@ -436,7 +455,7 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 		}
 
 		for i := 0; i < frameSize/d.downsample; i++ {
-			output[i*ch+c] = samplesOut[i*d.downsample] * celtFloatScale
+			output[i*cc+c] = samplesOut[i*d.downsample] * celtFloatScale
 		}
 	}
 
@@ -661,7 +680,7 @@ var spreadIcdf = [4]uint8{25, 23, 2, 0}
 func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int, isTransient bool, spread int, tfRes, offsets []int, quantLogE []float64, start, end int) (intensity int, dualStereo bool, err error) {
 	numBands := d.mode.Bands.NumBands
 	lm := d.mode.LM
-	ch := d.mode.Channels
+	ch := d.codedChannels()
 
 	// libopus: bits = (len*8 << BITRES) - ec_tell_frac(dec) - 1   (Q3 / eighth-bits)
 	bitsQ3 := lenBytes*8<<3 - dec.TellFrac() - 1
@@ -757,7 +776,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 
 func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, logE []float64, lm, frameLen int, seed uint32, start, end int) {
 	numBands := d.mode.Bands.NumBands
-	ch := d.mode.Channels
+	ch := d.codedChannels()
 	M := 1 << uint(lm)
 
 	for i := start; i < end; i++ {
@@ -828,6 +847,23 @@ func (d *Decoder) updateLogEnergyHistory(isTransient bool) {
 	}
 	copy(d.prevLogE2, d.prevLogE)
 	copy(d.prevLogE, d.prevEnergies)
+}
+
+// SetStreamChannels is CELT_SET_CHANNELS: the coded channels of the next
+// packets (1 or 2); the output keeps the decoder's channel count.
+func (d *Decoder) SetStreamChannels(n int) {
+	if n < 1 || n > 2 {
+		n = 0
+	}
+	d.streamChannels = n
+}
+
+// codedChannels is st->stream_channels (C).
+func (d *Decoder) codedChannels() int {
+	if d.streamChannels > 0 {
+		return d.streamChannels
+	}
+	return d.mode.Channels
 }
 
 // SetDownsample sets st->downsample: the decoder codes at 48 kHz and

@@ -95,10 +95,7 @@ func TestDecoderPLCOracle(t *testing.T) {
 		}
 	}
 	for _, rate := range []int{16000, 24000, 48000} {
-		// TODO(stereo): a stereo decoder receiving coded-mono hybrid packets
-		// conceals two channels of CELT noise in libopus (CC=2, C=1); the
-		// Go decoder still conceals the coded channels only.
-		for _, ch := range []int{1} {
+		for _, ch := range []int{1, 2} {
 			for _, br := range []int{12000, 24000, 40000} {
 				for _, mask := range []string{"0001", "0000111110"} {
 					cells = append(cells, cell{rate, ch, br, 20000, 30, "voip", mask, "voice", "ref-speech"})

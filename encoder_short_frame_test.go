@@ -235,3 +235,28 @@ func TestResetMatchesFreshEncoder(t *testing.T) {
 		}
 	}
 }
+
+// TestLegacyShortThen20msAtResampledRates codes a short packet and then
+// 20 ms packets with the Legacy policy at input rates it resamples to
+// 48 kHz: the 5 ms redundant CELT frame of the mode switch is resampled to
+// its own duration, not to the packet's frame size.
+func TestLegacyShortThen20msAtResampledRates(t *testing.T) {
+	for _, rate := range []int{12000, 24000} {
+		for _, first := range []int{rate / 400, rate / 200, rate / 100} {
+			enc, err := newLegacyEncoder(rate, 2, ApplicationVOIP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := enc.SetBitrate(64000); err != nil {
+				t.Fatal(err)
+			}
+			pos := 0
+			for _, n := range []int{first, rate / 50, rate / 50} {
+				if _, err := enc.EncodeFloat(strictSpeechLikeFrame(rate, 2, pos, n), n); err != nil {
+					t.Fatalf("%d Hz: %d samples after %d: %v", rate, n, first, err)
+				}
+				pos += n
+			}
+		}
+	}
+}

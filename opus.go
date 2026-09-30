@@ -2252,9 +2252,10 @@ func (e *Encoder) celtInputFrame(pcm []float64) []float64 {
 	if e.inputResampler != nil {
 		// Resample from sampleRate to 48kHz.
 		resampled := e.inputResampler.Process(pcm)
-		// The resampled output should be approximately internalFrameSize *
-		// channels samples. Pad or trim to exact size for CELT.
-		targetLen := e.internalFrameSize * e.channels
+		// The resampled output is approximately the input's duration at
+		// 48 kHz (a 20 ms frame, or a 2.5 ms prefill or 5 ms redundant
+		// frame). Pad or trim to exact size for CELT.
+		targetLen := len(pcm) / e.channels * (SampleRate48kHz / e.sampleRate) * e.channels
 		celtInput = padOrTrim(resampled, targetLen)
 	} else {
 		celtInput = pcm

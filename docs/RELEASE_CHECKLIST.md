@@ -71,7 +71,8 @@ inferring a patch or minor version from that historical classification.
   - known limitations;
   - verification performed.
 - Call out optional CGO/libopus checks as reference validation, not a runtime
-  dependency. Do not claim bit-exact encoder parity.
+  dependency. Claim encoder or decoder byte/sample identity only for what the
+  oracle gates verify (libopus's plain-C float build, without SIMD kernels).
 
 ## 3. Qualify the exact commit
 

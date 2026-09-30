@@ -112,6 +112,40 @@ they are intentionally not hidden behind a policy gate without a measured
 per-bit win. Full evidence is in
 `.claude/memory/iterations/silk-hybrid-policy-phase3-2026-07-17.md`.
 
+## Legacy vs Libopus Policy on the Real Corpus (2026-09-30)
+
+The real-corpus scoreboard (`TestOpusRealCorpusMatchedBitrateScoreboard`,
+complexity 5, CVBR, 16–64 kbps, 0/5/10/20 % loss) was run once per policy
+(`OPUS_REAL_CORPUS_POLICY=legacy|libopus`). The reference is the system
+libopus with the same settings.
+
+- **Libopus policy:** its byte totals equal libopus's in every cell (ratio
+  1.000, one cell at 0.998), and its SNR is within 0.1 dB of libopus in every
+  class. The modes and bandwidths match libopus: fullband hybrid for speech
+  and fullband CELT for music.
+- **Legacy policy at 16–32 kbps:** it codes speech as wideband SILK
+  (8 kHz audio), where libopus uses fullband hybrid. It also undershoots the
+  requested bitrate on speech (0.42–0.73× libopus's bytes on the clean and
+  stereo speech clips). It codes the music clip as narrowband CELT (4 kHz
+  audio) at every bitrate up to 64 kbps, and the mixed speech+tone clip as
+  narrowband in about half of its frames.
+- Waveform SNR hides this: narrowband coding puts every bit below 4 kHz, so
+  Legacy's matched-byte SNR looks 1.6–4.2 dB better on music. The high-band
+  measurement below (channel 0, 1024-point Hann frames, fraction of the
+  input's energy above 4 kHz present in the decoded output, and the mean
+  log-spectral distance over 0–20 kHz) shows what is lost:
+
+| Clip | kbps | Legacy >4 kHz kept | Legacy LSD | Libopus >4 kHz kept | Libopus LSD |
+|---|---:|---:|---:|---:|---:|
+| clean speech | 16 / 32 | 0.06 / 0.03 | 12.3 / 13.1 dB | 0.46 / 0.77 | 6.9 / 6.1 dB |
+| noisy speech | 16 / 32 | 0.11 / 0.08 | 37.1 / 36.8 dB | 0.51 / 0.68 | 5.8 / 5.3 dB |
+| speech (6 s) | 16 / 32 | 0.16 / 0.15 | 21.6 / 21.5 dB | 0.62 / 0.71 | 6.5 / 5.8 dB |
+| mixed | 16 / 32 / 64 | 0.01 / 0.02 / 0.35 | 37.8 / 31.1 / 16.5 dB | 0.80 / 0.73 / 0.74 | 6.1 / 5.2 / 3.8 dB |
+| music | 16 / 32 / 64 | 0.00 / 0.00 / 0.00 | 35.1 / 34.4 / 33.8 dB | 0.44 / 0.95 / 0.83 | 6.5 / 5.8 / 5.1 dB |
+
+At 64 kbps both policies code speech as fullband hybrid and their results are
+nearly identical.
+
 ## Guardrails
 
 - Keep range-coder changes out of Phase D unless a failing bitstream requires

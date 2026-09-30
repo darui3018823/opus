@@ -3926,9 +3926,11 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 	// only cross-faded in after a CELT/hybrid frame or a trailing redundant
 	// frame (the SILK bandwidth switch).
 	prevModeRedundancy := d.prevMode != framing.ModeSILKOnly || d.prevRedundancy
+	frameMode, frameRedundancy := d.prevMode, d.prevRedundancy
 	for si, stream := range silkStreams {
 		if si > 0 {
 			prevModeRedundancy = trailingRedundancy
+			frameMode, frameRedundancy = framing.ModeSILKOnly, trailingRedundancy
 		}
 		// opus_decode_native replaces prev_redundancy for every constituent
 		// frame, so only a trailing redundancy frame on the final stream remains.
@@ -3988,6 +3990,11 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 
 		// Pad or trim to exact expected length
 		pcm = padOrTrim(pcm, samplesPerStream)
+		// For hybrid -> SILK transitions the CELT MDCT fades out through a
+		// decoded silence frame.
+		if frameMode == framing.ModeHybrid && !(redundancy && celtToSilk && frameRedundancy) {
+			d.celtSilenceFade(pcm, pktChannels, redundancyEndBand)
+		}
 		var redundantRange uint32
 		if redundancy && redundancyBytes >= 2 {
 			carryState := celtToSilk
@@ -4431,6 +4438,38 @@ func (d *Decoder) resampleSILK(pcm []float64, nFrames, pktChannels int, stereoTo
 		}
 	}
 	return interleaveSILKOut(outL, outR, d.channels)
+}
+
+// celtSilenceFade is opus_decode_frame's hybrid -> SILK fade-out: a 2.5 ms
+// CELT frame decoded from the silence payload {0xFF, 0xFF} on the
+// persistent CELT state (start band 0, the packet's end band) is added to
+// the start of the SILK output.
+func (d *Decoder) celtSilenceFade(pcm []float64, pktChannels, endBand int) {
+	if d.lastCeltDec == nil {
+		return
+	}
+	bw := 3
+	for i, n := range celtBWNumBands {
+		if n == endBand {
+			bw = i
+		}
+	}
+	dec := d.celtDecoders[bw][0][d.channels-1]
+	if dec == nil {
+		return
+	}
+	if dec != d.lastCeltDec {
+		dec.CopyStateFrom(d.lastCeltDec)
+	}
+	dec.SetStreamChannels(pktChannels)
+	out, err := dec.Decode([]byte{0xFF, 0xFF})
+	if err != nil {
+		return
+	}
+	d.lastCeltDec = dec
+	for i := 0; i < len(out) && i < len(pcm); i++ {
+		pcm[i] = float64(float32(pcm[i]) + float32(out[i]))
+	}
 }
 
 // switchSILKRate hands the SILK decoder state to the decoders of internal

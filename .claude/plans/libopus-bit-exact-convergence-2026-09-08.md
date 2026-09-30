@@ -1536,3 +1536,15 @@ stays a non-goal.
 - Oracle modes `--dec-plc` and `--dec-bit`; `TestDecoderPLCOracle` and
   `TestDecoderVectorOracle` (12 vectors x 48k/2, 48k/1, 24k/2, 16k/1, 8k/2)
   are sample-exact and join the CI gate.
+
+### 2026-09-30 (later): real-corpus policy comparison, four bugs
+
+- Real-corpus scoreboard per policy (`OPUS_REAL_CORPUS_POLICY`): Libopus
+  matches libopus's bytes and SNR; Legacy narrows music to 4 kHz and speech to
+  8 kHz at <= 32 kbps (docs/MODE_RATE_POLICY_DIFF.md).
+- A trial default flip found: CBR multi-frame repacketizing kept the frame
+  packets' padding headers (`71452b7`), a padded short-frame panic
+  (`c9a5a78`), wrong encoder final ranges for SILK and redundant frames
+  (`d9b6fbd`), decoder handling of 0/1-byte frames (`fdf5772`).
+- Oracle `[ENC_RNG]` line; the sweep checks packets and final ranges
+  (3,204 cells: new `framescbr` and `dtxcbr` groups).

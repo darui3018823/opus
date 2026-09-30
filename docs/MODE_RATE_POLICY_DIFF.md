@@ -146,6 +146,29 @@ libopus with the same settings.
 At 64 kbps both policies code speech as fullband hybrid and their results are
 nearly identical.
 
+A trial run of the test suite with Libopus as the default found four bugs,
+all fixed on 2026-09-30, and extended the oracle sweep to catch them:
+
+- Libopus policy, CBR packets over 20 ms (40–120 ms): the repacketizer took
+  each padded frame packet's padding header as frame data. The resulting
+  packets were misparsed by every decoder, including libopus (84 of 240 new
+  sweep cells differed; `71452b7`).
+- Libopus policy, 2.5–10 ms CELT frames with `SetPacketPadding`: a panic
+  (`c9a5a78`).
+- `FinalRange` after SILK packets (the SILK encoder's range was read instead
+  of the packet's range coder's) and after transition packets (the redundant
+  frame's range was never XORed in): 1,090 of the 3,204 sweep cells reported
+  a wrong range (`d9b6fbd`).
+- The decoder decoded 0/1-byte CELT and hybrid frames (DTX packets) as data
+  and kept the previous final range, where libopus conceals them in the
+  previous mode and reports zero (`fdf5772`).
+
+The sweep now checks both the encoder's and a decoder's final range against
+libopus for every packet. With Libopus as the default, 30 tests in the root
+package fail. All of them assert Legacy-specific behaviour (mode and
+bandwidth choices, CBR padding of silence, immediate DTX, profile defaults,
+performance digests).
+
 ## Guardrails
 
 - Keep range-coder changes out of Phase D unless a failing bitstream requires

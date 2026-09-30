@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-09-15
+Last reviewed: 2026-09-30
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -10,9 +10,8 @@ code-derived status.
 The compatibility target is RFC 6716 and core libopus behavior. DRED, QEXT,
 OSCE/DNN processing, Opus Custom, and the libopus C ABI are outside the
 compatibility claim. Encoder packets are byte-identical to libopus 1.6.1 (a
-float build without SIMD kernels) only under the opt-in `ModePolicyLibopus`
-(also selected by `EncoderProfileLibopus` and by the restricted SILK / CELT
-applications); the default `ModePolicyLegacy` keeps the Go decisions. Opaque packet-extension transport
+float build without SIMD kernels) under `ModePolicyLibopus`, the default since
+v1.5.0; `ModePolicyLegacy` keeps the earlier Go decisions. Opaque packet-extension transport
 does not imply extension codec support. See `docs/LIBOPUS_SCOPE.md` for the
 claim boundary.
 
@@ -225,13 +224,12 @@ Opus frame rather than dividing one frame budget across the whole packet.
 
 `NewEncoder` preserves the historical defaults (64 kbit/s, complexity 5, CBR).
 `SetModePolicy` selects the automatic mode / channel / bandwidth policy:
-`ModePolicyLegacy` (the default, the Go encoder's rules) or
-`ModePolicyLibopus` (libopus 1.6.1's `opus_encode_native`). It should be
-called before the first `Encode`; a change after encoding has started resets
-the stream state as `Reset` does, keeping every setting.
-`NewEncoderWithProfile(..., EncoderProfileLibopus)` selects automatic bitrate,
-complexity 9, constrained VBR and (since v1.5.0) `ModePolicyLibopus`, without
-imposing a behavior change on `NewEncoder` callers.
+`ModePolicyLibopus` (libopus 1.6.1's `opus_encode_native`; the default of
+every encoder since v1.5.0) or `ModePolicyLegacy` (the Go encoder's earlier
+rules). It should be called before the first `Encode`; a change after
+encoding has started resets the stream state as `Reset` does, keeping every
+setting. `NewEncoderWithProfile(..., EncoderProfileLibopus)` also selects
+automatic bitrate, complexity 9 and constrained VBR.
 
 Encoder, decoder, multistream, surround, projection, and container reader/writer
 instances are stateful and are not safe for concurrent use. One instance owns
@@ -589,7 +587,7 @@ remain unchanged.
   folding seed; low-budget transient fallback recomputes long-block coefficients;
   and raw-only entropy `EncodeBits` flushes correctly.
 
-Current encoder limitations of the default `ModePolicyLegacy` (under
+Encoder limitations of `ModePolicyLegacy` (under the default
 `ModePolicyLibopus` the mode, bandwidth, rate control, DTX and FEC follow
 libopus and the packets are byte-identical; see the libopus-policy notes
 under Test Status):
@@ -1110,11 +1108,12 @@ DTX follows libopus under `ModePolicyLibopus`: the generalized DTX
 SILK's own DTX when the tonality analysis is off (`TestDTXOracle`, 48 cells
 byte-identical). Multi-frame packets read the tonality analysis per 20 ms
 frame as libopus does. Under `ModePolicyLegacy` DTX keeps the Go encoder's
-minimal silent packets. `TestAutoModeOracleSweep` extends the gate to 2340
+minimal silent packets. `TestAutoModeOracleSweep` extends the gate to 3204
 configurations (all bitrate steps, CBR / CVBR / unconstrained VBR,
-complexities 0–10, the auto signal hint, 8–24 kHz input, 40–120 ms packets,
-forced and capped bandwidths, forced mono, int16 input, LSB depths, FEC and
-DTX at 8/12/24 kHz), and CI builds the instrumented oracle and runs these
+complexities 0–10, the auto signal hint, 8–24 kHz input, 40–120 ms packets
+in CBR and CVBR, forced and capped bandwidths, forced mono, int16 input, LSB
+depths, FEC, and DTX in CBR and VBR) and checks every packet's bytes and the
+encoder's and a decoder's final range against libopus, and CI builds the instrumented oracle and runs these
 gates on Linux. The encoder's arithmetic is free of fused multiply-adds, so
 its output is identical on amd64, arm64 and the other FMA architectures (CI
 checks the arm64 build). Packets shorter than 20 ms follow the libopus policy
@@ -1443,9 +1442,9 @@ Notes:
   stereo 1 kHz after signal-driven bandwidth detection), and
   `TestCGOEncodeRefSilence` confirms silent input decodes to silence in libopus.
   This demonstrates standards interoperability for the covered fixtures rather
-  than only self-decoding. Under the default `ModePolicyLegacy` the packets are
-  not bit-exact with libopus's; `ModePolicyLibopus` makes them byte-identical
-  (the encoder oracle tests above).
+  than only self-decoding. Under `ModePolicyLegacy` the packets are not
+  bit-exact with libopus's; the default `ModePolicyLibopus` makes them
+  byte-identical (the encoder oracle tests above).
 - `TestCGOEncodeRefSILKOnly` cross-checks the limited public SILK-only encoder
   path with libopus for 8/12/16 kHz mono, VOIP and explicit voice routing, and
   20/40/60 ms packet durations. It verifies SILK-only TOC configs, decoded
@@ -1494,10 +1493,10 @@ reference comparison.
   every libopus multistream CTL.
 - Public PLC covers CELT-only, SILK-only, and hybrid streams for mono, stereo,
   multistream, and surround output.
-- Under the default `ModePolicyLegacy`, top-level SILK/hybrid encoder
+- Under `ModePolicyLegacy`, top-level SILK/hybrid encoder
   selection is voice-oriented and accounts for rate, channels, bandwidth, CVBR,
   and active FEC, but it is not the libopus mode/rate/quality policy (the
-  opt-in `ModePolicyLibopus` is). See
+  default `ModePolicyLibopus` is). See
   `docs/MODE_RATE_POLICY_DIFF.md` for the current gap map. The post-audit policy
   phase intentionally retained these gaps after two measured gate candidates
   failed its per-bit adoption criteria.
@@ -1515,9 +1514,9 @@ reference comparison.
   5.55/5.40 dB. Stateful stereo saving and broader dynamic-allocation parity
   remain future measured candidates.
 - Decoder conformance and reference validation passes the official vectors and
-  the covered libopus comparisons. The remaining compatibility gaps are the
-  default encoder policy (Legacy; libopus parity is opt-in) and parity with
-  a libopus built with SIMD kernels (a non-goal). Decoder PCM, including PLC,
+  the covered libopus comparisons. The remaining compatibility gap is parity
+  with a libopus built with SIMD kernels (a non-goal); `ModePolicyLegacy`
+  remains available but is not libopus-exact. Decoder PCM, including PLC,
   is sample-exact against the plain-C libopus float decoder.
 
 ## Practical Use Today
@@ -1529,7 +1528,7 @@ output, and libopus decode cross-checks, plus a narrow low-bitrate SILK-only
 speech path, an initial high-bitrate 24/48 kHz hybrid voice path, and public
 multistream/surround/projection packet support cross-checked with libopus.
 Packet extensions and single-stream Ogg Opus containers are available through
-public Pure Go APIs. With `SetModePolicy(ModePolicyLibopus)` (or
-`EncoderProfileLibopus`) the single-stream, multistream, surround and
-projection encoders produce packets byte-identical to libopus 1.6.1; the
-default `ModePolicyLegacy` keeps the Go mode selection and is not bit-exact.
+public Pure Go APIs. Under the default `ModePolicyLibopus` the
+single-stream, multistream, surround and projection encoders produce packets
+byte-identical to libopus 1.6.1; `ModePolicyLegacy` keeps the earlier Go mode
+selection and is not bit-exact.

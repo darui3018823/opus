@@ -28,8 +28,8 @@ libopus core-library compatibility requirement.
   policy CTLs
 - `opus_custom.h` / Opus Custom
 - libopus's C ABI and source-level C API compatibility
-- Bit-exact parity with the libopus encoder under the default
-  `ModePolicyLegacy`, and against a libopus built with SIMD kernels
+- Bit-exact parity with the libopus encoder under `ModePolicyLegacy` (the
+  default before v1.5.0), and against a libopus built with SIMD kernels
 
 Packet extensions, including DRED and QEXT payloads, can be parsed, generated,
 or transported opaquely. That transport support is not codec/DSP support.

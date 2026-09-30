@@ -31,7 +31,7 @@ marked `Out of scope` rather than treated as core parity.
 
 | libopus CTL | Surface | Semantics | Evidence / note |
 |---|---:|---:|---|
-| `OPUS_SET_APPLICATION` / `OPUS_GET_APPLICATION` | Present | Full | `SetApplication`, `Application`; VOIP, AUDIO, RESTRICTED_LOWDELAY, and libopus 1.6's RESTRICTED_SILK / RESTRICTED_CELT (fixed at creation, as in libopus). The mode policy follows libopus under `ModePolicyLibopus` (the restricted SILK / CELT applications always use it); the default `ModePolicyLegacy` keeps the Go decisions. Unlike libopus, the three original applications may still be changed after the first packet |
+| `OPUS_SET_APPLICATION` / `OPUS_GET_APPLICATION` | Present | Full | `SetApplication`, `Application`; VOIP, AUDIO, RESTRICTED_LOWDELAY, and libopus 1.6's RESTRICTED_SILK / RESTRICTED_CELT (fixed at creation, as in libopus). The mode policy follows libopus under `ModePolicyLibopus`, the default since v1.5.0 (the restricted SILK / CELT applications always use it); `ModePolicyLegacy` keeps the earlier Go decisions. Unlike libopus, the three original applications may still be changed after the first packet |
 | `OPUS_SET_BITRATE` / `OPUS_GET_BITRATE` | Present | Full | `SetBitrate`, `Bitrate`, `EffectiveBitrate`; positive requests are clamped to [500, 750000 x channels] and non-positive ones rejected, as libopus does (multistream/surround/projection: [500, 750000] per input channel) |
 | `OPUS_SET_MAX_BANDWIDTH` / `OPUS_GET_MAX_BANDWIDTH` | Present | Equivalent | `SetMaxBandwidth`, `MaxBandwidth`; bandwidth selection and round-trip tests |
 | `OPUS_SET_BANDWIDTH` / `OPUS_GET_BANDWIDTH` | Present | Equivalent | `SetBandwidth`, `Bandwidth`, `GetBandwidth`; bandwidth selection and libopus reference tests |

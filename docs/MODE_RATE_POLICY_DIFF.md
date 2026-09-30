@@ -2,9 +2,9 @@
 
 Last reviewed: 2026-07-17
 
-> **Status (2026-09-25):** this document describes the Go policy, which is
-> now `ModePolicyLegacy` (still `NewEncoder`'s default). The opt-in
-> `ModePolicyLibopus` ports libopus's decisions listed below (mode
+> **Status (2026-09-30):** this document describes the Go policy, which is
+> now `ModePolicyLegacy` (the default before v1.5.0). `ModePolicyLibopus`,
+> the default since v1.5.0, ports libopus's decisions listed below (mode
 > thresholds and hysteresis, bandwidth switching, SILK internal rate, hybrid
 > allocation, stereo width, DTX, FEC) and is byte-identical to libopus
 > 1.6.1; see `docs/CURRENT_IMPLEMENTATION.md`.
@@ -164,10 +164,15 @@ all fixed on 2026-09-30, and extended the oracle sweep to catch them:
   previous mode and reports zero (`fdf5772`).
 
 The sweep now checks both the encoder's and a decoder's final range against
-libopus for every packet. With Libopus as the default, 30 tests in the root
-package fail. All of them assert Legacy-specific behaviour (mode and
-bandwidth choices, CBR padding of silence, immediate DTX, profile defaults,
-performance digests).
+libopus for every packet. Making Libopus the default broke 30 tests of
+Legacy-specific behaviour (mode and bandwidth choices, CBR padding of
+silence, immediate DTX); they now pin `ModePolicyLegacy`. The flip also
+exposed two gaps, both fixed: `SetPacketPadding` was only honoured for CELT
+packets under the libopus policy, and Legacy's forced-mono helper encoder
+took the default policy instead of its parent's.
+
+**Decision (2026-09-30):** `ModePolicyLibopus` is the default of every
+encoder from v1.5.0; `ModePolicyLegacy` stays selectable.
 
 ## Guardrails
 

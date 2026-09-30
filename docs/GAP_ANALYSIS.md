@@ -13,10 +13,9 @@ libopus 1.6.1 と比べて **現在まだ足りていないもの** を優先度
 | 領域 | 状態 |
 |---|---|
 | **デコーダ** | 完成。2026-09-30: 全 12 公式ベクターの PCM が plain-C libopus 1.6.1 と 5 出力構成 (48k/2・48k/1・24k/2・16k/1・8k/2) でサンプル一致 (`TestDecoderVectorOracle`)。CELT PLC を `celt_decode_lost` 移植で一致させ、PLC 出力も一致 (`TestDecoderPLCOracle`) |
-| **CELT エンコーダ** | 2026-09-18: CELT-only (48 kHz mono/stereo、CBR/CVBR、complexity 0〜10) が plain-C libopus 1.6.1 と byte 一致。hybrid・非 48 kHz 入力・無音 shortcut が残 |
-| **SILK エンコーダ** | 構造完成。voiced/speech で libopus 比 2.3–6.6 dB のギャップが残る |
-| **SILK/hybrid モード選択** | 保守的な voice-gate のみ。libopus 統合制御ループに未達 |
-| **マルチストリーム/サラウンド** | コア API 完成。surround mask consumers の一部未実装 |
+| **エンコーダ (CELT/SILK/hybrid)** | 2026-09-30: `ModePolicyLibopus` (v1.5.0 から既定) で全モード・2.5〜120 ms・8〜48 kHz 入力・CBR/VBR・FEC・DTX の packet と final range が plain-C libopus 1.6.1 と一致 (sweep 3204 構成)。`ModePolicyLegacy` は旧判断のまま (libopus と不一致、低 bitrate で帯域を狭める) |
+| **モード選択** | libopus の `opus_encode_native` を移植済 (既定)。旧 Go 判断は `ModePolicyLegacy` |
+| **マルチストリーム/サラウンド/projection** | libopus policy で 171+18 構成が byte 一致 (surround mask・LFE 込み) |
 | **Ogg Opus コンテナ** | シングル論理ストリームは完成。多重化ストリーム demux なし |
 
 ---

@@ -47,7 +47,10 @@ Workloads:
 | `hybrid/stereo/48k/20ms` | `ApplicationVOIP`, 96 kbps, `SignalVoice` | speech-like frame plus high-band tone |
 
 Each benchmark validates the generated packet's TOC mode and 20 ms duration
-before timing starts.
+before timing starts. Since v1.5.0 made `ModePolicyLibopus` the default, the
+harness pins `ModePolicyLegacy` so that the workloads keep their modes and
+these numbers stay comparable; `BenchmarkPerfVsLibopus` below times both
+policies.
 
 ## Median Results
 

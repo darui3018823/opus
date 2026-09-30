@@ -12,10 +12,13 @@
 Opus コーデックライブラリです。single-stream、multistream、surround、
 projection/Ambisonics、packet 変換、Ogg Opus API を提供します。
 
-デコーダーは RMSE 0.001 未満で公式 RFC 8251 ベクター 12 本すべてに合格し、
-libopus 1.6.1 と相互検証されています。エンコーダーは標準準拠の CELT、SILK-only、
-hybrid packet を生成しますが、libopus と bit-exact ではなく、libopus のすべての
-mode/rate/quality 判断を再現するものではありません。実装状況の正本は
+デコーダーの PCM は公式 RFC 8251 ベクター 12 本すべてで libopus 1.6.1 の
+plain-C float デコーダーとサンプル単位で一致します (packet loss concealment
+を含む)。エンコーダーは標準準拠の CELT、SILK-only、hybrid packet を生成し、
+v1.5.0 からは自動判断が libopus 1.6.1 に従います (`ModePolicyLibopus`、既定)。
+検証済みの構成 (自動 mode、mode 遷移、8〜48 kHz 入力、CBR/VBR、in-band FEC、
+DTX) では 2.5〜120 ms の packet が libopus の plain-C float build と byte 単位で
+一致します。以前の判断は `SetModePolicy(ModePolicyLegacy)` で使えます。実装状況の正本は
 [docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md) です。
 
 ## インストール
@@ -180,9 +183,11 @@ go test -run='^$' -fuzz='^FuzzOggOpusReaderWriter$' -fuzztime=60s ./oggopus
 
 ## 現在の制限
 
-- encoder output は標準準拠ですが libopus と bit-exact ではありません。
-- SILK/hybrid encode は voice 向けであり、libopus の全 mode boundary、rate-control
-  判断、quality heuristic は実装していません。
+- byte 一致の基準は SIMD kernel なしでビルドした libopus です。SIMD kernel 付きの
+  libopus とは float の加算順序が異なるため CELT の packet は一致しません。
+- `ModePolicyLegacy` (v1.5.0 より前の既定) は libopus と異なる判断をし、
+  約 40 kbit/s 未満では speech を 8 kHz、tonal な music を最低 4 kHz の帯域で
+  符号化します。
 - DRED/QEXT packet extension は opaque に搬送するだけで、codec/DSP は未実装です。
 - projection family 3 は libopus 1.6.1 の定義済み matrix を使い、任意の custom
   encoder matrix 生成は提供しません。

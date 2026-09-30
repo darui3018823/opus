@@ -3736,8 +3736,16 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 	// OPUS_GET_FINAL_RANGE reports the last frame rather than an XOR across the
 	// frames of one single-stream packet.
 	var rangeFinal uint32
-	for _, frame := range frames {
-		if d.lastCeltDec != nil && d.lastCeltDec != activeCeltDec {
+	targetLen := celtFrameSamples(config, d.sampleRate) * d.channels
+	for fi, frame := range frames {
+		// A switch from SILK/hybrid without a trailing redundant frame
+		// conceals 5 ms in the old mode and discards the CELT state.
+		var trans []float64
+		switchReset := fi == 0 && d.prevMode >= 0 && d.prevMode != framing.ModeCELTOnly && !d.prevRedundancy
+		if switchReset {
+			trans = d.transitionPLC(targetLen / d.channels)
+			activeCeltDec.Reset()
+		} else if d.lastCeltDec != nil && d.lastCeltDec != activeCeltDec {
 			activeCeltDec.CopyStateFrom(d.lastCeltDec)
 		}
 		activeCeltDec.SetStreamChannels(pktChannels)
@@ -3753,9 +3761,10 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 		if d.celtResampler != nil {
 			pcm = d.celtResampler.Process(pcm)
 		}
-		// Compute expected frame size at output rate
-		targetLen := celtFrameSamples(config, d.sampleRate) * d.channels
 		pcm = padOrTrim(pcm, targetLen)
+		if trans != nil {
+			d.applyTransition(pcm, trans)
+		}
 		allPCM = append(allPCM, pcm...)
 	}
 
@@ -3862,6 +3871,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 	rateKHz := silkConfigRateKHz(config)
 	ri := silkRateIdx(rateKHz)
 	ci := pktChannels - 1
+	d.resetSILKAfterCELT()
 	d.switchSILKRate(ri)
 
 	// Determine Opus frame duration and SILK sub-frames per Opus frame
@@ -3990,6 +4000,12 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 
 		// Pad or trim to exact expected length
 		pcm = padOrTrim(pcm, samplesPerStream)
+		// A switch from CELT without redundancy conceals 5 ms in the old mode.
+		if frameMode == framing.ModeCELTOnly && !redundancy {
+			if trans := d.transitionPLC(samplesPerStream / d.channels); trans != nil {
+				d.applyTransition(pcm, trans)
+			}
+		}
 		// For hybrid -> SILK transitions the CELT MDCT fades out through a
 		// decoded silence frame.
 		if frameMode == framing.ModeHybrid && !(redundancy && celtToSilk && frameRedundancy) {
@@ -4088,6 +4104,44 @@ func (d *Decoder) crossfadeLeadingRedundancy(out, red []float64) {
 	}
 }
 
+// transitionPLC is opus_decode_frame's concealment on a switch between CELT
+// and SILK/hybrid without a redundant frame: min(F5, frameSamples) samples
+// decoded as a loss in the previous mode, faded in by applyTransition.
+func (d *Decoder) transitionPLC(frameSamples int) []float64 {
+	pcm, err := d.decodePLCFloat(min(d.sampleRate/200, frameSamples))
+	if err != nil {
+		return nil
+	}
+	return pcm
+}
+
+// applyTransition is opus_decode_frame's transition fade: the first 2.5 ms
+// of a frame of at least 5 ms are the concealed audio, whose second half is
+// faded into the frame over the next 2.5 ms; a shorter frame is faded from
+// the start (libopus smooth_fade, window squared).
+func (d *Decoder) applyTransition(out, trans []float64) {
+	ch := d.channels
+	f25 := d.sampleRate / 400
+	if len(trans) < f25*ch || len(out) < f25*ch {
+		return
+	}
+	in1, off := trans, 0
+	if len(out) >= 2*f25*ch && len(trans) >= 2*f25*ch {
+		copy(out[:f25*ch], trans[:f25*ch])
+		in1, off = trans[f25*ch:], f25*ch
+	}
+	win := celt.OverlapWindow48()
+	inc := max(48000/d.sampleRate, 1)
+	for i := 0; i < f25; i++ {
+		w := win[i*inc]
+		w = float64(w * w)
+		for c := 0; c < ch; c++ {
+			o := i*ch + c
+			out[off+o] = float64((1.0-w)*in1[o]) + float64(w*out[off+o])
+		}
+	}
+}
+
 func (d *Decoder) decodeRedundancy(frame []byte, pktChannels, endBand int, carryState bool) ([]float64, uint32, *celt.Decoder) {
 	if len(frame) < 2 {
 		return nil, 0, nil
@@ -4122,6 +4176,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 	const rateKHz = 16 // hybrid SILK layer is always wideband
 	ri := silkRateIdx(rateKHz)
 	ci := pktChannels - 1
+	d.resetSILKAfterCELT()
 	d.switchSILKRate(ri)
 	frameDurationMs := silkConfigFrameMs(config) // 10 (even config) or 20 (odd)
 
@@ -4250,6 +4305,12 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 			}
 		}
 
+		// A switch from CELT without redundancy conceals 5 ms in the old mode.
+		var trans []float64
+		if frameMode == framing.ModeCELTOnly && !redundancy {
+			trans = d.transitionPLC(samplesPerFrame / d.channels)
+		}
+
 		// CELT high-band layer continues from the same range decoder; a mode
 		// change discards the previous CELT state unless the previous frame
 		// ended with a redundant frame.
@@ -4278,6 +4339,9 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 			}
 			if len(leadingRedundancy) >= (d.sampleRate/200)*d.channels && (frameMode != framing.ModeSILKOnly || frameRedundancy) {
 				d.crossfadeLeadingRedundancy(silkOut, leadingRedundancy)
+			}
+			if trans != nil {
+				d.applyTransition(silkOut, trans)
 			}
 
 			// SILK->CELT redundancy: decode the trailing 5 ms (F5=240 @ 48k) CELT
@@ -4470,6 +4534,26 @@ func (d *Decoder) celtSilenceFade(pcm []float64, pktChannels, endBand int) {
 	for i := 0; i < len(out) && i < len(pcm); i++ {
 		pcm[i] = float64(float32(pcm[i]) + float32(out[i]))
 	}
+}
+
+// resetSILKAfterCELT is silk_ResetDecoder on a SILK or hybrid frame after a
+// CELT-only frame: every SILK decoder, the stereo state and sMid are
+// cleared, and the resamplers are reinitialised by the following set_fs.
+func (d *Decoder) resetSILKAfterCELT() {
+	if d.prevMode != framing.ModeCELTOnly {
+		return
+	}
+	for ri := range d.silkDecoders {
+		for _, info := range d.silkDecoders[ri] {
+			if info != nil && info.dec != nil {
+				info.dec.ResetAfterCELT()
+			}
+		}
+	}
+	d.silkRS = [2]*silk.Resampler{}
+	d.silkRSInKHz = [2]int{}
+	d.silkSMid = [2]int16{}
+	d.silkActiveRi = -1
 }
 
 // switchSILKRate hands the SILK decoder state to the decoders of internal

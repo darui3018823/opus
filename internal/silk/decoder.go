@@ -2464,6 +2464,17 @@ func (d *Decoder) Reset() {
 	}
 }
 
+// ResetAfterCELT is opus_decode_frame's silk_ResetDecoder when a SILK or
+// hybrid frame follows a CELT-only frame, together with the
+// silk_decoder_set_fs that follows it (the cleared rate always differs).
+func (d *Decoder) ResetAfterCELT() {
+	d.Reset()
+	d.applySetFsReset()
+	if d.side != nil {
+		d.side.applySetFsReset()
+	}
+}
+
 // AdoptAfterRateSwitch is silk_decoder_set_fs on an internal rate change,
 // for a decoder of the new rate taking over from prev (the decoder of the
 // previous rate): libopus keeps one decoder state, so the gain, loss and

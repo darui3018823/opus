@@ -545,11 +545,31 @@ func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
 }
 
 // encodeFloat is the internal encoding path shared by Encode and EncodeFloat.
+// Under the libopus policy a packet padding request (SetPacketPadding) is
+// applied to the finished packet of any mode: its frames are repacked as a
+// padded code-3 packet.
+func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
+	pkt, err := e.encodeFloatPacket(pcm, frameSize)
+	if err != nil || !e.libopusModePolicy || e.padBytes <= 0 || len(pkt) == 0 {
+		return pkt, err
+	}
+	toc, frames, _, err := PacketParse(pkt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pad packet: %w", err)
+	}
+	payload, err := packOpusFramesCode3(frames, e.rateMode != celt.RateModeCBR, true, e.padBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to pad packet: %w", err)
+	}
+	return append([]byte{toc | 3}, payload...), nil
+}
+
+// encodeFloatPacket codes one packet.
 //
 // Short 2.5/5/10 ms requests use their corresponding CELT geometry. Requests
 // that are exact multiples (1..6) of the 20 ms base are split into consecutive
 // 20 ms frames and packed as one Opus packet (RFC 6716 §3.2).
-func (e *Encoder) encodeFloat(pcm []float64, frameSize int) ([]byte, error) {
+func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error) {
 	// The Go policy codes a forced-mono stereo input with a separate mono
 	// encoder. libopus instead keeps its one encoder and codes a mono stream
 	// (stream_channels = force_channels, the CELT MDCT and SILK mid averaged

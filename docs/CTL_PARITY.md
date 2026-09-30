@@ -83,6 +83,7 @@ marked `Out of scope` rather than treated as core parity.
 | `opus_packet_get_nb_channels` | Present | Partial | `PacketGetNumChannels`; complete-framing validation is intentionally stricter |
 | `opus_packet_get_nb_frames` | Present | Partial | `PacketGetNumFrames`; complete-framing validation is intentionally stricter |
 | `opus_packet_get_nb_samples` / `opus_decoder_get_nb_samples` | Present | Partial | `PacketGetNumSamples`; full framing and 120 ms duration validation are stricter |
+| `opus_packet_parse` | Present | Equivalent | `PacketParse`; frames alias the packet; libopus comparison on the official vectors and random/malformed packets |
 | Complete packet inspection | Present | Equivalent within Go API | `InspectPacket` validates once and returns all TOC-derived packet metadata at a requested output rate |
 | `opus_packet_has_lbrr` | Present | Equivalent | `PacketHasLBRR`; packed-packet tests inspect the recoverable first frame |
 | `opus_pcm_soft_clip` | Present | Equivalent | `SoftClipFloat32`; argument, continuity, and bounded-output tests |

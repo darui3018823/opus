@@ -95,6 +95,9 @@ Public packet inspection entry points:
 - `PacketGetNumFrames(packet []byte) (int, error)`
 - `PacketGetSamplesPerFrame(packet []byte, sampleRate int) (int, error)`
 - `PacketGetNumSamples(packet []byte, sampleRate int) (int, error)`
+- `PacketParse(packet []byte) (toc byte, frames [][]byte, payloadOffset int, err error)`
+  (`opus_packet_parse`; frames alias the packet; accepts and rejects exactly
+  the packets libopus does, `TestCGOPacketParseMatchesLibopus`)
 - `PacketHasLBRR(packet []byte) (bool, error)`
 - `SoftClipFloat32(pcm []float32, channels int, mem []float32) error`
 - `NewRepacketizer() *Repacketizer`

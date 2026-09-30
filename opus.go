@@ -935,6 +935,11 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 		}
 		return out, err
 	}
+	// CELT_SET_END_BAND and CELT_SET_CHANNELS come before the mode-switch
+	// reset and prefill (opus_encode_frame_native).
+	e.celtEncoder.SetEndBand(celtEndBandForFramingBW(bw))
+	streamChannels := e.celtStreamChannels()
+	e.celtEncoder.SetStreamChannels(streamChannels)
 	if e.libopusModePolicy {
 		// A CELT-only packet after a SILK/hybrid one (only possible below
 		// 10 ms, where the switch is not deferred) starts from a reset,
@@ -962,8 +967,6 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 	// actual signal, so a source with no high-frequency energy is coded in a
 	// narrower band rather than wasting bits. The detection runs once over the whole
 	// input PCM, so every frame in a packet still shares the same bandwidth/config.
-	e.celtEncoder.SetEndBand(celtEndBandForFramingBW(bw))
-	streamChannels := e.celtStreamChannels()
 	tocFrameSize := framing.FrameSize20ms
 	if short {
 		tocFrameSize = e.internalFrameSize

@@ -173,3 +173,65 @@ func TestInbandFECAcrossFrameDurationSwitch(t *testing.T) {
 		}
 	}
 }
+
+// TestResetMatchesFreshEncoder checks that Reset clears what OPUS_RESET_STATE
+// clears: after Reset the encoder codes the same packets as a new encoder
+// with the same settings, including across mode switches with mixed packet
+// durations (the CELT prefill of a switch uses the new packet's stream
+// channels, not those left by earlier packets).
+func TestResetMatchesFreshEncoder(t *testing.T) {
+	type cfg struct {
+		rate, channels, bitrate int
+		app                     Application
+	}
+	durations := []int{20, 20, 20, 20, 20, 20, 5, 5, 20, 10, 20, 2, 20}
+	for _, c := range []cfg{{8000, 2, 16000, ApplicationAudio}, {16000, 2, 24000, ApplicationVOIP}, {48000, 2, 20000, ApplicationAudio}, {48000, 1, 12000, ApplicationVOIP}} {
+		newEnc := func() *Encoder {
+			enc, err := NewEncoder(c.rate, c.channels, c.app)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := enc.SetBitrate(c.bitrate); err != nil {
+				t.Fatal(err)
+			}
+			if err := enc.SetComplexity(8); err != nil {
+				t.Fatal(err)
+			}
+			enc.SetDTX(true)
+			// Without in-band FEC: OPUS_RESET_STATE keeps silk_mode, so
+			// decide_fec's hysteresis (LBRR_coded) survives a reset.
+			enc.SetPacketLossPerc(12)
+			return enc
+		}
+		run := func(enc *Encoder, start int) [][]byte {
+			var out [][]byte
+			pos := start
+			for _, ms := range durations {
+				n := c.rate * ms / 1000
+				if ms == 2 {
+					n = c.rate / 400
+				}
+				pcm := strictSpeechLikeFrame(c.rate, c.channels, pos, n)
+				pos += n
+				pkt, err := enc.EncodeFloat(pcm, n)
+				if err != nil {
+					t.Fatal(err)
+				}
+				out = append(out, pkt)
+			}
+			return out
+		}
+		used := newEnc()
+		run(used, 50000)
+		if err := used.Reset(); err != nil {
+			t.Fatal(err)
+		}
+		got := run(used, 0)
+		want := run(newEnc(), 0)
+		for i := range want {
+			if string(got[i]) != string(want[i]) {
+				t.Fatalf("%+v: packet %d after Reset differs from a new encoder (TOC %#x vs %#x)", c, i, got[i][0], want[i][0])
+			}
+		}
+	}
+}

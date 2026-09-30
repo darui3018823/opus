@@ -84,6 +84,9 @@ type celtOracleFrame struct {
 	bandLogE    []float32
 	packet      []byte
 	havePacket  bool
+	// rng is OPUS_GET_FINAL_RANGE after the packet (--auto-enc only).
+	rng     uint32
+	haveRng bool
 }
 
 var (
@@ -287,6 +290,13 @@ func runCELTOracleCmdWithStderr(t *testing.T, fixture string, args ...string) ([
 			}
 			out[cur].packet = pkt
 			out[cur].havePacket = true
+		case strings.HasPrefix(line, "[ENC_RNG]"):
+			v, err := strconv.ParseUint(strings.TrimPrefix(line, "[ENC_RNG] rng="), 16, 32)
+			if err != nil {
+				t.Fatalf("parse final range: %s", line)
+			}
+			out[cur].rng = uint32(v)
+			out[cur].haveRng = true
 		}
 	}
 	return out, stderr.String()

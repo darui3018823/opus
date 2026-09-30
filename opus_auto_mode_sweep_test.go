@@ -410,6 +410,13 @@ func runSweepCell(t *testing.T, c sweepCell) bool {
 		}
 	}
 	frameSize := c.rate * c.frameUs / 1000000
+	// OPUS_GET_FINAL_RANGE after every packet must be libopus's, from the
+	// encoder and from a decoder of the packet.
+	dec, err := NewDecoder(c.rate, c.channels)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rangeMismatch := -1
 	identical, firstDiff := 0, -1
 	bitrate := c.bitrate
 	for f := 0; f < c.frames; f++ {
@@ -447,9 +454,17 @@ func runSweepCell(t *testing.T, c sweepCell) bool {
 		if err != nil {
 			t.Fatalf("frame %d: %v", f, err)
 		}
+		if _, err := dec.DecodeFloat(pkt); err != nil {
+			t.Fatalf("frame %d: decode: %v", f, err)
+		}
 		r := ref[f]
-		if !r.havePacket {
+		if !r.havePacket || !r.haveRng {
 			t.Fatalf("frame %d: incomplete oracle trace", f)
+		}
+		if rangeMismatch < 0 && (enc.FinalRange() != r.rng || dec.FinalRange() != r.rng) {
+			rangeMismatch = f
+			t.Logf("frame %d (%d B): final range libopus %08x, Go encoder %08x, Go decoder %08x",
+				f, len(pkt), r.rng, enc.FinalRange(), dec.FinalRange())
 		}
 		if bytes.Equal(pkt, r.packet) {
 			identical++
@@ -458,6 +473,10 @@ func runSweepCell(t *testing.T, c sweepCell) bool {
 			t.Logf("frame %d: Go %d B TOC %#x / C %d B TOC %#x\ngo % x\nc  % x", f, len(pkt), pkt[0], len(r.packet), r.packet[0],
 				pkt[:min(len(pkt), 24)], r.packet[:min(len(r.packet), 24)])
 		}
+	}
+	if rangeMismatch >= 0 {
+		t.Errorf("final range differs from libopus from frame %d", rangeMismatch)
+		return false
 	}
 	if identical != c.frames {
 		t.Errorf("%d/%d packets byte-identical (first difference at frame %d)", identical, c.frames, firstDiff)

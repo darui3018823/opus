@@ -571,6 +571,11 @@ static int run_auto_encoder_oracle(int argc, char **argv)
         fprintf(stderr, "[ENC_PACKET] n=%d", n);
         for (b = 0; b < n; b++) fprintf(stderr, " %02x", packet[b]);
         fprintf(stderr, "\n");
+        {
+            opus_uint32 rng = 0;
+            opus_encoder_ctl(enc, OPUS_GET_FINAL_RANGE(&rng));
+            fprintf(stderr, "[ENC_RNG] rng=%08x\n", (unsigned)rng);
+        }
     }
     oracle_trace_enabled = 0;
     opus_encoder_destroy(enc);

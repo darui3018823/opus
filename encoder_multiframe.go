@@ -114,15 +114,23 @@ func (e *Encoder) encodeMultiframeLibopus(raw []float64, frameSize, nFrames, max
 	// opus_repacketizer_out_range_impl: the frames share the TOC; code 1 for
 	// two equal frames, code 2 otherwise, code 3 (CBR or VBR flag) for more,
 	// padded to the CBR size when the rate is constant.
+	// Like opus_repacketizer_cat, each frame packet is parsed, which drops
+	// a CBR frame's own padding.
 	toc := frames[0][0] &^ 0x03
-	payloads := make([][]byte, nFrames)
-	allEqual := true
-	for i, f := range frames {
+	payloads := make([][]byte, 0, nFrames)
+	for _, f := range frames {
 		if f[0]&^0x03 != toc {
 			return nil, fmt.Errorf("multi-frame packet mixes TOCs %#x and %#x", toc, f[0]&^0x03)
 		}
-		payloads[i] = f[1:]
-		if len(f) != len(frames[0]) {
+		_, fs, _, err := PacketParse(f)
+		if err != nil {
+			return nil, fmt.Errorf("multi-frame packet: %w", err)
+		}
+		payloads = append(payloads, fs...)
+	}
+	allEqual := true
+	for _, p := range payloads {
+		if len(p) != len(payloads[0]) {
 			allEqual = false
 		}
 	}

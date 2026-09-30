@@ -109,10 +109,10 @@ func (c sweepCell) oracleOptions() string {
 }
 
 // TestAutoModeOracleSweep checks ModePolicyLibopus against the libopus
-// oracle over a broad matrix (2340 cells) beyond the traced gate tests: every
+// oracle over a broad matrix (3180 cells) beyond the traced gate tests: every
 // bitrate step, CBR / constrained / unconstrained VBR, complexities 0-10, the
 // "auto" signal hint with the tonality analysis, 8-24 kHz input, 40-120 ms
-// packets, forced / capped bandwidths, forced mono, int16 input and a
+// packets (CBR and CVBR), forced / capped bandwidths, forced mono, int16 input and a
 // reduced LSB depth, and DTX / FEC away from 16/48 kHz. The oracle runs
 // without its traces, so the whole sweep takes seconds; cells run in
 // parallel and a mismatching cell fails its subtest.
@@ -164,6 +164,19 @@ func TestAutoModeOracleSweep(t *testing.T) {
 						for _, cpx := range []int{5, 9} {
 							add("frames", sweepCell{rate: rate, channels: ch, bitrate: kbps * 1000, complexity: cpx, frameUs: frameMs * 1000, vbr: true, constrained: true, signal: signal, app: "voip"})
 						}
+					}
+				}
+			}
+		}
+	}
+	// Repacketized multi-frame packets in CBR: every frame packet is padded
+	// to its budget and the repacketizer drops that padding.
+	for _, frameMs := range []int{40, 60, 80, 100, 120} {
+		for _, rate := range []int{8000, 12000, 16000, 48000} {
+			for _, ch := range []int{1, 2} {
+				for _, kbps := range []int{12, 24, 64} {
+					for _, signal := range []string{"voice", "music"} {
+						add("framescbr", sweepCell{rate: rate, channels: ch, bitrate: kbps * 1000, complexity: 5, frameUs: frameMs * 1000, signal: signal, app: "voip"})
 					}
 				}
 			}
@@ -295,7 +308,7 @@ func TestAutoModeOracleSweep(t *testing.T) {
 		}
 	}
 
-	for _, group := range []string{"core", "rates", "frames", "forced", "input", "fec", "dtx", "short", "short-transitions", "short-dtx", "short-fec", "restricted"} {
+	for _, group := range []string{"core", "rates", "frames", "framescbr", "forced", "input", "fec", "dtx", "short", "short-transitions", "short-dtx", "short-fec", "restricted"} {
 		cells := groups[group]
 		var bad atomic.Int32
 		t.Run(group, func(t *testing.T) {
@@ -432,7 +445,8 @@ func runSweepCell(t *testing.T, c sweepCell) bool {
 			identical++
 		} else if firstDiff < 0 {
 			firstDiff = f
-			t.Logf("frame %d: Go %d B TOC %#x / C %d B TOC %#x", f, len(pkt), pkt[0], len(r.packet), r.packet[0])
+			t.Logf("frame %d: Go %d B TOC %#x / C %d B TOC %#x\ngo % x\nc  % x", f, len(pkt), pkt[0], len(r.packet), r.packet[0],
+				pkt[:min(len(pkt), 24)], r.packet[:min(len(r.packet), 24)])
 		}
 	}
 	if identical != c.frames {

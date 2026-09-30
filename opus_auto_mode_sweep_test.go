@@ -109,7 +109,7 @@ func (c sweepCell) oracleOptions() string {
 }
 
 // TestAutoModeOracleSweep checks ModePolicyLibopus against the libopus
-// oracle over a broad matrix (3204 cells) beyond the traced gate tests: every
+// oracle over a broad matrix (3252 cells) beyond the traced gate tests: every
 // bitrate step, CBR / constrained / unconstrained VBR, complexities 0-10, the
 // "auto" signal hint with the tonality analysis, 8-24 kHz input, 40-120 ms
 // packets (CBR and CVBR), forced / capped bandwidths, forced mono, int16 input and a

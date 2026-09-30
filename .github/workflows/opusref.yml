@@ -77,7 +77,7 @@ jobs:
         # CELT-only, hybrid, SILK, automatic mode, mode transitions, FEC and
         # DTX packets must stay byte-identical to libopus 1.6.1.
         # The decoder's PLC and official-vector PCM must stay sample-exact.
-        run: go test -tags opusref -count=1 -timeout 60m -run '^(TestCELTEncoderOracle|TestHybridEncoderOracle|TestSILKEncoder(InputPipeline|Stereo)Oracle.*|TestAutoModeOracle|TestAutoModeOracleSweep|TestAutoModeTransitionOracle|TestDTXOracle|TestMultistreamEncoderOracle|TestDecoderPLCOracle|TestDecoderVectorOracle)$' .
+        run: go test -tags opusref -count=1 -timeout 60m -run '^(TestCELTEncoderOracle|TestHybridEncoderOracle|TestSILKEncoder(InputPipeline|Stereo)Oracle.*|TestAutoModeOracle|TestAutoModeOracleSweep|TestAutoModeTransitionOracle|TestDTXOracle|TestMultistreamEncoderOracle|TestDecoderPLCOracle|TestDecoderVectorOracle|TestDecoderShortFrameOracle)$' .
 
       - name: Decoder reference (12/12 vectors)
         run: go test -tags opusref -count=1 -run TestCGORef .

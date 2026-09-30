@@ -677,7 +677,11 @@ Current decoder behavior and limitations:
   `celt_decode_lost` (pitch-based and noise concealment, `prefilter_and_fold`,
   the loss-duration and background-energy state), and the public PLC output
   for CELT, SILK and hybrid streams with loss masks is sample-exact against
-  libopus (`TestDecoderPLCOracle`).
+  libopus (`TestDecoderPLCOracle`). Frames of at most one byte (DTX packets,
+  libopus's "PLC frames") are concealed in the previous mode, which stays the
+  mode later concealment and mode switches continue from, whatever the TOC
+  says; streams mixing them with SILK, hybrid and CELT packets decode
+  sample-exact (`TestDecoderShortFrameOracle`).
   A SILK payload of at most one byte is treated as a lost frame and concealed,
   reporting a zero final range, exactly as `opus_decode_frame` does; the
   encoder reports zero for such frames too. A SILK-only or hybrid packet ending in trailing
@@ -1108,7 +1112,7 @@ DTX follows libopus under `ModePolicyLibopus`: the generalized DTX
 SILK's own DTX when the tonality analysis is off (`TestDTXOracle`, 48 cells
 byte-identical). Multi-frame packets read the tonality analysis per 20 ms
 frame as libopus does. Under `ModePolicyLegacy` DTX keeps the Go encoder's
-minimal silent packets. `TestAutoModeOracleSweep` extends the gate to 3204
+minimal silent packets. `TestAutoModeOracleSweep` extends the gate to 3252
 configurations (all bitrate steps, CBR / CVBR / unconstrained VBR,
 complexities 0–10, the auto signal hint, 8–24 kHz input, 40–120 ms packets
 in CBR and CVBR, forced and capped bandwidths, forced mono, int16 input, LSB

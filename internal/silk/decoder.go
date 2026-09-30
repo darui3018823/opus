@@ -2464,6 +2464,47 @@ func (d *Decoder) Reset() {
 	}
 }
 
+// AdoptAfterRateSwitch is silk_decoder_set_fs on an internal rate change,
+// for a decoder of the new rate taking over from prev (the decoder of the
+// previous rate): libopus keeps one decoder state, so the gain, loss and
+// excitation history, the PLC and CNG states (reset at their next use as
+// their rate differs) and the stereo state continue, while set_fs restarts
+// the frame (first frame after reset, lag 100, gain index 10, no voice
+// activity) and clears the synthesis buffers.
+func (d *Decoder) AdoptAfterRateSwitch(prev *Decoder) {
+	if prev == nil || prev == d {
+		return
+	}
+	d.prevGainQ16 = prev.prevGainQ16
+	d.lossCnt = prev.lossCnt
+	d.excQ14 = prev.excQ14
+	d.randSeed = prev.randSeed
+	d.plc = prev.plc
+	d.cng = prev.cng
+	d.stereoPredPrevQ13 = prev.stereoPredPrevQ13
+	d.stereoSide = prev.stereoSide
+	d.prevDecodeOnlyMiddle = prev.prevDecodeOnlyMiddle
+	d.applySetFsReset()
+	if d.side != nil {
+		if prev.side != nil {
+			d.side.AdoptAfterRateSwitch(prev.side)
+		} else {
+			d.side.applySetFsReset()
+		}
+	}
+}
+
+// applySetFsReset is the part of silk_decoder_set_fs that restarts the
+// decoder at a new internal rate.
+func (d *Decoder) applySetFsReset() {
+	d.firstFrame = true
+	d.lagPrev = 100
+	d.prevGainIndex = 10
+	d.prevSignalType = SignalTypeInactive
+	clear(d.lpcState)
+	clear(d.ltpState)
+}
+
 // CopyPrimaryStateFrom copies the mono/mid-channel decoder state from src.
 // Stereo side-channel and M/S predictor state are intentionally left intact.
 func (d *Decoder) CopyPrimaryStateFrom(src *Decoder) {

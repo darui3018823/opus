@@ -2990,6 +2990,10 @@ type Decoder struct {
 	silkRSInKHz        [2]int // current internal rate (kHz) per channel; 0 = uninitialized
 	silkSMid           [2]int16
 	silkStereoDec      *silk.Decoder
+	// silkActiveRi is the SILK internal rate index of the last decoded
+	// SILK layer (-1 before any): libopus has one SILK decoder state, so a
+	// rate change hands the state to the new rate's decoders.
+	silkActiveRi int
 	prevSilkInternalCh int // previous packet's SILK internal channel count (0 = none yet)
 
 	// Resampler for non-48kHz CELT output rates
@@ -3062,6 +3066,7 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 		internalFrameSize: internalFrameSize,
 		prevMode:          -1,
 		lastPacketConfig:  -1,
+		silkActiveRi:      -1,
 	}
 
 	// Create CELT decoders for all 4 bandwidths × 4 frame sizes × 2 channel counts.
@@ -3857,6 +3862,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 	rateKHz := silkConfigRateKHz(config)
 	ri := silkRateIdx(rateKHz)
 	ci := pktChannels - 1
+	d.switchSILKRate(ri)
 
 	// Determine Opus frame duration and SILK sub-frames per Opus frame
 	frameDurationMs := silkConfigFrameMs(config)
@@ -4109,6 +4115,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 	const rateKHz = 16 // hybrid SILK layer is always wideband
 	ri := silkRateIdx(rateKHz)
 	ci := pktChannels - 1
+	d.switchSILKRate(ri)
 	frameDurationMs := silkConfigFrameMs(config) // 10 (even config) or 20 (odd)
 
 	// CELT band range: hybrid SWB (config 12,13) -> end 19; FB (14,15) -> end 21.
@@ -4424,6 +4431,26 @@ func (d *Decoder) resampleSILK(pcm []float64, nFrames, pktChannels int, stereoTo
 		}
 	}
 	return interleaveSILKOut(outL, outR, d.channels)
+}
+
+// switchSILKRate hands the SILK decoder state to the decoders of internal
+// rate index ri when the rate changes (silk_decoder_set_fs).
+func (d *Decoder) switchSILKRate(ri int) {
+	if d.silkActiveRi >= 0 && d.silkActiveRi != ri {
+		ci := max(d.prevSilkInternalCh, 1) - 1
+		prev := d.silkDecoders[d.silkActiveRi][ci]
+		if prev == nil || prev.dec == nil {
+			prev = d.silkDecoders[d.silkActiveRi][0]
+		}
+		if prev != nil && prev.dec != nil {
+			for c := 0; c < 2; c++ {
+				if n := d.silkDecoders[ri][c]; n != nil && n.dec != nil {
+					n.dec.AdoptAfterRateSwitch(prev.dec)
+				}
+			}
+		}
+	}
+	d.silkActiveRi = ri
 }
 
 // prepareSILKStream hands silk_Decode's shared stereo state to the SILK
@@ -4895,6 +4922,7 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	}
 	ri := silkRateIdx(rateKHz)
 	ci := info.channels - 1
+	d.switchSILKRate(ri)
 	infoDec := d.silkDecoders[ri][ci]
 	if infoDec == nil || infoDec.dec == nil {
 		return nil, 0, fmt.Errorf("%w: SILK decoder for %d kHz", ErrInvalidState, rateKHz)
@@ -5005,6 +5033,7 @@ func (d *Decoder) cloneState() (*Decoder, error) {
 	clone.prevSilkInternalCh = d.prevSilkInternalCh
 	clone.silkRSInKHz = d.silkRSInKHz
 	clone.silkSMid = d.silkSMid
+	clone.silkActiveRi = d.silkActiveRi
 	clone.silkStereoDec = nil
 
 	for bw := range d.celtDecoders {
@@ -5100,6 +5129,7 @@ func (d *Decoder) Reset() error {
 	d.silkRSInKHz[0] = 0
 	d.silkRSInKHz[1] = 0
 	d.silkSMid = [2]int16{}
+	d.silkActiveRi = -1
 	d.prevSilkInternalCh = 0
 	d.lastPacketDuration = d.frameSize
 	if d.celtResampler != nil {

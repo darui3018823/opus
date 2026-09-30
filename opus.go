@@ -3915,7 +3915,15 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 	var rangeFinal uint32
 	trailingRedundancy := false
 	redundancyEndBand := celtEndBandForFramingBW(config / 4)
+	// prevModeRedundancy is (prev_mode != MODE_SILK_ONLY || prev_redundancy)
+	// for the frame being decoded: a leading CELT->SILK redundant frame is
+	// only cross-faded in after a CELT/hybrid frame or a trailing redundant
+	// frame (the SILK bandwidth switch).
+	prevModeRedundancy := d.prevMode != framing.ModeSILKOnly || d.prevRedundancy
 	for si, stream := range silkStreams {
+		if si > 0 {
+			prevModeRedundancy = trailingRedundancy
+		}
 		// opus_decode_native replaces prev_redundancy for every constituent
 		// frame, so only a trailing redundancy frame on the final stream remains.
 		trailingRedundancy = false
@@ -3984,7 +3992,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 				redundantRange = redRange
 				d.lastCeltDec = redDec
 				if celtToSilk {
-					if si == 0 && d.prevMode != framing.ModeSILKOnly {
+					if prevModeRedundancy {
 						d.crossfadeLeadingRedundancy(pcm, redPCM)
 					}
 				} else {
@@ -4158,7 +4166,13 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 	// than being XORed with preceding frames from the same stream.
 	var rangeFinal uint32
 	trailingRedundancy := false
+	// prevMode / prevRedundancy of the frame being decoded (libopus updates
+	// them per constituent frame).
+	frameMode, frameRedundancy := d.prevMode, d.prevRedundancy
 	for si, stream := range silkStreams {
+		if si > 0 {
+			frameMode, frameRedundancy = framing.ModeHybrid, trailingRedundancy
+		}
 		// libopus replaces prev_redundancy for every constituent frame. An
 		// unreadable final frame must therefore clear an earlier frame's value.
 		trailingRedundancy = false
@@ -4211,13 +4225,21 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		var leadingRedundancy []float64
 		var redundantRange uint32
 		if redundancy && celtToSilk && redundancyBytes >= 2 && celtLen+redundancyBytes <= len(stream) {
-			leadingRedundancy, redundantRange, _ = d.decodeRedundancy(
+			// The CELT->SILK redundant frame is decoded first, from (and
+			// advancing) the persistent CELT state.
+			var redDec *celt.Decoder
+			leadingRedundancy, redundantRange, redDec = d.decodeRedundancy(
 				stream[celtLen:celtLen+redundancyBytes], pktChannels, celtEnd, true,
 			)
+			if redDec != nil {
+				d.lastCeltDec = redDec
+			}
 		}
 
-		// CELT high-band layer continues from the same range decoder.
-		if celtToSilk && d.prevMode == framing.ModeCELTOnly {
+		// CELT high-band layer continues from the same range decoder; a mode
+		// change discards the previous CELT state unless the previous frame
+		// ended with a redundant frame.
+		if frameMode >= 0 && frameMode != framing.ModeHybrid && !frameRedundancy {
 			celtDec.Reset()
 		} else if d.lastCeltDec != nil && d.lastCeltDec != celtDec {
 			celtDec.CopyStateFrom(d.lastCeltDec)
@@ -4240,7 +4262,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 				}
 				silkOut[i] = v
 			}
-			if len(leadingRedundancy) >= (d.sampleRate/200)*d.channels && d.prevMode != framing.ModeSILKOnly {
+			if len(leadingRedundancy) >= (d.sampleRate/200)*d.channels && (frameMode != framing.ModeSILKOnly || frameRedundancy) {
 				d.crossfadeLeadingRedundancy(silkOut, leadingRedundancy)
 			}
 

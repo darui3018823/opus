@@ -175,10 +175,17 @@ func (e *Encoder) ControlAudioBandwidth(desiredFsHz int, opusCanSwitch bool, pay
 		e.maxBits -= e.maxBits * 5 / (payloadMs + 5)
 	}
 	if e.channels == 2 && e.streamChannels == 2 && e.side != nil {
+		// silk_control_encoder hands both channels silk_Encode's single
+		// allowBandwidthSwitch.
+		e.side.allowBandwidthSwitch = e.allowBandwidthSwitch
 		if _, ready := e.side.controlAudioBandwidthState(desiredFsHz, opusCanSwitch); ready {
 			e.maxBits -= e.maxBits * 5 / (payloadMs + 5)
 			switchReady = true
 		}
+	}
+	if e.side != nil {
+		// encControl->maxBits is one value for both channels.
+		e.side.maxBits = e.maxBits
 	}
 	return fsKHz, switchReady
 }

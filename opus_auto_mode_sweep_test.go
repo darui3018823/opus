@@ -307,6 +307,28 @@ func TestAutoModeOracleSweep(t *testing.T) {
 			}
 		}
 	}
+	// Stereo input coded as a mono SILK stream, then CELT-only: the CELT
+	// prefill of the switch runs with the new packet's stream channels.
+	for _, frameUs := range []int{10000, 20000} {
+		frames := 240000 / frameUs
+		for _, rate := range []int{8000, 16000, 48000} {
+			for _, app := range []string{"voip", "audio"} {
+				for _, dtx := range []bool{false, true} {
+					for _, sched := range [][2]int{{8000, 64000}, {12000, 96000}} {
+						schedule := make([]int, frames)
+						for i := range schedule {
+							schedule[i] = sched[0]
+							if i >= frames/2 {
+								schedule[i] = sched[1]
+							}
+						}
+						add("stereo-mono-celt", sweepCell{rate: rate, channels: 2, bitrate: sched[0], schedule: schedule, complexity: 8,
+							frameUs: frameUs, frames: frames, signal: "voice", app: app, dtx: dtx, fixture: "ref-speech-gaps"})
+					}
+				}
+			}
+		}
+	}
 	// DTX in CBR, where the packets before DTX starts are padded.
 	for _, rate := range []int{16000, 48000} {
 		for _, ch := range []int{1, 2} {
@@ -318,7 +340,7 @@ func TestAutoModeOracleSweep(t *testing.T) {
 		}
 	}
 
-	for _, group := range []string{"core", "rates", "frames", "framescbr", "forced", "input", "fec", "dtx", "dtxcbr", "short", "short-transitions", "short-dtx", "short-fec", "restricted"} {
+	for _, group := range []string{"core", "rates", "frames", "framescbr", "forced", "input", "fec", "dtx", "dtxcbr", "stereo-mono-celt", "short", "short-transitions", "short-dtx", "short-fec", "restricted"} {
 		cells := groups[group]
 		var bad atomic.Int32
 		t.Run(group, func(t *testing.T) {

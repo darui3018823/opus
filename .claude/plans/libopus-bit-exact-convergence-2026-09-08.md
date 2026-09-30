@@ -1,6 +1,6 @@
 # libopus Bit-Exact Convergence Plan
 
-Last updated: 2026-09-15
+Last updated: 2026-09-30
 Status: Active
 
 ## Objective
@@ -62,7 +62,7 @@ state or entropy divergence.
 | Decoder framing/range | All 12 official vectors now have zero `FinalRange` mismatches against libopus 1.6.1 and their `.bit` records | Retain the all-vector zero-mismatch gate while localizing PCM divergence |
 | int16 decode conversion | Conversion semantics match `FLOAT2INT16`; direct `opus_decode` comparison now reports exact-sample percentage, first/max LSB delta, and range mismatch count | Raise mode-specific exact-sample coverage after range alignment |
 | CELT synthesis | Every normalized-energy, denormalized-spectrum, synthesis, post-filter, and PCM stage hash emitted for the three pure-CELT official vectors (01, 07, and 11) matches the checked-in scalar C source | Extend source-level localization to CELT portions of mixed-mode vectors without conflating SILK/CELT transition state or installed-libopus SIMD drift |
-| SILK synthesis/PLC | Normal-frame synthesis, PLC, CNG, and post-loss glue are sample-exact on the SILK oracles (2026-09-15) | Extend exactness to mixed-mode official vectors and CELT PLC |
+| SILK synthesis/PLC | Normal-frame synthesis, PLC, CNG, and post-loss glue are sample-exact on the SILK oracles (2026-09-15) | Done 2026-09-30: all official vectors and CELT/SILK/hybrid PLC sample-exact |
 | Encoder | Packets interoperate but are not byte-identical | Add mode-specific byte and first-symbol divergence traces |
 | Mode/rate policy | Known partial parity in `docs/MODE_RATE_POLICY_DIFF.md` | Compare decisions and state over identical PCM/control sequences |
 
@@ -1515,3 +1515,24 @@ stays a non-goal.
   configurations are byte-identical.
 - Stale Legacy-era statements in CURRENT_IMPLEMENTATION, CTL_PARITY and
   MODE_RATE_POLICY_DIFF were updated.
+
+### 2026-09-30: decoder PCM sample-exact (`d64454b` .. `83b99d5`)
+
+- CELT PLC ported from `celt_decode_lost` (pitch PLC with the windowed
+  autocorrelation LPC, decay check, `celt_iir` and energy checks; noise PLC
+  from `backgroundLogE`; `prefilter_and_fold`; loss/PLC durations,
+  `skip_plc`, the post-loss energy safety and the background update) with
+  `st->downsample` in place of the CELT output resampler.
+- CELT decoders have the output channels and decode the packet's coded
+  channels (`C` vs `CC`); mono decoders disable phase inversion; sMid is
+  shared between mono and stereo SILK streams; the SILK decoder state
+  continues across internal rate changes (`silk_decoder_set_fs`).
+- `opus_decode_frame` mode-switch logic: redundancy decode order, the CELT
+  reset rule, per-frame `prev_mode`/`prev_redundancy`, the hybrid-to-SILK
+  silence-frame fade-out, the 5 ms transition concealment and fade on
+  CELT<->SILK/hybrid switches without redundancy, `silk_ResetDecoder` after
+  CELT, the side-channel init on mono-to-stereo switches and the partial
+  side reset after mid-only frames.
+- Oracle modes `--dec-plc` and `--dec-bit`; `TestDecoderPLCOracle` and
+  `TestDecoderVectorOracle` (12 vectors x 48k/2, 48k/1, 24k/2, 16k/1, 8k/2)
+  are sample-exact and join the CI gate.

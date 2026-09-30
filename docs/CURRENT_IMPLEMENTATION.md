@@ -649,9 +649,18 @@ Current decoder behavior and limitations:
 
 - All single-stream and multistream int16 decode, PLC, and FEC entry points use
   the floating-point libopus `FLOAT2INT16` conversion order: float32 scaling by
-  32768, saturation to the int16 domain, then nearest-even rounding. This makes
-  the API conversion itself C-faithful; codec synthesis is not yet generally
-  sample-exact with libopus.
+  32768, saturation to the int16 domain, then nearest-even rounding.
+- Since 2026-09-30 the single-stream decoder's int16 PCM is sample-exact
+  against libopus 1.6.1's plain-C float decoder on all 12 official vectors at
+  48 kHz stereo and mono, 24 kHz stereo, 16 kHz mono and 8 kHz stereo output
+  (`TestDecoderVectorOracle`, opus_demo's decode loop in the encoder oracle's
+  `--dec-bit` mode). This covers the libopus `opus_decode_frame` mode-switch
+  logic (CELT reset rule, 5 ms transition concealment and fade, SILK reset
+  after CELT, hybrid-to-SILK CELT fade-out, redundancy ordering, per-frame
+  `prev_mode`/`prev_redundancy`), CELT `C`/`CC` stream-versus-output channels,
+  `st->downsample`, the single SILK decoder state carried across internal
+  rate changes (`silk_decoder_set_fs`), `sStereo.sMid`, the side-channel init
+  on mono-to-stereo switches, and mid-only PLC.
 - `DecodePLC` supports CELT-only, SILK-only, and hybrid streams. Before the
   first successful packet and after reset it returns zero concealment, matching
   libopus. The requested duration may be any positive 2.5 ms multiple through
@@ -663,7 +672,11 @@ Current decoder behavior and limitations:
   comfort noise, the post-loss bandwidth expansion and LTP smoothing, and the
   glue fade-in are sample-exact against libopus 1.6.1 at the SILK internal rate
   (`TestCGOSILKPLCExact`, `TestCGOSILKFECGapExact`,
-  `TestCGOSILKOneBytePayloadExact`). CELT PLC is not bit-exact.
+  `TestCGOSILKOneBytePayloadExact`). CELT PLC is a port of libopus
+  `celt_decode_lost` (pitch-based and noise concealment, `prefilter_and_fold`,
+  the loss-duration and background-energy state), and the public PLC output
+  for CELT, SILK and hybrid streams with loss masks is sample-exact against
+  libopus (`TestDecoderPLCOracle`).
   A SILK payload of at most one byte is treated as a lost frame and concealed,
   reporting a zero final range, exactly as `opus_decode_frame` does; the
   encoder reports zero for such frames too. A SILK-only or hybrid packet ending in trailing
@@ -1500,9 +1513,9 @@ reference comparison.
   remain future measured candidates.
 - Decoder conformance and reference validation passes the official vectors and
   the covered libopus comparisons. The remaining compatibility gaps are the
-  default encoder policy (Legacy; libopus parity is opt-in), CELT PLC and
-  some mixed-mode decoder samples that are not sample-exact, and parity with
-  a libopus built with SIMD kernels (a non-goal).
+  default encoder policy (Legacy; libopus parity is opt-in) and parity with
+  a libopus built with SIMD kernels (a non-goal). Decoder PCM, including PLC,
+  is sample-exact against the plain-C libopus float decoder.
 
 ## Practical Use Today
 

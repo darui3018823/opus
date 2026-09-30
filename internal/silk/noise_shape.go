@@ -10,7 +10,6 @@ const (
 	silkHarmShapeFIRTaps     = 3
 	silkDecisionDelay        = 40
 	silkQuantLevelAdjustQ10  = 80
-	silkWarpingMultiplier    = 0.015
 	shapeWhiteNoiseFraction  = 3e-5
 	shapeBandwidthExpansion  = 0.94
 	findPitchWhiteNoiseFrac  = 1e-3

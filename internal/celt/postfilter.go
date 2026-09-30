@@ -13,19 +13,6 @@ const (
 	combFilterMaxPeriod = 1024
 )
 
-// pfGainTable maps 3-bit gain index (0..7) to the gain scalar used in
-// the comb filter.  From libopus celt_decoder.c COMBFILTER_GAIN_TABLE.
-var pfGainTable = [8]float64{
-	0.09375, // 6/64
-	0.125,   // 8/64
-	0.15625, // 10/64
-	0.1875,  // 12/64
-	0.25,    // 16/64
-	0.3125,  // 20/64
-	0.375,   // 24/64
-	0.4375,  // 28/64
-}
-
 // PostFilter implements RFC 6716 §5.4.1 comb (pitch) post-filter.
 // It is applied after IMDCT in the decoder.
 type PostFilter struct {
@@ -81,13 +68,6 @@ func (pf *PostFilter) copyFrom(src *PostFilter) {
 // Matches libopus tapset_icdf = {2, 1, 0} in celt/celt.h.
 // P(tapset=0)=1/2, P(tapset=1)=1/4, P(tapset=2)=1/4.
 var tapsetIcdf = [3]uint8{2, 1, 0}
-
-// tapGains[tapset][tap] where taps are [g0, g1, g2] normalized to 1.0 gain.
-var tapGains = [3][3]float64{
-	{0, 1, 0},       // tapset=0: single tap
-	{0.5, 1, 0.5},   // tapset=1: 3-tap symmetric, flanks at 0.5
-	{0.25, 1, 0.25}, // tapset=2: wider 3-tap
-}
 
 // pfCombGains are the synthesis tap weights per tapset, from libopus comb_filter
 // (celt/celt.c gains[3][3]). Index [tapset][tap].

@@ -258,27 +258,6 @@ func (ra *RateAllocator) ApplyAllocation(result *AllocationResult, bitAlloc *Bit
 	}
 }
 
-// VerifyAllocationMatch compares our allocation against expected libopus output.
-// Returns match percentage (0.0 to 1.0) and list of mismatches.
-func VerifyAllocationMatch(ours, expected []int) (float64, []int) {
-	if len(ours) != len(expected) {
-		return 0.0, nil
-	}
-
-	matches := 0
-	mismatches := make([]int, 0)
-
-	for i := range ours {
-		if ours[i] == expected[i] {
-			matches++
-		} else {
-			mismatches = append(mismatches, i)
-		}
-	}
-
-	return float64(matches) / float64(len(ours)), mismatches
-}
-
 // numAllocLevels is the number of columns in BandAllocation (k=0..10).
 const numAllocLevels = 11
 
@@ -319,23 +298,6 @@ func computeAllocationScratch(
 	offsets []int, sc *allocScratch,
 ) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
 	return computeAllocationShared(dec, nil, end, false, numBands, start, end, lm, ch, allocTrim, available, offsets, 0, end-1, sc)
-}
-
-// computeAllocationEncode is the encoder-side entry point. encIntensity and
-// encDualStereo are the encoder's chosen stereo parameters (written to the
-// stream); they are returned (possibly clamped) so quant_all_bands uses the same
-// values the decoder will read.
-// computeAllocationEncode is clt_compute_allocation(encode=1). prev is the
-// previous frame's coded band count (st->lastCodedBands, 0 on the first
-// frame) and signalBandwidth the last band the signal analysis considers
-// worth coding (end-1 without analysis); both steer the skip decision.
-func computeAllocationEncode(
-	enc *entcode.Encoder,
-	encIntensity int, encDualStereo bool,
-	numBands, start, end, lm, ch, allocTrim, available int,
-	offsets []int, prev, signalBandwidth int,
-) (pulses []int, eBits []int, finePriority []int, balance, intensity, codedBands int, dualStereo bool) {
-	return computeAllocationShared(nil, enc, encIntensity, encDualStereo, numBands, start, end, lm, ch, allocTrim, available, offsets, prev, signalBandwidth, nil)
 }
 
 // allocScratch holds computeAllocationShared's per-frame arrays so an
@@ -964,11 +926,6 @@ func celtBits2PulsesQ3(bandIdx, lm, bitsQ3 int) int {
 		return lo
 	}
 	return hi
-}
-
-// celtBits2Pulses is a legacy wrapper (raw bits → Q3 → celtBits2PulsesQ3).
-func celtBits2Pulses(bandIdx, lm, bits int) int {
-	return celtBits2PulsesQ3(bandIdx, lm, bits*8)
 }
 
 // celtPulses2BitsQ3 returns the Q3 bit cost of p pulses in band bandIdx at LM=lm.

@@ -49,60 +49,6 @@ func (c Complex) MulScalar(s float64) Complex {
 
 // Math utilities
 
-// Min returns the minimum of two integers
-func Min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// Max returns the maximum of two integers
-func Max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-// MinFloat returns the minimum of two float64 values
-func MinFloat(a, b float64) float64 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// MaxFloat returns the maximum of two float64 values
-func MaxFloat(a, b float64) float64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-// Clamp restricts a value to a given range
-func Clamp(val, min, max int) int {
-	if val < min {
-		return min
-	}
-	if val > max {
-		return max
-	}
-	return val
-}
-
-// ClampFloat restricts a float64 value to a given range
-func ClampFloat(val, min, max float64) float64 {
-	if val < min {
-		return min
-	}
-	if val > max {
-		return max
-	}
-	return val
-}
-
 // IsPowerOf2 checks if n is a power of 2
 func IsPowerOf2(n int) bool {
 	return n > 0 && (n&(n-1)) == 0
@@ -154,23 +100,6 @@ func Dot(a, b []float64) float64 {
 	return sum
 }
 
-// Normalize normalizes a slice to have maximum absolute value of 1.0
-func Normalize(x []float64) {
-	maxAbs := 0.0
-	for _, v := range x {
-		abs := math.Abs(v)
-		if abs > maxAbs {
-			maxAbs = abs
-		}
-	}
-	if maxAbs > 0 {
-		scale := 1.0 / maxAbs
-		for i := range x {
-			x[i] *= scale
-		}
-	}
-}
-
 // Energy computes the energy (sum of squares) of a signal
 func Energy(x []float64) float64 {
 	sum := 0.0
@@ -196,11 +125,6 @@ func Abs(x float64) float64 {
 // Sin returns the sine of x (in radians)
 func Sin(x float64) float64 {
 	return math.Sin(x)
-}
-
-// Cos returns the cosine of x (in radians)
-func Cos(x float64) float64 {
-	return math.Cos(x)
 }
 
 // Pi is the mathematical constant π

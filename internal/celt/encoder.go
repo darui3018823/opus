@@ -3,7 +3,6 @@ package celt
 import (
 	"errors"
 	"fmt"
-	"math"
 	"os"
 
 	"github.com/darui3018823/opus/internal/dsp"
@@ -1479,39 +1478,6 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		out = padded
 	}
 	return targetBytes, out, nil
-}
-
-func hybridHighBandActivity(pcm []float64, channels int) float64 {
-	if channels <= 0 {
-		return 0
-	}
-	n := len(pcm) / channels
-	if n < 2 {
-		return 0
-	}
-	sample := func(i int) float64 {
-		if channels == 1 {
-			return pcm[i]
-		}
-		return 0.5 * (pcm[i*channels] + pcm[i*channels+1])
-	}
-	var energy, hpEnergy float64
-	prev := sample(0)
-	for i := 1; i < n; i++ {
-		s := sample(i)
-		d := s - prev
-		prev = s
-		hpEnergy += float64(d * d)
-		energy += float64(s * s)
-	}
-	if energy < 1e-9 {
-		return 0
-	}
-	activity := math.Sqrt(hpEnergy / energy / 2.0)
-	if activity > 1 {
-		activity = 1
-	}
-	return activity
 }
 
 // Reset resets the encoder state.

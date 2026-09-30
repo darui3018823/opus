@@ -217,17 +217,6 @@ type dynallocAnalysisResult struct {
 	maxDepth     float32
 }
 
-// dynallocAnalysis32 mirrors dynalloc_analysis. bandLogE, bandLogE2 and
-// oldBandE are channel-major (c*nbEBands+i) float32-valued slices;
-// surroundDynalloc may be nil (all zero); lsbDepth is the encoder's
-// OPUS_SET_LSB_DEPTH; effectiveBytes the libopus effectiveBytes.
-func dynallocAnalysis32(bandLogE, bandLogE2, oldBandE []float64, nbEBands, start, end, C, lsbDepth, lm int,
-	isTransient, vbr, constrainedVBR bool, effectiveBytes int, surroundDynalloc []float64,
-	toneFreq, toneishness float32, analysis *AnalysisInfo) dynallocAnalysisResult {
-	return dynallocAnalysis32Scratch(bandLogE, bandLogE2, oldBandE, nbEBands, start, end, C, lsbDepth, lm,
-		isTransient, vbr, constrainedVBR, effectiveBytes, false, surroundDynalloc, toneFreq, toneishness, analysis, nil)
-}
-
 // dynallocScratch holds dynallocAnalysis32's work buffers so a frame does
 // not allocate; the result slices alias it until the next call.
 type dynallocScratch struct {

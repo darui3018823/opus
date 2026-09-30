@@ -8,12 +8,11 @@ package silk
 // rate itself may switch (switchReady, acted on by the Opus layer).
 
 const (
-	silkTransitionTimeMs  = 5120
-	silkTransitionNB      = 3
-	silkTransitionNA      = 2
-	silkTransitionIntNum  = 5
-	silkTransitionFrames  = silkTransitionTimeMs / 20
-	silkTransitionIntStep = silkTransitionFrames / (silkTransitionIntNum - 1)
+	silkTransitionTimeMs = 5120
+	silkTransitionNB     = 3
+	silkTransitionNA     = 2
+	silkTransitionIntNum = 5
+	silkTransitionFrames = silkTransitionTimeMs / 20
 )
 
 var silkTransitionLPBQ28 = [silkTransitionIntNum][silkTransitionNB]int32{

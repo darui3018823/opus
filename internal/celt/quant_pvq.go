@@ -21,7 +21,6 @@ const (
 	spreadAggressive     = 3
 	qThetaOffset         = 4
 	qThetaOffsetTwoPhase = 16
-	logMaxPseudo         = 6
 )
 
 // qabDebug enables per-band trace capture in QuantAllBands (test diagnostics).
@@ -1058,17 +1057,6 @@ func QuantAllBands(dec *entcode.Decoder, start, end int, X, Y []float64,
 	return quantAllBandsImpl(false, nil, dec, nil, start, end, X, Y,
 		collapseMasks, pulses, shortBlocks, spread, dualStereo, intensity, tfRes,
 		totalBitsQ3, balance, lm, codedBands, seed, disableInv, 0, nil)
-}
-
-// QuantAllBandsEncode is the encoder-side entry point. bandE holds per-band
-// energies in channel-major layout (used by stereo intensity/split). It mirrors
-// QuantAllBands symbol-for-symbol so the existing decoder reconstructs X/Y.
-func QuantAllBandsEncode(enc *entcode.Encoder, bandE []float64, start, end int, X, Y []float64,
-	collapseMasks []byte, pulses []int, shortBlocks bool, spread int,
-	dualStereo bool, intensity int, tfRes []int, totalBitsQ3, balance, lm, codedBands int,
-	seed uint32, disableInv bool, complexity int) uint32 {
-	return quantAllBandsEncodeTrace(enc, bandE, start, end, X, Y, collapseMasks, pulses, shortBlocks, spread,
-		dualStereo, intensity, tfRes, totalBitsQ3, balance, lm, codedBands, seed, disableInv, complexity, nil)
 }
 
 // quantAllBandsEncodeTrace is QuantAllBandsEncode that also appends

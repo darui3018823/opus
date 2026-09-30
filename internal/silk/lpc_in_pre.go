@@ -168,29 +168,6 @@ func lastHalfBurgNLSF(preSignal []float64, subfrLength, order, nbSubfr int, minI
 	return nlsf, a
 }
 
-func firstHalfStackedLPCResidual(preSignal []float64, lpcQ12 []int16, order, subfrLength, nbSubfr int) float64 {
-	if order <= 0 || subfrLength <= order || nbSubfr < 2 || len(lpcQ12) < order {
-		return 0
-	}
-	halfSubfr := nbSubfr / 2
-	energy := 0.0
-	for sf := 0; sf < halfSubfr; sf++ {
-		base := sf * subfrLength
-		if base+subfrLength > len(preSignal) {
-			break
-		}
-		for i := order; i < subfrLength; i++ {
-			pred := 0.0
-			for j := 0; j < order; j++ {
-				pred += float64(float64(lpcQ12[j]) / 4096.0 * preSignal[base+i-j-1])
-			}
-			err := preSignal[base+i] - pred
-			energy += float64(err * err)
-		}
-	}
-	return energy
-}
-
 func (e *Encoder) lpcInPreInput(signal []float64) []float64 {
 	histLen := len(e.pitchHist)
 	if histLen < e.lpcOrder {

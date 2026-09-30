@@ -1105,9 +1105,9 @@ func computeRedundancyBytes(maxDataBytes, bitrate, frameRate, channels int) int 
 	redundancyBytes := redundancyRate / 1600
 
 	availableBits := maxDataBytes*8 - 2*baseBits
-	cap := (availableBits*240/(240+48000/frameRate) + baseBits) / 8
-	if redundancyBytes > cap {
-		redundancyBytes = cap
+	maxRedundancy := (availableBits*240/(240+48000/frameRate) + baseBits) / 8
+	if redundancyBytes > maxRedundancy {
+		redundancyBytes = maxRedundancy
 	}
 	if redundancyBytes > 4+8*channels {
 		if redundancyBytes > 257 {
@@ -2762,8 +2762,8 @@ func (e *Encoder) selectCeltBandwidth() int {
 		return bw
 	}
 	bw := nyq
-	if cap := publicToCeltFramingBW(e.maxBandwidth); cap < bw {
-		bw = cap
+	if maxBW := publicToCeltFramingBW(e.maxBandwidth); maxBW < bw {
+		bw = maxBW
 	}
 	if br := bitrateCeltBandwidth(e.bitrate, e.application, e.celtEncoder.SignalTypeHint()); br < bw {
 		bw = br
@@ -3595,26 +3595,6 @@ func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
 	}
 }
 
-func opusFrameCount(payload []byte, countCode int) (int, error) {
-	switch countCode {
-	case 0:
-		return 1, nil
-	case 1, 2:
-		return 2, nil
-	case 3:
-		if len(payload) < 1 {
-			return 0, fmt.Errorf("code 3: empty payload")
-		}
-		frameCount := int(payload[0] & 0x3F)
-		if frameCount == 0 || frameCount > 48 {
-			return 0, fmt.Errorf("code 3: invalid frame count %d", frameCount)
-		}
-		return frameCount, nil
-	default:
-		return 0, fmt.Errorf("unknown count code %d", countCode)
-	}
-}
-
 func packetDurationSamples(config, frameCount, sampleRate int) (int, error) {
 	if frameCount < 1 {
 		return 0, fmt.Errorf("%w: invalid frame count %d", ErrInvalidPacket, frameCount)
@@ -3857,21 +3837,6 @@ func (d *Decoder) DecodeFloat32(data []byte) ([]float32, error) {
 		out[i] = float32(pcm[i])
 	}
 	return out, nil
-}
-
-// celtFrameDurationMs returns the frame duration in ms for CELT configs (16-31).
-func celtFrameDurationMs(config int) int {
-	switch config & 3 {
-	case 0:
-		return 2
-	case 1:
-		return 5
-	case 2:
-		return 10
-	case 3:
-		return 20
-	}
-	return 20
 }
 
 func celtFrameSamples(config, sampleRate int) int {
@@ -4916,9 +4881,6 @@ func (d *Decoder) decodeCELTPLCFrame(frameSize int) ([]float64, error) {
 	default:
 		return nil, fmt.Errorf("%w: invalid CELT bandwidth %d", ErrInvalidState, bandwidth)
 	}
-	if bw < 0 || bw >= len(d.celtDecoders) {
-		return nil, fmt.Errorf("%w: invalid CELT bandwidth %d", ErrInvalidState, bandwidth)
-	}
 	active := d.celtDecoders[bw][lm][d.channels-1]
 	if active == nil {
 		return nil, fmt.Errorf("%w: missing CELT PLC decoder", ErrInvalidState)
@@ -4936,15 +4898,6 @@ func (d *Decoder) decodeCELTPLCFrame(frameSize int) ([]float64, error) {
 	}
 	frame = adjustChannels(frame, active.Channels(), d.channels)
 	return padOrTrim(frame, frameSize*d.channels), nil
-}
-
-func isValidPacketFrameSize(frameSize, sampleRate int) bool {
-	for _, numerator := range []int{1, 2, 4, 8, 16, 24, 32, 40, 48} {
-		if frameSize*400 == sampleRate*numerator {
-			return true
-		}
-	}
-	return false
 }
 
 func isValidLossFrameSize(frameSize, sampleRate int) bool {

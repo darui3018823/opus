@@ -1658,19 +1658,6 @@ func clampInt(v, lo, hi int) int {
 	return v
 }
 
-func encodeFlatPitchContour(enc *entcode.Encoder, fsKHz, nSubframes int) {
-	switch {
-	case fsKHz == 8 && nSubframes == 4:
-		enc.EncodeIcdf(0, silkPitchContourNBICDF[:], 8)
-	case fsKHz == 8:
-		enc.EncodeIcdf(0, silkPitchContour10msNBICDF[:], 8)
-	case nSubframes == 4:
-		enc.EncodeIcdf(0, silkPitchContourICDF[:], 8)
-	default:
-		enc.EncodeIcdf(0, silkPitchContour10msICDF[:], 8)
-	}
-}
-
 func selectLTPGain(pitchGain float64) (int, int) {
 	target := pitchGain * 128.0
 	bestPer, bestIdx := 0, 0
@@ -2466,47 +2453,6 @@ func topNLSFCB1ByTarget(cb *nlsfCBParams, targetQ15 []int16, n int) []int {
 		}
 	}
 	return bestIdx
-}
-
-func rawNLSFResidualForTarget(cb *nlsfCBParams, cb1Idx int, targetQ15 []int16) []int {
-	rawIdx := make([]int, cb.order)
-	predQ8 := nlsfPredQ8ForCB1(cb, cb1Idx)
-	desiredResQ10 := make([]int32, cb.order)
-	for i := 0; i < cb.order; i++ {
-		cb1Val := int32(cb.cb1Q8[cb1Idx*cb.order+i]) << 7
-		wghtQ9 := int32(cb.cb1WghtQ9[cb1Idx*cb.order+i])
-		desiredResQ10[i] = int32(int64(int32(targetQ15[i])-cb1Val) * int64(wghtQ9) >> 14)
-	}
-
-	const nlsfQuantLevelAdjQ10 = int32(102)
-	nextOutQ10 := int32(0)
-	for i := cb.order - 1; i >= 0; i-- {
-		predQ10 := (nextOutQ10 * int32(predQ8[i])) >> 8
-		bestRaw := 0
-		bestErr := int64(1<<63 - 1)
-		bestOut := int32(0)
-		for raw := -3; raw <= 3; raw++ {
-			out := int32(raw) << 10
-			if out > 0 {
-				out -= nlsfQuantLevelAdjQ10
-			} else if out < 0 {
-				out += nlsfQuantLevelAdjQ10
-			}
-			out = predQ10 + int32((int64(out)*int64(cb.quantStepSizeQ16))>>16)
-			err := int64(out - desiredResQ10[i])
-			if err < 0 {
-				err = -err
-			}
-			if err < bestErr {
-				bestErr = err
-				bestRaw = raw
-				bestOut = out
-			}
-		}
-		rawIdx[i] = bestRaw
-		nextOutQ10 = bestOut
-	}
-	return rawIdx
 }
 
 func nlsfPredQ8ForCB1(cb *nlsfCBParams, cb1Idx int) []uint8 {
@@ -3595,38 +3541,12 @@ func computeEnergy(signal []float64) float64 {
 	return energy / float64(len(signal))
 }
 
-// QuantizeSubframeGains quantizes subframe gains
-func QuantizeSubframeGains(gains []float64) ([]float64, []int) {
-	quantized := make([]float64, len(gains))
-	indices := make([]int, len(gains))
-
-	for i, g := range gains {
-		gainDB := LinearToDB(g)
-
-		step := 3.0
-		index := int(math.Round(gainDB / step))
-
-		if index < -20 {
-			index = -20
-		}
-		if index > 13 {
-			index = 13
-		}
-
-		indices[i] = index
-		quantized[i] = DBToLinear(float64(index) * step)
-	}
-
-	return quantized, indices
-}
-
 // runFrameVAD runs the fixed-point VAD on packet frame index frame (in frame
 // order, once per frame) and returns the frame's VAD flag as
 // silk_encode_do_VAD_FLP derives it: active when speech_activity_Q8 reaches
 // SILK_FIX_CONST(SPEECH_ACTIVITY_DTX_THRES, 8). The result is kept for the
 // frame encode so the VAD state advances exactly once per frame.
 func (e *Encoder) runFrameVAD(frame int, pcm []float64) bool {
-	const activityThresholdQ8 = 13 // SILK_FIX_CONST(0.05, 8)
 	if frame == 0 {
 		e.frameVAD = e.frameVAD[:0]
 	}

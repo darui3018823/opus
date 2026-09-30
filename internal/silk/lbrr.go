@@ -157,14 +157,14 @@ func (e *Encoder) beginLBRRPacket() {
 // finishLBRRPacket promotes the LBRR frames generated for the just-encoded
 // packet to "pending", so they are emitted at the front of the next packet.
 func (e *Encoder) finishLBRRPacket(nFrames int) {
-	any := false
+	anyLBRR := false
 	for i := range e.curLBRR {
 		if e.curLBRR[i].present {
-			any = true
+			anyLBRR = true
 			break
 		}
 	}
-	if any {
+	if anyLBRR {
 		e.pendingLBRR = append([]lbrrFrameData(nil), e.curLBRR...)
 		e.pendingLBRRFrames = nFrames
 	} else {

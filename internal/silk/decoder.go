@@ -1416,36 +1416,6 @@ func silkGainDequantQ16(prevInd int) int32 {
 	return silkLog2Lin(logQ7)
 }
 
-func inverseGainQ31(gainQ16 int32) int32 {
-	if gainQ16 <= 0 {
-		return math.MaxInt32
-	}
-	v := (int64(1) << 47) / int64(gainQ16)
-	if v > math.MaxInt32 {
-		return math.MaxInt32
-	}
-	return int32(v)
-}
-
-func lpcAnalysisResidualQ0(samples []int32, idx int, aQ12 []int16, order int) int32 {
-	pred := int64(0)
-	for j := 0; j < order; j++ {
-		past := idx - j - 1
-		if past < 0 {
-			break
-		}
-		pred += int64(samples[past]) * int64(aQ12[j])
-	}
-	res := samples[idx] - int32(pred>>12)
-	if res > 32767 {
-		return 32767
-	}
-	if res < -32768 {
-		return -32768
-	}
-	return res
-}
-
 // decodeNLSF decodes NLSF values from the range coder.
 // Implements silk_NLSF_decode + silk_decode_indices NLSF portion from libopus.
 // Returns NLSF in Q15.
@@ -1755,12 +1725,6 @@ func nlsf2APolyFindPoly(out []int32, cLSF []int32, dd int) {
 		}
 		out[1] -= ftmp
 	}
-}
-
-func silkLPCFit(aQIN []int32, qOut, qIn, order int) []int16 {
-	coeffs := make([]int16, order)
-	silkLPCFitInto(coeffs, aQIN, qOut, qIn, order)
-	return coeffs
 }
 
 func silkLPCFitInto(coeffs []int16, aQIN []int32, qOut, qIn, order int) {
@@ -2597,14 +2561,4 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 		}
 		d.trace = trace
 	}
-}
-
-// DequantizeSubframeGains dequantizes subframe gain indices (API compatibility).
-func DequantizeSubframeGains(indices []int) []float64 {
-	gains := make([]float64, len(indices))
-	for i, idx := range indices {
-		gainDB := float64(float64(idx)*0.5) - 10.0
-		gains[i] = math.Pow(10.0, gainDB/20.0)
-	}
-	return gains
 }

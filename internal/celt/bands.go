@@ -168,18 +168,6 @@ func ComputeBandEnergy(coeffs []float64) float64 {
 	return energy
 }
 
-// NormalizeBand normalizes band coefficients to unit energy
-func NormalizeBand(coeffs []float64) float64 {
-	energy := ComputeBandEnergy(coeffs)
-	if energy > 0 {
-		scale := 1.0 / math.Sqrt(energy)
-		for i := range coeffs {
-			coeffs[i] *= scale
-		}
-	}
-	return energy
-}
-
 // InterpolateBandEnergies interpolates energies for missing bands
 func (bp *BandProcessor) InterpolateBandEnergies() {
 	// For bands with zero or missing energy, interpolate from neighbors

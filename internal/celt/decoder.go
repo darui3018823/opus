@@ -342,7 +342,8 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	d.updateLogEnergyHistory(isTransient)
 	// The noise floor may rise by up to 2.4 dB/second, or by the weight of
 	// all the missing packets after a loss.
-	maxBackgroundIncrease := float32(min(160, d.lossDuration+(1<<lm))) * float32(0.001)
+	// The explicit conversion keeps the product rounded (no FMA with the add).
+	maxBackgroundIncrease := float32(float32(min(160, d.lossDuration+(1<<lm))) * float32(0.001))
 	for i := range d.backgroundLogE {
 		d.backgroundLogE[i] = float64(min(float32(d.backgroundLogE[i])+maxBackgroundIncrease, float32(d.prevEnergies[i])))
 	}

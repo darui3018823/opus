@@ -976,6 +976,10 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 	// reaches here only when padding was requested, in which case it is wrapped in
 	// a code-3 packet (the only count code that carries padding).
 	chunkLen := base * e.channels
+	if short {
+		// A frame shorter than 20 ms is a single-frame packet.
+		chunkLen = len(celtPCM)
+	}
 	frames := make([][]byte, 0, nFrames)
 	var rangeFinal uint32
 	for k := 0; k < nFrames; k++ {

@@ -103,3 +103,26 @@ func TestEncoderShortFrameControlsAndTransitions(t *testing.T) {
 		t.Fatalf("padded short packet length = %d", len(packet))
 	}
 }
+
+func TestLibopusPolicyPaddedShortFrames(t *testing.T) {
+	for _, frameSize := range []int{120, 240, 480} {
+		enc, err := NewEncoder(48000, 1, ApplicationAudio)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := enc.SetModePolicy(ModePolicyLibopus); err != nil {
+			t.Fatal(err)
+		}
+		enc.SetPacketPadding(7)
+		packet, err := enc.EncodeFloat(make([]float64, frameSize), frameSize)
+		if err != nil {
+			t.Fatalf("frameSize %d: %v", frameSize, err)
+		}
+		if got, err := PacketGetNumSamples(packet, 48000); err != nil || got != frameSize {
+			t.Fatalf("frameSize %d: packet samples = %d, %v", frameSize, got, err)
+		}
+		if len(packet) < 8 {
+			t.Fatalf("frameSize %d: padded packet length = %d", frameSize, len(packet))
+		}
+	}
+}

@@ -606,7 +606,9 @@ func (d *Decoder) decodeFECStereo(dec *entcode.Decoder, nFrames int) ([]float64,
 		if !decodeOnlyMiddle {
 			if sidePresent {
 				if d.prevDecodeOnlyMiddle {
-					d.side.Reset()
+					// The first frame with side coding clears the side
+					// prediction memory only.
+					d.side.applySetFsReset()
 				}
 				side, err = d.side.decodeFrame(dec, 1, frame > 0 && masks[1]&(1<<uint(frame-1)) != 0)
 			} else {
@@ -827,7 +829,9 @@ func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]floa
 		side := make([]float64, d.frameSize)
 		if !decodeOnlyMiddle {
 			if d.prevDecodeOnlyMiddle {
-				d.side.Reset()
+				// The first frame with side coding clears the side
+				// prediction memory only.
+				d.side.applySetFsReset()
 			}
 			sideConditional := i > 0 && !d.prevDecodeOnlyMiddle
 			pcm, err := d.side.decodeFrame(dec, vadFlags[1][i], sideConditional)
@@ -2462,6 +2466,17 @@ func (d *Decoder) Reset() {
 	if d.side != nil {
 		d.side.Reset()
 	}
+}
+
+// InitSideChannel is silk_Decode's init of the second channel on a switch
+// from a mono to a stereo stream (silk_init_decoder, then set_fs); the mid
+// channel carries on and the stream has no mid-only history.
+func (d *Decoder) InitSideChannel() {
+	if d.side != nil {
+		d.side.Reset()
+		d.side.applySetFsReset()
+	}
+	d.prevDecodeOnlyMiddle = false
 }
 
 // ResetAfterCELT is opus_decode_frame's silk_ResetDecoder when a SILK or

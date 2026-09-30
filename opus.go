@@ -4588,8 +4588,11 @@ func (d *Decoder) prepareSILKStream(dec *silk.Decoder, pktChannels int) {
 	d.silkStereoDec = dec
 	dec.SetStereoMid(d.silkSMid)
 	dec.SetAPIMono(d.channels == 1)
-	if d.channels == 2 && d.prevSilkInternalCh == 1 {
-		dec.ResetStereoPrediction()
+	if d.prevSilkInternalCh == 1 {
+		dec.InitSideChannel()
+		if d.channels == 2 {
+			dec.ResetStereoPrediction()
+		}
 		// Once per switch (psDec->nChannelsInternal is now 2).
 		d.prevSilkInternalCh = 2
 	}

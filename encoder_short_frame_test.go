@@ -126,3 +126,50 @@ func TestLibopusPolicyPaddedShortFrames(t *testing.T) {
 		}
 	}
 }
+
+// TestInbandFECAcrossFrameDurationSwitch switches the packet duration
+// between 20 ms and 10 ms (the same SILK frame count) with in-band FEC on.
+// As silk_Encode's `transition`, the previous packet's LBRR frames are
+// dropped instead of being written with the other frame length's syntax.
+func TestInbandFECAcrossFrameDurationSwitch(t *testing.T) {
+	for _, rate := range []int{8000, 16000} {
+		for _, channels := range []int{1, 2} {
+			enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := enc.SetBitrate(24000); err != nil {
+				t.Fatal(err)
+			}
+			enc.SetInbandFEC(true)
+			enc.SetPacketLossPerc(20)
+			dec, err := NewDecoder(rate, channels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pos := 0
+			for p, ms := range []int{20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 10, 10, 20, 10, 20} {
+				n := rate * ms / 1000
+				pcm := make([]float64, n*channels)
+				for i := 0; i < n; i++ {
+					for c := 0; c < channels; c++ {
+						pcm[i*channels+c] = 0.5 * math.Sin(float64(pos+i)*0.05)
+					}
+				}
+				pos += n
+				pkt, err := enc.EncodeFloat(pcm, n)
+				if err != nil {
+					t.Fatalf("%d Hz %dch packet %d (%d ms): %v", rate, channels, p, ms, err)
+				}
+				if p == 11 {
+					if has, err := PacketHasLBRR(pkt); err != nil || has {
+						t.Fatalf("%d Hz %dch: the first 10 ms packet carries LBRR=%v (err %v), want none", rate, channels, has, err)
+					}
+				}
+				if _, err := dec.DecodeFloat(pkt); err != nil {
+					t.Fatalf("%d Hz %dch packet %d: decode: %v", rate, channels, p, err)
+				}
+			}
+		}
+	}
+}

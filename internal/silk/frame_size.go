@@ -8,10 +8,16 @@ import "fmt"
 // pitch analysis window and the pitch contour tables), while the carried
 // history - the LTP memory and look-ahead in x_buf, the NSQ state, the
 // noise-shaping and gain smoothing, the VAD - is kept. Both channel
-// encoders of a stereo encoder switch together.
+// encoders of a stereo encoder switch together. As silk_Encode's
+// `transition` (payloadSize_ms != PacketSize_ms), a change drops the
+// previous packet's LBRR frames: they were coded with the other frame
+// length and cannot be written in this packet's syntax.
 func (e *Encoder) SetFrameMs(ms int) error {
 	if ms != 10 && ms != 20 {
 		return fmt.Errorf("invalid SILK frame duration: %d ms (must be 10 or 20)", ms)
+	}
+	if ms != e.frameMs && e.frameMs != 0 {
+		e.clearTransitionLBRR()
 	}
 	if ms != e.frameMs {
 		frameSize := e.sampleRate / 1000 * ms

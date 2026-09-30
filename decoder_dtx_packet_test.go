@@ -51,3 +51,50 @@ func TestDecoderTOCOnlyPackets(t *testing.T) {
 		}
 	}
 }
+
+// TestDecoderShortFramesInOtherModes decodes frames of at most one byte
+// whose TOC mode differs from the previous packet's: they are concealed in
+// the previous mode, which stays the mode later concealment continues.
+func TestDecoderShortFramesInOtherModes(t *testing.T) {
+	enc, err := NewEncoder(16000, 1, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetBitrate(12000); err != nil {
+		t.Fatal(err)
+	}
+	var silk [][]byte
+	for p := 0; p < 4; p++ {
+		pkt, err := enc.EncodeFloat(strictSpeechLikeFrame(16000, 1, p*320, 320), 320)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mode, _ := PacketGetMode(pkt); mode != ModeSILKOnly {
+			t.Fatalf("setup packet %d mode %d, want SILK", p, mode)
+		}
+		silk = append(silk, pkt)
+	}
+	for _, short := range [][]byte{{0x7f, 0x02}, {0xff, 0x02}, {0x7c}, {0xf8}} {
+		dec, err := NewDecoder(48000, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range silk[:3] {
+			if _, err := dec.DecodeFloat(p); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := dec.DecodeFloat(short); err != nil {
+			t.Fatalf("% x after SILK: %v", short, err)
+		}
+		if dec.FinalRange() != 0 {
+			t.Fatalf("% x after SILK: final range %08x", short, dec.FinalRange())
+		}
+		if _, err := dec.DecodePLCFloat(960); err != nil {
+			t.Fatalf("PLC after % x: %v", short, err)
+		}
+		if _, err := dec.DecodeFloat(silk[3]); err != nil {
+			t.Fatalf("SILK after % x: %v", short, err)
+		}
+	}
+}

@@ -2996,10 +2996,17 @@ type Decoder struct {
 	// prev_mode so the next lost frame uses CELT-only PLC while normal packet
 	// transition handling still sees the original hybrid framing mode.
 	prevRedundancy bool
-	// lostWithoutHistory is set while the packet being decoded has only
-	// concealed frames of at most one byte before any packet was decoded:
-	// opus_decode_frame returns silence and leaves prev_mode unset.
-	lostWithoutHistory bool
+	// lastFrameConcealed is set while the last frame of the packet being
+	// decoded was a frame of at most one byte, concealed in the previous
+	// mode: opus_decode_frame then stores that mode (or nothing, before any
+	// packet) as prev_mode, not the packet's TOC mode.
+	lastFrameConcealed bool
+	// lossConfig and lossChannels are the TOC config and coded channels of
+	// the last frame decoded from data. Concealment continues the SILK and
+	// CELT decoders that frame used (libopus keeps one state of each), while
+	// lastPacketConfig follows every packet's TOC (st->mode, st->bandwidth).
+	lossConfig   int
+	lossChannels int
 
 	// SILK decoders indexed by [rateIdx 0-2][chIdx 0=mono,1=stereo].
 	// rateIdx: 0=8kHz, 1=12kHz, 2=16kHz
@@ -3100,6 +3107,7 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 		internalFrameSize: internalFrameSize,
 		prevMode:          -1,
 		lastPacketConfig:  -1,
+		lossConfig:        -1,
 		silkActiveRi:      -1,
 	}
 
@@ -3700,11 +3708,9 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 				d.lastPacketDuration = duration
 				d.lastPacketConfig = config
 				d.lastPacketChannels = pktChannels
-				d.prevMode = framing.ModeHybrid
-				if d.lostWithoutHistory {
-					d.prevMode = -1
+				if !d.lastFrameConcealed {
+					d.prevMode, d.prevRedundancy = framing.ModeHybrid, trailingRedundancy
 				}
-				d.prevRedundancy = trailingRedundancy
 				d.applyGain(out)
 			}
 			return out, err
@@ -3715,8 +3721,9 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 			d.lastPacketDuration = duration
 			d.lastPacketConfig = config
 			d.lastPacketChannels = pktChannels
-			d.prevMode = framing.ModeSILKOnly
-			d.prevRedundancy = trailingRedundancy
+			if !d.lastFrameConcealed {
+				d.prevMode, d.prevRedundancy = framing.ModeSILKOnly, trailingRedundancy
+			}
 			d.applyGain(out)
 		}
 		return out, err
@@ -3754,15 +3761,15 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 	// frames of one single-stream packet.
 	var rangeFinal uint32
 	targetLen := celtFrameSamples(config, d.sampleRate) * d.channels
-	d.lostWithoutHistory = false
+	d.lastFrameConcealed = false
 	for fi, frame := range frames {
-		if fi > 0 && !d.lostWithoutHistory {
+		if fi > 0 && !d.lastFrameConcealed {
 			d.prevMode, d.prevRedundancy = framing.ModeCELTOnly, false
 		}
 		if len(frame) <= 1 {
 			// opus_decode_frame: a frame of at most one byte is a loss,
 			// concealed in the previous mode, with a zero final range.
-			d.lostWithoutHistory = d.previousLossMode() < 0
+			d.lastFrameConcealed = true
 			pcm, err := d.decodePLCFloat(targetLen / d.channels)
 			if err != nil {
 				return nil, err
@@ -3774,7 +3781,7 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 		// A switch from SILK/hybrid without a trailing redundant frame
 		// conceals 5 ms in the old mode and discards the CELT state.
 		var trans []float64
-		switchReset := fi == 0 && d.prevMode >= 0 && d.prevMode != framing.ModeCELTOnly && !d.prevRedundancy
+		switchReset := d.prevMode >= 0 && d.prevMode != framing.ModeCELTOnly && !d.prevRedundancy
 		if switchReset {
 			trans = d.transitionPLC(targetLen / d.channels)
 			activeCeltDec.Reset()
@@ -3787,7 +3794,8 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 			return nil, fmt.Errorf("CELT decoding failed: %w", err)
 		}
 		d.lastCeltDec = activeCeltDec
-		d.lostWithoutHistory = false
+		d.lastFrameConcealed = false
+		d.lossConfig, d.lossChannels = config, pktChannels
 		rangeFinal = activeCeltDec.LastFinalRange()
 		d.lastPitch = activeCeltDec.Pitch() * d.sampleRate / 48000
 
@@ -3806,11 +3814,9 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 	d.lastPacketConfig = config
 	d.lastPacketChannels = pktChannels
 	d.lastFinalRange = rangeFinal
-	d.prevMode = framing.ModeCELTOnly
-	if d.lostWithoutHistory {
-		d.prevMode = -1
+	if !d.lastFrameConcealed {
+		d.prevMode, d.prevRedundancy = framing.ModeCELTOnly, false
 	}
-	d.prevRedundancy = false
 	d.applyGain(allPCM)
 	return allPCM, nil
 }
@@ -3890,6 +3896,9 @@ func adjustChannels(data []float64, inputCh, outputCh int) []float64 {
 //
 // pktChannels is the number of channels in the packet (from TOC stereo bit).
 func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannels int) ([]float64, bool, error) {
+	if out, ok, err := d.concealOnlyPacket(payload, countCode, d.sampleRate*silkConfigFrameMs(config)/1000); ok || err != nil {
+		return out, false, err
+	}
 	rateKHz := silkConfigRateKHz(config)
 	ri := silkRateIdx(rateKHz)
 	ci := pktChannels - 1
@@ -3959,25 +3968,31 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 	// frame (the SILK bandwidth switch).
 	prevModeRedundancy := d.prevMode != framing.ModeSILKOnly || d.prevRedundancy
 	frameMode, frameRedundancy := d.prevMode, d.prevRedundancy
+	d.lastFrameConcealed = false
+	decodedAny := false
 	for si, stream := range silkStreams {
 		if si > 0 {
-			prevModeRedundancy = trailingRedundancy
 			frameMode, frameRedundancy = framing.ModeSILKOnly, trailingRedundancy
+			if d.lastFrameConcealed {
+				// The concealment's mode (prev_mode after the lost frame).
+				frameMode, frameRedundancy = d.prevMode, d.prevRedundancy
+			}
+			prevModeRedundancy = frameMode != framing.ModeSILKOnly || frameRedundancy
 		}
 		// opus_decode_native replaces prev_redundancy for every constituent
 		// frame, so only a trailing redundancy frame on the final stream remains.
 		trailingRedundancy = false
 		if len(stream) < 2 {
-			d.prepareSILKStream(info.dec, pktChannels)
-			pcm, err := info.dec.DecodeMulti(stream, nSilkFramesPerStream)
+			// opus_decode_frame: a frame of at most one byte is a loss,
+			// concealed in the previous mode, with a zero final range.
+			d.prevMode, d.prevRedundancy = frameMode, frameRedundancy
+			d.lastFrameConcealed = true
+			pcm, err := d.decodePLCFloat(samplesPerStream / d.channels)
 			if err != nil {
-				allPCM = append(allPCM, make([]float64, samplesPerStream)...)
-				continue
+				return nil, false, err
 			}
-			pcm = d.resampleSILK(pcm, nSilkFramesPerStream, pktChannels, stereoToMono && si == 0)
-			pcm = padOrTrim(pcm, samplesPerStream)
-			allPCM = append(allPCM, pcm...)
-			rangeFinal = info.dec.LastFinalRange()
+			allPCM = append(allPCM, padOrTrim(pcm, samplesPerStream)...)
+			rangeFinal = 0
 			continue
 		}
 		dec := entcode.NewDecoder(stream)
@@ -4051,10 +4066,17 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 				}
 			}
 		}
+		d.lastFrameConcealed = false
+		d.lossConfig, d.lossChannels = config, pktChannels
+		decodedAny = true
 		allPCM = append(allPCM, pcm...)
 		rangeFinal = dec.GetRng() ^ redundantRange
 	}
 	d.lastFinalRange = rangeFinal
+	if !decodedAny {
+		// Only concealed frames: the SILK configuration is unchanged.
+		return allPCM, trailingRedundancy, nil
+	}
 	d.lastPitch = info.dec.Pitch() * d.sampleRate / (rateKHz * 1000)
 	d.prevSilkInternalCh = pktChannels
 
@@ -4195,6 +4217,9 @@ func (d *Decoder) decodeRedundancy(frame []byte, pktChannels, endBand int, carry
 }
 
 func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChannels int) ([]float64, bool, error) {
+	if out, ok, err := d.concealOnlyPacket(payload, countCode, d.sampleRate*silkConfigFrameMs(config)/1000); ok || err != nil {
+		return out, false, err
+	}
 	const rateKHz = 16 // hybrid SILK layer is always wideband
 	ri := silkRateIdx(rateKHz)
 	ci := pktChannels - 1
@@ -4260,12 +4285,14 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 	// prevMode / prevRedundancy of the frame being decoded (libopus updates
 	// them per constituent frame).
 	frameMode, frameRedundancy := d.prevMode, d.prevRedundancy
-	d.lostWithoutHistory = false
+	d.lastFrameConcealed = false
+	decodedAny := false
 	for si, stream := range silkStreams {
 		if si > 0 {
 			frameMode, frameRedundancy = framing.ModeHybrid, trailingRedundancy
-			if d.lostWithoutHistory {
-				frameMode = -1
+			if d.lastFrameConcealed {
+				// The concealment's mode (prev_mode after the lost frame).
+				frameMode, frameRedundancy = d.prevMode, d.prevRedundancy
 			}
 		}
 		// libopus replaces prev_redundancy for every constituent frame. An
@@ -4275,7 +4302,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 			// opus_decode_frame: a frame of at most one byte is a loss,
 			// concealed in the previous mode, with a zero final range.
 			d.prevMode, d.prevRedundancy = frameMode, frameRedundancy
-			d.lostWithoutHistory = d.previousLossMode() < 0
+			d.lastFrameConcealed = true
 			pcm, err := d.decodePLCFloat(samplesPerFrame / d.channels)
 			if err != nil {
 				return nil, false, err
@@ -4399,11 +4426,17 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 				}
 			}
 		}
-		d.lostWithoutHistory = false
+		d.lastFrameConcealed = false
+		d.lossConfig, d.lossChannels = config, pktChannels
+		decodedAny = true
 		allPCM = append(allPCM, silkOut...)
 		rangeFinal = dec.GetRng() ^ redundantRange
 	}
 	d.lastFinalRange = rangeFinal
+	if !decodedAny {
+		// Only concealed frames: the SILK configuration is unchanged.
+		return allPCM, trailingRedundancy, nil
+	}
 	d.lastPitch = info.dec.Pitch() * d.sampleRate / (rateKHz * 1000)
 	d.prevSilkInternalCh = pktChannels
 
@@ -4574,6 +4607,34 @@ func (d *Decoder) celtSilenceFade(pcm []float64, pktChannels, endBand int) {
 	for i := 0; i < len(out) && i < len(pcm); i++ {
 		pcm[i] = float64(float32(pcm[i]) + float32(out[i]))
 	}
+}
+
+// concealOnlyPacket decodes a SILK or hybrid packet whose frames all have
+// at most one byte: opus_decode_frame conceals each in the previous mode and
+// leaves the SILK configuration (internal rate, channels) as it was. It
+// returns ok == false, without decoding, when the packet has a frame to
+// decode or cannot be split.
+func (d *Decoder) concealOnlyPacket(payload []byte, countCode, frameSamples int) ([]float64, bool, error) {
+	frames, err := splitOpusFrames(payload, countCode)
+	if err != nil {
+		return nil, false, nil
+	}
+	for _, f := range frames {
+		if len(f) > 1 {
+			return nil, false, nil
+		}
+	}
+	out := make([]float64, 0, len(frames)*frameSamples*d.channels)
+	for range frames {
+		d.lastFrameConcealed = true
+		pcm, err := d.decodePLCFloat(frameSamples)
+		if err != nil {
+			return nil, false, err
+		}
+		out = append(out, padOrTrim(pcm, frameSamples*d.channels)...)
+	}
+	d.lastFinalRange = 0
+	return out, true, nil
 }
 
 // resetSILKAfterCELT is silk_ResetDecoder on a SILK or hybrid frame after a
@@ -4752,13 +4813,13 @@ func (d *Decoder) validatePLCState(frameSize int) error {
 	if lossMode != framing.ModeSILKOnly && lossMode != framing.ModeHybrid {
 		return fmt.Errorf("%w: unsupported previous decoder mode %d", ErrInvalidState, lossMode)
 	}
-	if d.lastPacketConfig < 0 || d.lastPacketChannels < 1 {
+	if d.lossConfig < 0 || d.lossChannels < 1 {
 		return fmt.Errorf("%w: missing SILK decoder history", ErrInvalidState)
 	}
-	rateKHz := silkConfigRateKHz(d.lastPacketConfig)
-	info := d.silkDecoders[silkRateIdx(rateKHz)][d.lastPacketChannels-1]
+	rateKHz := silkConfigRateKHz(d.lossConfig)
+	info := d.silkDecoders[silkRateIdx(rateKHz)][d.lossChannels-1]
 	if info == nil || info.dec == nil {
-		return fmt.Errorf("%w: SILK decoder for %d kHz and %d channels", ErrInvalidState, rateKHz, d.lastPacketChannels)
+		return fmt.Errorf("%w: SILK decoder for %d kHz and %d channels", ErrInvalidState, rateKHz, d.lossChannels)
 	}
 	if lossMode == framing.ModeHybrid {
 		if d.lastCeltDec == nil {
@@ -4793,16 +4854,16 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 	if lossMode != framing.ModeSILKOnly && lossMode != framing.ModeHybrid {
 		return nil, fmt.Errorf("%w: unsupported previous decoder mode %d", ErrInvalidState, lossMode)
 	}
-	if d.lastPacketConfig < 0 || d.lastPacketChannels < 1 {
+	if d.lossConfig < 0 || d.lossChannels < 1 {
 		return nil, fmt.Errorf("%w: missing SILK decoder history", ErrInvalidState)
 	}
 
-	rateKHz := silkConfigRateKHz(d.lastPacketConfig)
+	rateKHz := silkConfigRateKHz(d.lossConfig)
 	ri := silkRateIdx(rateKHz)
-	ci := d.lastPacketChannels - 1
+	ci := d.lossChannels - 1
 	info := d.silkDecoders[ri][ci]
 	if info == nil || info.dec == nil {
-		return nil, fmt.Errorf("%w: SILK decoder for %d kHz and %d channels", ErrInvalidState, rateKHz, d.lastPacketChannels)
+		return nil, fmt.Errorf("%w: SILK decoder for %d kHz and %d channels", ErrInvalidState, rateKHz, d.lossChannels)
 	}
 	out := make([]float64, 0, frameSize*d.channels)
 	for remaining := frameSize; remaining > 0; {
@@ -4814,16 +4875,16 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 		}
 		frameMs := decodeSamples * 1000 / d.sampleRate
 		info.dec.SetFrameMs(frameMs)
-		d.prepareSILKStream(info.dec, d.lastPacketChannels)
+		d.prepareSILKStream(info.dec, d.lossChannels)
 		silkPCM, err := info.dec.DecodePLC(1)
 		if err != nil {
 			return nil, fmt.Errorf("SILK PLC decoding failed: %w", err)
 		}
 		d.ensureSilkResampler(0, rateKHz)
-		if d.lastPacketChannels == 2 {
+		if d.lossChannels == 2 {
 			d.ensureSilkResampler(1, rateKHz)
 		}
-		frame := d.resampleSILK(silkPCM, 1, d.lastPacketChannels, false)
+		frame := d.resampleSILK(silkPCM, 1, d.lossChannels, false)
 		frame = padOrTrim(frame, decodeSamples*d.channels)
 		frame = frame[:chunk*d.channels]
 		if lossMode == framing.ModeHybrid {
@@ -4845,7 +4906,7 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 		remaining -= chunk
 	}
 	d.lastPitch = info.dec.Pitch() * d.sampleRate / (rateKHz * 1000)
-	d.prevSilkInternalCh = d.lastPacketChannels
+	d.prevSilkInternalCh = d.lossChannels
 	if peer := d.silkDecoders[ri][1-ci]; peer != nil && peer.dec != nil {
 		peer.dec.CopyPrimaryStateFrom(info.dec)
 	}
@@ -4853,7 +4914,7 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 }
 
 func (d *Decoder) decodeCELTPLCFrame(frameSize int) ([]float64, error) {
-	if d.lastCeltDec == nil || d.lastPacketConfig < 0 || d.lastPacketChannels < 1 {
+	if d.lastCeltDec == nil || d.lossConfig < 0 || d.lossChannels < 1 {
 		return nil, fmt.Errorf("%w: missing CELT decoder history", ErrInvalidState)
 	}
 	frameSize48 := frameSize * SampleRate48kHz / d.sampleRate
@@ -4867,7 +4928,7 @@ func (d *Decoder) decodeCELTPLCFrame(frameSize int) ([]float64, error) {
 	if lm < 0 {
 		return nil, fmt.Errorf("%w: CELT PLC frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
-	_, bandwidth, _ := framing.ParseTOCConfig(d.lastPacketConfig)
+	_, bandwidth, _ := framing.ParseTOCConfig(d.lossConfig)
 	bw := 0
 	switch bandwidth {
 	case framing.BandwidthNarrowband:
@@ -5131,6 +5192,7 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	}
 	d.lastPacketConfig = config
 	d.lastPacketChannels = info.channels
+	d.lossConfig, d.lossChannels = config, info.channels
 	// inspectPacket reports the public Mode* constants; prevMode is compared
 	// against the internal framing.Mode* constants (e.g. by DecodePLC).
 	if info.mode == ModeHybrid {
@@ -5180,6 +5242,8 @@ func (d *Decoder) cloneState() (*Decoder, error) {
 	clone.lastPacketDuration = d.lastPacketDuration
 	clone.lastPacketConfig = d.lastPacketConfig
 	clone.lastPacketChannels = d.lastPacketChannels
+	clone.lossConfig = d.lossConfig
+	clone.lossChannels = d.lossChannels
 	clone.lastFinalRange = d.lastFinalRange
 	clone.lastPitch = d.lastPitch
 	clone.gainQ8 = d.gainQ8
@@ -5294,6 +5358,8 @@ func (d *Decoder) Reset() error {
 	d.prevRedundancy = false
 	d.lastPacketConfig = -1
 	d.lastPacketChannels = 0
+	d.lossConfig = -1
+	d.lossChannels = 0
 	d.lastFinalRange = 0
 	d.lastPitch = 0
 	return nil

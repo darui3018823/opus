@@ -109,7 +109,7 @@ func (c sweepCell) oracleOptions() string {
 }
 
 // TestAutoModeOracleSweep checks ModePolicyLibopus against the libopus
-// oracle over a broad matrix (3180 cells) beyond the traced gate tests: every
+// oracle over a broad matrix (3204 cells) beyond the traced gate tests: every
 // bitrate step, CBR / constrained / unconstrained VBR, complexities 0-10, the
 // "auto" signal hint with the tonality analysis, 8-24 kHz input, 40-120 ms
 // packets (CBR and CVBR), forced / capped bandwidths, forced mono, int16 input and a
@@ -307,8 +307,18 @@ func TestAutoModeOracleSweep(t *testing.T) {
 			}
 		}
 	}
+	// DTX in CBR, where the packets before DTX starts are padded.
+	for _, rate := range []int{16000, 48000} {
+		for _, ch := range []int{1, 2} {
+			for _, kbps := range []int{12, 24, 64} {
+				for _, app := range []string{"voip", "audio"} {
+					add("dtxcbr", sweepCell{rate: rate, channels: ch, bitrate: kbps * 1000, complexity: 5, signal: "voice", app: app, dtx: true, fixture: "ref-speech-gaps", frames: 120})
+				}
+			}
+		}
+	}
 
-	for _, group := range []string{"core", "rates", "frames", "framescbr", "forced", "input", "fec", "dtx", "short", "short-transitions", "short-dtx", "short-fec", "restricted"} {
+	for _, group := range []string{"core", "rates", "frames", "framescbr", "forced", "input", "fec", "dtx", "dtxcbr", "short", "short-transitions", "short-dtx", "short-fec", "restricted"} {
 		cells := groups[group]
 		var bad atomic.Int32
 		t.Run(group, func(t *testing.T) {

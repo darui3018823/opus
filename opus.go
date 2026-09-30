@@ -2986,14 +2986,14 @@ type Decoder struct {
 	// the mono path delays its output through it and a stereo stream's
 	// mid/side conversion starts from it; silkStereoDec is the stereo
 	// decoder of the stream being decoded.
-	silkRS             [2]*silk.Resampler
-	silkRSInKHz        [2]int // current internal rate (kHz) per channel; 0 = uninitialized
-	silkSMid           [2]int16
-	silkStereoDec      *silk.Decoder
+	silkRS        [2]*silk.Resampler
+	silkRSInKHz   [2]int // current internal rate (kHz) per channel; 0 = uninitialized
+	silkSMid      [2]int16
+	silkStereoDec *silk.Decoder
 	// silkActiveRi is the SILK internal rate index of the last decoded
 	// SILK layer (-1 before any): libopus has one SILK decoder state, so a
 	// rate change hands the state to the new rate's decoders.
-	silkActiveRi int
+	silkActiveRi       int
 	prevSilkInternalCh int // previous packet's SILK internal channel count (0 = none yet)
 
 	// Resampler for non-48kHz CELT output rates

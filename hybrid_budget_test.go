@@ -18,7 +18,7 @@ func TestHybridMultiFrameStrictBudget(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			enc, err := NewEncoder(tc.rate, tc.channels, ApplicationVOIP)
+			enc, err := newLegacyEncoder(tc.rate, tc.channels, ApplicationVOIP)
 			if err != nil {
 				t.Fatalf("NewEncoder: %v", err)
 			}

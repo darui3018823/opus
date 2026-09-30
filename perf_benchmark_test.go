@@ -229,7 +229,7 @@ func perfWorkloads() []perfWorkload {
 
 func newPerfEncoder(tb testing.TB, wl perfWorkload) *Encoder {
 	tb.Helper()
-	enc, err := NewEncoder(perfSampleRate, wl.channels, wl.app)
+	enc, err := newLegacyEncoder(perfSampleRate, wl.channels, wl.app)
 	if err != nil {
 		tb.Fatalf("NewEncoder: %v", err)
 	}

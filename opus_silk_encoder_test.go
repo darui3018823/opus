@@ -131,7 +131,7 @@ func TestEncoderSILKOnlyStereoMultiFrameRoundTrip(t *testing.T) {
 
 	for _, mult := range []int{2, 3, 6} {
 		t.Run(multName(mult), func(t *testing.T) {
-			enc, err := NewEncoder(rate, 2, ApplicationVOIP)
+			enc, err := newLegacyEncoder(rate, 2, ApplicationVOIP)
 			if err != nil {
 				t.Fatalf("NewEncoder: %v", err)
 			}
@@ -182,7 +182,7 @@ func TestEncoderSILKOnlyAllSupportedDurationsStrict(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(rateName(tc.rate)+"/"+channelName(tc.channels), func(t *testing.T) {
-			enc, err := NewEncoder(tc.rate, tc.channels, ApplicationVOIP)
+			enc, err := newLegacyEncoder(tc.rate, tc.channels, ApplicationVOIP)
 			if err != nil {
 				t.Fatalf("NewEncoder: %v", err)
 			}
@@ -242,7 +242,7 @@ func TestEncoderSILKOnlyAllSupportedDurationsStrict(t *testing.T) {
 }
 
 func TestEncoderVOIPHighBitrateStaysCELT(t *testing.T) {
-	enc, err := NewEncoder(16000, 1, ApplicationVOIP)
+	enc, err := newLegacyEncoder(16000, 1, ApplicationVOIP)
 	if err != nil {
 		t.Fatalf("NewEncoder: %v", err)
 	}
@@ -265,7 +265,7 @@ func TestEncoderVoiceModeTransitionsStrict(t *testing.T) {
 	const channels = 1
 	frameSize := rate * 20 / 1000
 
-	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	enc, err := newLegacyEncoder(rate, channels, ApplicationVOIP)
 	if err != nil {
 		t.Fatalf("NewEncoder: %v", err)
 	}
@@ -525,7 +525,7 @@ func TestEncoderHybridToCELTWithoutRedundancyKeepsHybridState(t *testing.T) {
 		channels  = 2
 		frameSize = rate * 20 / 1000
 	)
-	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	enc, err := newLegacyEncoder(rate, channels, ApplicationVOIP)
 	if err != nil {
 		t.Fatalf("NewEncoder: %v", err)
 	}
@@ -744,7 +744,7 @@ func TestEncoderCELTToSILKRedundancy(t *testing.T) {
 		channels = 1
 	)
 	frameSize := rate * 20 / 1000
-	enc, err := NewEncoder(rate, channels, ApplicationVOIP)
+	enc, err := newLegacyEncoder(rate, channels, ApplicationVOIP)
 	if err != nil {
 		t.Fatalf("NewEncoder: %v", err)
 	}
@@ -1024,7 +1024,7 @@ func TestEncoderHybridSelectionBoundariesStrict(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			enc, err := NewEncoder(tc.rate, tc.channels, tc.app)
+			enc, err := newLegacyEncoder(tc.rate, tc.channels, tc.app)
 			if err != nil {
 				t.Fatalf("NewEncoder: %v", err)
 			}
@@ -1327,7 +1327,7 @@ func TestEncoderSILKOnlyModeSelectionMatrix(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			enc, err := NewEncoder(tc.rate, tc.channels, tc.app)
+			enc, err := newLegacyEncoder(tc.rate, tc.channels, tc.app)
 			if err != nil {
 				t.Fatalf("NewEncoder: %v", err)
 			}
@@ -1386,7 +1386,7 @@ func TestEncoderModeRatePolicy(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			enc, err := NewEncoder(tc.rate, tc.channels, ApplicationVOIP)
+			enc, err := newLegacyEncoder(tc.rate, tc.channels, ApplicationVOIP)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1427,7 +1427,7 @@ func TestEncoderSILKOnlyDownsampledVoiceRoundTrip(t *testing.T) {
 		{48000, 2},
 	} {
 		t.Run(rateName(tc.rate)+"/"+channelName(tc.channels), func(t *testing.T) {
-			enc, err := NewEncoder(tc.rate, tc.channels, ApplicationVOIP)
+			enc, err := newLegacyEncoder(tc.rate, tc.channels, ApplicationVOIP)
 			if err != nil {
 				t.Fatalf("NewEncoder: %v", err)
 			}
@@ -1614,7 +1614,7 @@ func TestEncoderSILKOnlyVBRAndDTXDoNotUseCBRPadding(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			enc, err := NewEncoder(rate, 1, ApplicationVOIP)
+			enc, err := newLegacyEncoder(rate, 1, ApplicationVOIP)
 			if err != nil {
 				t.Fatalf("NewEncoder: %v", err)
 			}
@@ -1666,7 +1666,7 @@ func TestEncoderHybridVoiceRoundTrip(t *testing.T) {
 		{name: "fb_48k_stereo_multiframe", rate: 48000, channels: 2, bitrate: 96000, packetMs: 40, wantConfig: 15, wantCode: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			enc, err := NewEncoder(tc.rate, tc.channels, ApplicationVOIP)
+			enc, err := newLegacyEncoder(tc.rate, tc.channels, ApplicationVOIP)
 			if err != nil {
 				t.Fatalf("NewEncoder: %v", err)
 			}

@@ -58,9 +58,9 @@ func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, ma
 		encoders:       encoders,
 		bitrate:        BitrateAuto,
 		lfeStream:      -1,
-		// The restricted SILK / CELT applications only have the libopus
-		// policy (their elementary encoders select it).
-		libopusPolicy: isRestrictedCodecApplication(application),
+		// The libopus policy is the default since v1.5.0, like the
+		// elementary encoders'.
+		libopusPolicy: true,
 	}, nil
 }
 

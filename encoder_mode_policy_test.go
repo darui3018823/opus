@@ -37,20 +37,20 @@ func TestSetModePolicyValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := enc.ModePolicy(); got != ModePolicyLegacy {
-		t.Fatalf("default ModePolicy = %d, want ModePolicyLegacy", got)
+	if got := enc.ModePolicy(); got != ModePolicyLibopus {
+		t.Fatalf("default ModePolicy = %d, want ModePolicyLibopus", got)
 	}
-	if err := enc.SetModePolicy(ModePolicyLibopus); err != nil {
+	if err := enc.SetModePolicy(ModePolicyLegacy); err != nil {
 		t.Fatal(err)
 	}
-	if got := enc.ModePolicy(); got != ModePolicyLibopus {
-		t.Fatalf("ModePolicy = %d, want ModePolicyLibopus", got)
+	if got := enc.ModePolicy(); got != ModePolicyLegacy {
+		t.Fatalf("ModePolicy = %d, want ModePolicyLegacy", got)
 	}
 	for _, bad := range []ModePolicy{-1, 2, 99} {
 		if err := enc.SetModePolicy(bad); !errors.Is(err, ErrBadArg) {
 			t.Fatalf("SetModePolicy(%d) error = %v, want ErrBadArg", bad, err)
 		}
-		if got := enc.ModePolicy(); got != ModePolicyLibopus {
+		if got := enc.ModePolicy(); got != ModePolicyLegacy {
 			t.Fatalf("invalid SetModePolicy(%d) changed the policy to %d", bad, got)
 		}
 	}

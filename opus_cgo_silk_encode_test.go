@@ -43,7 +43,7 @@ func TestCGOEncodeRefSILKOnly(t *testing.T) {
 			for _, packetMs := range []int{20, 40, 60} {
 				packetMs := packetMs
 				t.Run(rt.name+"/"+silkRefRateName(tc.rate)+"/"+silkRefChannelName(tc.channels)+"/"+silkRefPacketName(packetMs), func(t *testing.T) {
-					enc, err := opus.NewEncoder(tc.rate, tc.channels, rt.app)
+					enc, err := newLegacyEncoder(tc.rate, tc.channels, rt.app)
 					if err != nil {
 						t.Fatalf("NewEncoder: %v", err)
 					}
@@ -168,7 +168,7 @@ func TestCGOEncodeRefSILKOnlyExtendedDurationsStrict(t *testing.T) {
 		for _, packetMs := range []int{80, 100, 120} {
 			packetMs := packetMs
 			t.Run(tc.name+"/"+silkRefPacketName(packetMs), func(t *testing.T) {
-				enc, err := opus.NewEncoder(tc.rate, tc.channels, opus.ApplicationVOIP)
+				enc, err := newLegacyEncoder(tc.rate, tc.channels, opus.ApplicationVOIP)
 				if err != nil {
 					t.Fatalf("NewEncoder: %v", err)
 				}
@@ -259,7 +259,7 @@ func TestCGOEncodeRefHybrid(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			enc, err := opus.NewEncoder(tc.rate, tc.channels, opus.ApplicationVOIP)
+			enc, err := newLegacyEncoder(tc.rate, tc.channels, opus.ApplicationVOIP)
 			if err != nil {
 				t.Fatalf("NewEncoder: %v", err)
 			}
@@ -349,7 +349,7 @@ func TestCGOEncodeRefHybridMultiFrameStrict(t *testing.T) {
 		for _, packetMs := range []int{40, 60, 120} {
 			packetMs := packetMs
 			t.Run(tc.name+"/"+silkRefPacketName(packetMs), func(t *testing.T) {
-				enc, err := opus.NewEncoder(tc.rate, tc.channels, opus.ApplicationVOIP)
+				enc, err := newLegacyEncoder(tc.rate, tc.channels, opus.ApplicationVOIP)
 				if err != nil {
 					t.Fatalf("NewEncoder: %v", err)
 				}
@@ -574,7 +574,7 @@ func TestCGOEncodeRefCELTToSILKRedundancyTransition(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			enc, err := opus.NewEncoder(rate, channels, opus.ApplicationVOIP)
+			enc, err := newLegacyEncoder(rate, channels, opus.ApplicationVOIP)
 			if err != nil {
 				t.Fatalf("NewEncoder: %v", err)
 			}

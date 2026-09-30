@@ -125,11 +125,11 @@ func TestBitrateMaxMatchesNumericAfterHybridHistory(t *testing.T) {
 		durationMs = 60
 	)
 	frameSize := rate * durationMs / 1000
-	maxEnc, err := NewEncoder(rate, 1, ApplicationVOIP)
+	maxEnc, err := newLegacyEncoder(rate, 1, ApplicationVOIP)
 	if err != nil {
 		t.Fatal(err)
 	}
-	numericEnc, err := NewEncoder(rate, 1, ApplicationVOIP)
+	numericEnc, err := newLegacyEncoder(rate, 1, ApplicationVOIP)
 	if err != nil {
 		t.Fatal(err)
 	}

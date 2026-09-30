@@ -97,8 +97,8 @@ func TestNewEncoderWithProfile(t *testing.T) {
 	if got := compatible.ModePolicy(); got != ModePolicyLibopus {
 		t.Fatalf("libopus profile mode policy = %d, want ModePolicyLibopus", got)
 	}
-	if got := legacy.ModePolicy(); got != ModePolicyLegacy {
-		t.Fatalf("legacy profile mode policy = %d, want ModePolicyLegacy", got)
+	if got := legacy.ModePolicy(); got != ModePolicyLibopus {
+		t.Fatalf("legacy profile mode policy = %d, want ModePolicyLibopus (the default since v1.5.0)", got)
 	}
 	packet, err := compatible.Encode(make([]int16, 960), 960)
 	if err != nil {
@@ -114,7 +114,7 @@ func TestNewEncoderWithProfile(t *testing.T) {
 }
 
 func TestCommonEncoderDecoderGetters(t *testing.T) {
-	enc, err := NewEncoder(48000, 2, ApplicationAudio)
+	enc, err := newLegacyEncoder(48000, 2, ApplicationAudio)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestCommonEncoderDecoderGetters(t *testing.T) {
 }
 
 func TestProductionControls(t *testing.T) {
-	enc, err := NewEncoder(48000, 2, ApplicationVOIP)
+	enc, err := newLegacyEncoder(48000, 2, ApplicationVOIP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +233,7 @@ func TestProductionControls(t *testing.T) {
 		t.Fatalf("prediction-disabled mode = %d, err=%v", mode, err)
 	}
 
-	mono, err := NewEncoder(48000, 1, ApplicationAudio)
+	mono, err := newLegacyEncoder(48000, 1, ApplicationAudio)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -317,11 +317,11 @@ func TestEncoderSignalSettingIsIndependentOfApplication(t *testing.T) {
 		{ApplicationAudio, SignalMusic},
 		{ApplicationRestrictedLowDelay, SignalMusic},
 	} {
-		auto, err := NewEncoder(rate, 1, tc.application)
+		auto, err := newLegacyEncoder(rate, 1, tc.application)
 		if err != nil {
 			t.Fatal(err)
 		}
-		explicit, err := NewEncoder(rate, 1, tc.application)
+		explicit, err := newLegacyEncoder(rate, 1, tc.application)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -342,11 +342,11 @@ func TestEncoderSignalSettingIsIndependentOfApplication(t *testing.T) {
 		}
 	}
 
-	first, err := NewEncoder(rate, 1, ApplicationVOIP)
+	first, err := newLegacyEncoder(rate, 1, ApplicationVOIP)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := NewEncoder(rate, 1, ApplicationVOIP)
+	second, err := newLegacyEncoder(rate, 1, ApplicationVOIP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +381,7 @@ func TestEncoderSignalSettingIsIndependentOfApplication(t *testing.T) {
 		t.Fatalf("SignalType after Auto+Reset=%d, want Auto", got)
 	}
 
-	stereo, err := NewEncoder(rate, 2, ApplicationVOIP)
+	stereo, err := newLegacyEncoder(rate, 2, ApplicationVOIP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -725,7 +725,7 @@ func TestDecoderPLCSILKAndHybrid(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			frameSize := tc.rate / 50
-			enc, err := NewEncoder(tc.rate, tc.channels, ApplicationVOIP)
+			enc, err := newLegacyEncoder(tc.rate, tc.channels, ApplicationVOIP)
 			if err != nil {
 				t.Fatal(err)
 			}

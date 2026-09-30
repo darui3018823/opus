@@ -123,7 +123,7 @@ func TestEncoderAutoBandwidthConfig(t *testing.T) {
 	const sr = 48000
 	const frameSize = 960
 
-	enc, err := NewEncoder(sr, 1, ApplicationAudio)
+	enc, err := newLegacyEncoder(sr, 1, ApplicationAudio)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestEncoderAutoBandwidthConfig(t *testing.T) {
 		t.Errorf("1kHz tone: config %d, want narrowband CELT (16-19)", config)
 	}
 
-	encN, _ := NewEncoder(sr, 1, ApplicationAudio)
+	encN, _ := newLegacyEncoder(sr, 1, ApplicationAudio)
 	rng := rand.New(rand.NewSource(2))
 	noise := make([]float64, frameSize)
 	for i := range noise {

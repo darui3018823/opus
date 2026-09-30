@@ -63,7 +63,7 @@ func TestHybridEncoderOracle(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ref := runHybridEncOracle(t, "ref-speech", frames, tc.bitrate, "fb", tc.vbr, tc.channels, tc.complexity)
-			enc, err := NewEncoder(rate, tc.channels, ApplicationVOIP)
+			enc, err := newLegacyEncoder(rate, tc.channels, ApplicationVOIP)
 			if err != nil {
 				t.Fatal(err)
 			}

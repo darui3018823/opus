@@ -269,7 +269,7 @@ func TestEncoderMultiFrameRoundTrip(t *testing.T) {
 				name += "-vbr"
 			}
 			t.Run(name, func(t *testing.T) {
-				enc, err := NewEncoder(sampleRate, channels, ApplicationAudio)
+				enc, err := newLegacyEncoder(sampleRate, channels, ApplicationAudio)
 				if err != nil {
 					t.Fatal(err)
 				}

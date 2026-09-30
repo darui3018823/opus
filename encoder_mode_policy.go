@@ -463,9 +463,10 @@ func (e *Encoder) goModeDecision(raw []float64, frameSize, nFrames int) modeDeci
 type ModePolicy int
 
 const (
-	// ModePolicyLegacy is the Go encoder's historical policy: bitrate
-	// boundaries for the mode and signal-analysis bandwidth narrowing. It is
-	// NewEncoder's default.
+	// ModePolicyLegacy is the Go encoder's historical policy, the default
+	// before v1.5.0: bitrate boundaries for the mode and signal-analysis
+	// bandwidth narrowing. It codes lower bandwidths than libopus (speech at
+	// 8 kHz below about 40 kbit/s, tonal music down to 4 kHz).
 	ModePolicyLegacy ModePolicy = iota
 	// ModePolicyLibopus follows libopus 1.6.1's opus_encode_native: mode
 	// thresholds interpolated by the stereo width and the voice estimate,
@@ -474,7 +475,7 @@ const (
 	// redundancy and prefills, and a sub-48 kHz CELT input zero-stuffed as
 	// libopus does. With the same settings and input its packets are
 	// byte-identical to libopus 1.6.1 (float build without SIMD kernels).
-	// EncoderProfileLibopus selects it.
+	// It is the default of NewEncoder and of every encoder profile.
 	ModePolicyLibopus
 )
 

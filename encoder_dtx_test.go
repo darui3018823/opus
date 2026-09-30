@@ -17,7 +17,7 @@ func TestEncoderDTXSilencePackets(t *testing.T) {
 		nFrames    = 8
 	)
 
-	enc, err := NewEncoder(sampleRate, channels, ApplicationAudio)
+	enc, err := newLegacyEncoder(sampleRate, channels, ApplicationAudio)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestEncoderDTXMultiFrame(t *testing.T) {
 		frameSize  = 2 * base // 40 ms
 		bitrate    = 64000
 	)
-	enc, err := NewEncoder(sampleRate, channels, ApplicationAudio)
+	enc, err := newLegacyEncoder(sampleRate, channels, ApplicationAudio)
 	if err != nil {
 		t.Fatal(err)
 	}

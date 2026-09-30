@@ -256,7 +256,7 @@ func TestEncoderSILKOnlySilenceMinimalPacket(t *testing.T) {
 		rate := rate
 		t.Run(rateName(rate), func(t *testing.T) {
 			frameSize := rate * 20 / 1000
-			enc, err := NewEncoder(rate, 1, ApplicationVOIP)
+			enc, err := newLegacyEncoder(rate, 1, ApplicationVOIP)
 			if err != nil {
 				t.Fatalf("NewEncoder: %v", err)
 			}
@@ -383,7 +383,7 @@ func TestEncoderSILKOnlyStereoQualityBaseline(t *testing.T) {
 			for _, sig := range opusSILKStereoQualitySignals() {
 				sig := sig
 				t.Run(sig.name, func(t *testing.T) {
-					enc, err := NewEncoder(rate, 2, ApplicationVOIP)
+					enc, err := newLegacyEncoder(rate, 2, ApplicationVOIP)
 					if err != nil {
 						t.Fatalf("NewEncoder: %v", err)
 					}

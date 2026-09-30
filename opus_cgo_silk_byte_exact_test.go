@@ -19,7 +19,10 @@ import (
 // count and bandwidth. Cells where libopus picks another mode (hybrid at
 // 32 kbps for 24/48 kHz input), downmixes a stereo stream to mono or narrows
 // the bandwidth are the open mode/channel/bandwidth-policy gap and are only
-// logged.
+// logged. The Go encoder uses ModePolicyLegacy, whose SILK path has no float
+// analysis: under ModePolicyLibopus the tonality analysis steers the rate
+// decisions and a SIMD libopus sums its floats in another order, so that
+// policy is checked against the plain-C oracle (TestAutoModeOracleSweep).
 func TestCGOEncodeRefSILKByteExact(t *testing.T) {
 	const nPackets = 14
 	type cell struct{ channels, rate, bitrate int }
@@ -47,7 +50,7 @@ func TestCGOEncodeRefSILKByteExact(t *testing.T) {
 				}
 				t.Run(fmt.Sprintf("%s/%dch/%dk/%dkbps", name, channels, rate/1000, bitrate/1000), func(t *testing.T) {
 					frameSize := rate * 20 / 1000
-					enc, err := opus.NewEncoder(rate, channels, opus.ApplicationVOIP)
+					enc, err := newLegacyEncoder(rate, channels, opus.ApplicationVOIP)
 					if err != nil {
 						t.Fatal(err)
 					}

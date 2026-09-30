@@ -22,12 +22,12 @@ type EncoderProfile int
 
 const (
 	// EncoderProfileLegacy preserves NewEncoder's historical defaults:
-	// 64 kbit/s, complexity 5, and CBR.
+	// 64 kbit/s, complexity 5, and CBR. Like NewEncoder it uses
+	// ModePolicyLibopus since v1.5.0.
 	EncoderProfileLegacy EncoderProfile = iota
 	// EncoderProfileLibopus uses libopus-style defaults: automatic bitrate,
 	// complexity 9, constrained VBR, and ModePolicyLibopus for the automatic
-	// mode, channel and bandwidth decisions (since v1.5.0; call
-	// SetModePolicy(ModePolicyLegacy) for the earlier decisions).
+	// mode, channel and bandwidth decisions.
 	EncoderProfileLibopus
 )
 
@@ -282,7 +282,9 @@ func (e *Encoder) celtOnlyApplication() bool {
 }
 
 // NewEncoder creates a stateful Opus encoder using the legacy compatibility
-// defaults: 64 kbit/s, complexity 5, and CBR.
+// defaults: 64 kbit/s, complexity 5, and CBR. Its automatic mode, channel
+// and bandwidth decisions follow ModePolicyLibopus (since v1.5.0); call
+// SetModePolicy(ModePolicyLegacy) for the earlier decisions.
 //
 // sampleRate must be 8000, 12000, 16000, 24000, or 48000 Hz; channels must be
 // one or two. Invalid arguments return an error wrapping ErrBadArg.
@@ -358,9 +360,8 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		}
 		enc.silkEncoder.SetRateMode(silk.RateModeCBR)
 	}
-	if isRestrictedCodecApplication(application) {
-		enc.libopusModePolicy = true
-	}
+	// The libopus mode policy is the default since v1.5.0.
+	enc.libopusModePolicy = true
 
 	return enc, nil
 }
@@ -2404,6 +2405,9 @@ func (e *Encoder) monoEncoder() (*Encoder, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Only the Go policy codes forced mono with this encoder, and it
+		// codes the stream with the parent's policy.
+		enc.libopusModePolicy = e.libopusModePolicy
 		e.forcedMono = enc
 	}
 	m := e.forcedMono

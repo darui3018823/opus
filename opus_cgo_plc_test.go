@@ -28,7 +28,7 @@ func TestCGORefSILKAndHybridPLC(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			frameSize := tc.rate / 50
-			enc, err := opus.NewEncoder(tc.rate, tc.channels, opus.ApplicationVOIP)
+			enc, err := newLegacyEncoder(tc.rate, tc.channels, opus.ApplicationVOIP)
 			if err != nil {
 				t.Fatal(err)
 			}

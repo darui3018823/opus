@@ -29,7 +29,7 @@ func TestCGOEncodeRefSILKFEC(t *testing.T) {
 	maxSPC := rate * 120 / 1000
 
 	newEnc := func(fec bool) *opus.Encoder {
-		enc, err := opus.NewEncoder(rate, channels, opus.ApplicationVOIP)
+		enc, err := newLegacyEncoder(rate, channels, opus.ApplicationVOIP)
 		if err != nil {
 			t.Fatalf("NewEncoder: %v", err)
 		}
@@ -208,7 +208,7 @@ func TestCGOEncodeRefSILKFECMultiFrame(t *testing.T) {
 			frameSize := rate * packetMs / 1000
 
 			mkEnc := func(fec bool) *opus.Encoder {
-				enc, err := opus.NewEncoder(rate, channels, opus.ApplicationVOIP)
+				enc, err := newLegacyEncoder(rate, channels, opus.ApplicationVOIP)
 				if err != nil {
 					t.Fatalf("NewEncoder: %v", err)
 				}

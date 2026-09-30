@@ -90,7 +90,7 @@ func TestSILKSilenceWithoutPendingLBRRStaysMinimal(t *testing.T) {
 		for _, dtx := range []bool{false, true} {
 			name := fmt.Sprintf("%dch/dtx=%v", channels, dtx)
 			t.Run(name, func(t *testing.T) {
-				enc, err := NewEncoder(16000, channels, ApplicationVOIP)
+				enc, err := newLegacyEncoder(16000, channels, ApplicationVOIP)
 				if err != nil {
 					t.Fatal(err)
 				}

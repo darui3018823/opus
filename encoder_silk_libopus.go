@@ -200,17 +200,18 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 		// coder's unused tail cleared by ec_enc_done.
 		stream = append(stream, 0)
 	}
-	rangeFinal := e.silkEncoder.LastFinalRange()
+	// st->rangeFinal = enc.rng (ec_enc_done leaves rng unchanged).
+	rangeFinal := enc.GetRng()
 	if redundancy {
 		// CELT_SET_END_BAND / CELT_SET_CHANNELS follow the packet's bandwidth
 		// and stream channels on every packet.
 		e.celtEncoder.SetStreamChannels(streamChannels)
-		redFrame, err := e.encodeCELTRedundancy(celtPCM, redBytes, celtEndBandForFramingBW(bw), celtToSilk)
+		redFrame, redRng, err := e.encodeCELTRedundancy(celtPCM, redBytes, celtEndBandForFramingBW(bw), celtToSilk)
 		if err != nil {
 			return nil, fmt.Errorf("CELT redundant frame encoding failed: %w", err)
 		}
 		stream = append(stream, redFrame...)
-		rangeFinal ^= e.celtEncoder.FinalRange()
+		rangeFinal ^= redRng
 	} else {
 		// LPC-only packets may drop trailing zero bytes (the decoder fills
 		// them in).

@@ -87,8 +87,10 @@ func (e *Encoder) celtModeTransition(startBand int) error {
 // state prefilled with the 2.5 ms before the last 5 ms, with prediction
 // disabled, and covers the last 5 ms. endBand < 0 keeps the encoder's band
 // limit (libopus leaves it as the previous CELT frame set it). The input
-// is the frame's CELT input at the input rate (delayed, faded).
-func (e *Encoder) encodeCELTRedundancy(celtPCM []float64, nbytes, endBand int, celtToSilk bool) ([]byte, error) {
+// is the frame's CELT input at the input rate (delayed, faded). It also
+// returns the redundant frame's final range (redundant_rng), which libopus
+// XORs into the packet's.
+func (e *Encoder) encodeCELTRedundancy(celtPCM []float64, nbytes, endBand int, celtToSilk bool) ([]byte, uint32, error) {
 	ch := e.channels
 	frame := len(celtPCM) / ch
 	n2, n4 := e.sampleRate/200, e.sampleRate/400
@@ -98,22 +100,25 @@ func (e *Encoder) encodeCELTRedundancy(celtPCM []float64, nbytes, endBand int, c
 		// temporal VBR follower averages the coded bands only).
 		e.celtEncoder.SetEndBand(endBand)
 	}
-	encode := func(part []float64) ([]byte, error) {
+	encode := func(part []float64) ([]byte, uint32, error) {
 		var out []byte
+		var rng uint32
 		err := e.celtWithFrameSize(celt.FrameSize5ms, func(enc *celt.Encoder) error {
 			if endBand >= 0 {
 				enc.SetEndBand(endBand)
 			}
 			var err error
 			out, err = enc.EncodeRedundant(e.celtInputFrame(part), nbytes)
+			rng = enc.FinalRange()
 			return err
 		})
-		return out, err
+		return out, rng, err
 	}
 	if celtToSilk {
-		out, err := encode(celtPCM[:n2*ch])
+		// OPUS_GET_FINAL_RANGE comes before the OPUS_RESET_STATE.
+		out, rng, err := encode(celtPCM[:n2*ch])
 		e.celtEncoder.Reset()
-		return out, err
+		return out, rng, err
 	}
 	e.celtEncoder.Reset()
 	e.celtEncoder.SetPrediction(0)
@@ -130,7 +135,7 @@ func (e *Encoder) encodeCELTRedundancy(celtPCM []float64, nbytes, endBand int, c
 		e.celtEncoder.SetBitrateMax()
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	return encode(celtPCM[(frame-n2)*ch:])
 }

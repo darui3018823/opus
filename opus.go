@@ -1521,12 +1521,13 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		// then resets celt_enc for the hybrid high band. It is appended to the
 		// frame tail below.
 		var leadingRedFrame []byte
+		var redundantRng uint32
 		if frameRedundancy && celtToSilk {
-			rf, rerr := e.encodeCELTRedundancy(celtChunk, redundancyBytes, celtEnd, true)
+			rf, rng, rerr := e.encodeCELTRedundancy(celtChunk, redundancyBytes, celtEnd, true)
 			if rerr != nil {
 				return nil, false, fmt.Errorf("CELT leading redundant frame encoding failed: %w", rerr)
 			}
-			leadingRedFrame = rf
+			leadingRedFrame, redundantRng = rf, rng
 		}
 		// libopus gives hybrid CELT the total bitrate minus the SILK target
 		// and disables CELT's own VBR constraint; in CBR the CELT part fills
@@ -1591,16 +1592,17 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 				// encoder from a reset, prefilled state, so the next (genuinely
 				// CELT-only) packet continues from it, as the decoder adopts
 				// the redundant decoder's state (celtDec.CopyStateFrom(redDec)).
-				rf, rerr := e.encodeCELTRedundancy(celtChunk, redundancyBytes, celtEnd, false)
+				rf, rng, rerr := e.encodeCELTRedundancy(celtChunk, redundancyBytes, celtEnd, false)
 				if rerr != nil {
 					return nil, false, fmt.Errorf("CELT redundant frame encoding failed: %w", rerr)
 				}
-				redFrame = rf
+				redFrame, redundantRng = rf, rng
 			}
 			redPadded := make([]byte, redundancyBytes)
 			copy(redPadded, redFrame)
 			frame = append(frame, redPadded...)
 			redundancyEmitted = true
+			rangeFinal ^= redundantRng
 		}
 		if len(frame) != frameBytes && frameRedundancy {
 			// Defensive: redundant frame must total exactly maxBytes.

@@ -34,3 +34,21 @@ func TestCwrsiLibopusCollapseMasks(t *testing.T) {
 		})
 	}
 }
+
+func TestCwrsiLibopusNearUint32Boundary(t *testing.T) {
+	const (
+		n     = 24
+		k     = 9
+		index = uint32(2779010792)
+	)
+	want := []int{0, 0, -1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, -1, 0, 0, -1, 1, 0, 0}
+	got := cwrsiLibopus(n, k, index)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pulse[%d]=%d, want %d; got=%v", i, got[i], want[i], got)
+		}
+	}
+	if got := cwrsV(n, k); got != 4003707568 {
+		t.Fatalf("V(%d,%d)=%d, want 4003707568", n, k, got)
+	}
+}

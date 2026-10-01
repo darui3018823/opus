@@ -68,6 +68,14 @@ const (
 	ApplicationAudio = 2049
 	// ApplicationRestrictedLowDelay keeps encoding on the low-delay CELT path.
 	ApplicationRestrictedLowDelay = 2051
+	// ApplicationRestrictedSILK (libopus 1.6 OPUS_APPLICATION_RESTRICTED_SILK)
+	// codes SILK-only packets of 10 ms or longer, at most wideband, without
+	// the CELT layer or the tonality analysis. It is fixed at creation.
+	ApplicationRestrictedSILK = 2052
+	// ApplicationRestrictedCELT (libopus 1.6 OPUS_APPLICATION_RESTRICTED_CELT)
+	// codes CELT-only packets without the SILK layer, with the low delay of
+	// ApplicationRestrictedLowDelay. It is fixed at creation.
+	ApplicationRestrictedCELT = 2053
 )
 
 // Coded bandwidth selections. BandwidthAuto is accepted by SetBandwidth to

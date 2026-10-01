@@ -294,8 +294,14 @@ func silkPitchContinuity(x []float64, frameSize, minLag, maxLag int) (mean, maxD
 	return mean, maxDelta
 }
 
+// silkBestPitchLag returns the shortest lag whose normalized correlation is
+// within a small tolerance of the maximum. A perfectly periodic decoded frame
+// correlates equally well at the fundamental and at its octave, and the
+// tolerance keeps such ties from being reported as pitch jumps.
 func silkBestPitchLag(x []float64, minLag, maxLag int) (lag int, corr float64) {
+	const octaveTolerance = 0.02
 	bestLag, bestCorr := minLag, 0.0
+	corrs := make([]float64, maxLag+1)
 	for l := minLag; l <= maxLag && l < len(x); l++ {
 		var xy, x2, y2 float64
 		for i := l; i < len(x); i++ {
@@ -309,9 +315,15 @@ func silkBestPitchLag(x []float64, minLag, maxLag int) (lag int, corr float64) {
 			continue
 		}
 		c := xy / math.Sqrt(x2*y2)
+		corrs[l] = c
 		if c > bestCorr {
 			bestCorr = c
 			bestLag = l
+		}
+	}
+	for l := minLag; l < bestLag; l++ {
+		if corrs[l] >= bestCorr-octaveTolerance {
+			return l, corrs[l]
 		}
 	}
 	return bestLag, bestCorr

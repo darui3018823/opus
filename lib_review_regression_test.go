@@ -45,8 +45,11 @@ func TestMonoDecoderDecodesStereoCELTPacket(t *testing.T) {
 		t.Fatalf("mono decode length = %d, want %d", len(mono), frameSize)
 	}
 	for i := range mono {
+		// libopus (CC=1, C=2) averages the two channels' spectra before the
+		// IMDCT, so the mono output equals the stereo downmix up to float32
+		// rounding.
 		want := 0.5 * (stereo[2*i] + stereo[2*i+1])
-		if math.Abs(mono[i]-want) > 1e-12 {
+		if math.Abs(mono[i]-want) > 1e-6 {
 			t.Fatalf("sample %d: mono=%g want downmix=%g", i, mono[i], want)
 		}
 	}

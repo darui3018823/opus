@@ -27,14 +27,14 @@ func (c Complex) Sub(other Complex) Complex {
 // Mul multiplies two complex numbers
 func (c Complex) Mul(other Complex) Complex {
 	return Complex{
-		Real: c.Real*other.Real - c.Imag*other.Imag,
-		Imag: c.Real*other.Imag + c.Imag*other.Real,
+		Real: float64(c.Real*other.Real) - float64(c.Imag*other.Imag),
+		Imag: float64(c.Real*other.Imag) + float64(c.Imag*other.Real),
 	}
 }
 
 // Abs returns the magnitude of the complex number
 func (c Complex) Abs() float64 {
-	return math.Sqrt(c.Real*c.Real + c.Imag*c.Imag)
+	return math.Sqrt(float64(c.Real*c.Real) + float64(c.Imag*c.Imag))
 }
 
 // Conj returns the complex conjugate
@@ -48,60 +48,6 @@ func (c Complex) MulScalar(s float64) Complex {
 }
 
 // Math utilities
-
-// Min returns the minimum of two integers
-func Min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// Max returns the maximum of two integers
-func Max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-// MinFloat returns the minimum of two float64 values
-func MinFloat(a, b float64) float64 {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// MaxFloat returns the maximum of two float64 values
-func MaxFloat(a, b float64) float64 {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-// Clamp restricts a value to a given range
-func Clamp(val, min, max int) int {
-	if val < min {
-		return min
-	}
-	if val > max {
-		return max
-	}
-	return val
-}
-
-// ClampFloat restricts a float64 value to a given range
-func ClampFloat(val, min, max float64) float64 {
-	if val < min {
-		return min
-	}
-	if val > max {
-		return max
-	}
-	return val
-}
 
 // IsPowerOf2 checks if n is a power of 2
 func IsPowerOf2(n int) bool {
@@ -149,33 +95,16 @@ func Dot(a, b []float64) float64 {
 	}
 	sum := 0.0
 	for i := range a {
-		sum += a[i] * b[i]
+		sum += float64(a[i] * b[i])
 	}
 	return sum
-}
-
-// Normalize normalizes a slice to have maximum absolute value of 1.0
-func Normalize(x []float64) {
-	maxAbs := 0.0
-	for _, v := range x {
-		abs := math.Abs(v)
-		if abs > maxAbs {
-			maxAbs = abs
-		}
-	}
-	if maxAbs > 0 {
-		scale := 1.0 / maxAbs
-		for i := range x {
-			x[i] *= scale
-		}
-	}
 }
 
 // Energy computes the energy (sum of squares) of a signal
 func Energy(x []float64) float64 {
 	sum := 0.0
 	for _, v := range x {
-		sum += v * v
+		sum += float64(v * v)
 	}
 	return sum
 }
@@ -196,11 +125,6 @@ func Abs(x float64) float64 {
 // Sin returns the sine of x (in radians)
 func Sin(x float64) float64 {
 	return math.Sin(x)
-}
-
-// Cos returns the cosine of x (in radians)
-func Cos(x float64) float64 {
-	return math.Cos(x)
 }
 
 // Pi is the mathematical constant π

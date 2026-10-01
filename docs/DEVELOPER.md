@@ -12,6 +12,8 @@
 git clone https://github.com/darui3018823/opus.git
 cd opus
 go mod download
+go fmt ./...
+go vet ./...
 go build ./...
 ```
 
@@ -165,6 +167,16 @@ When porting C code from libopus:
    - Use float64 for primary math
    - Use int32/uint32 for exact integer operations
    - Be aware of overflow/underflow
+   - Never let a floating-point product feed an addition or subtraction
+     unrounded. On arm64, ppc64le, s390x, riscv64 and loong64 the Go compiler
+     fuses `x*y + z` (also across statements, through `x *= y`, and through
+     inlined calls; a division by a power of two counts as a product) into a
+     fused multiply-add, which rounds differently from amd64 and from libopus
+     (built with `-ffp-contract=off`), so the encoder's output would depend on
+     the architecture. Round every such product with an explicit conversion,
+     `float32(x*y) + z` / `float64(x*y) + z`: the spec guarantees the
+     conversion rounds, and on amd64 it compiles to nothing. CI fails when an
+     arm64 build of the module contains an FMA instruction.
 
 ### Example: C to Go Translation
 

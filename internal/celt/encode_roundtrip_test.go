@@ -215,7 +215,7 @@ func TestCeltSilenceCBRPaddedSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := 64000 * 20 / 1000 / 8 // CELT payload bytes at 64 kbps, 20 ms
+	want := (64000*20/1000+4)/8 - 1 // cbr_bytes minus the TOC: CELT payload at 64 kbps, 20 ms
 	if len(pkt) != want {
 		t.Errorf("CBR (no DTX) silent packet: got %d bytes, want %d", len(pkt), want)
 	}

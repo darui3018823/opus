@@ -52,8 +52,8 @@ func (pa *PitchAnalyzer) Analyze(input []float64) (lag int, gain float64) {
 
 		// Compute normalized correlation
 		for i := 0; i < len(input)-testLag; i++ {
-			corr += input[i] * input[i+testLag]
-			energy += input[i+testLag] * input[i+testLag]
+			corr += float64(input[i] * input[i+testLag])
+			energy += float64(input[i+testLag] * input[i+testLag])
 		}
 
 		// Normalize by energy
@@ -93,11 +93,11 @@ func (pa *PitchAnalyzer) ApplyPrediction(input, residual []float64) {
 	// Compute residual = input - gain * input[lag samples ago]
 	for i := 0; i < len(input); i++ {
 		if i >= pa.lag {
-			residual[i] = input[i] - pa.gain*input[i-pa.lag]
+			residual[i] = input[i] - float64(pa.gain*input[i-pa.lag])
 		} else {
 			// Use previous frame for initial samples
 			if i < len(pa.prevFrame) && pa.lag-i < len(pa.prevFrame) {
-				residual[i] = input[i] - pa.gain*pa.prevFrame[len(pa.prevFrame)-(pa.lag-i)]
+				residual[i] = input[i] - float64(pa.gain*pa.prevFrame[len(pa.prevFrame)-(pa.lag-i)])
 			} else {
 				residual[i] = input[i]
 			}
@@ -119,11 +119,11 @@ func (pa *PitchAnalyzer) SynthesizePrediction(residual, output []float64) {
 	// Synthesize: output = residual + gain * output[lag samples ago]
 	for i := 0; i < len(residual); i++ {
 		if i >= pa.lag {
-			output[i] = residual[i] + pa.gain*output[i-pa.lag]
+			output[i] = residual[i] + float64(pa.gain*output[i-pa.lag])
 		} else {
 			// Use previous frame for initial samples
 			if i < len(pa.prevFrame) && pa.lag-i < len(pa.prevFrame) {
-				output[i] = residual[i] + pa.gain*pa.prevFrame[len(pa.prevFrame)-(pa.lag-i)]
+				output[i] = residual[i] + float64(pa.gain*pa.prevFrame[len(pa.prevFrame)-(pa.lag-i)])
 			} else {
 				output[i] = residual[i]
 			}
@@ -206,7 +206,7 @@ func (pa *PitchAnalyzer) PostFilter(signal []float64, strength float64) {
 
 	for i := pa.lag; i < len(signal); i++ {
 		// Enhance periodicity
-		signal[i] += effectiveGain * 0.3 * signal[i-pa.lag]
+		signal[i] += float64(effectiveGain * 0.3 * signal[i-pa.lag])
 	}
 }
 

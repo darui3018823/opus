@@ -55,7 +55,7 @@ func (td *TransientDetector) Detect(samples []float64) (bool, int) {
 
 		energy := 0.0
 		for j := start; j < end; j++ {
-			energy += samples[j] * samples[j]
+			energy += float64(samples[j] * samples[j])
 		}
 		blockEnergies[i] = energy / float64(blockSize)
 	}
@@ -201,13 +201,13 @@ func (td *TransientDetector) ComputeTransientWeight(samples []float64) float64 {
 
 	energy1 := 0.0
 	for i := 0; i < mid; i++ {
-		energy1 += samples[i] * samples[i]
+		energy1 += float64(samples[i] * samples[i])
 	}
 	energy1 /= float64(mid)
 
 	energy2 := 0.0
 	for i := mid; i < len(samples); i++ {
-		energy2 += samples[i] * samples[i]
+		energy2 += float64(samples[i] * samples[i])
 	}
 	energy2 /= float64(len(samples) - mid)
 

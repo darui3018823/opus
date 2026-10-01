@@ -367,7 +367,7 @@ func TestSurroundExpertFrameDurationUsesSelectedRateAllocation(t *testing.T) {
 		channels  = 6
 		available = 960
 	)
-	enc, err := NewSurroundEncoder(rate, channels, MappingFamilyVorbis, ApplicationAudio)
+	enc, err := newLegacySurroundEncoder(rate, channels, MappingFamilyVorbis, ApplicationAudio)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestProjectionExpertFrameDurationUsesSelectedRateAllocation(t *testing.T) {
 		channels  = 4
 		available = 960
 	)
-	enc, err := NewProjectionEncoder(rate, channels, MappingFamilyAmbisonics, ApplicationAudio)
+	enc, err := newLegacyProjectionEncoder(rate, channels, MappingFamilyAmbisonics, ApplicationAudio)
 	if err != nil {
 		t.Fatal(err)
 	}

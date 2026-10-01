@@ -89,8 +89,8 @@ func (m *MDCT) Forward(input []float64) ([]float64, error) {
 		sin := math.Sin(angle)
 
 		fftInput[i] = Complex{
-			Real: re*cos - im*sin,
-			Imag: re*sin + im*cos,
+			Real: float64(re*cos) - float64(im*sin),
+			Imag: float64(re*sin) + float64(im*cos),
 		}
 	}
 
@@ -109,7 +109,7 @@ func (m *MDCT) Forward(input []float64) ([]float64, error) {
 		sin := math.Sin(angle)
 
 		k := i % m.fftSize
-		output[i] = 2.0 * (fftOutput[k].Real*cos + fftOutput[k].Imag*sin)
+		output[i] = 2.0 * (float64(fftOutput[k].Real*cos) + float64(fftOutput[k].Imag*sin))
 	}
 
 	return output, nil
@@ -145,8 +145,8 @@ func (m *MDCT) inverseFft(input []float64) ([]float64, error) {
 		sin2 := math.Sin(angle2)
 
 		fftInput[i] = Complex{
-			Real: input[i]*cos1 + input[i+m.fftSize]*cos2,
-			Imag: input[i]*sin1 + input[i+m.fftSize]*sin2,
+			Real: float64(input[i]*cos1) + float64(input[i+m.fftSize]*cos2),
+			Imag: float64(input[i]*sin1) + float64(input[i+m.fftSize]*sin2),
 		}
 	}
 
@@ -163,8 +163,8 @@ func (m *MDCT) inverseFft(input []float64) ([]float64, error) {
 		cos := math.Cos(angle)
 		sin := math.Sin(angle)
 
-		re := (fftOutput[i].Real*cos - fftOutput[i].Imag*sin) * scale
-		im := (fftOutput[i].Real*sin + fftOutput[i].Imag*cos) * scale
+		re := (float64(fftOutput[i].Real*cos) - float64(fftOutput[i].Imag*sin)) * scale
+		im := (float64(fftOutput[i].Real*sin) + float64(fftOutput[i].Imag*cos)) * scale
 
 		output[i] = re
 		output[n+i] = im
@@ -184,14 +184,14 @@ func (m *MDCT) inverseFft(input []float64) ([]float64, error) {
 func (m *MDCT) inverseDirect(input []float64) []float64 {
 	n := m.size
 	output := make([]float64, 2*n)
-	scale := 2.0 / float64(n)
+	scale := float64(2.0 / float64(n))
 	for sn := 0; sn < 2*n; sn++ {
 		v := 0.0
-		base := math.Pi / float64(n) * (float64(sn) + 0.5 + float64(n)/2.0)
+		base := float64(float64(math.Pi/float64(n)) * (float64(sn) + 0.5 + float64(float64(n)/2.0)))
 		for k := 0; k < n; k++ {
-			v += input[k] * math.Cos(base*(float64(k)+0.5))
+			v += float64(input[k] * math.Cos(float64(base*(float64(k)+0.5))))
 		}
-		output[sn] = v * scale * m.window[sn]
+		output[sn] = float64(float64(v*scale) * m.window[sn])
 	}
 	return output
 }

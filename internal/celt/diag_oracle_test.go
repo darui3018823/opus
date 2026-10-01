@@ -162,7 +162,7 @@ func TestOracleTrace(t *testing.T) {
 			amp := logEAmplitude(quantLogE[i], i)
 			diagDec.bandProcs[0].bands[i].Energy = amp * amp
 		}
-		diagDec.antiCollapse(X, collapse, pulses, lm, frameLen, seed, 0, numBands)
+		diagDec.antiCollapse(X, collapse, pulses, quantLogE, lm, frameLen, seed, 0, numBands)
 	}
 
 	dumpDenormalizedMDCT(denormalizedMDCTViaBandProcessor(frameLen, numBands, ch, lm, X, quantLogE), numBands, lm)

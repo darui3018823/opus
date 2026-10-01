@@ -12,16 +12,22 @@
 no runtime CGO dependency. It provides single-stream, multistream, surround,
 projection/Ambisonics, packet transformation, and Ogg Opus APIs.
 
-The decoder passes all 12 official RFC 8251 vectors with RMSE below 0.001 and
-is cross-checked against libopus 1.6.1. The encoder produces
-standards-compatible CELT, SILK-only, and hybrid packets, but is not bit-exact
-with libopus and does not reproduce every libopus mode/rate/quality decision.
+The decoder's PCM is sample-exact against libopus 1.6.1's plain-C float
+decoder on all 12 official RFC 8251 vectors, including packet loss
+concealment. The encoder produces standards-compatible CELT, SILK-only, and
+hybrid packets. Since v1.5.0 its automatic decisions follow libopus 1.6.1's
+encoder (`ModePolicyLibopus`, the default), and its packets (2.5 to 120 ms)
+are byte-identical to libopus's plain-C float build in the tested
+configurations (automatic mode, mode transitions, 8–48 kHz input, CBR and
+VBR, in-band FEC, and DTX). `SetModePolicy(ModePolicyLegacy)` restores the
+decisions of earlier releases.
 The authoritative implementation snapshot is
 [docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md).
 
 The compatibility target is standard Opus and core libopus behavior. DRED,
-QEXT, OSCE/DNN processing, Opus Custom, the libopus C ABI, and bit-exact encoder
-output are outside that claim; see
+QEXT, OSCE/DNN processing, Opus Custom, and the libopus C ABI are outside that
+claim, as is bit-exact encoder output beyond `ModePolicyLibopus`'s tested
+configurations; see
 [docs/LIBOPUS_SCOPE.md](docs/LIBOPUS_SCOPE.md).
 
 ## Install
@@ -192,9 +198,15 @@ go test -run='^$' -fuzz='^FuzzOggOpusReaderWriter$' -fuzztime=60s ./oggopus
 
 ## Current limitations
 
-- Encoder output is standards-compatible but not bit-exact with libopus.
-- SILK/hybrid encoding is voice-oriented and does not implement every libopus
-  mode boundary, rate-control decision, or quality heuristic.
+- `ModePolicyLibopus` (the default) reproduces libopus for single-stream
+  packets of every duration and for the multistream, surround (mapping
+  families 0, 1 and 255), and projection / Ambisonics (families 2 and 3)
+  encoders. `ModePolicyLegacy`, the Go encoder's earlier decisions, differs
+  from libopus: below about 40 kbit/s it codes speech at 8 kHz and tonal
+  music down to 4 kHz audio bandwidth.
+- Byte identity is measured against libopus built without SIMD kernels; a
+  libopus linked with SIMD kernels sums floats in a different order, so its
+  CELT output differs.
 - DRED and QEXT packet extensions are transported opaquely; their codecs/DSP
   are not implemented.
 - Projection family 3 uses predefined libopus 1.6.1 matrices; arbitrary custom

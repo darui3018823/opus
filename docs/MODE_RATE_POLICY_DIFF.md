@@ -2,6 +2,13 @@
 
 Last reviewed: 2026-07-17
 
+> **Status (2026-09-30):** this document describes the Go policy, which is
+> now `ModePolicyLegacy` (the default before v1.5.0). `ModePolicyLibopus`,
+> the default since v1.5.0, ports libopus's decisions listed below (mode
+> thresholds and hysteresis, bandwidth switching, SILK internal rate, hybrid
+> allocation, stereo width, DTX, FEC) and is byte-identical to libopus
+> 1.6.1; see `docs/CURRENT_IMPLEMENTATION.md`.
+
 Scope: Phase D-1 only. This document compares libopus 1.6.1 mode decision and
 rate-control policy against the current Go implementation. It deliberately does
 not change any mode gate; Phase D-2 must use the real-corpus scoreboard before
@@ -104,6 +111,68 @@ remaining partial/unsupported rows above continue to describe real known gaps;
 they are intentionally not hidden behind a policy gate without a measured
 per-bit win. Full evidence is in
 `.claude/memory/iterations/silk-hybrid-policy-phase3-2026-07-17.md`.
+
+## Legacy vs Libopus Policy on the Real Corpus (2026-09-30)
+
+The real-corpus scoreboard (`TestOpusRealCorpusMatchedBitrateScoreboard`,
+complexity 5, CVBR, 16–64 kbps, 0/5/10/20 % loss) was run once per policy
+(`OPUS_REAL_CORPUS_POLICY=legacy|libopus`). The reference is the system
+libopus with the same settings.
+
+- **Libopus policy:** its byte totals equal libopus's in every cell (ratio
+  1.000, one cell at 0.998), and its SNR is within 0.1 dB of libopus in every
+  class. The modes and bandwidths match libopus: fullband hybrid for speech
+  and fullband CELT for music.
+- **Legacy policy at 16–32 kbps:** it codes speech as wideband SILK
+  (8 kHz audio), where libopus uses fullband hybrid. It also undershoots the
+  requested bitrate on speech (0.42–0.73× libopus's bytes on the clean and
+  stereo speech clips). It codes the music clip as narrowband CELT (4 kHz
+  audio) at every bitrate up to 64 kbps, and the mixed speech+tone clip as
+  narrowband in about half of its frames.
+- Waveform SNR hides this: narrowband coding puts every bit below 4 kHz, so
+  Legacy's matched-byte SNR looks 1.6–4.2 dB better on music. The high-band
+  measurement below (channel 0, 1024-point Hann frames, fraction of the
+  input's energy above 4 kHz present in the decoded output, and the mean
+  log-spectral distance over 0–20 kHz) shows what is lost:
+
+| Clip | kbps | Legacy >4 kHz kept | Legacy LSD | Libopus >4 kHz kept | Libopus LSD |
+|---|---:|---:|---:|---:|---:|
+| clean speech | 16 / 32 | 0.06 / 0.03 | 12.3 / 13.1 dB | 0.46 / 0.77 | 6.9 / 6.1 dB |
+| noisy speech | 16 / 32 | 0.11 / 0.08 | 37.1 / 36.8 dB | 0.51 / 0.68 | 5.8 / 5.3 dB |
+| speech (6 s) | 16 / 32 | 0.16 / 0.15 | 21.6 / 21.5 dB | 0.62 / 0.71 | 6.5 / 5.8 dB |
+| mixed | 16 / 32 / 64 | 0.01 / 0.02 / 0.35 | 37.8 / 31.1 / 16.5 dB | 0.80 / 0.73 / 0.74 | 6.1 / 5.2 / 3.8 dB |
+| music | 16 / 32 / 64 | 0.00 / 0.00 / 0.00 | 35.1 / 34.4 / 33.8 dB | 0.44 / 0.95 / 0.83 | 6.5 / 5.8 / 5.1 dB |
+
+At 64 kbps both policies code speech as fullband hybrid and their results are
+nearly identical.
+
+A trial run of the test suite with Libopus as the default found four bugs,
+all fixed on 2026-09-30, and extended the oracle sweep to catch them:
+
+- Libopus policy, CBR packets over 20 ms (40–120 ms): the repacketizer took
+  each padded frame packet's padding header as frame data. The resulting
+  packets were misparsed by every decoder, including libopus (84 of 240 new
+  sweep cells differed; `71452b7`).
+- Libopus policy, 2.5–10 ms CELT frames with `SetPacketPadding`: a panic
+  (`c9a5a78`).
+- `FinalRange` after SILK packets (the SILK encoder's range was read instead
+  of the packet's range coder's) and after transition packets (the redundant
+  frame's range was never XORed in): 1,090 of the 3,204 sweep cells reported
+  a wrong range (`d9b6fbd`).
+- The decoder decoded 0/1-byte CELT and hybrid frames (DTX packets) as data
+  and kept the previous final range, where libopus conceals them in the
+  previous mode and reports zero (`fdf5772`).
+
+The sweep now checks both the encoder's and a decoder's final range against
+libopus for every packet. Making Libopus the default broke 30 tests of
+Legacy-specific behaviour (mode and bandwidth choices, CBR padding of
+silence, immediate DTX); they now pin `ModePolicyLegacy`. The flip also
+exposed two gaps, both fixed: `SetPacketPadding` was only honoured for CELT
+packets under the libopus policy, and Legacy's forced-mono helper encoder
+took the default policy instead of its parent's.
+
+**Decision (2026-09-30):** `ModePolicyLibopus` is the default of every
+encoder from v1.5.0; `ModePolicyLegacy` stays selectable.
 
 ## Guardrails
 

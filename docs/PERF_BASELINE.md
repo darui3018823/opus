@@ -47,7 +47,10 @@ Workloads:
 | `hybrid/stereo/48k/20ms` | `ApplicationVOIP`, 96 kbps, `SignalVoice` | speech-like frame plus high-band tone |
 
 Each benchmark validates the generated packet's TOC mode and 20 ms duration
-before timing starts.
+before timing starts. Since v1.5.0 made `ModePolicyLibopus` the default, the
+harness pins `ModePolicyLegacy` so that the workloads keep their modes and
+these numbers stay comparable; `BenchmarkPerfVsLibopus` below times both
+policies.
 
 ## Median Results
 
@@ -325,3 +328,33 @@ The final SILK/hybrid mono medians were 161,256 B/op with 231 allocs/op and
 327,171 B/op with 298 allocs/op. The 256-frame benchmark retained only
 384-4,880 median live bytes, with unchanged packet bytes/frame, so the reduced
 temporary allocation did not become retained stream state.
+
+## Comparison With libopus (2026-09-30)
+
+`BenchmarkPerfVsLibopus` (opusref build tag) runs the workloads above through
+this library under both mode policies and through the linked system libopus
+(MSYS2 build, with its SIMD kernels). The encoders get the same float32 input;
+both decoders get the same libopus-encoded packets. The workload name is the
+Legacy policy's mode, and the libopus policy can pick another mode for the
+same settings, so the encode ratio compares Go with the libopus policy
+against libopus. The times are per 20 ms frame, medians of three
+300 ms runs on the machine above:
+
+```text
+go test -tags opusref -run '^$' -bench '^BenchmarkPerfVsLibopus/' -benchtime=300ms -count=3 .
+```
+
+| Workload | Go Legacy enc | Go Libopus enc | libopus enc | ratio | Go dec | libopus dec | ratio |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `celt/mono/48k/20ms` | 316 µs | 209 µs | 66 µs | 3.2x | 135 µs | 20 µs | 6.7x |
+| `celt/stereo/48k/20ms` | 429 µs | 317 µs | 94 µs | 3.4x | 199 µs | 35 µs | 5.7x |
+| `hybrid/mono/48k/20ms` | 571 µs | 449 µs | 161 µs | 2.8x | 94 µs | 26 µs | 3.6x |
+| `hybrid/stereo/48k/20ms` | 941 µs | 313 µs | 108 µs | 2.9x | 157 µs | 32 µs | 4.9x |
+| `silk/mono/48k/20ms` | 793 µs | 419 µs | 170 µs | 2.5x | 94 µs | 24 µs | 3.9x |
+| `silk/stereo/48k/20ms` | 1230 µs | 1133 µs | 304 µs | 3.7x | 170 µs | 48 µs | 3.5x |
+
+Go runs the libopus float path in scalar float32 (without FMA, for
+cross-architecture determinism), and libopus uses SSE/AVX kernels, so it is
+2.5 to 3.7 times slower to encode and 3.5 to 6.7 times slower to decode. Even
+the slowest case is about 6 % of real time (1.2 ms per 20 ms frame). The CELT
+decoder has the largest gap and is the first optimisation target.

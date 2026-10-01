@@ -28,10 +28,32 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Vendor libopus source (generator input)
+        # internal/dsp's MDCT twiddle generator reads libopus 1.6.1's
+        # static_modes_float.h from ./libopus (not tracked in the repository).
+        run: |
+          curl -sL -o opus-src.tar.gz https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz
+          tar -xzf opus-src.tar.gz
+          mv opus-1.6.1 libopus
+          rm opus-src.tar.gz
+
       - name: Verify generated files
         run: |
           go generate ./...
           git diff --exit-code
+
+      - name: No fused multiply-add on FMA architectures
+        # The encoder must produce the same bytes on every architecture; see
+        # "Numerical considerations" in docs/DEVELOPER.md.
+        run: |
+          sites=$(GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -gcflags='all=-S' ./... 2>&1 \
+            | grep -E '\b(FMADD[SD]|FMSUB[SD]|FNMADD[SD]|FNMSUB[SD])\b' \
+            | grep -oE '\([^()]*\.go:[0-9]+\)' | grep -F "$GITHUB_WORKSPACE" | sort -u || true)
+          if [ -n "$sites" ]; then
+            echo "fused multiply-add in:"
+            echo "$sites"
+            exit 1
+          fi
 
       - name: go vet
         run: go vet ./...

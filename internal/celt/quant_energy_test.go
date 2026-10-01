@@ -219,3 +219,26 @@ func TestUnquantizeCoarseEnergySymbolEdgeCases(t *testing.T) {
 		}
 	}
 }
+
+func TestUnquantizeCoarseEnergyUsesFloatBuildRange(t *testing.T) {
+	const (
+		lm       = 3
+		capacity = 64
+	)
+	model := eProbModel[lm][0]
+	residual := -30
+	enc := entcode.NewEncoder(capacity)
+	enc.EncodeLaplace(&residual, uint32(model[0])<<7, int(model[1])<<6)
+	enc.Flush()
+
+	dec := entcode.NewDecoder(enc.Bytes())
+	got := UnquantizeCoarseEnergy(dec, []float64{-9}, nil, false, 1, 0, 1, lm, 1, capacity*8)
+	// Floating-point libopus does not apply the fixed-point build's -28 clamp.
+	want := float64(float32(-9)*float32(predCoef[lm]) + float32(residual))
+	if got[0] != want {
+		t.Fatalf("energy = %g, want float-build result %g", got[0], want)
+	}
+	if got[0] >= -28 {
+		t.Fatalf("energy = %g, unexpectedly clamped to the fixed-point floor", got[0])
+	}
+}

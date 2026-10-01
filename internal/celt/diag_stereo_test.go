@@ -188,7 +188,7 @@ func TestOracleTraceStereo(t *testing.T) {
 				diagDec.bandProcs[c].bands[i].Energy = amp * amp
 			}
 		}
-		diagDec.antiCollapse(X, collapse, pulses, lm, frameLen, seed, 0, numBands)
+		diagDec.antiCollapse(X, collapse, pulses, quantLogE, lm, frameLen, seed, 0, numBands)
 	}
 
 	dumpDenormalizedMDCT(denormalizedMDCTViaBandProcessor(frameLen, numBands, ch, lm, X, quantLogE), numBands, lm)

@@ -41,9 +41,9 @@ func (sp *StereoProcessor) AnalyzeStereo(left, right []float64) StereoMode {
 	// Calculate correlation between channels
 	var sumLR, sumLL, sumRR float64
 	for i := 0; i < len(left); i++ {
-		sumLR += left[i] * right[i]
-		sumLL += left[i] * left[i]
-		sumRR += right[i] * right[i]
+		sumLR += float64(left[i] * right[i])
+		sumLL += float64(left[i] * left[i])
+		sumRR += float64(right[i] * right[i])
 	}
 
 	// Normalize to get correlation coefficient
@@ -92,8 +92,8 @@ func (sp *StereoProcessor) DecodeMidSide(mid, side, left, right []float64) {
 func (sp *StereoProcessor) ComputeBalance(mid, side []float64) float64 {
 	var midEnergy, sideEnergy float64
 	for i := 0; i < len(mid); i++ {
-		midEnergy += mid[i] * mid[i]
-		sideEnergy += side[i] * side[i]
+		midEnergy += float64(mid[i] * mid[i])
+		sideEnergy += float64(side[i] * side[i])
 	}
 
 	totalEnergy := midEnergy + sideEnergy
@@ -105,7 +105,7 @@ func (sp *StereoProcessor) ComputeBalance(mid, side []float64) float64 {
 	balance := midEnergy / totalEnergy
 
 	// Update running average
-	sp.midSideBalance = 0.9*sp.midSideBalance + 0.1*balance
+	sp.midSideBalance = float64(0.9*sp.midSideBalance) + float64(0.1*balance)
 
 	return sp.midSideBalance
 }
@@ -121,7 +121,7 @@ func (sp *StereoProcessor) Decorrelate(left, right []float64, strength float64) 
 	// Simple time-domain decorrelation using prediction
 	for i := 1; i < len(left); i++ {
 		// Predict right from left
-		pred := strength * left[i]
+		pred := float64(strength * left[i])
 		right[i] -= pred
 	}
 
@@ -136,7 +136,7 @@ func (sp *StereoProcessor) Correlate(left, right []float64) {
 
 	// Reverse the prediction
 	for i := 1; i < len(left); i++ {
-		pred := sp.predStrength * left[i]
+		pred := float64(sp.predStrength * left[i])
 		right[i] += pred
 	}
 }

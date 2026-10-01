@@ -129,7 +129,7 @@ func (g *GainQuantizer) quantizeDB(dbValue float64) int {
 
 // dequantizeDB dequantizes an index to a dB value
 func (g *GainQuantizer) dequantizeDB(index int) float64 {
-	return GainMinDB + float64(index)*GainQuantStep
+	return GainMinDB + float64(float64(index)*GainQuantStep)
 }
 
 // clampDB clamps a dB value to valid range
@@ -167,7 +167,7 @@ func (g *GainQuantizer) ComputeSubframeGains(residual []float64, subframeSize in
 		// Compute RMS energy
 		energy := 0.0
 		for j := start; j < end; j++ {
-			energy += residual[j] * residual[j]
+			energy += float64(residual[j] * residual[j])
 		}
 		energy /= float64(end - start)
 
@@ -191,7 +191,7 @@ func (g *GainQuantizer) SmoothGains(gains []float64, smoothingFactor float64) {
 
 	// Apply exponential smoothing
 	for i := 1; i < len(gains); i++ {
-		gains[i] = smoothingFactor*gains[i-1] + (1-smoothingFactor)*gains[i]
+		gains[i] = float64(smoothingFactor*gains[i-1]) + float64((1-smoothingFactor)*gains[i])
 	}
 }
 

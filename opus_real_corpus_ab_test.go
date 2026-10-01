@@ -158,6 +158,12 @@ func encodeRealCorpusOwn(clip corpusClip, kind string, bitrate int) (packets [][
 	enc.SetVBR(true)
 	enc.SetVBRConstraint(true)
 	enc.SetSignalType(signal)
+	// OPUS_REAL_CORPUS_POLICY=libopus scores the libopus mode policy.
+	if strings.EqualFold(os.Getenv("OPUS_REAL_CORPUS_POLICY"), "libopus") {
+		if err := enc.SetModePolicy(ModePolicyLibopus); err != nil {
+			return nil, 0, 0, err
+		}
+	}
 	forcedBandwidth, err := realCorpusForcedBandwidth(os.Getenv("OPUS_REAL_CORPUS_FORCE_BANDWIDTH"))
 	if err != nil {
 		return nil, 0, 0, err

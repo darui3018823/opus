@@ -325,203 +325,40 @@ func TestGainErrors(t *testing.T) {
 	}
 }
 
-// VAD Tests
+// VAD Tests (fixed-point silk_VAD_GetSA_Q8 port)
 
-func TestVADSpeechDetection(t *testing.T) {
-	vad := NewVAD()
-
-	// Create synthetic speech-like signal (voiced) with higher amplitude
-	signal := make([]float64, 160)
-	for i := range signal {
-		// Sine wave with higher amplitude (speech-like)
-		signal[i] = 1.0 * math.Sin(2*math.Pi*float64(i)/20)
-	}
-
-	// Detect multiple times to build history
-	var isVoice bool
-	for repeat := 0; repeat < VADHistorySize+2; repeat++ {
-		isVoice = vad.Detect(signal)
-	}
-
-	// Should detect as speech after building history
-	if !isVoice {
-		t.Error("Failed to detect speech signal after multiple detections")
-	}
-}
-
-func TestVADSilenceDetection(t *testing.T) {
-	vad := NewVAD()
-
-	// Create silence (very low energy)
-	signal := make([]float64, 160)
-	for i := range signal {
-		signal[i] = 0.001 * math.Sin(2*math.Pi*float64(i)/20)
-	}
-
-	// Should detect as silence
-	isVoice := vad.Detect(signal)
-	if isVoice {
-		t.Error("Incorrectly detected silence as speech")
-	}
-}
-
-func TestVADNoiseRejection(t *testing.T) {
-	vad := NewVAD()
-
-	// Create white noise-like signal
-	signal := make([]float64, 160)
-	for i := range signal {
-		// Random-like values
-		signal[i] = 0.1 * math.Sin(2*math.Pi*float64(i)*13.7/160)
-		signal[i] += 0.05 * math.Sin(2*math.Pi*float64(i)*27.3/160)
-		signal[i] += 0.03 * math.Sin(2*math.Pi*float64(i)*41.1/160)
-	}
-
-	// Should tend towards non-speech (noise has high spectral flatness)
-	isVoice := vad.Detect(signal)
-
-	// Note: This test is probabilistic, noise may occasionally be detected as speech
-	// We mainly test that VAD doesn't crash and returns a boolean
-	_ = isVoice
-}
-
-func TestVADSpectralFlatness(t *testing.T) {
-	vad := NewVAD()
-
-	// Tonal signal (low flatness)
-	tonal := make([]float64, 100)
-	for i := range tonal {
-		tonal[i] = math.Sin(2 * math.Pi * float64(i) / 10)
-	}
-
-	flatnessTonal := vad.computeSpectralFlatness(tonal)
-
-	// Noisy signal (high flatness)
-	noisy := make([]float64, 100)
-	for i := range noisy {
-		// Multiple frequencies
-		for f := 1; f <= 10; f++ {
-			noisy[i] += 0.1 * math.Sin(2*math.Pi*float64(i)*float64(f)/100)
-		}
-	}
-
-	flatnessNoisy := vad.computeSpectralFlatness(noisy)
-
-	// Noisy signal should have higher flatness
-	if flatnessNoisy <= flatnessTonal {
-		t.Error("Noisy signal should have higher spectral flatness than tonal signal")
-	}
-}
-
-func TestVADZeroCrossingRate(t *testing.T) {
-	vad := NewVAD()
-
-	// Low frequency signal (low ZCR)
-	lowFreq := make([]float64, 100)
-	for i := range lowFreq {
-		lowFreq[i] = math.Sin(2 * math.Pi * float64(i) / 50)
-	}
-
-	zcrLow := vad.computeZeroCrossingRate(lowFreq)
-
-	// High frequency signal (high ZCR)
-	highFreq := make([]float64, 100)
-	for i := range highFreq {
-		highFreq[i] = math.Sin(2 * math.Pi * float64(i) / 2)
-	}
-
-	zcrHigh := vad.computeZeroCrossingRate(highFreq)
-
-	// High frequency should have higher ZCR
-	if zcrHigh <= zcrLow {
-		t.Error("High frequency signal should have higher ZCR")
-	}
-
-	// ZCR should be in valid range [0, 1]
-	if zcrLow < 0 || zcrLow > 1 || zcrHigh < 0 || zcrHigh > 1 {
-		t.Errorf("ZCR out of range: low=%f, high=%f", zcrLow, zcrHigh)
-	}
-}
-
-func TestVADHangover(t *testing.T) {
-	vad := NewVAD()
-
-	// Speech signal with high amplitude
-	speech := make([]float64, 160)
-	for i := range speech {
-		speech[i] = 1.0 * math.Sin(2*math.Pi*float64(i)/20)
-	}
-
-	// Silence signal
-	silence := make([]float64, 160)
-	for i := range silence {
-		silence[i] = 0.001
-	}
-
-	// Detect speech multiple times to build history
-	for i := 0; i < VADHistorySize+2; i++ {
-		vad.Detect(speech)
-	}
-
-	// Immediately after speech, even silence should be detected as speech (hangover)
-	isVoiceAfter := vad.Detect(silence)
-	if !isVoiceAfter {
-		t.Log("Note: Hangover mechanism may require tuning for different signal characteristics")
-		// Don't fail - hangover behavior can vary with adaptive threshold
-	}
-
-	// After several silence frames, should eventually detect as silence
-	for i := 0; i < 20; i++ {
-		vad.Detect(silence)
-	}
-
-	isVoiceLater := vad.Detect(silence)
-	if isVoiceLater {
-		t.Error("Hangover lasted too long - should eventually detect as silence")
-	}
-}
-
-func TestVADReset(t *testing.T) {
-	vad := NewVAD()
-
-	// Detect some signals
-	signal := make([]float64, 160)
-	for i := range signal {
-		signal[i] = 0.5 * math.Sin(2*math.Pi*float64(i)/20)
-	}
-
-	vad.Detect(signal)
-
-	// Reset
-	vad.Reset()
-
-	// Check that state is cleared
-	if vad.hangoverCount != 0 {
-		t.Error("Hangover count not reset")
-	}
-
-	for _, h := range vad.history {
-		if h {
-			t.Error("History not cleared")
-			break
-		}
-	}
-}
-
-func TestStereoEncoderVADReportsLiveOnsetImmediately(t *testing.T) {
-	enc, err := NewEncoder(16000, 2)
+// TestFrameVADFlagsFollowActivity checks the packet VAD flags derived from
+// the fixed-point activity: a speech-like tone is active, digital silence is
+// inactive, and the per-frame results are retained for the frame encode.
+func TestFrameVADFlagsFollowActivity(t *testing.T) {
+	enc, err := NewEncoder(16000, 1)
 	if err != nil {
 		t.Fatalf("NewEncoder: %v", err)
 	}
-	signal := make([]float64, enc.frameSize)
-	for i := range signal {
-		signal[i] = 0.2 * math.Sin(2*math.Pi*180*float64(i)/16000)
+	speech := make([]float64, enc.frameSize)
+	for i := range speech {
+		speech[i] = 0.3 * math.Sin(2*math.Pi*180*float64(i)/16000)
 	}
-	if !enc.vad.Detect(signal) {
-		t.Fatal("stereo mid VAD suppressed the first active frame")
+	active := false
+	for frame := 0; frame < 4; frame++ {
+		active = enc.runFrameVAD(0, speech)
 	}
-	if enc.side == nil || !enc.side.vad.Detect(signal) {
-		t.Fatal("stereo side VAD suppressed the first active frame")
+	if !active {
+		t.Fatalf("speech-like tone not flagged active: SA_Q8=%d", enc.frameVAD[0].speechActivityQ8)
+	}
+	if enc.frameVAD[0].speechActivityQ8 < 13 {
+		t.Fatalf("stored activity %d below the DTX threshold", enc.frameVAD[0].speechActivityQ8)
+	}
+	enc.Reset()
+	silence := make([]float64, enc.frameSize)
+	for frame := 0; frame < 4; frame++ {
+		active = enc.runFrameVAD(0, silence)
+	}
+	if active {
+		t.Fatalf("digital silence flagged active: SA_Q8=%d", enc.frameVAD[0].speechActivityQ8)
+	}
+	if enc.noSpeechCounter == 0 {
+		t.Fatal("noSpeechCounter did not advance on inactive frames")
 	}
 }
 
@@ -548,19 +385,5 @@ func BenchmarkGainQuantization(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		g.Quantize(gains)
-	}
-}
-
-func BenchmarkVADDetection(b *testing.B) {
-	vad := NewVAD()
-
-	signal := make([]float64, 160)
-	for i := range signal {
-		signal[i] = 0.5 * math.Sin(2*math.Pi*float64(i)/20)
-	}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		vad.Detect(signal)
 	}
 }

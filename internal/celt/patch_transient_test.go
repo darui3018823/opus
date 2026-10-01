@@ -7,8 +7,8 @@ import (
 
 // TestPatchTransientDecision exercises the energy-rise fallback transient
 // detector directly: a steady frame must not fire, a sharp cross-frame energy
-// rise must fire, and a moderate rise in the (voiceThreshold, 1.0) window must
-// fire only at the lower (voice) threshold.
+// rise must fire, and a moderate rise below the libopus threshold (1.0) must
+// not fire at that threshold.
 func TestPatchTransientDecision(t *testing.T) {
 	const stride = 21
 	const start, end = 0, 21
@@ -33,14 +33,14 @@ func TestPatchTransientDecision(t *testing.T) {
 		t.Error("sharp +3 dB rise should trigger patch at threshold 1.0")
 	}
 
-	// Moderate rise of +0.7: above the voice threshold (0.5) but below the
-	// default music threshold (1.0). It must fire only for voice.
+	// Moderate rise of +0.7: below the libopus threshold (1.0), so no patch;
+	// the threshold argument still scales the decision.
 	mod := flat(0.7)
 	if patchTransientDecision(mod, old, stride, start, end, 1, 1.0) {
-		t.Error("+0.7 rise should NOT patch at the music threshold (1.0)")
+		t.Error("+0.7 rise should NOT patch at the libopus threshold (1.0)")
 	}
-	if !patchTransientDecision(mod, old, stride, start, end, 1, patchTransientVoiceThreshold) {
-		t.Error("+0.7 rise SHOULD patch at the voice threshold (0.5)")
+	if !patchTransientDecision(mod, old, stride, start, end, 1, 0.5) {
+		t.Error("+0.7 rise SHOULD patch at a 0.5 threshold")
 	}
 }
 
@@ -130,72 +130,5 @@ func TestCeltPatchTransientRoundTrip(t *testing.T) {
 				t.Errorf("ch=%d frame=%d final range mismatch: enc=%08x dec=%08x", ch, f, er, dr)
 			}
 		}
-	}
-}
-
-// TestCeltSignalTypePatchSensitivity confirms the signal-type hint is wired into
-// the encoder: a moderate broadband cross-frame energy rise that lands between the
-// voice and music patch thresholds produces a different bitstream (the voice
-// encoder promotes the frame to a transient, the music encoder does not), while
-// both still decode with a matching final range.
-func TestCeltSignalTypePatchSensitivity(t *testing.T) {
-	const sr = 48000
-	const fs = 960
-
-	encode := func(sig SignalType) [][]byte {
-		cfg := DefaultEncoderConfig()
-		cfg.Complexity = 6
-		enc, err := NewEncoder(fs, sr, 1, cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
-		enc.SetSignalType(sig)
-		dec, err := NewDecoder(fs, sr, 1)
-		if err != nil {
-			t.Fatal(err)
-		}
-		// ~0.74 dB broadband rise (between the 0.5 voice and 1.0 music thresholds).
-		frames := broadbandFrames(6, fs, 1, 3, 0.12, 0.20)
-		var pkts [][]byte
-		for f, frame := range frames {
-			pkt, err := enc.Encode(frame)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err := dec.Decode(pkt); err != nil {
-				t.Fatal(err)
-			}
-			if er, dr := enc.FinalRange(), dec.LastFinalRange(); er != dr {
-				t.Errorf("sig=%d frame=%d final range mismatch: enc=%08x dec=%08x", sig, f, er, dr)
-			}
-			cp := make([]byte, len(pkt))
-			copy(cp, pkt)
-			pkts = append(pkts, cp)
-		}
-		return pkts
-	}
-
-	voice := encode(SignalVoice)
-	music := encode(SignalMusic)
-
-	differs := false
-	for f := range voice {
-		if len(voice[f]) != len(music[f]) {
-			differs = true
-			break
-		}
-		for i := range voice[f] {
-			if voice[f][i] != music[f][i] {
-				differs = true
-				break
-			}
-		}
-		if differs {
-			break
-		}
-	}
-	if !differs {
-		t.Error("voice and music signal hints produced identical bitstreams; " +
-			"the patch-transient threshold coupling is not wired")
 	}
 }

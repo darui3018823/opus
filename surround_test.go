@@ -88,7 +88,7 @@ func TestSurroundRoundTrip71(t *testing.T) {
 }
 
 func TestSurroundLFERateAllocation(t *testing.T) {
-	enc, err := NewSurroundEncoder(48000, 6, MappingFamilyVorbis, ApplicationAudio)
+	enc, err := newLegacySurroundEncoder(48000, 6, MappingFamilyVorbis, ApplicationAudio)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestSurroundBandwidthControlsSurviveFramePreparation(t *testing.T) {
 		channels  = 6
 		frameSize = 960
 	)
-	enc, err := NewSurroundEncoder(rate, channels, MappingFamilyVorbis, ApplicationAudio)
+	enc, err := newLegacySurroundEncoder(rate, channels, MappingFamilyVorbis, ApplicationAudio)
 	if err != nil {
 		t.Fatal(err)
 	}

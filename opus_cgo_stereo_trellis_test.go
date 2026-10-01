@@ -41,7 +41,7 @@ func TestCGOStereoTrellisFinalRange(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		encoderRange := enc.silkEncoder.LastFinalRange()
+		encoderRange := enc.FinalRange()
 		if encoderRange != refRange {
 			t.Fatalf("frame %d: final range encoder=%08x libopus=%08x (packet=%d bytes)", frame, encoderRange, refRange, len(pkt))
 		}

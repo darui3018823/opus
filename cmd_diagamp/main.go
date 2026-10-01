@@ -28,7 +28,7 @@ func main() {
 			if v > maxAbs {
 				maxAbs = v
 			}
-			sumSq += float64(pcm[i]) * float64(pcm[i])
+			sumSq += float64(float64(pcm[i]) * float64(pcm[i]))
 			count++
 		}
 	}

@@ -63,10 +63,15 @@ We appreciate code contributions! Please follow these steps:
      go test ./...
      go test -race ./...
      ```
-6. **Commit Your Changes:** Follow [Conventional Commits](https://www.conventionalcommits.org/).
+6. **Commit Your Changes:** Strictly follow [Conventional Commits](https://www.conventionalcommits.org/) with an explicit prefix (e.g. `<type>(<scope>): <subject>` or `<type>: <subject>`).
+   - **Prefix is mandatory**: Commits without a recognized type prefix are strictly forbidden and will be rejected by the repository's Git hooks.
+   - **Allowed prefixes**: `feat`, `fix`, `test`, `docs`, `refactor`, `perf`, `build`, `ci`, `chore`, `style`, `revert`.
+   - **Common scopes**: `celt`, `silk`, `dsp`, `packet`, `api`, `decoder`, `encoder`, `opusref`, etc.
+   - See `.claude/rules/commit-rules.md` for full requirements and scope mappings.
    - Examples:
      - `feat(celt): add band energy normalization`
      - `fix(silk): correct LPC filter boundary`
+     - `test(opusref): trace mono scalar CELT stages`
      - `docs: update CONTRIBUTING.md`
 7. **Push Your Branch:**
    ```bash

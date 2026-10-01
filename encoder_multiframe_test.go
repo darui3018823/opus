@@ -269,7 +269,7 @@ func TestEncoderMultiFrameRoundTrip(t *testing.T) {
 				name += "-vbr"
 			}
 			t.Run(name, func(t *testing.T) {
-				enc, err := NewEncoder(sampleRate, channels, ApplicationAudio)
+				enc, err := newLegacyEncoder(sampleRate, channels, ApplicationAudio)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -400,4 +400,51 @@ func TestEncoderPacketPaddingRoundTrip(t *testing.T) {
 
 func padLabel(pad int) string {
 	return "pad" + string(rune('0'+pad/100)) + string(rune('0'+(pad/10)%10)) + string(rune('0'+pad%10))
+}
+
+// TestLibopusPolicyCBRMultiFrameDecodes checks CBR multi-frame packets under
+// the libopus policy: every frame packet is padded to its budget, and the
+// repacketized packet must carry the frames without that padding.
+func TestLibopusPolicyCBRMultiFrameDecodes(t *testing.T) {
+	for _, rate := range []int{8000, 16000, 48000} {
+		for _, mult := range []int{2, 3, 4, 5, 6} {
+			enc, err := NewEncoder(rate, 1, ApplicationVOIP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := enc.SetModePolicy(ModePolicyLibopus); err != nil {
+				t.Fatal(err)
+			}
+			if err := enc.SetBitrate(24000); err != nil {
+				t.Fatal(err)
+			}
+			enc.SetVBR(false)
+			dec, err := NewDecoder(rate, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			frameSize := rate / 50 * mult
+			for p := 0; p < 3; p++ {
+				pcm := strictSpeechLikeFrame(rate, 1, p*frameSize, frameSize)
+				pkt, err := enc.EncodeFloat(pcm, frameSize)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want := 24000 * mult / 50 / 8; len(pkt) != want {
+					t.Fatalf("%d Hz %d ms: CBR packet %d bytes, want %d", rate, 20*mult, len(pkt), want)
+				}
+				out, err := dec.DecodeFloat(pkt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// A misparsed packet decodes to noise or a runaway (RMS
+				// ratios of 0.1 to 7); intact packets stay near unity.
+				rmsOut, _ := strictSignalStats(out)
+				rmsIn, _ := strictSignalStats(pcm)
+				if r := rmsOut / rmsIn; r < 0.5 || r > 2 {
+					t.Fatalf("%d Hz %d ms packet %d: decoded/input RMS %.2f", rate, 20*mult, p, r)
+				}
+			}
+		}
+	}
 }

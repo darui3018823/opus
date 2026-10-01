@@ -85,6 +85,13 @@ func TestComplexityEffectiveScaling(t *testing.T) {
 	if !(cfgHi.shapingLPCOrder > cfgLo.shapingLPCOrder) {
 		t.Errorf("shaping LPC order did not scale: cx0=%d cx10=%d", cfgLo.shapingLPCOrder, cfgHi.shapingLPCOrder)
 	}
+	for cx := 0; cx <= 10; cx++ {
+		_ = enc.SetComplexity(cx)
+		wantInterpolation := cx >= 4
+		if got := enc.silkComplexityConfig().useInterpolatedNLSFs; got != wantInterpolation {
+			t.Errorf("cx%d useInterpolatedNLSFs=%v, want %v", cx, got, wantInterpolation)
+		}
+	}
 
 	// 2) Every complexity level must encode/decode without panicking, and the
 	//    low end must not match the high end (the setting has a real effect).

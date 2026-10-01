@@ -119,9 +119,9 @@ func TestEncoderCBRFixedSize(t *testing.T) {
 			_ = enc.SetBitrate(bitrate)
 			enc.SetVBR(false) // CBR
 
-			// Expected CELT payload bytes = bitrate * 0.02 / 8
-			expectedPayload := bitrate * 20 / 1000 / 8 // bytes
-			expectedTotal := expectedPayload + 1       // + TOC byte
+			// opus_encode_native: cbr_bytes = (bitrate_to_bits + 4) / 8 bytes
+			// including the TOC.
+			expectedTotal := (bitrate*20/1000 + 4) / 8
 
 			pcm := make([]float64, frameSize*channels)
 			for i := range pcm {

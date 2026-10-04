@@ -1749,7 +1749,12 @@ func (e *Encoder) signalBandwidth(end, equivRate int) int {
 	if !e.analysis.Valid {
 		return end - 1
 	}
-	C := e.mode.Channels
+	// C is st->stream_channels: a stereo input coded as a mono stream uses
+	// the mono thresholds.
+	C := e.streamChannels
+	if C < 1 {
+		C = e.mode.Channels
+	}
 	var minBandwidth int
 	switch {
 	case equivRate < 32000*C:

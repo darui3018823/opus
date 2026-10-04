@@ -4446,15 +4446,11 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 			}
 			celtPCM = adjustChannels(celtPCM, celtActualCh, d.channels)
 			celtPCM = padOrTrim(celtPCM, samplesPerFrame)
-			// Time-domain sum of the two layers, clipped to [-1, 1].
+			// Time-domain sum of the two layers. libopus accumulates the CELT
+			// layer into the SILK output in float32 (celt deemphasis with
+			// accum) without clipping; the decoder gain comes later.
 			for i := 0; i < samplesPerFrame; i++ {
-				v := silkOut[i] + celtPCM[i]
-				if v > 1.0 {
-					v = 1.0
-				} else if v < -1.0 {
-					v = -1.0
-				}
-				silkOut[i] = v
+				silkOut[i] = float64(float32(silkOut[i]) + float32(celtPCM[i]))
 			}
 			if len(leadingRedundancy) >= (d.sampleRate/200)*d.channels && (frameMode != framing.ModeSILKOnly || frameRedundancy) {
 				d.crossfadeLeadingRedundancy(silkOut, leadingRedundancy)

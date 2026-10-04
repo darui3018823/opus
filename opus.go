@@ -5178,10 +5178,13 @@ func floatToInt16(dst []int16, src []float64) {
 // saturate, then use the platform's default nearest-even rounding semantics.
 func libopusFloatToInt16(sample float64) int16 {
 	scaled := float32(sample) * float32(32768)
-	if scaled > 32767 {
-		scaled = 32767
-	} else if scaled < -32768 {
+	// FLOAT2INT16: MAX32(x, -32768) then MIN32(x, 32767), written as the
+	// (a > b ? a : b) macros so NaN becomes -32768 as in libopus.
+	if !(scaled > -32768) {
 		scaled = -32768
+	}
+	if !(scaled < 32767) {
+		scaled = 32767
 	}
 	return int16(math.RoundToEven(float64(scaled)))
 }

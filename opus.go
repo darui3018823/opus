@@ -3852,6 +3852,7 @@ func (d *Decoder) decodePacketFloat(data []byte) ([]float64, error) {
 			activeCeltDec.CopyStateFrom(d.lastCeltDec)
 		}
 		activeCeltDec.SetStreamChannels(pktChannels)
+		activeCeltDec.SetAccumulate(false)
 		pcm, err := activeCeltDec.Decode(frame)
 		overrun := errors.Is(err, celt.ErrRangeOverrun)
 		if err != nil && !overrun {
@@ -4484,6 +4485,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		}
 		var celtPCM []float64
 		var cerr error
+		celtDec.SetAccumulate(true)
 		if celtLost {
 			celtPCM = celtDec.DecodeHybridLoss(celtStart, celtEnd)
 		} else {
@@ -4711,6 +4713,7 @@ func (d *Decoder) celtSilenceFade(pcm []float64, pktChannels, endBand int) {
 		dec.CopyStateFrom(d.lastCeltDec)
 	}
 	dec.SetStreamChannels(pktChannels)
+	dec.SetAccumulate(true)
 	out, err := dec.Decode([]byte{0xFF, 0xFF})
 	if err != nil {
 		return
@@ -4954,7 +4957,7 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 		out := make([]float64, 0, frameSize*d.channels)
 		for remaining := frameSize; remaining > 0; {
 			chunk := lossDecodeChunk(min(remaining, d.plcFrameSize), d.sampleRate, lossMode)
-			frame, err := d.decodeCELTPLCFrame(chunk)
+			frame, err := d.decodeCELTPLCFrame(chunk, false)
 			if err != nil {
 				return nil, err
 			}
@@ -5003,18 +5006,13 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 		frame = padOrTrim(frame, decodeSamples*d.channels)
 		frame = frame[:chunk*d.channels]
 		if lossMode == framing.ModeHybrid {
-			celtPCM, err := d.decodeCELTPLCFrame(chunk)
+			celtPCM, err := d.decodeCELTPLCFrame(chunk, true)
 			if err != nil {
 				return nil, err
 			}
+			// Accumulated onto the SILK output in float32, unclipped.
 			for i := range celtPCM {
-				v := frame[i] + celtPCM[i]
-				if v > 1 {
-					v = 1
-				} else if v < -1 {
-					v = -1
-				}
-				frame[i] = v
+				frame[i] = float64(float32(frame[i]) + float32(celtPCM[i]))
 			}
 		}
 		out = append(out, frame...)
@@ -5028,7 +5026,9 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 	return out, nil
 }
 
-func (d *Decoder) decodeCELTPLCFrame(frameSize int) ([]float64, error) {
+// accum is set when the concealed CELT layer is added onto SILK output
+// (libopus celt_accum, mode != MODE_CELT_ONLY).
+func (d *Decoder) decodeCELTPLCFrame(frameSize int, accum bool) ([]float64, error) {
 	if d.lastCeltDec == nil || d.lossConfig < 0 || d.lossChannels < 1 {
 		return nil, fmt.Errorf("%w: missing CELT decoder history", ErrInvalidState)
 	}
@@ -5064,6 +5064,7 @@ func (d *Decoder) decodeCELTPLCFrame(frameSize int) ([]float64, error) {
 	if active != d.lastCeltDec {
 		active.CopyStateFrom(d.lastCeltDec)
 	}
+	active.SetAccumulate(accum)
 	frame, err := active.DecodePLC()
 	if err != nil {
 		return nil, fmt.Errorf("CELT PLC decoding failed: %w", err)
@@ -5279,18 +5280,13 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 		// CELT carries no in-band FEC. Its high band advances through PLC and,
 		// as in libopus, supplies the combined final range.
 		if d.lastCeltDec != nil {
-			celtPCM, err := d.decodeCELTPLCFrame(packetFrameSize)
+			celtPCM, err := d.decodeCELTPLCFrame(packetFrameSize, true)
 			if err != nil {
 				return nil, 0, err
 			}
+			// Accumulated onto the SILK output in float32, unclipped.
 			for i := range silkPCM {
-				v := silkPCM[i] + celtPCM[i]
-				if v > 1 {
-					v = 1
-				} else if v < -1 {
-					v = -1
-				}
-				silkPCM[i] = v
+				silkPCM[i] = float64(float32(silkPCM[i]) + float32(celtPCM[i]))
 			}
 			finalRange = d.lastCeltDec.LastFinalRange()
 		} else {

@@ -50,6 +50,9 @@ type Decoder struct {
 	// (the spectrum above it is cleared and the de-emphasised output
 	// decimated), 1 by default.
 	downsample int
+	// accum is deemphasis's accum flag: the Opus decoder adds a hybrid
+	// layer, its concealment or a silence fade onto the SILK output.
+	accum bool
 	// streamChannels is CELT_SET_CHANNELS (st->stream_channels, C): the
 	// coded channels of the packet, while mode.Channels (CC) is the output.
 	// A mono stream is duplicated to both output channels and a stereo
@@ -380,8 +383,13 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			d.coefficientStageHook("denormalized", c, coeffs,
 				quantLogE[c*numBands:(c+1)*numBands])
 		}
-		// denormalise_bands' bound: nothing above the output Nyquist.
-		for i := frameSize / d.downsample; i < len(coeffs); i++ {
+		// denormalise_bands' bound: nothing above the output Nyquist, and
+		// nothing at all for a silence frame.
+		bound := frameSize / d.downsample
+		if silence {
+			bound = 0
+		}
+		for i := bound; i < len(coeffs); i++ {
 			coeffs[i] = 0
 		}
 		mdctCoeffsPerCh[c] = coeffs
@@ -668,14 +676,25 @@ func (d *Decoder) applyDeemphasis(ch int, samples []float64) {
 	mem := d.preemphMem[ch]
 	for i := range samples {
 		// libopus stores celt_sig as float and evaluates
-		// x[i] + VERY_SMALL + mem in that precision and order.
-		y := float32(samples[i]) + verySmall
-		y += mem
+		// x[i] + VERY_SMALL + mem in that precision and order; its
+		// accumulating loop without downsampling adds x[i] + mem first.
+		var y float32
+		if d.accum && d.downsample == 1 {
+			y = float32(samples[i]) + mem
+			y += verySmall
+		} else {
+			y = float32(samples[i]) + verySmall
+			y += mem
+		}
 		mem = coef * y
 		samples[i] = float64(y)
 	}
 	d.preemphMem[ch] = mem
 }
+
+// SetAccumulate selects the deemphasis variant libopus uses when the frame
+// is added onto existing output (celt_decode_with_ec's accum argument).
+func (d *Decoder) SetAccumulate(on bool) { d.accum = on }
 
 // decodeBandEnergies is superseded by UnquantizeCoarseEnergy (RFC 6716 §5.1.2).
 // Kept as an unexported no-op to avoid compilation errors if referenced elsewhere.

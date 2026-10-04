@@ -107,8 +107,8 @@ type Encoder struct {
 	// is coded as the first frame after a reset (no inter-packet
 	// prediction).
 	reducedDependency bool
-	stereoState     stereoEncState
-	prevOnlyMiddle  bool // previous stereo frame omitted the side channel
+	stereoState       stereoEncState
+	prevOnlyMiddle    bool // previous stereo frame omitted the side channel
 	// streamChannels is nChannelsInternal for a stereo (API) encoder: 1 codes
 	// the caller's L/R downmix as a mono stream; prevStreamChannels is
 	// nPrevChannelsInternal (0 before the first packet). toMono marks the

@@ -2773,6 +2773,12 @@ func (e *Encoder) syncSILKFEC() {
 		return
 	}
 	e.silkEncoder.SetPacketLossPerc(e.packetLossPerc)
+	if e.libopusModePolicy {
+		// decide_fec sets LBRR_coded per packet (SetLBRRCoded); changing
+		// the settings keeps the LBRR frames coded with the previous
+		// packet, which silk_Encode still writes into the next one.
+		return
+	}
 	e.silkEncoder.SetInbandFEC(e.useInbandFEC && e.packetLossPerc > 0)
 }
 

@@ -441,13 +441,15 @@ func dynallocAnalysis(logE, logE2 []float64, numBands, end, C, lm int, isTransie
 // l1Metric is the float port of libopus celt_encoder.c l1_metric: the L1 norm of
 // the coefficients, biased upward by lm*bias*L1 so deeper (more time-resolved)
 // splits are slightly penalised when in doubt (preferring frequency resolution).
-func l1Metric(tmp []float64, n, lm int, bias float64) float64 {
-	var l1 float64
+//
+// It runs in float32 like the float build: L1 = sum|x|, then
+// L1 + (LM*bias)*L1 (MAC16_32_Q15) with the product rounded.
+func l1Metric(tmp []float64, n, lm int, bias float32) float32 {
+	var l1 float32
 	for i := 0; i < n; i++ {
-		l1 += math.Abs(tmp[i])
+		l1 += float32(math.Abs(tmp[i]))
 	}
-	l1 += float64(float64(lm) * bias * l1)
-	return l1
+	return l1 + float32(float32(float32(lm)*bias)*l1)
 }
 
 func iabs(x int) int {
@@ -485,7 +487,8 @@ func tfAnalysis(end int, isTransient bool, tfRes []int, lambda int, X []float64,
 	if isTransient {
 		lambdaTerm = 0 // (isTransient ? 0 : lambda) on the cost1 init
 	}
-	bias := 0.04 * math.Max(-0.25, 0.5-tfEstimate)
+	// bias = .04f * MAX16(-.25f, .5f - tf_estimate), in float32.
+	bias := float32(0.04) * max(float32(-0.25), float32(0.5)-float32(tfEstimate))
 
 	metric := make([]int, end)
 	path0 := make([]int, end)

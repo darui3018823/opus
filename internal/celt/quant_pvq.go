@@ -237,11 +237,14 @@ func algUnquant(X []float64, n, k, spread, b int, dec *entcode.Decoder, gain flo
 }
 
 func renormaliseVector(X []float64, n int, gain float64) {
-	e := float32(1e-15)
+	// E = EPSILON + celt_inner_prod_norm(X, X, N): the sum starts at zero
+	// and EPSILON is added last.
+	var e float32
 	for i := 0; i < n; i++ {
 		x := float32(X[i])
 		e += float32(x * x)
 	}
+	e = float32(1e-15) + e
 	g := (float32(1.0) / float32(math.Sqrt(float64(e)))) * float32(gain)
 	for i := 0; i < n; i++ {
 		X[i] = float64(g * float32(X[i]))

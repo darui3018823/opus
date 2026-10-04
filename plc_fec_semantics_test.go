@@ -91,10 +91,16 @@ func TestDecoderLossPCMVariants(t *testing.T) {
 		}
 	}
 
-	for _, bad := range []int{0, rate/400 + 1, rate*120/1000 + rate/400} {
+	for _, bad := range []int{0, rate/400 + 1} {
 		if _, err := intDec.DecodePLC(make([]int16, frameSize), bad); !errors.Is(err, ErrUnsupportedFrameSize) {
 			t.Fatalf("frameSize=%d error=%v, want ErrUnsupportedFrameSize", bad, err)
 		}
+	}
+	// Like opus_decode_native, concealment longer than 120 ms is accepted
+	// and produced in calls of at most 120 ms.
+	long := rate*120/1000 + rate/400
+	if n, err := intDec.DecodePLC(make([]int16, long), long); err != nil || n != long {
+		t.Fatalf("frameSize=%d: n=%d error=%v, want %d samples", long, n, err, long)
 	}
 }
 

@@ -3011,6 +3011,10 @@ type Decoder struct {
 	// lastPacketConfig follows every packet's TOC (st->mode, st->bandwidth).
 	lossConfig   int
 	lossChannels int
+	// plcFrameSize is st->frame_size: the frame size of the last packet
+	// (Fs/400 before any and after a reset). Each concealment call is cut to
+	// it before the 20 / 10 / 5 ms rounding.
+	plcFrameSize int
 
 	// SILK decoders indexed by [rateIdx 0-2][chIdx 0=mono,1=stereo].
 	// rateIdx: 0=8kHz, 1=12kHz, 2=16kHz
@@ -3112,6 +3116,7 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 		prevMode:          -1,
 		lastPacketConfig:  -1,
 		lossConfig:        -1,
+		plcFrameSize:      sampleRate / 400,
 		silkActiveRi:      -1,
 	}
 
@@ -3693,6 +3698,9 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 	if err != nil {
 		return nil, err
 	}
+	// st->frame_size is updated before the packet's frames are decoded (a
+	// mode-switch concealment inside the packet is cut to it).
+	d.plcFrameSize = info.samplesPerFrame
 
 	toc := data[0]
 	config, stereo, countCode := framing.ParseTOC(toc)
@@ -4842,7 +4850,7 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 	if lossMode == framing.ModeCELTOnly {
 		out := make([]float64, 0, frameSize*d.channels)
 		for remaining := frameSize; remaining > 0; {
-			chunk := lossDecodeChunk(remaining, d.sampleRate, lossMode)
+			chunk := lossDecodeChunk(min(remaining, d.plcFrameSize), d.sampleRate, lossMode)
 			frame, err := d.decodeCELTPLCFrame(chunk)
 			if err != nil {
 				return nil, err
@@ -4871,7 +4879,7 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 	}
 	out := make([]float64, 0, frameSize*d.channels)
 	for remaining := frameSize; remaining > 0; {
-		chunk := lossDecodeChunk(remaining, d.sampleRate, lossMode)
+		chunk := lossDecodeChunk(min(remaining, d.plcFrameSize), d.sampleRate, lossMode)
 		decodeSamples := chunk
 		minSILKSamples := d.sampleRate / 100 // SILK PLC produces at least 10 ms.
 		if decodeSamples < minSILKSamples {
@@ -4967,7 +4975,8 @@ func (d *Decoder) decodeCELTPLCFrame(frameSize int) ([]float64, error) {
 
 func isValidLossFrameSize(frameSize, sampleRate int) bool {
 	quantum := sampleRate / 400
-	return quantum > 0 && frameSize > 0 && frameSize <= sampleRate*120/1000 && frameSize%quantum == 0
+	// opus_decode_native conceals any length in calls of at most 120 ms.
+	return quantum > 0 && frameSize > 0 && frameSize%quantum == 0
 }
 
 func floatToInt24(dst []int32, src []float64) {
@@ -5131,6 +5140,8 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 		}
 		out = append(out, plc...)
 	}
+	// st->frame_size follows the FEC packet only after the concealed prefix.
+	d.plcFrameSize = packetFrameSize
 
 	rateKHz := silkConfigRateKHz(config)
 	if rateKHz != 8 && rateKHz != 12 && rateKHz != 16 {
@@ -5247,6 +5258,7 @@ func (d *Decoder) cloneState() (*Decoder, error) {
 	clone.lastPacketConfig = d.lastPacketConfig
 	clone.lastPacketChannels = d.lastPacketChannels
 	clone.lossConfig = d.lossConfig
+	clone.plcFrameSize = d.plcFrameSize
 	clone.lossChannels = d.lossChannels
 	clone.lastFinalRange = d.lastFinalRange
 	clone.lastPitch = d.lastPitch
@@ -5363,6 +5375,7 @@ func (d *Decoder) Reset() error {
 	d.lastPacketConfig = -1
 	d.lastPacketChannels = 0
 	d.lossConfig = -1
+	d.plcFrameSize = d.sampleRate / 400
 	d.lossChannels = 0
 	d.lastFinalRange = 0
 	d.lastPitch = 0

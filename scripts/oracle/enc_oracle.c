@@ -903,8 +903,123 @@ static int run_dec_bit_oracle(int argc, char **argv)
     return 0;
 }
 
+/* ---- audit: --script-enc / --script-ms ----
+   --script-enc <rate> <channels> <app> <pcm.f32> <script>
+   --script-ms <rate> <channels> <family> <app> <pcm.f32> <script>
+   pcm.f32: raw little-endian float32 interleaved input, read sequentially.
+   script lines: "e N" encode N samples/channel via opus_encode_float,
+   "i N" via opus_encode (int16, round+clamp), "c <ctl> <val>" set a CTL,
+   "r" OPUS_RESET_STATE, "m N" set out_data_bytes, "q" print lookahead.
+   stdout: "P n hex", "R rng", "E err", "L v", "X indtx", "K ctl ret". */
+static int audit_bw(const char *s) { int v = parse_bandwidth(s); return v ? v : atoi(s); }
+static int run_script_oracle(int argc, char **argv, int ms)
+{
+    int rate, channels, family = 0, app, err = OPUS_OK, outbytes = 7656, streams = 0, coupled = 0;
+    unsigned char mapping[256];
+    OpusEncoder *enc = NULL;
+    OpusMSEncoder *menc = NULL;
+    OpusProjectionEncoder *proj = NULL;
+    FILE *pf, *sf;
+    static float pcm[5760 * 255];
+    static opus_int16 pcm16[5760 * 255];
+    static unsigned char packet[1276 * 6 * 255];
+    char line[512];
+    int ai = 2;
+    (void)argc;
+    rate = atoi(argv[ai++]);
+    channels = atoi(argv[ai++]);
+    if (ms) family = atoi(argv[ai++]);
+    app = parse_application(argv[ai++]);
+    pf = fopen(argv[ai++], "rb");
+    sf = fopen(argv[ai++], "r");
+    if (!pf || !sf) { fprintf(stderr, "cannot open inputs\n"); return 2; }
+    if (!ms) {
+        enc = opus_encoder_create(rate, channels, app, &err);
+    } else if (family == 3) {
+        proj = opus_projection_ambisonics_encoder_create(rate, channels, 3, &streams, &coupled, app, &err);
+    } else if (family >= 0) {
+        menc = opus_multistream_surround_encoder_create(rate, channels, family, &streams, &coupled, mapping, app, &err);
+    } else {
+        int f = channels <= 8 ? 1 : 255;
+        OpusMSEncoder *probe = opus_multistream_surround_encoder_create(rate, channels, f, &streams, &coupled, mapping, app, &err);
+        if (probe != NULL) opus_multistream_encoder_destroy(probe);
+        if (err == OPUS_OK) menc = opus_multistream_encoder_create(rate, channels, streams, coupled, mapping, app, &err);
+    }
+    if (err != OPUS_OK) { printf("C %d\n", err); return 0; }
+#define S_CTL(x) (enc ? opus_encoder_ctl(enc, x) : proj ? opus_projection_encoder_ctl(proj, x) : opus_multistream_encoder_ctl(menc, x))
+    while (fgets(line, sizeof(line), sf)) {
+        char cmd[64], name[64], val[64];
+        int k = sscanf(line, "%63s %63s %63s", cmd, name, val);
+        if (k < 1) continue;
+        if (strcmp(cmd, "e") == 0 || strcmp(cmd, "i") == 0) {
+            int n = atoi(name), b, ret;
+            size_t got = fread(pcm, sizeof(float), (size_t)n * channels, pf);
+            for (b = (int)got; b < n * channels; b++) pcm[b] = 0;
+            if (cmd[0] == 'i') {
+                for (b = 0; b < n * channels; b++) {
+                    double v = floor((double)pcm[b] * 32768.0 + 0.5);
+                    if (v > 32767.0) v = 32767.0;
+                    if (v < -32768.0) v = -32768.0;
+                    pcm16[b] = (opus_int16)v;
+                }
+                ret = enc ? opus_encode(enc, pcm16, n, packet, outbytes)
+                    : proj ? opus_projection_encode(proj, pcm16, n, packet, outbytes)
+                    : opus_multistream_encode(menc, pcm16, n, packet, outbytes);
+            } else {
+                ret = enc ? opus_encode_float(enc, pcm, n, packet, outbytes)
+                    : proj ? opus_projection_encode_float(proj, pcm, n, packet, outbytes)
+                    : opus_multistream_encode_float(menc, pcm, n, packet, outbytes);
+            }
+            if (ret < 0) { printf("E %d\n", ret); continue; }
+            printf("P %d ", ret);
+            for (b = 0; b < ret; b++) printf("%02x", packet[b]);
+            printf("\n");
+            {
+                opus_uint32 rng = 0;
+                S_CTL(OPUS_GET_FINAL_RANGE(&rng));
+                printf("R %08x\n", (unsigned)rng);
+            }
+            if (enc) { opus_int32 d = 0; opus_encoder_ctl(enc, OPUS_GET_IN_DTX(&d)); printf("X %d\n", d); }
+        } else if (strcmp(cmd, "t") == 0) {
+            oracle_trace_enabled = atoi(name);
+            fprintf(stderr, "[CELT_ENC_INPUT_FRAME] frame=-1 trace=%d\n", oracle_trace_enabled);
+        } else if (strcmp(cmd, "r") == 0) {
+            S_CTL(OPUS_RESET_STATE);
+        } else if (strcmp(cmd, "m") == 0) {
+            outbytes = atoi(name);
+        } else if (strcmp(cmd, "q") == 0) {
+            opus_int32 v = 0; S_CTL(OPUS_GET_LOOKAHEAD(&v)); printf("L %d\n", v);
+        } else if (strcmp(cmd, "c") == 0 && k == 3) {
+            int v = atoi(val), r;
+            if (strcmp(name, "bitrate") == 0) r = S_CTL(OPUS_SET_BITRATE(v));
+            else if (strcmp(name, "complexity") == 0) r = S_CTL(OPUS_SET_COMPLEXITY(v));
+            else if (strcmp(name, "vbr") == 0) r = S_CTL(OPUS_SET_VBR(v));
+            else if (strcmp(name, "vbrc") == 0) r = S_CTL(OPUS_SET_VBR_CONSTRAINT(v));
+            else if (strcmp(name, "bw") == 0) r = S_CTL(OPUS_SET_BANDWIDTH(audit_bw(val)));
+            else if (strcmp(name, "maxbw") == 0) r = S_CTL(OPUS_SET_MAX_BANDWIDTH(audit_bw(val)));
+            else if (strcmp(name, "fc") == 0) r = S_CTL(OPUS_SET_FORCE_CHANNELS(v));
+            else if (strcmp(name, "signal") == 0) r = S_CTL(OPUS_SET_SIGNAL(v));
+            else if (strcmp(name, "app") == 0) r = S_CTL(OPUS_SET_APPLICATION(v));
+            else if (strcmp(name, "loss") == 0) r = S_CTL(OPUS_SET_PACKET_LOSS_PERC(v));
+            else if (strcmp(name, "fec") == 0) r = S_CTL(OPUS_SET_INBAND_FEC(v));
+            else if (strcmp(name, "dtx") == 0) r = S_CTL(OPUS_SET_DTX(v));
+            else if (strcmp(name, "lsb") == 0) r = S_CTL(OPUS_SET_LSB_DEPTH(v));
+            else if (strcmp(name, "pred") == 0) r = S_CTL(OPUS_SET_PREDICTION_DISABLED(v));
+            else if (strcmp(name, "phaseinv") == 0) r = S_CTL(OPUS_SET_PHASE_INVERSION_DISABLED(v));
+            else if (strcmp(name, "expert") == 0) r = S_CTL(OPUS_SET_EXPERT_FRAME_DURATION(v));
+            else { fprintf(stderr, "unknown ctl %s\n", name); return 2; }
+            printf("K %s %d\n", name, r);
+        }
+    }
+#undef S_CTL
+    fflush(stdout);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc >= 7 && strcmp(argv[1], "--script-enc") == 0) return run_script_oracle(argc, argv, 0);
+    if (argc >= 8 && strcmp(argv[1], "--script-ms") == 0) return run_script_oracle(argc, argv, 1);
     if (argc >= 2 && strcmp(argv[1], "--dec-bit") == 0) {
         return run_dec_bit_oracle(argc, argv);
     }

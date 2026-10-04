@@ -4193,14 +4193,25 @@ func (d *Decoder) crossfadeRedundancy(out, red []float64, samplesPerFrame int) {
 	}
 	base := (frameSamplesPerCh - f25) * ch // first interleaved sample of the tail
 	for i := 0; i < f25; i++ {
-		wi := win[i*inc]
-		w := float64(wi * wi)
+		w := smoothFadeWeight(win[i*inc])
 		for c := 0; c < ch; c++ {
 			o := base + i*ch + c
 			r := (f25+i)*ch + c
-			out[o] = float64(w*red[r]) + float64((1.0-w)*out[o])
+			out[o] = smoothFadeSample(w, out[o], red[r])
 		}
 	}
+}
+
+// smoothFadeWeight is smooth_fade's squared window, in float32.
+func smoothFadeWeight(window float64) float32 {
+	w := float32(window)
+	return w * w
+}
+
+// smoothFadeSample is one smooth_fade output in float32:
+// w*in2 + (1-w)*in1, each product rounded (no fused multiply-add).
+func smoothFadeSample(w float32, in1, in2 float64) float64 {
+	return float64(float32(w*float32(in2)) + float32((1-w)*float32(in1)))
 }
 
 // crossfadeLeadingRedundancy replaces the first 2.5 ms with the first half of
@@ -4219,11 +4230,10 @@ func (d *Decoder) crossfadeLeadingRedundancy(out, red []float64) {
 		inc = 1
 	}
 	for i := 0; i < f25; i++ {
-		w := win[i*inc]
-		w = float64(w * w)
+		w := smoothFadeWeight(win[i*inc])
 		for c := 0; c < ch; c++ {
 			o := (f25+i)*ch + c
-			out[o] = float64((1.0-w)*red[o]) + float64(w*out[o])
+			out[o] = smoothFadeSample(w, red[o], out[o])
 		}
 	}
 }
@@ -4257,11 +4267,10 @@ func (d *Decoder) applyTransition(out, trans []float64) {
 	win := celt.OverlapWindow48()
 	inc := max(48000/d.sampleRate, 1)
 	for i := 0; i < f25; i++ {
-		w := win[i*inc]
-		w = float64(w * w)
+		w := smoothFadeWeight(win[i*inc])
 		for c := 0; c < ch; c++ {
 			o := i*ch + c
-			out[off+o] = float64((1.0-w)*in1[o]) + float64(w*out[off+o])
+			out[off+o] = smoothFadeSample(w, in1[o], out[off+o])
 		}
 	}
 }

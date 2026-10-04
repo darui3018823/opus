@@ -169,11 +169,26 @@ func TestSurroundMappingFamilies(t *testing.T) {
 	if discrete.Streams() != 12 || discrete.CoupledStreams() != 0 {
 		t.Fatalf("discrete layout streams=%d coupled=%d", discrete.Streams(), discrete.CoupledStreams())
 	}
-	if _, err := NewSurroundEncoder(48000, 6, MappingFamilyMonoStereo, ApplicationAudio); !errors.Is(err, ErrBadArg) {
+	// libopus answers OPUS_UNIMPLEMENTED; ErrBadArg is kept for callers.
+	if _, err := NewSurroundEncoder(48000, 6, MappingFamilyMonoStereo, ApplicationAudio); !errors.Is(err, ErrBadArg) || !errors.Is(err, ErrUnimplemented) {
 		t.Fatalf("family 0 with 6ch error=%v", err)
 	}
-	if _, err := NewSurroundEncoder(48000, 4, MappingFamilyAmbisonics, ApplicationAudio); !errors.Is(err, ErrUnimplemented) {
-		t.Fatalf("family 2 error=%v", err)
+	// Family 2: one stream per ambisonic channel, plus a coupled stream for
+	// the non-diegetic pair (validate_ambisonics).
+	for _, tc := range []struct{ channels, streams, coupled int }{{4, 4, 0}, {6, 5, 1}, {9, 9, 0}, {11, 10, 1}} {
+		enc, err := NewSurroundEncoder(48000, tc.channels, MappingFamilyAmbisonics, ApplicationAudio)
+		if err != nil {
+			t.Fatalf("family 2 with %d channels: %v", tc.channels, err)
+		}
+		if enc.Streams() != tc.streams || enc.CoupledStreams() != tc.coupled {
+			t.Fatalf("family 2 %d channels: streams=%d coupled=%d", tc.channels, enc.Streams(), enc.CoupledStreams())
+		}
+		if _, err := NewSurroundDecoder(48000, tc.channels, MappingFamilyAmbisonics); err != nil {
+			t.Fatalf("family 2 decoder with %d channels: %v", tc.channels, err)
+		}
+	}
+	if _, err := NewSurroundEncoder(48000, 5, MappingFamilyAmbisonics, ApplicationAudio); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("family 2 with 5ch error=%v", err)
 	}
 }
 

@@ -43,10 +43,14 @@ type SurroundEncoder struct {
 	analyzer      *celt.SurroundAnalyzer
 }
 
-// NewSurroundEncoder creates an encoder for mapping family 0, 1, or 255.
-// Mapping family 1 uses the standard Vorbis channel order for 1 through 8
-// channels. Family 0 accepts mono or stereo. Mapping family 255 creates one
-// uncoupled stream per channel.
+// NewSurroundEncoder creates an encoder for mapping family 0, 1, 2, or 255
+// (opus_multistream_surround_encoder_create). Mapping family 1 uses the
+// standard Vorbis channel order for 1 through 8 channels. Family 0 accepts
+// mono or stereo. Family 2 takes full-order ambisonics with an optional
+// non-diegetic stereo pair, one stream per ambisonic channel. Mapping family
+// 255 creates one uncoupled stream per channel. A channel count a family
+// does not cover, or another family, returns an error wrapping both
+// ErrUnimplemented (libopus's OPUS_UNIMPLEMENTED) and ErrBadArg.
 func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application Application) (*SurroundEncoder, error) {
 	layout, err := surroundLayoutFor(channels, mappingFamily)
 	if err != nil {
@@ -65,6 +69,9 @@ func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application App
 	}
 	s.configureSurroundStreams()
 	ms.policyChanged = s.configureForPolicy
+	if mappingFamily == MappingFamilyAmbisonics {
+		ms.mappingType = msMappingAmbisonics
+	}
 	if mappingFamily == MappingFamilyVorbis && channels > 2 {
 		ms.mappingType = msMappingSurround
 		ms.lfeStream = layout.lfeStream
@@ -347,9 +354,10 @@ type SurroundDecoder struct {
 	lfeStream     int
 }
 
-// NewSurroundDecoder creates a decoder for mapping family 0, 1, or 255. Family
-// 0 accepts mono or stereo, family 1 accepts 1 through 8 channels in Vorbis
-// order, and family 255 treats every channel as a discrete uncoupled stream.
+// NewSurroundDecoder creates a decoder for mapping family 0, 1, 2, or 255.
+// Family 0 accepts mono or stereo, family 1 accepts 1 through 8 channels in
+// Vorbis order, family 2 the ambisonics layout of NewSurroundEncoder, and
+// family 255 treats every channel as a discrete uncoupled stream.
 func NewSurroundDecoder(sampleRate, channels, mappingFamily int) (*SurroundDecoder, error) {
 	layout, err := surroundLayoutFor(channels, mappingFamily)
 	if err != nil {
@@ -382,10 +390,10 @@ func surroundLayoutFor(channels, mappingFamily int) (surroundLayout, error) {
 		if channels == 2 {
 			return surroundLayout{1, 1, []byte{0, 1}, -1}, nil
 		}
-		return surroundLayout{}, fmt.Errorf("%w: mapping family 0 requires one or two channels", ErrBadArg)
+		return surroundLayout{}, fmt.Errorf("%w: %w: mapping family 0 requires one or two channels", ErrUnimplemented, ErrBadArg)
 	case MappingFamilyVorbis:
 		if channels < 1 || channels > len(vorbisSurroundLayouts) {
-			return surroundLayout{}, fmt.Errorf("%w: mapping family 1 supports one through eight channels", ErrBadArg)
+			return surroundLayout{}, fmt.Errorf("%w: %w: mapping family 1 supports one through eight channels", ErrUnimplemented, ErrBadArg)
 		}
 		layout := vorbisSurroundLayouts[channels-1]
 		layout.mapping = append([]byte(nil), layout.mapping...)
@@ -400,8 +408,16 @@ func surroundLayoutFor(channels, mappingFamily int) (surroundLayout, error) {
 		}
 		return surroundLayout{channels, 0, mapping, -1}, nil
 	case MappingFamilyAmbisonics:
-		return surroundLayout{}, fmt.Errorf("%w: mapping family 2 belongs to the projection API", ErrUnimplemented)
+		// opus_multistream_surround_encoder_init's validate_ambisonics: one
+		// mono stream per ACN channel and a coupled stream for the optional
+		// non-diegetic pair.
+		_, nondiegetic, err := ambisonicsOrder(channels)
+		if err != nil {
+			return surroundLayout{}, err
+		}
+		coupled := nondiegetic / 2
+		return surroundLayout{channels - coupled, coupled, ambisonicsFamily2Mapping(channels, coupled), -1}, nil
 	default:
-		return surroundLayout{}, fmt.Errorf("%w: unsupported mapping family %d", ErrBadArg, mappingFamily)
+		return surroundLayout{}, fmt.Errorf("%w: %w: unsupported mapping family %d", ErrUnimplemented, ErrBadArg, mappingFamily)
 	}
 }

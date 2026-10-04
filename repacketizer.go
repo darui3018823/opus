@@ -3,12 +3,15 @@ package opus
 import "fmt"
 
 // Repacketizer combines Opus frames with matching TOC configurations without
-// decoding and re-encoding their audio. It is mutable, must not be copied after
-// first use, and is not safe for concurrent use. Cat copies accumulated frames.
+// decoding and re-encoding their audio, like libopus's OpusRepacketizer. The
+// packet extensions carried in each added packet's padding are kept (with
+// their frame numbers moved to the frames' new positions). It is mutable,
+// must not be copied after first use, and is not safe for concurrent use. Cat
+// copies accumulated frames.
 type Repacketizer struct {
-	toc             byte
-	frames          [][]byte
-	samplesPerFrame int
+	toc       byte
+	framesize int // samples per frame at 8 kHz
+	frames    []repacketizerFrame
 }
 
 // NewRepacketizer creates an empty single-stream Opus repacketizer.
@@ -17,44 +20,22 @@ func NewRepacketizer() *Repacketizer { return &Repacketizer{} }
 // Reset removes all frames accumulated by the repacketizer.
 func (r *Repacketizer) Reset() {
 	r.toc = 0
+	r.framesize = 0
 	r.frames = nil
-	r.samplesPerFrame = 0
 }
 
 // NumFrames returns the number of accumulated Opus frames.
 func (r *Repacketizer) NumFrames() int { return len(r.frames) }
 
-// Cat appends every frame from packet. All packets must have the same TOC
-// configuration and channel count, and the accumulated duration must not exceed
-// the Opus 120 ms packet limit.
+// Cat appends every frame from packet (opus_repacketizer_cat). All packets
+// must have the same TOC configuration and channel count, and the
+// accumulated duration must not exceed the Opus 120 ms packet limit.
 func (r *Repacketizer) Cat(packet []byte) error {
-	if _, err := inspectPacket(packet, SampleRate48kHz); err != nil {
-		return err
-	}
-	samplesPerFrame, err := PacketGetSamplesPerFrame(packet, SampleRate48kHz)
+	frames, err := catPacket(r.frames, &r.toc, &r.framesize, packet, false)
 	if err != nil {
 		return err
 	}
-	baseTOC := packet[0] & 0xfc
-	if len(r.frames) != 0 && (r.toc != baseTOC || r.samplesPerFrame != samplesPerFrame) {
-		return fmt.Errorf("%w: repacketizer TOC mismatch", ErrInvalidPacket)
-	}
-	_, _, code := parseTOCForRepacketizer(packet[0])
-	frames, err := splitOpusFrames(packet[1:], code)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidPacket, err)
-	}
-	if len(r.frames)+len(frames) > MaxPacketFrames ||
-		(len(r.frames)+len(frames))*samplesPerFrame > MaxFrameSize {
-		return fmt.Errorf("%w: repacketized duration exceeds 120 ms", ErrInvalidPacket)
-	}
-	if len(r.frames) == 0 {
-		r.toc = baseTOC
-		r.samplesPerFrame = samplesPerFrame
-	}
-	for _, frame := range frames {
-		r.frames = append(r.frames, append([]byte(nil), frame...))
-	}
+	r.frames = frames
 	return nil
 }
 
@@ -72,124 +53,123 @@ func (r *Repacketizer) Out() ([]byte, error) {
 }
 
 // OutRange returns a caller-owned packet containing frames [begin,end) without
-// clearing the repacketizer. Invalid or empty ranges return ErrBadArg.
+// clearing the repacketizer (opus_repacketizer_out_range with a large enough
+// buffer). Invalid or empty ranges return ErrBadArg.
 func (r *Repacketizer) OutRange(begin, end int) ([]byte, error) {
-	if begin < 0 || end <= begin || end > len(r.frames) {
-		return nil, fmt.Errorf("%w: invalid repacketizer range [%d,%d)", ErrBadArg, begin, end)
-	}
-	payload, code, err := packOpusFrames(r.frames[begin:end], false)
-	if err != nil {
-		return nil, err
-	}
-	packet := make([]byte, 1, 1+len(payload))
-	packet[0] = r.toc | byte(code)
-	packet = append(packet, payload...)
-	return packet, nil
+	return repacketizeOutRange(r.toc, r.frames, begin, end, outRangeUnbounded(r.frames), false, false, nil)
 }
 
 // PacketPad returns packet padded to exactly newLen bytes using RFC 6716 code-3
-// packet padding. The encoded Opus frames are not modified and the returned
-// slice is caller-owned. newLen must be at least len(packet) and large enough
-// to represent the required code-3 framing overhead.
+// packet padding, like opus_packet_pad: the encoded Opus frames are not
+// modified, extensions in the packet's padding are kept, and the returned slice
+// is caller-owned. A newLen equal to len(packet) returns a copy without
+// parsing the packet; a smaller one, or an empty packet, returns ErrBadArg.
 func PacketPad(packet []byte, newLen int) ([]byte, error) {
-	if newLen < len(packet) {
-		return nil, fmt.Errorf("%w: padded length %d is smaller than packet length %d", ErrBadArg, newLen, len(packet))
-	}
-	if _, err := inspectPacket(packet, SampleRate48kHz); err != nil {
-		return nil, err
+	if len(packet) < 1 {
+		return nil, fmt.Errorf("%w: empty packet", ErrBadArg)
 	}
 	if newLen == len(packet) {
 		return append([]byte(nil), packet...), nil
 	}
-	_, _, code := parseTOCForRepacketizer(packet[0])
-	frames, err := splitOpusFrames(packet[1:], code)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidPacket, err)
+	if newLen < len(packet) {
+		return nil, fmt.Errorf("%w: padded length %d is smaller than packet length %d", ErrBadArg, newLen, len(packet))
 	}
-	payload, outCode, err := packOpusFramesToPacketSize(frames, false, newLen)
+	var toc byte
+	var framesize int
+	frames, err := catPacket(nil, &toc, &framesize, packet, false)
 	if err != nil {
 		return nil, err
 	}
-	if 1+len(payload) != newLen {
-		return nil, fmt.Errorf("%w: cannot represent padded length %d", ErrBadArg, newLen)
-	}
-	out := make([]byte, 1, newLen)
-	out[0] = packet[0]&0xfc | byte(outCode)
-	out = append(out, payload...)
-	return out, nil
+	return repacketizeOutRange(toc, frames, 0, len(frames), newLen, false, true, nil)
 }
 
-// PacketUnpad removes RFC 6716 packet padding and returns canonical compact
-// framing for the packet's unchanged Opus frames.
+// PacketUnpad removes RFC 6716 packet padding and the extensions it carries,
+// and returns compact framing for the packet's unchanged Opus frames
+// (opus_packet_unpad).
 func PacketUnpad(packet []byte) ([]byte, error) {
-	if _, err := inspectPacket(packet, SampleRate48kHz); err != nil {
-		return nil, err
+	if len(packet) < 1 {
+		return nil, fmt.Errorf("%w: empty packet", ErrBadArg)
 	}
-	_, _, code := parseTOCForRepacketizer(packet[0])
-	frames, err := splitOpusFrames(packet[1:], code)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidPacket, err)
-	}
-	payload, outCode, err := packOpusFrames(frames, false)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]byte, 1, 1+len(payload))
-	out[0] = packet[0]&0xfc | byte(outCode)
-	out = append(out, payload...)
-	return out, nil
+	return unpadPacket(packet, len(packet), false)
 }
 
-// MultistreamPacketPad returns an RFC 7845 multistream packet padded to exactly
-// newLen bytes. Padding is applied to the final elementary Opus packet; earlier
-// self-delimited stream lengths are regenerated canonically. The returned slice
-// is caller-owned, and newLen must accommodate any regenerated framing overhead.
-func MultistreamPacketPad(packet []byte, streams, newLen int) ([]byte, error) {
-	if newLen < len(packet) {
-		return nil, fmt.Errorf("%w: padded length %d is smaller than packet length %d", ErrBadArg, newLen, len(packet))
-	}
-	packets, _, err := splitMultistreamPackets(packet, streams, SampleRate48kHz)
+// unpadPacket is the repacketizer step of opus_packet_unpad on one (possibly
+// self-delimited) packet: its frames without padding or extensions.
+func unpadPacket(packet []byte, maxlen int, selfDelimited bool) ([]byte, error) {
+	var toc byte
+	var framesize int
+	frames, err := catPacket(nil, &toc, &framesize, packet, selfDelimited)
 	if err != nil {
 		return nil, err
+	}
+	for i := range frames {
+		frames[i].padding, frames[i].paddingFrames = nil, 0
+	}
+	return repacketizeOutRange(toc, frames, 0, len(frames), maxlen, selfDelimited, false, nil)
+}
+
+// MultistreamPacketPad returns an RFC 7845 multistream packet padded to
+// exactly newLen bytes, like opus_multistream_packet_pad: the first
+// streams-1 self-delimited packets are kept as they are and the final
+// elementary packet is padded with PacketPad. A newLen equal to len(packet)
+// returns a copy; a smaller one, or an empty packet, returns ErrBadArg.
+func MultistreamPacketPad(packet []byte, streams, newLen int) ([]byte, error) {
+	if len(packet) < 1 {
+		return nil, fmt.Errorf("%w: empty packet", ErrBadArg)
 	}
 	if newLen == len(packet) {
 		return append([]byte(nil), packet...), nil
 	}
-	canonical, err := joinMultistreamPackets(packets)
+	if newLen < len(packet) {
+		return nil, fmt.Errorf("%w: padded length %d is smaller than packet length %d", ErrBadArg, newLen, len(packet))
+	}
+	amount := newLen - len(packet)
+	offset := 0
+	for s := 0; s < streams-1; s++ {
+		if len(packet)-offset <= 0 {
+			return nil, fmt.Errorf("%w: missing stream %d", ErrInvalidPacket, s)
+		}
+		p, err := packetParseImpl(packet[offset:], true)
+		if err != nil {
+			return nil, fmt.Errorf("stream %d: %w", s, err)
+		}
+		offset += p.packetOffset
+	}
+	last := packet[offset:]
+	padded, err := PacketPad(last, len(last)+amount)
 	if err != nil {
 		return nil, err
 	}
-	if newLen < len(canonical) {
-		return nil, fmt.Errorf("%w: padded length %d is smaller than canonical packet length %d", ErrBadArg, newLen, len(canonical))
-	}
-	last := len(packets) - 1
-	paddedLastLen := len(packets[last]) + (newLen - len(canonical))
-	packets[last], err = PacketPad(packets[last], paddedLastLen)
-	if err != nil {
-		return nil, err
-	}
-	out, err := joinMultistreamPackets(packets)
-	if err != nil {
-		return nil, err
-	}
-	if len(out) != newLen {
-		return nil, fmt.Errorf("%w: cannot represent multistream padded length %d", ErrBadArg, newLen)
-	}
-	return out, nil
+	out := make([]byte, 0, newLen)
+	out = append(out, packet[:offset]...)
+	return append(out, padded...), nil
 }
 
-// MultistreamPacketUnpad removes RFC 6716 padding from every elementary stream
-// and returns canonical RFC 7845 multistream framing.
+// MultistreamPacketUnpad removes RFC 6716 padding and extensions from every
+// elementary stream and returns compact RFC 7845 multistream framing
+// (opus_multistream_packet_unpad).
 func MultistreamPacketUnpad(packet []byte, streams int) ([]byte, error) {
-	packets, _, err := splitMultistreamPackets(packet, streams, SampleRate48kHz)
-	if err != nil {
-		return nil, err
+	if len(packet) < 1 {
+		return nil, fmt.Errorf("%w: empty packet", ErrBadArg)
 	}
-	for i := range packets {
-		packets[i], err = PacketUnpad(packets[i])
-		if err != nil {
-			return nil, fmt.Errorf("stream %d: %w", i, err)
+	var out []byte
+	offset := 0
+	for s := 0; s < streams; s++ {
+		selfDelimited := s != streams-1
+		rest := packet[offset:]
+		if len(rest) <= 0 {
+			return nil, fmt.Errorf("%w: missing stream %d", ErrInvalidPacket, s)
 		}
+		p, err := packetParseImpl(rest, selfDelimited)
+		if err != nil {
+			return nil, fmt.Errorf("stream %d: %w", s, err)
+		}
+		unpadded, err := unpadPacket(rest[:p.packetOffset], len(rest), selfDelimited)
+		if err != nil {
+			return nil, fmt.Errorf("stream %d: %w", s, err)
+		}
+		out = append(out, unpadded...)
+		offset += p.packetOffset
 	}
-	return joinMultistreamPackets(packets)
+	return out, nil
 }

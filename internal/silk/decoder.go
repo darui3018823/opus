@@ -456,8 +456,15 @@ func (d *Decoder) DecodeMultiWithDecoder(dec *entcode.Decoder, nFrames int) ([]f
 // standalone or shared-stream decode.
 func (d *Decoder) LastFinalRange() uint32 { return d.lastFinalRange }
 
-// Pitch returns the most recent SILK pitch period at the internal sample rate.
-func (d *Decoder) Pitch() int { return d.lagPrev }
+// Pitch returns the most recent SILK pitch period at the internal sample
+// rate, or 0 when the last coded frame was not voiced, as silk_Decode
+// exports prevPitchLag.
+func (d *Decoder) Pitch() int {
+	if d.prevSignalType != SignalTypeVoiced {
+		return 0
+	}
+	return d.lagPrev
+}
 
 // DecodeFEC decodes LBRR data carried in the packet following a loss.
 // nFrames is the number of 10 or 20 ms SILK frames represented by the packet.

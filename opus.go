@@ -3190,13 +3190,17 @@ type Decoder struct {
 	// Resampler for non-48kHz CELT output rates
 	celtResampler *resampler.Resampler // 48kHz -> outRate
 
-	frameSize              int // frame size in samples at sampleRate
-	internalFrameSize      int // always 960 (20ms at 48kHz)
-	lastPacketDuration     int // samples per channel decoded by the last packet
-	lastPacketConfig       int // TOC config of the last successfully decoded packet
-	lastPacketChannels     int // coded channels of the last successfully decoded packet
-	lastFinalRange         uint32
-	lastPitch              int // in 48 kHz samples, like OPUS_GET_PITCH
+	frameSize          int // frame size in samples at sampleRate
+	internalFrameSize  int // always 960 (20ms at 48kHz)
+	lastPacketDuration int // samples per channel decoded by the last packet
+	lastPacketConfig   int // TOC config of the last successfully decoded packet
+	lastPacketChannels int // coded channels of the last successfully decoded packet
+	lastFinalRange     uint32
+	lastPitch          int // in 48 kHz samples, like OPUS_GET_PITCH
+	// silkPitch48 is DecControl.prevPitchLag (48 kHz samples), which
+	// OPUS_GET_PITCH reports outside CELT-only mode and which survives a
+	// reset.
+	silkPitch48            int
 	gainQ8                 int
 	phaseInversionDisabled bool
 }
@@ -4303,6 +4307,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		return allPCM, trailingRedundancy, nil
 	}
 	d.lastPitch = info.dec.Pitch() * 48 / rateKHz
+	d.silkPitch48 = d.lastPitch
 	d.prevSilkInternalCh = pktChannels
 
 	if pktChannels == 1 && stereoPeer != nil && stereoPeer.dec != nil {
@@ -4692,6 +4697,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		return allPCM, trailingRedundancy, nil
 	}
 	d.lastPitch = info.dec.Pitch() * 48 / rateKHz
+	d.silkPitch48 = d.lastPitch
 	d.prevSilkInternalCh = pktChannels
 
 	if pktChannels == 1 && stereoPeer != nil && stereoPeer.dec != nil {
@@ -5159,6 +5165,7 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 		remaining -= chunk
 	}
 	d.lastPitch = info.dec.Pitch() * 48 / rateKHz
+	d.silkPitch48 = d.lastPitch
 	d.prevSilkInternalCh = d.lossChannels
 	if peer := d.silkDecoders[ri][1-ci]; peer != nil && peer.dec != nil {
 		peer.dec.CopyPrimaryStateFrom(info.dec)
@@ -5501,6 +5508,7 @@ func (d *Decoder) cloneState() (*Decoder, error) {
 	clone.lossChannels = d.lossChannels
 	clone.lastFinalRange = d.lastFinalRange
 	clone.lastPitch = d.lastPitch
+	clone.silkPitch48 = d.silkPitch48
 	clone.gainQ8 = d.gainQ8
 	clone.phaseInversionDisabled = d.phaseInversionDisabled
 	clone.prevSilkInternalCh = d.prevSilkInternalCh
@@ -5660,9 +5668,15 @@ func (d *Decoder) FinalRange() uint32 { return d.lastFinalRange }
 // the decoder output rate. Zero means no pitch period is currently available.
 func (d *Decoder) Pitch() int { return d.lastPitch * d.sampleRate / SampleRate48kHz }
 
-// Pitch48kHz returns the pitch period in 48 kHz samples, the unit of libopus
-// OPUS_GET_PITCH whatever the decoder output rate.
-func (d *Decoder) Pitch48kHz() int { return d.lastPitch }
+// Pitch48kHz is OPUS_GET_PITCH: the pitch period in 48 kHz samples whatever
+// the decoder output rate. After a CELT-only frame it is the CELT post-filter
+// period, otherwise the last SILK lag (0 when unvoiced), which a reset keeps.
+func (d *Decoder) Pitch48kHz() int {
+	if d.prevMode == framing.ModeCELTOnly {
+		return d.lastPitch
+	}
+	return d.silkPitch48
+}
 
 // SetGain sets the decoder output gain in Q8 dB.
 func (d *Decoder) SetGain(gainQ8 int) error {

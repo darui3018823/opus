@@ -202,13 +202,16 @@ type Decoder struct {
 	subfrmLen  int // subframe length
 
 	// Decoder state (persists across frames)
-	prevNLSFQ15    []int16 // previous NLSF in Q15
-	lagPrev        int     // previous pitch lag
-	prevLagIndex   int     // previous entropy-coded pitch lag index
-	prevGainQ16    int32   // previous gain (Q16) for delta coding
-	prevGainIndex  int8    // previous gain index for conditional coding
-	prevSignalType int     // previous signal type
-	firstFrame     bool    // true until the first decoded frame after reset
+	prevNLSFQ15   []int16 // previous NLSF in Q15
+	lagPrev       int     // previous pitch lag
+	prevLagIndex  int     // previous entropy-coded pitch lag index
+	prevGainQ16   int32   // previous gain (Q16) for delta coding
+	prevGainIndex int8    // previous gain index for conditional coding
+	// noLTPScaling selects CODE_INDEPENDENTLY_NO_LTP_SCALING for the next
+	// independently coded frame: no LTP scale symbol is read.
+	noLTPScaling   bool
+	prevSignalType int  // previous signal type
+	firstFrame     bool // true until the first decoded frame after reset
 	lastFinalRange uint32
 
 	// LPC synthesis state: last MAX_LPC_ORDER samples
@@ -840,7 +843,12 @@ func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]floa
 				d.side.applySetFsReset()
 			}
 			sideConditional := i > 0 && !d.prevDecodeOnlyMiddle
+			// A side frame after a skipped one in the same packet is coded
+			// independently without LTP scaling
+			// (CODE_INDEPENDENTLY_NO_LTP_SCALING).
+			d.side.noLTPScaling = i > 0 && d.prevDecodeOnlyMiddle
 			pcm, err := d.side.decodeFrame(dec, vadFlags[1][i], sideConditional)
+			d.side.noLTPScaling = false
 			if err == nil {
 				copy(side, pcm)
 			}
@@ -1276,7 +1284,7 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 			}
 		}
 
-		if !conditionalGain {
+		if !conditionalGain && !d.noLTPScaling {
 			ltpScaleIdx := dec.DecodeIcdf(silkLTPScaleICDF[:], 8)
 			ltpScaleQ14 = silkLTPScalesTable[ltpScaleIdx]
 		} else {

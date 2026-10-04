@@ -159,6 +159,13 @@ type Encoder struct {
 	// projection encoder's unmixed channels), and libopusForcedMode
 	// st->user_forced_mode (-1 for automatic) under the libopus policy.
 	outDataBytes      int
+	// maxPacketSize is SetMaxPacketSize: the caller's output buffer for a
+	// single-stream packet (0 = defaultOutDataBytes).
+	maxPacketSize int
+	// reportedBitrate is EffectiveBitrate: the setting bounded by 1275
+	// bytes per coded frame. Under the libopus policy the packet bitrate
+	// (e.bitrate) is st->bitrate_bps instead, bounded by max_data_bytes.
+	reportedBitrate int
 	analysisInput     []float64
 	libopusForcedMode int
 	// lfe is st->lfe (OPUS_SET_LFE), set by the surround encoder on its
@@ -639,18 +646,20 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 	// decision (the toMono delay only applies to SILK and hybrid packets),
 	// before the high-pass conditioning whose cutoff depends on the mode.
 	maxDataBytes := MaxFrameBytes + 1
-	if e.rateMode == celt.RateModeCBR {
+	if e.libopusModePolicy {
+		// max_data_bytes = IMIN(1276*6, out_data_bytes); in CBR it becomes
+		// cbr_bytes (applyOutDataBytes).
+		maxDataBytes = 6 * (MaxFrameBytes + 1)
+		if err := e.applyOutDataBytes(frameSize, &maxDataBytes); err != nil {
+			return nil, err
+		}
+	} else if e.rateMode == celt.RateModeCBR {
 		maxDataBytes = (bitrateToBits(e.bitrate, e.sampleRate, frameSize) + 4) / 8
 		if maxDataBytes > MaxFrameBytes+1 {
 			maxDataBytes = MaxFrameBytes + 1
 		}
 		if maxDataBytes < 1 {
 			maxDataBytes = 1
-		}
-	}
-	if e.libopusModePolicy && e.outDataBytes > 0 {
-		if err := e.applyOutDataBytes(frameSize, &maxDataBytes); err != nil {
-			return nil, err
 		}
 	}
 	var decision modeDecision
@@ -730,6 +739,10 @@ func (e *Encoder) encodeDecidedFrame(pcm []float64, frameSize, nFrames, maxDataB
 	if !e.libopusModePolicy || nFrames < 1 {
 		return e.encodeDecidedFrameCore(pcm, frameSize, nFrames, maxDataBytes, decision)
 	}
+	// opus_encode_frame_native codes within IMIN(max_data_bytes, 1276) and
+	// pads a CBR packet to the full max_data_bytes.
+	origMaxDataBytes := maxDataBytes
+	maxDataBytes = min(maxDataBytes, MaxFrameBytes+1)
 	// opus_encode_frame_native's voice activity, passed to SILK.
 	activity := e.frameActivity(pcm, e.frameIsSilence, e.frameAnalysis, decision.mode)
 	if e.silkEncoder != nil {
@@ -774,6 +787,9 @@ func (e *Encoder) encodeDecidedFrame(pcm []float64, frameSize, nFrames, maxDataB
 		}
 	} else {
 		e.nbNoActivityMsQ1 = 0
+	}
+	if e.rateMode == celt.RateModeCBR && len(out) > 1 && len(out) < origMaxDataBytes {
+		return PacketPad(out, origMaxDataBytes)
 	}
 	return out, nil
 }
@@ -2284,7 +2300,12 @@ func (e *Encoder) Bitrate() int { return e.bitrateSetting }
 
 // EffectiveBitrate returns the numeric bitrate currently applied internally.
 // For BitrateAuto and BitrateMax this is updated for each encoded frame size.
-func (e *Encoder) EffectiveBitrate() int { return e.bitrate }
+func (e *Encoder) EffectiveBitrate() int {
+	if e.reportedBitrate > 0 {
+		return e.reportedBitrate
+	}
+	return e.bitrate
+}
 
 // Complexity returns the current complexity setting (0–10).
 func (e *Encoder) Complexity() int { return e.complexity }
@@ -2492,6 +2513,19 @@ func (e *Encoder) applyBitrateSetting(frameSize int) error {
 			bitrate = maximum
 		}
 	}
+	e.reportedBitrate = bitrate
+	if e.libopusModePolicy && e.outDataBytes == 0 {
+		// user_bitrate_to_bitrate: OPUS_BITRATE_MAX is 1.5 Mb/s and a
+		// numeric setting is used as is; max_data_bytes bounds both when
+		// the packet is coded (applyOutDataBytes).
+		switch e.bitrateSetting {
+		case BitrateAuto:
+		case BitrateMax:
+			bitrate = 1500000
+		default:
+			bitrate = e.bitrateSetting
+		}
+	}
 	return e.setPacketBitrate(bitrate, frameSize)
 }
 
@@ -2587,6 +2621,34 @@ func (e *Encoder) syncSILKRateMode() {
 	default:
 		e.silkEncoder.SetRateMode(silk.RateModeCBR)
 	}
+}
+
+// SetMaxPacketSize sets the size of the output buffer that libopus's
+// opus_encode would receive (max_data_bytes): no packet is longer, a VBR
+// packet of more than one frame shares it between its frames, and a CBR
+// packet above 1276 bytes uses it as the packet size limit. It applies
+// under ModePolicyLibopus; the default is 1500 bytes. n must be positive.
+func (e *Encoder) SetMaxPacketSize(n int) error {
+	if n < 1 {
+		return fmt.Errorf("%w: max packet size %d", ErrBadArg, n)
+	}
+	e.maxPacketSize = n
+	return nil
+}
+
+// MaxPacketSize returns the SetMaxPacketSize value (1500 by default).
+func (e *Encoder) MaxPacketSize() int { return e.outBufferBytes() }
+
+// outBufferBytes is out_data_bytes: the multistream encoder's per-stream
+// budget while it codes a stream, otherwise SetMaxPacketSize.
+func (e *Encoder) outBufferBytes() int {
+	if e.outDataBytes > 0 {
+		return e.outDataBytes
+	}
+	if e.maxPacketSize > 0 {
+		return e.maxPacketSize
+	}
+	return defaultOutDataBytes
 }
 
 // SetPacketPadding sets the number of code-3 padding-data bytes appended to each

@@ -7,11 +7,9 @@ import (
 	"github.com/darui3018823/opus/internal/celt"
 )
 
-// defaultOutDataBytes stands in for the caller's output buffer size that
-// opus_encode receives (out_data_bytes): libopus bounds a VBR multi-frame
-// packet by it. The Go API has no such buffer, so the usual buffer size of
-// the reference tools (and the oracle) applies; it only binds at extreme
-// bitrates.
+// defaultOutDataBytes is the default SetMaxPacketSize: the output buffer
+// size that opus_encode receives (out_data_bytes), the usual buffer of the
+// reference tools (and the oracle). It only binds at extreme bitrates.
 const defaultOutDataBytes = 1500
 
 // encodeMultiframeLibopus is opus_encode_native's multi-frame path under the
@@ -48,12 +46,11 @@ func (e *Encoder) encodeMultiframeLibopus(raw []float64, frameSize, nFrames, max
 	if nFrames == 2 {
 		maxHeaderBytes = 3
 	}
-	repacketizeLen := defaultOutDataBytes
-	if !vbr {
-		repacketizeLen = maxDataBytes
-		if repacketizeLen > defaultOutDataBytes {
-			repacketizeLen = defaultOutDataBytes
-		}
+	// repacketize_len: out_data_bytes for VBR and OPUS_BITRATE_MAX, else
+	// IMIN(cbr_bytes, out_data_bytes).
+	repacketizeLen := e.outBufferBytes()
+	if !vbr && e.bitrateSetting != BitrateMax {
+		repacketizeLen = min(maxDataBytes, repacketizeLen)
 	}
 	maxLenSum := nFrames + repacketizeLen - maxHeaderBytes
 

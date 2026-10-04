@@ -20,7 +20,7 @@ func (e *Encoder) setLibopusBitrate(bitrate int) {
 // the budget can carry (user_bitrate_to_bitrate) and, in CBR, cbr_bytes is
 // bounded by it.
 func (e *Encoder) applyOutDataBytes(frameSize int, maxDataBytes *int) error {
-	limit := min(e.outDataBytes, 6*(MaxFrameBytes+1))
+	limit := min(e.outBufferBytes(), 6*(MaxFrameBytes+1))
 	if maxRate := bitsToBitrate(limit*8, e.sampleRate, frameSize); e.bitrate > maxRate {
 		if err := e.setPacketBitrate(maxRate, frameSize); err != nil {
 			return err
@@ -28,8 +28,13 @@ func (e *Encoder) applyOutDataBytes(frameSize int, maxDataBytes *int) error {
 	}
 	if e.rateMode == celt.RateModeCBR {
 		cbrBytes := min((bitrateToBits(e.bitrate, e.sampleRate, frameSize)+4)/8, limit)
-		if err := e.setPacketBitrate(bitsToBitrate(cbrBytes*8, e.sampleRate, frameSize), frameSize); err != nil {
-			return err
+		// A single-stream encoder rounds to cbr_bytes where it codes (the
+		// mode decision and the frame encoders work from max_data_bytes),
+		// keeping EffectiveBitrate at the requested rate.
+		if e.outDataBytes > 0 {
+			if err := e.setPacketBitrate(bitsToBitrate(cbrBytes*8, e.sampleRate, frameSize), frameSize); err != nil {
+				return err
+			}
 		}
 		*maxDataBytes = min(*maxDataBytes, max(1, cbrBytes))
 		return nil

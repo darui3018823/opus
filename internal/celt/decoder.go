@@ -318,7 +318,8 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	// oldBandE value, so derive the linear amplitude only after band decoding.
 	for i := start; i < end; i++ {
 		for c := 0; c < ch; c++ {
-			amp := celtExp2RoundedFloat32(float32(quantLogE[c*numBands+i] + EMean(i)))
+			// denormalise_bands: g = celt_exp2_db(MIN32(32.f, lg)).
+			amp := celtExp2RoundedFloat32(min(32, float32(quantLogE[c*numBands+i]+EMean(i))))
 			e := float64(amp) * float64(amp)
 			if e < 1e-20 {
 				e = 1e-20
@@ -721,6 +722,11 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 		if fb <= 0 {
 			continue
 		}
+		// unquant_fine_energy skips a band whose bits would read past the
+		// buffer (only reachable on a malformed packet).
+		if dec.ECTell()+ch*fb > dec.Storage()*8 {
+			continue
+		}
 		for c := 0; c < ch; c++ {
 			q2 := int(dec.DecodeBits(uint(fb)))
 			d.bandProcs[c].ApplyFineEnergy(i, q2, fb)
@@ -893,6 +899,14 @@ func (d *Decoder) SetDownsample(n int) {
 // DecodePLC performs packet loss concealment (public API)
 func (d *Decoder) DecodePLC() ([]float64, error) {
 	return d.decodeLoss(), nil
+}
+
+// DecodeHybridLoss conceals the CELT layer of a hybrid frame left without
+// CELT data (celt_decode_with_ec with len 0), using that frame's start and
+// end bands as celt_decode_lost does.
+func (d *Decoder) DecodeHybridLoss(start, end int) []float64 {
+	d.lastStartBand, d.lastEndBand = start, end
+	return d.decodeLoss()
 }
 
 // FrameSize returns the decoder's frame size in samples per channel at 48 kHz.

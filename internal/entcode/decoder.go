@@ -113,6 +113,9 @@ func (dec *Decoder) ShrinkStorage(n int) {
 	dec.buf = dec.buf[:len(dec.buf)-n]
 }
 
+// Storage returns the decoder's buffer length in bytes (ec_dec storage).
+func (dec *Decoder) Storage() int { return len(dec.buf) }
+
 // readByte reads one byte from the buffer, returning 0 past the end.
 func (dec *Decoder) readByte() byte {
 	if dec.pos < len(dec.buf) {

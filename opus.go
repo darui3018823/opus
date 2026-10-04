@@ -4087,15 +4087,19 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		redundancy := false
 		redundancyBytes := 0
 		celtToSilk := false
+		sanityFailed := false
 		if dec.ECTell()+17 <= len(stream)*8 {
 			redundancy = true
 			celtToSilk = dec.DecodeBitLogp(1)
 			redundancyBytes = len(stream) - ((dec.ECTell() + 7) >> 3)
 			mainBytes := len(stream) - redundancyBytes
 			if redundancyBytes < 2 || mainBytes < 0 || mainBytes*8 < dec.ECTell() {
+				// libopus's sanity check sets len = 0, so the frame's final
+				// range becomes 0.
 				redundancy = false
 				redundancyBytes = 0
 				celtToSilk = false
+				sanityFailed = true
 			} else {
 				dec.ShrinkStorage(redundancyBytes)
 			}
@@ -4144,6 +4148,9 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		decodedAny = true
 		allPCM = append(allPCM, pcm...)
 		rangeFinal = dec.GetRng() ^ redundantRange
+		if sanityFailed {
+			rangeFinal = 0
+		}
 	}
 	d.lastFinalRange = rangeFinal
 	if !decodedAny {
@@ -4411,6 +4418,9 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		celtToSilk := false
 		redundancyBytes := 0
 		celtLen := len(stream)
+		// celtLost is libopus's sanity-check failure (len = 0): the CELT
+		// layer is concealed and the frame's final range is 0.
+		celtLost := false
 		if dec.ECTell()+37 <= len(stream)*8 {
 			redundancy = dec.DecodeBitLogp(12)
 		}
@@ -4422,6 +4432,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 				celtLen = len(stream)
 				redundancyBytes = 0
 				redundancy = false
+				celtLost = true
 			} else {
 				dec.ShrinkStorage(redundancyBytes)
 			}
@@ -4458,7 +4469,13 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		} else if d.lastCeltDec != nil && d.lastCeltDec != celtDec {
 			celtDec.CopyStateFrom(d.lastCeltDec)
 		}
-		celtPCM, cerr := celtDec.DecodeHybrid(dec, celtLen, celtStart, celtEnd)
+		var celtPCM []float64
+		var cerr error
+		if celtLost {
+			celtPCM = celtDec.DecodeHybridLoss(celtStart, celtEnd)
+		} else {
+			celtPCM, cerr = celtDec.DecodeHybrid(dec, celtLen, celtStart, celtEnd)
+		}
 		overrun := errors.Is(cerr, celt.ErrRangeOverrun)
 		if overrun {
 			cerr = nil
@@ -4504,6 +4521,9 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		decodedAny = true
 		allPCM = append(allPCM, silkOut...)
 		rangeFinal = dec.GetRng() ^ redundantRange
+		if celtLost {
+			rangeFinal = 0
+		}
 		if overrun {
 			// The frame completes, then libopus fails the whole call.
 			d.lastFinalRange = rangeFinal
@@ -5015,8 +5035,8 @@ func (d *Decoder) decodeCELTPLCFrame(frameSize int) ([]float64, error) {
 	switch bandwidth {
 	case framing.BandwidthNarrowband:
 		bw = 0
-	case framing.BandwidthWideband:
-		bw = 1
+	case framing.BandwidthMediumband, framing.BandwidthWideband:
+		bw = 1 // libopus uses CELT end band 17 for both
 	case framing.BandwidthSuperwideband:
 		bw = 2
 	case framing.BandwidthFullband:

@@ -2070,11 +2070,12 @@ func (d *Decoder) decodeSigns(dec *entcode.Decoder, pulses []int16, frameLen, si
 	}
 
 	for i := 0; i < iter; i++ {
-		p := sumPulses[i] & 0x1F
-		if p == 0 {
+		// silk_decode_signs tests the whole sum (LSB shifts included), so a
+		// block whose shell sum is 0 but has LSB pulses still reads signs.
+		if sumPulses[i] == 0 {
 			continue
 		}
-		col := p
+		col := sumPulses[i] & 0x1F
 		if col > 6 {
 			col = 6
 		}

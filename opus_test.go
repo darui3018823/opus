@@ -132,9 +132,17 @@ func TestCommonEncoderDecoderGetters(t *testing.T) {
 	if enc.Lookahead() != 312 {
 		t.Fatalf("lookahead = %d, want 312 (Fs/400 overlap + Fs/250 delay compensation)", enc.Lookahead())
 	}
-	if enc.VBRConstraint() {
-		t.Fatal("legacy CBR encoder reports constrained VBR")
+	// OPUS_GET_VBR_CONSTRAINT reports the setting (1 by default) even in CBR.
+	if !enc.VBRConstraint() {
+		t.Fatal("CBR encoder does not report the default VBR constraint")
 	}
+	enc.SetVBRConstraint(false)
+	enc.SetVBR(true)
+	if enc.VBRConstraint() || !enc.VBR() {
+		t.Fatal("VBR constraint set while in CBR was not kept")
+	}
+	enc.SetVBRConstraint(true)
+	enc.SetVBR(false)
 	enc.SetVBR(true)
 	if !enc.VBRConstraint() {
 		t.Fatal("constrained VBR getter did not track SetVBR(true)")

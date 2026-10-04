@@ -111,8 +111,11 @@ type Encoder struct {
 	// encoder only emits LBRR when this is on and packetLossPerc > 0.
 	useInbandFEC bool
 	// fecConfig is st->fec_config (OPUS_SET_INBAND_FEC: 0, 1 or 2).
-	fecConfig      int
-	packetLossPerc int
+	fecConfig int
+	// vbrUnconstrained is !st->vbr_constraint: kept independently of the
+	// VBR setting, as OPUS_SET_VBR and OPUS_SET_VBR_CONSTRAINT are.
+	vbrUnconstrained bool
+	packetLossPerc   int
 	// lbrrCoded is the previous packet's LBRR_coded decision (decide_fec
 	// hysteresis).
 	lbrrCoded bool
@@ -2323,8 +2326,9 @@ func (e *Encoder) Complexity() int { return e.complexity }
 // VBR reports whether variable bitrate is enabled.
 func (e *Encoder) VBR() bool { return e.rateMode != celt.RateModeCBR }
 
-// VBRConstraint reports whether constrained VBR is enabled.
-func (e *Encoder) VBRConstraint() bool { return e.rateMode == celt.RateModeCVBR }
+// VBRConstraint reports the VBR constraint setting
+// (OPUS_GET_VBR_CONSTRAINT), whether or not VBR is on.
+func (e *Encoder) VBRConstraint() bool { return !e.vbrUnconstrained }
 
 // SampleRate returns the encoder input sample rate in Hz.
 func (e *Encoder) SampleRate() int { return e.sampleRate }
@@ -2593,13 +2597,15 @@ func (e *Encoder) SetComplexity(complexity int) error {
 	return nil
 }
 
-// SetVBR enables or disables variable bitrate mode.
-// When enabled, this sets constrained VBR (CVBR), which is the libopus default:
-// the encoder produces variable-size packets but keeps the average bitrate
-// close to the target. Use SetVBRConstraint(false) for unconstrained VBR.
+// SetVBR enables or disables variable bitrate mode (OPUS_SET_VBR). With
+// VBR on, the VBR constraint setting (constrained by default, the libopus
+// default) selects constrained or unconstrained VBR.
 func (e *Encoder) SetVBR(vbr bool) {
 	if vbr {
 		e.rateMode = celt.RateModeCVBR
+		if e.vbrUnconstrained {
+			e.rateMode = celt.RateModeVBR
+		}
 	} else {
 		e.rateMode = celt.RateModeCBR
 	}
@@ -2607,11 +2613,14 @@ func (e *Encoder) SetVBR(vbr bool) {
 	e.syncSILKRateMode()
 }
 
-// SetVBRConstraint controls the VBR constraint. When true (default), CVBR is
-// used; when false, unconstrained VBR is used. Has no effect if VBR is disabled.
+// SetVBRConstraint sets the VBR constraint (OPUS_SET_VBR_CONSTRAINT): true
+// (the default) for constrained VBR, false for unconstrained VBR. Like
+// libopus the setting is kept while VBR is off and applies when it is
+// turned on.
 func (e *Encoder) SetVBRConstraint(constrained bool) {
+	e.vbrUnconstrained = !constrained
 	if e.rateMode == celt.RateModeCBR {
-		return // VBR not enabled, nothing to do
+		return
 	}
 	if constrained {
 		e.rateMode = celt.RateModeCVBR

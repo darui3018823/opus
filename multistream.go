@@ -246,6 +246,20 @@ func (e *MultistreamEncoder) SetInbandFEC(enabled bool) {
 // InbandFEC returns the in-band FEC setting of the first elementary stream.
 func (e *MultistreamEncoder) InbandFEC() bool { return e.encoders[0].InbandFEC() }
 
+// SetInbandFECMode applies Encoder.SetInbandFECMode to every elementary
+// stream.
+func (e *MultistreamEncoder) SetInbandFECMode(mode int) error {
+	for _, enc := range e.encoders {
+		if err := enc.SetInbandFECMode(mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// InbandFECMode returns the in-band FEC mode of the first elementary stream.
+func (e *MultistreamEncoder) InbandFECMode() int { return e.encoders[0].InbandFECMode() }
+
 // SetPacketLossPerc applies the expected packet-loss percentage to every
 // elementary stream. Values retain the single-stream clamping semantics.
 func (e *MultistreamEncoder) SetPacketLossPerc(perc int) {

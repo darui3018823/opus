@@ -241,7 +241,7 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 			mode = framing.ModeSILKOnly
 		}
 		// When FEC is enabled and there's enough packet loss, use SILK.
-		if e.useInbandFEC && e.packetLossPerc > (128-voiceEst)>>4 {
+		if e.useInbandFEC && e.packetLossPerc > (128-voiceEst)>>4 && (e.fecConfig != InbandFECNoModeSwitch || voiceEst > 25) {
 			mode = framing.ModeSILKOnly
 		}
 		// When encoding voice and DTX is enabled but the generalized DTX cannot

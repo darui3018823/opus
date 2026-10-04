@@ -109,7 +109,9 @@ type Encoder struct {
 
 	// Inband FEC (SILK LBRR). useInbandFEC requests redundant coding; the SILK
 	// encoder only emits LBRR when this is on and packetLossPerc > 0.
-	useInbandFEC   bool
+	useInbandFEC bool
+	// fecConfig is st->fec_config (OPUS_SET_INBAND_FEC: 0, 1 or 2).
+	fecConfig      int
 	packetLossPerc int
 	// lbrrCoded is the previous packet's LBRR_coded decision (decide_fec
 	// hysteresis).
@@ -158,14 +160,14 @@ type Encoder struct {
 	// the input the tonality analysis reads instead of the packet's (the
 	// projection encoder's unmixed channels), and libopusForcedMode
 	// st->user_forced_mode (-1 for automatic) under the libopus policy.
-	outDataBytes      int
+	outDataBytes int
 	// maxPacketSize is SetMaxPacketSize: the caller's output buffer for a
 	// single-stream packet (0 = defaultOutDataBytes).
 	maxPacketSize int
 	// reportedBitrate is EffectiveBitrate: the setting bounded by 1275
 	// bytes per coded frame. Under the libopus policy the packet bitrate
 	// (e.bitrate) is st->bitrate_bps instead, bounded by max_data_bytes.
-	reportedBitrate int
+	reportedBitrate   int
 	analysisInput     []float64
 	libopusForcedMode int
 	// lfe is st->lfe (OPUS_SET_LFE), set by the surround encoder on its
@@ -2699,12 +2701,43 @@ func (e *Encoder) DTX() bool { return e.dtx }
 // FEC applies to SILK-only and hybrid speech paths; it is off by default and has
 // no effect on CELT-only packets.
 func (e *Encoder) SetInbandFEC(enabled bool) {
-	e.useInbandFEC = enabled
-	e.syncSILKFEC()
+	if enabled {
+		_ = e.SetInbandFECMode(InbandFECOn)
+	} else {
+		_ = e.SetInbandFECMode(InbandFECOff)
+	}
 }
 
 // InbandFEC reports whether inband FEC is enabled.
 func (e *Encoder) InbandFEC() bool { return e.useInbandFEC }
+
+// In-band FEC modes of SetInbandFECMode (the OPUS_SET_INBAND_FEC values).
+const (
+	// InbandFECOff disables LBRR.
+	InbandFECOff = 0
+	// InbandFECOn enables LBRR and may move the encoder to SILK so that
+	// it can carry it.
+	InbandFECOn = 1
+	// InbandFECNoModeSwitch enables LBRR without moving music (a voice
+	// estimate of at most 25) to SILK for it.
+	InbandFECNoModeSwitch = 2
+)
+
+// SetInbandFECMode is OPUS_SET_INBAND_FEC with its three values; mode 2
+// differs from 1 only in the libopus mode decision. Other values return
+// ErrBadArg.
+func (e *Encoder) SetInbandFECMode(mode int) error {
+	if mode < InbandFECOff || mode > InbandFECNoModeSwitch {
+		return fmt.Errorf("%w: in-band FEC mode %d", ErrBadArg, mode)
+	}
+	e.fecConfig = mode
+	e.useInbandFEC = mode != InbandFECOff
+	e.syncSILKFEC()
+	return nil
+}
+
+// InbandFECMode returns the SetInbandFECMode value (OPUS_GET_INBAND_FEC).
+func (e *Encoder) InbandFECMode() int { return e.fecConfig }
 
 // SetPacketLossPerc sets the expected packet-loss percentage used to tune FEC
 // redundancy (higher loss → smaller, more frequent LBRR frames). Values are

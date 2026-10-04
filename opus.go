@@ -679,6 +679,9 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 			return pkt, nil
 		}
 		e.silkUseDTX = e.dtx && !(analysisInfo.Valid || isSilence)
+		if e.silkEncoder != nil {
+			e.silkEncoder.SetReducedDependency(e.predictionDisabled)
+		}
 		e.frameIsSilence, e.frameAnalysis, e.packetLSBDepth = isSilence, analysisInfo, lsbDepth
 		defer func() { e.packetEquivRate = 0 }()
 		e.decideStreamChannelsLibopus(frameSize, maxDataBytes, analysisInfo)
@@ -924,8 +927,13 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 		// The deferral (to_celt) and the redundancy were decided with the mode.
 		redundancy, celtToSilk, redundancyBytes = decision.redundancy, decision.celtToSilk, decision.redundancyBytes
 		if hybrid || decision.mode == framing.ModeCELTOnly {
-			// CELT_SET_PREDICTION(2) at the start of every non-SILK packet.
-			e.celtEncoder.SetPrediction(2)
+			// CELT_SET_PREDICTION(2) at the start of every non-SILK packet,
+			// 0 with reduced dependency (OPUS_SET_PREDICTION_DISABLED).
+			pred := 2
+			if e.predictionDisabled {
+				pred = 0
+			}
+			e.celtEncoder.SetPrediction(pred)
 		}
 	} else if !hybrid && e.prevMode == framing.ModeHybrid && e.canDeferToHybrid(nFrames) {
 		bw = e.deferredHybridBandwidth(raw)
@@ -2400,8 +2408,11 @@ func (e *Encoder) SetLSBDepth(depth int) error {
 // LSBDepth returns the configured input precision hint.
 func (e *Encoder) LSBDepth() int { return e.lsbDepth }
 
-// SetPredictionDisabled disables predictive SILK/hybrid mode routing. CELT
-// remains available for all supported frame durations.
+// SetPredictionDisabled is OPUS_SET_PREDICTION_DISABLED. Under
+// ModePolicyLibopus it reduces inter-packet dependency as libopus does: SILK
+// codes every packet as the first frame after a reset and CELT runs without
+// prediction (no prefilter, intra energy). Under ModePolicyLegacy it
+// instead keeps the encoder away from the SILK and hybrid modes.
 func (e *Encoder) SetPredictionDisabled(disabled bool) {
 	e.predictionDisabled = disabled
 }

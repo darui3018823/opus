@@ -103,6 +103,10 @@ type Encoder struct {
 	shapeTiltSmooth float64
 	noiseShapeBuf   []float64
 	side            *Encoder // side-channel encoder for stereo packets
+	// reducedDependency is encControl->reducedDependency: every packet
+	// is coded as the first frame after a reset (no inter-packet
+	// prediction).
+	reducedDependency bool
 	stereoState     stereoEncState
 	prevOnlyMiddle  bool // previous stereo frame omitted the side channel
 	// streamChannels is nChannelsInternal for a stereo (API) encoder: 1 codes
@@ -502,6 +506,13 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 	expected := e.frameSize * streamChannels * nFrames
 	if len(pcm) != expected {
 		return fmt.Errorf("invalid PCM length: got %d, expected %d", len(pcm), expected)
+	}
+	if e.reducedDependency {
+		// silk_Encode: first_frame_after_reset = 1 for every API channel.
+		e.firstFrameAfterReset = true
+		if e.side != nil {
+			e.side.firstFrameAfterReset = true
+		}
 	}
 	e.beginDTXPacket()
 	if streamChannels == 2 {
@@ -2732,6 +2743,11 @@ func (e *Encoder) SetTrellisNSQ(enabled bool) {
 func (e *Encoder) LastStreamSNRVBR() bool {
 	return e.lastSNRVBRStream
 }
+
+// SetReducedDependency is encControl->reducedDependency
+// (OPUS_SET_PREDICTION_DISABLED): each packet is coded as the first frame
+// after a reset.
+func (e *Encoder) SetReducedDependency(on bool) { e.reducedDependency = on }
 
 // SetHybridMode marks subsequent frames as the SILK low band of a hybrid packet
 // (see hybridMode). The hybrid encoder sets it before encoding and clears it

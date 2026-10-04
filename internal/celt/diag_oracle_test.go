@@ -92,7 +92,7 @@ func TestOracleTrace(t *testing.T) {
 	snap("spread")
 
 	// dynalloc
-	offsets := decodeDynalloc(dec, numBands, 0, numBands, lm, ch, totalBits)
+	offsets, _, _ := decodeDynalloc(dec, numBands, 0, numBands, lm, ch, totalBits)
 	snap("dynalloc")
 
 	// alloc_trim

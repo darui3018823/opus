@@ -114,7 +114,7 @@ func TestOracleTraceStereo(t *testing.T) {
 	}
 	snap("spread")
 
-	offsets := decodeDynalloc(dec, numBands, 0, numBands, lm, ch, totalBits)
+	offsets, _, _ := decodeDynalloc(dec, numBands, 0, numBands, lm, ch, totalBits)
 	snap("dynalloc")
 	fmt.Printf("   offsets: %v\n", offsets)
 

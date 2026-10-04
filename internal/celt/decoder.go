@@ -273,12 +273,13 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	htr(dec, "spread")
 
 	// Per-band dynamic allocation boosts (BEFORE alloc_trim, libopus order).
-	offsets := decodeDynalloc(dec, numBands, start, end, lm, ch, totalBits)
+	offsets, tellQ3, boostedTotalQ3 := decodeDynalloc(dec, numBands, start, end, lm, ch, totalBits)
 	htr(dec, "dynalloc")
 
-	// Allocation trim (7-bit ICDF, default 5 = neutral).
+	// Allocation trim (7-bit ICDF, default 5 = neutral). Like libopus, the
+	// gate uses the fractional tell and the budget left after the boosts.
 	allocTrim := 5
-	if dec.ECTell()+6 <= totalBits {
+	if tellQ3+(6<<3) <= boostedTotalQ3 {
 		allocTrim = dec.DecodeIcdf(TrimICDF[:], 7)
 	}
 	htr(dec, "alloc_trim")
@@ -948,7 +949,10 @@ func (d *Decoder) Reset() {
 // decodeDynalloc decodes per-band dynamic allocation boosts between alloc_trim and
 // compute_allocation. Matches libopus celt_decode_with_ec dynalloc loop.
 // Returns Q3 boost per band. Even when all boosts are 0, the range coder state advances.
-func decodeDynalloc(dec *entcode.Decoder, numBands, start, end, lm, ch, totalBits int) []int {
+// decodeDynalloc returns the band boosts together with libopus's tell
+// (ec_tell_frac as last sampled) and total_bits (Q3, less every boost),
+// which gate the following alloc_trim symbol.
+func decodeDynalloc(dec *entcode.Decoder, numBands, start, end, lm, ch, totalBits int) ([]int, int, int) {
 	offsets := make([]int, numBands)
 	dynallocLogp := 6
 	// libopus: total_bits<<=BITRES (Q3), decreases as boosts are applied;
@@ -997,7 +1001,7 @@ func decodeDynalloc(dec *entcode.Decoder, numBands, start, end, lm, ch, totalBit
 			}
 		}
 	}
-	return offsets
+	return offsets, tell, totalQ3
 }
 
 // tfSelectTable[lm][8] matches libopus tf_select_table in celt/bands.c.

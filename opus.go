@@ -542,6 +542,8 @@ func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i])
 	}
+	// opus_encode_float passes an LSB depth of 24.
+	e.inputLSBDepth = 24
 	return e.encodeFloat(floatPCM, selectedFrameSize)
 }
 
@@ -662,12 +664,15 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 			e.packetStereoWidth = e.stereoWidth.compute(raw, frameSize, e.sampleRate)
 		}
 		if pkt, ok := e.libopusPLCFrame(frameSize, maxDataBytes); ok {
+			// opus_encode_native clears rangeFinal on entry and a PLC frame
+			// codes nothing.
+			e.lastFinalRange = 0
 			return pkt, nil
 		}
 		e.silkUseDTX = e.dtx && !(analysisInfo.Valid || isSilence)
 		e.frameIsSilence, e.frameAnalysis, e.packetLSBDepth = isSilence, analysisInfo, lsbDepth
 		defer func() { e.packetEquivRate = 0 }()
-		e.decideStreamChannels(frameSize, framing.ModeSILKOnly)
+		e.decideStreamChannelsLibopus(frameSize, maxDataBytes, analysisInfo)
 		decision = e.decideLibopusMode(raw, frameSize, maxDataBytes, analysisInfo)
 		if decision.mode == framing.ModeCELTOnly && e.toMono {
 			e.toMono = false

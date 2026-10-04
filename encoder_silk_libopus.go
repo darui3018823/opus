@@ -188,7 +188,8 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 		redBytes = 0
 		e.silkBwSwitch = false
 	}
-	ret := (enc.ECTell() + 7) >> 3
+	tell := enc.ECTell()
+	ret := (tell + 7) >> 3
 	enc.Shrink(ret)
 	enc.Flush()
 	stream := enc.Bytes()
@@ -218,6 +219,20 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 		for len(stream) > 2 && stream[len(stream)-1] == 0 {
 			stream = stream[:len(stream)-1]
 		}
+	}
+	if tell > (maxDataBytes-1)*8 {
+		// SILK busted its target: data[1] = 0 tells the decoder to run the
+		// PLC (ret = 1 plus the redundancy bytes that follow in the buffer),
+		// and the final range is 0.
+		if maxDataBytes < 2 {
+			return nil, fmt.Errorf("%w: %d bytes for a SILK frame", ErrBufferTooSmall, maxDataBytes)
+		}
+		plc := make([]byte, 1+redBytes)
+		if len(stream) > 1 {
+			copy(plc[1:], stream[1:])
+		}
+		stream = plc
+		rangeFinal = 0
 	}
 	e.lastFinalRange = rangeFinal
 	packet := append([]byte{toc}, stream...)

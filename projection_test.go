@@ -211,3 +211,30 @@ func projectionFixture(frameSize, channels, rate int) []float64 {
 	}
 	return pcm
 }
+
+func TestProjectionEncoderForwardsControls(t *testing.T) {
+	enc, err := NewProjectionEncoder(48000, 4, MappingFamilyProjection, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc.SetDTX(true)
+	enc.SetPacketLossPerc(12)
+	if err := enc.SetInbandFECMode(InbandFECNoModeSwitch); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetMaxBandwidth(BandwidthWideband); err != nil {
+		t.Fatal(err)
+	}
+	for s := 0; s < enc.Streams(); s++ {
+		st, err := enc.StreamEncoder(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !st.DTX() || st.PacketLossPerc() != 12 || st.InbandFECMode() != InbandFECNoModeSwitch || st.MaxBandwidth() != BandwidthWideband {
+			t.Fatalf("stream %d did not receive the controls", s)
+		}
+	}
+	if !enc.DTX() || enc.PacketLossPerc() != 12 || enc.InbandFECMode() != InbandFECNoModeSwitch {
+		t.Fatal("projection getters do not report the forwarded controls")
+	}
+}

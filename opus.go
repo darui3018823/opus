@@ -3898,9 +3898,13 @@ func (d *Decoder) applyGain(pcm []float64) {
 	if d.gainQ8 == 0 {
 		return
 	}
-	scale := math.Pow(10, float64(d.gainQ8)/(20*256))
+	// opus_decode_frame (float build):
+	// gain = celt_exp2(6.48814081e-4f * decode_gain), with celt_exp2(x) =
+	// (float)exp(0.6931471805599453094*x), applied in float32.
+	g := float32(6.48814081e-4) * float32(d.gainQ8)
+	scale := float32(math.Exp(0.6931471805599453094 * float64(g)))
 	for i := range pcm {
-		pcm[i] *= scale
+		pcm[i] = float64(float32(pcm[i]) * scale)
 	}
 }
 

@@ -655,7 +655,12 @@ func (d *MultistreamDecoder) DecodeFloat32(data []byte) ([]float32, error) {
 }
 
 // Decode decodes a multistream packet to interleaved int16 PCM.
+// An empty packet conceals len(pcm)/Channels() samples, like DecodePLC.
 func (d *MultistreamDecoder) Decode(data []byte, pcm []int16) (int, error) {
+	if len(data) == 0 {
+		// Like opus_decode with no packet: conceal a buffer's worth.
+		return d.DecodePLC(pcm, len(pcm)/d.channels)
+	}
 	duration, err := multistreamPacketDuration(data, d.streams, d.sampleRate)
 	if err != nil {
 		return 0, err
@@ -857,7 +862,12 @@ func (d *MultistreamDecoder) mapStreamFloat(out, streamPCM []float64, stream, du
 }
 
 // Decode24 decodes a multistream packet to signed 24-bit PCM in int32 values.
+// An empty packet conceals len(pcm)/Channels() samples, like DecodePLC.
 func (d *MultistreamDecoder) Decode24(data []byte, pcm []int32) (int, error) {
+	if len(data) == 0 {
+		// Like opus_decode24 with no packet: conceal a buffer's worth.
+		return d.DecodePLC24(pcm, len(pcm)/d.channels)
+	}
 	duration, err := multistreamPacketDuration(data, d.streams, d.sampleRate)
 	if err != nil {
 		return 0, err

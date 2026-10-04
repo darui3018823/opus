@@ -273,3 +273,38 @@ func primedLossDecoder(t *testing.T, rate int, packets [][]byte) *Decoder {
 	}
 	return dec
 }
+
+func TestDecodeEmptyPacketConceals(t *testing.T) {
+	const (
+		rate      = 16000
+		frameSize = 320
+	)
+	packets := makeFECPackets(t, rate, frameSize, 4)
+	viaDecode := primedLossDecoder(t, rate, packets)
+	viaPLC := primedLossDecoder(t, rate, packets)
+	for _, size := range []int{frameSize, 2 * frameSize, frameSize / 4} {
+		got := make([]int16, size)
+		want := make([]int16, size)
+		n, err := viaDecode.Decode(nil, got)
+		if err != nil || n != size {
+			t.Fatalf("size %d: Decode(nil)=(%d,%v)", size, n, err)
+		}
+		if _, err := viaPLC.DecodePLC(want, size); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("size %d: empty-packet decode differs from DecodePLC", size)
+		}
+	}
+	got24 := make([]int32, frameSize)
+	want24 := make([]int32, frameSize)
+	if n, err := viaDecode.Decode24([]byte{}, got24); err != nil || n != frameSize {
+		t.Fatalf("Decode24(empty)=(%d,%v)", n, err)
+	}
+	if _, err := viaPLC.DecodePLC24(want24, frameSize); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got24, want24) {
+		t.Fatal("empty-packet Decode24 differs from DecodePLC24")
+	}
+}

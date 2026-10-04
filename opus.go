@@ -3197,7 +3197,12 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 // Decode decodes an Opus packet into interleaved int16 PCM and returns the
 // number of samples per channel. pcm must have room for the packet duration
 // times Channels() values; a short buffer returns ErrBufferTooSmall.
+// An empty packet conceals len(pcm)/Channels() samples, like DecodePLC.
 func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
+	if len(data) == 0 {
+		// Like opus_decode with no packet: conceal a buffer's worth.
+		return d.DecodePLC(pcm, len(pcm)/d.channels)
+	}
 	required, err := d.packetOutputSamples(data)
 	if err != nil {
 		return 0, err
@@ -3223,7 +3228,12 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 // not clamped, so positive decoder gain can exceed the 24-bit range). pcm must have room
 // for the packet duration times Channels() values; the return value is samples
 // per channel, and a short buffer returns ErrBufferTooSmall.
+// An empty packet conceals len(pcm)/Channels() samples, like DecodePLC.
 func (d *Decoder) Decode24(data []byte, pcm []int32) (int, error) {
+	if len(data) == 0 {
+		// Like opus_decode24 with no packet: conceal a buffer's worth.
+		return d.DecodePLC24(pcm, len(pcm)/d.channels)
+	}
 	required, err := d.packetOutputSamples(data)
 	if err != nil {
 		return 0, err

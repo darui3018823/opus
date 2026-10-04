@@ -429,7 +429,12 @@ func (d *ProjectionDecoder) DecodeFloat32(data []byte) ([]float32, error) {
 }
 
 // Decode decodes and demixes a packet into pcm and returns samples per channel.
+// An empty packet conceals len(pcm)/Channels() samples, like DecodePLC.
 func (d *ProjectionDecoder) Decode(data []byte, pcm []int16) (int, error) {
+	if len(data) == 0 {
+		// Like opus_decode with no packet: conceal a buffer's worth.
+		return d.DecodePLC(pcm, len(pcm)/d.channels)
+	}
 	duration, err := multistreamPacketDuration(data, d.streams, d.sampleRate)
 	if err != nil {
 		return 0, err
@@ -446,7 +451,12 @@ func (d *ProjectionDecoder) Decode(data []byte, pcm []int16) (int, error) {
 }
 
 // Decode24 decodes and demixes a packet to signed 24-bit PCM stored in int32.
+// An empty packet conceals len(pcm)/Channels() samples, like DecodePLC.
 func (d *ProjectionDecoder) Decode24(data []byte, pcm []int32) (int, error) {
+	if len(data) == 0 {
+		// Like opus_decode24 with no packet: conceal a buffer's worth.
+		return d.DecodePLC24(pcm, len(pcm)/d.channels)
+	}
 	duration, err := multistreamPacketDuration(data, d.streams, d.sampleRate)
 	if err != nil {
 		return 0, err

@@ -3015,6 +3015,8 @@ type Decoder struct {
 	// (Fs/400 before any and after a reset). Each concealment call is cut to
 	// it before the 20 / 10 / 5 ms rounding.
 	plcFrameSize int
+	// softclipMem is the soft-clip memory of the int16 decode (softclip_mem).
+	softclipMem [2]float32
 
 	// SILK decoders indexed by [rateIdx 0-2][chIdx 0=mono,1=stereo].
 	// rateIdx: 0=8kHz, 1=12kHz, 2=16kHz
@@ -3204,7 +3206,7 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
 	}
 
-	floatPCM, err := d.DecodeFloat(data)
+	floatPCM, err := d.decodeSoftClipped(data)
 	if err != nil {
 		return 0, err
 	}
@@ -3217,7 +3219,8 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 }
 
 // Decode24 decodes an Opus packet to interleaved signed 24-bit PCM stored in
-// int32 values. Output is saturated to [-8388608, 8388607]. pcm must have room
+// int32 values, converted like libopus RES2INT24 (rounded to nearest even and
+// not clamped, so positive decoder gain can exceed the 24-bit range). pcm must have room
 // for the packet duration times Channels() values; the return value is samples
 // per channel, and a short buffer returns ErrBufferTooSmall.
 func (d *Decoder) Decode24(data []byte, pcm []int32) (int, error) {
@@ -3234,13 +3237,7 @@ func (d *Decoder) Decode24(data []byte, pcm []int32) (int, error) {
 		return 0, err
 	}
 	for i, sample := range floatPCM {
-		scaled := sample * 8388608.0
-		if scaled > 8388607.0 {
-			scaled = 8388607.0
-		} else if scaled < -8388608.0 {
-			scaled = -8388608.0
-		}
-		pcm[i] = int32(math.Round(scaled))
+		pcm[i] = res2Int24(sample)
 	}
 	return len(floatPCM) / d.channels, nil
 }
@@ -3694,6 +3691,50 @@ func is10msConfig(config int) bool {
 // full-scale input. Positive decoder gain can produce values outside that
 // nominal range.
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
+	pcm, err := d.decodePacketFloat(data)
+	if err != nil {
+		return nil, err
+	}
+	return d.finishOutput(pcm, false), nil
+}
+
+// decodeSoftClipped decodes a packet for the int16 API.
+func (d *Decoder) decodeSoftClipped(data []byte) ([]float64, error) {
+	pcm, err := d.decodePacketFloat(data)
+	if err != nil {
+		return nil, err
+	}
+	return d.finishOutput(pcm, true), nil
+}
+
+// finishOutput ends a successful opus_decode_native call. The int16 API of a
+// float build soft-clips the output (opus_pcm_soft_clip) with the decoder's
+// clipping memory; the float and 24-bit APIs do not, and restart the memory.
+func (d *Decoder) finishOutput(pcm []float64, softClip bool) []float64 {
+	if !softClip {
+		d.softclipMem = [2]float32{}
+		return pcm
+	}
+	f := make([]float32, len(pcm))
+	for i, v := range pcm {
+		f[i] = float32(v)
+	}
+	_ = SoftClipFloat32(f, d.channels, d.softclipMem[:d.channels])
+	for i, v := range f {
+		pcm[i] = float64(v)
+	}
+	return pcm
+}
+
+// res2Int24 is libopus RES2INT24 for a float build: the sample scaled by
+// 2^23 in float32 and rounded to nearest even (lrintf), without a clamp.
+func res2Int24(v float64) int32 {
+	return int32(math.RoundToEven(float64(float32(v) * 8388608)))
+}
+
+// decodePacketFloat decodes one packet (opus_decode_native without the
+// output conversion).
+func (d *Decoder) decodePacketFloat(data []byte) ([]float64, error) {
 	info, err := inspectPacket(data, d.sampleRate)
 	if err != nil {
 		return nil, err
@@ -4778,6 +4819,9 @@ func (d *Decoder) DecodePLC24(pcm []int32, frameSize int) (int, error) {
 
 // DecodePLCFloat performs packet-loss concealment and returns interleaved
 // float64 PCM. frameSize follows DecodePLC semantics.
+//
+// Like opus_decode_native, concealment is never soft-clipped and leaves the
+// soft-clip memory of the int16 API untouched.
 func (d *Decoder) DecodePLCFloat(frameSize int) ([]float64, error) {
 	if err := d.validatePLCState(frameSize); err != nil {
 		return nil, err
@@ -4981,13 +5025,7 @@ func isValidLossFrameSize(frameSize, sampleRate int) bool {
 
 func floatToInt24(dst []int32, src []float64) {
 	for i, sample := range src {
-		scaled := sample * 8388608.0
-		if scaled > 8388607.0 {
-			scaled = 8388607.0
-		} else if scaled < -8388608.0 {
-			scaled = -8388608.0
-		}
-		dst[i] = int32(math.Round(scaled))
+		dst[i] = res2Int24(sample)
 	}
 }
 
@@ -5081,6 +5119,8 @@ func (d *Decoder) DecodeFEC24(data []byte, pcm []int32, frameSize int) (int, err
 
 // DecodeFECFloat decodes recovery data for exactly frameSize lost samples per
 // channel and returns interleaved float64 PCM.
+// Like opus_decode_native, FEC output is never soft-clipped and leaves the
+// soft-clip memory of the int16 API untouched.
 func (d *Decoder) DecodeFECFloat(data []byte, frameSize int) ([]float64, error) {
 	if err := d.validateFECState(data, frameSize); err != nil {
 		return nil, err
@@ -5259,6 +5299,7 @@ func (d *Decoder) cloneState() (*Decoder, error) {
 	clone.lastPacketChannels = d.lastPacketChannels
 	clone.lossConfig = d.lossConfig
 	clone.plcFrameSize = d.plcFrameSize
+	clone.softclipMem = d.softclipMem
 	clone.lossChannels = d.lossChannels
 	clone.lastFinalRange = d.lastFinalRange
 	clone.lastPitch = d.lastPitch
@@ -5376,6 +5417,7 @@ func (d *Decoder) Reset() error {
 	d.lastPacketChannels = 0
 	d.lossConfig = -1
 	d.plcFrameSize = d.sampleRate / 400
+	d.softclipMem = [2]float32{}
 	d.lossChannels = 0
 	d.lastFinalRange = 0
 	d.lastPitch = 0

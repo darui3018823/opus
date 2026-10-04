@@ -2,7 +2,6 @@ package opus
 
 import (
 	"fmt"
-	"math"
 )
 
 // MultistreamEncoder encodes several elementary Opus streams into one RFC 7845
@@ -604,13 +603,24 @@ func (d *MultistreamDecoder) GetLastPacketDuration() int {
 
 // DecodeFloat decodes a multistream packet to interleaved float64 PCM.
 func (d *MultistreamDecoder) DecodeFloat(data []byte) ([]float64, error) {
+	return d.decodeMapped(data, false)
+}
+
+// decodeMapped decodes every elementary stream and maps it to the output
+// channels. softClip is opus_multistream_decode's OPTIONAL_CLIP: the int16
+// API soft-clips each stream with its own memory before the mapping.
+func (d *MultistreamDecoder) decodeMapped(data []byte, softClip bool) ([]float64, error) {
 	packets, duration, err := splitMultistreamPackets(data, d.streams, d.sampleRate)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]float64, duration*d.channels)
 	for stream, packet := range packets {
-		streamPCM, err := d.decoders[stream].DecodeFloat(packet)
+		decode := d.decoders[stream].DecodeFloat
+		if softClip {
+			decode = d.decoders[stream].decodeSoftClipped
+		}
+		streamPCM, err := decode(packet)
 		if err != nil {
 			return nil, fmt.Errorf("stream %d: %w", stream, err)
 		}
@@ -654,7 +664,7 @@ func (d *MultistreamDecoder) Decode(data []byte, pcm []int16) (int, error) {
 	if len(pcm) < required {
 		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
 	}
-	floatPCM, err := d.DecodeFloat(data)
+	floatPCM, err := d.decodeMapped(data, true)
 	if err != nil {
 		return 0, err
 	}
@@ -861,13 +871,7 @@ func (d *MultistreamDecoder) Decode24(data []byte, pcm []int32) (int, error) {
 		return 0, err
 	}
 	for i, sample := range floatPCM {
-		scaled := sample * 8388608
-		if scaled > 8388607 {
-			scaled = 8388607
-		} else if scaled < -8388608 {
-			scaled = -8388608
-		}
-		pcm[i] = int32(math.Round(scaled))
+		pcm[i] = res2Int24(sample)
 	}
 	return duration, nil
 }

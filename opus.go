@@ -167,6 +167,10 @@ type Encoder struct {
 	// maxPacketSize is SetMaxPacketSize: the caller's output buffer for a
 	// single-stream packet (0 = defaultOutDataBytes).
 	maxPacketSize int
+	// callerPCM / callerFrameSize are the caller's whole input when an
+	// expert frame duration codes only a prefix (analysis_pcm).
+	callerPCM       []float64
+	callerFrameSize int
 	// reportedBitrate is EffectiveBitrate: the setting bounded by 1275
 	// bytes per coded frame. Under the libopus policy the packet bitrate
 	// (e.bitrate) is st->bitrate_bps instead, bounded by max_data_bytes.
@@ -485,14 +489,13 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	}
 
 	// Convert int16 to float64
-	selectedSize := selectedFrameSize * e.channels
-	floatPCM := make([]float64, selectedSize)
-	for i := 0; i < selectedSize; i++ {
+	floatPCM := make([]float64, expectedSize)
+	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768.0
 	}
 
 	e.inputLSBDepth = 16
-	return e.encodeFloat(floatPCM, selectedFrameSize)
+	return e.encodeCallerFrame(floatPCM, frameSize, selectedFrameSize)
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
@@ -508,13 +511,12 @@ func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
 	if len(pcm) < expectedSize {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
-	selectedSize := selectedFrameSize * e.channels
-	floatPCM := make([]float64, selectedSize)
+	floatPCM := make([]float64, expectedSize)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608.0
 	}
 	e.inputLSBDepth = 24
-	return e.encodeFloat(floatPCM, selectedFrameSize)
+	return e.encodeCallerFrame(floatPCM, frameSize, selectedFrameSize)
 }
 
 // EncodeFloat encodes floating-point PCM samples
@@ -532,9 +534,8 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
 
-	selectedSize := selectedFrameSize * e.channels
 	e.inputLSBDepth = 24
-	return e.encodeFloat(pcm[:selectedSize], selectedFrameSize)
+	return e.encodeCallerFrame(pcm[:expectedSize], frameSize, selectedFrameSize)
 }
 
 // EncodeFloat32 encodes interleaved float32 PCM samples in range [-1.0, 1.0].
@@ -549,14 +550,25 @@ func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
 	if len(pcm) < expectedSize {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
-	selectedSize := selectedFrameSize * e.channels
-	floatPCM := make([]float64, selectedSize)
+	floatPCM := make([]float64, expectedSize)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i])
 	}
 	// opus_encode_float passes an LSB depth of 24.
 	e.inputLSBDepth = 24
-	return e.encodeFloat(floatPCM, selectedFrameSize)
+	return e.encodeCallerFrame(floatPCM, frameSize, selectedFrameSize)
+}
+
+// encodeCallerFrame codes the first selectedFrameSize samples of the
+// caller's frameSize samples. Like opus_encode_native's analysis_pcm and
+// analysis_frame_size, the tonality analysis sees all the caller's samples
+// when an expert frame duration selects fewer.
+func (e *Encoder) encodeCallerFrame(pcm []float64, frameSize, selectedFrameSize int) ([]byte, error) {
+	if selectedFrameSize < frameSize {
+		e.callerPCM, e.callerFrameSize = pcm, frameSize
+		defer func() { e.callerPCM, e.callerFrameSize = nil, 0 }()
+	}
+	return e.encodeFloat(pcm[:selectedFrameSize*e.channels], selectedFrameSize)
 }
 
 // encodeFloat is the internal encoding path shared by Encode and EncodeFloat.
@@ -627,11 +639,13 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 			e.analysis = celt.NewTonalityAnalysis(e.sampleRate)
 		}
 		e.analysisReadPos, e.analysisReadSubframe = e.analysis.ReadPosition()
-		analysisPCM := pcm
+		analysisPCM, analysisFrameSize := pcm, frameSize
 		if e.analysisInput != nil {
 			analysisPCM = e.analysisInput
+		} else if e.callerPCM != nil {
+			analysisPCM, analysisFrameSize = e.callerPCM, e.callerFrameSize
 		}
-		analysisInfo = e.analysis.Run(analysisPCM, frameSize, e.channels, lsbDepth)
+		analysisInfo = e.analysis.Run(analysisPCM, analysisFrameSize, frameSize, e.channels, lsbDepth)
 	} else if e.analysis != nil && e.analysis.Initialized() {
 		e.analysis.Reset()
 	}

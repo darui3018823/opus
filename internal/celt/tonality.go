@@ -682,11 +682,11 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 	info.Valid = true
 }
 
-// Run is run_analysis: feed one Opus frame (interleaved float samples in
-// [-1, 1], C channels, at the analysis sample rate) and return the
-// AnalysisInfo for it.
-func (t *TonalityAnalysis) Run(pcm []float64, frameSize, C, lsbDepth int) AnalysisInfo {
-	analysisFrameSize := frameSize
+// Run is run_analysis: analyse the caller's analysisFrameSize samples
+// (interleaved float samples in [-1, 1], C channels, at the analysis sample
+// rate) and return the AnalysisInfo of the frameSize samples coded now; the
+// samples analysed beyond them are skipped on the next call.
+func (t *TonalityAnalysis) Run(pcm []float64, analysisFrameSize, frameSize, C, lsbDepth int) AnalysisInfo {
 	analysisFrameSize -= analysisFrameSize & 1
 	// Avoid overflow/wrap-around of the analysis buffer.
 	analysisFrameSize = minInt((analysisDetectSize-5)*t.fs/50, analysisFrameSize)

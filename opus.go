@@ -3853,8 +3853,18 @@ func (d *Decoder) decodePacketFloat(data []byte) ([]float64, error) {
 		}
 		activeCeltDec.SetStreamChannels(pktChannels)
 		pcm, err := activeCeltDec.Decode(frame)
-		if err != nil {
+		overrun := errors.Is(err, celt.ErrRangeOverrun)
+		if err != nil && !overrun {
 			return nil, fmt.Errorf("CELT decoding failed: %w", err)
+		}
+		if overrun {
+			// libopus keeps the frame's decoder state, range and mode, but
+			// fails the whole call (OPUS_INTERNAL_ERROR).
+			d.lastCeltDec = activeCeltDec
+			d.lossConfig, d.lossChannels = config, pktChannels
+			d.lastFinalRange = activeCeltDec.LastFinalRange()
+			d.prevMode, d.prevRedundancy = framing.ModeCELTOnly, false
+			return nil, fmt.Errorf("%w: %w", ErrInternalError, err)
 		}
 		d.lastCeltDec = activeCeltDec
 		d.lastFrameConcealed = false
@@ -4449,6 +4459,10 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 			celtDec.CopyStateFrom(d.lastCeltDec)
 		}
 		celtPCM, cerr := celtDec.DecodeHybrid(dec, celtLen, celtStart, celtEnd)
+		overrun := errors.Is(cerr, celt.ErrRangeOverrun)
+		if overrun {
+			cerr = nil
+		}
 		if cerr == nil {
 			d.lastCeltDec = celtDec
 			if d.celtResampler != nil {
@@ -4490,6 +4504,12 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		decodedAny = true
 		allPCM = append(allPCM, silkOut...)
 		rangeFinal = dec.GetRng() ^ redundantRange
+		if overrun {
+			// The frame completes, then libopus fails the whole call.
+			d.lastFinalRange = rangeFinal
+			d.prevMode, d.prevRedundancy = framing.ModeHybrid, redundancy && !celtToSilk
+			return nil, false, fmt.Errorf("%w: %w", ErrInternalError, celt.ErrRangeOverrun)
+		}
 	}
 	d.lastFinalRange = rangeFinal
 	if !decodedAny {

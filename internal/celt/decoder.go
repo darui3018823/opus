@@ -220,7 +220,9 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 		silence = dec.DecodeBitLogp(15)
 	}
 	if silence {
-		dec.AdvanceTellTo(totalBits)
+		// libopus sets the tell to the budget, pulling it back too when the
+		// hybrid SILK layer already overran it.
+		dec.SetTell(totalBits)
 	}
 	htr(dec, "silence")
 
@@ -469,8 +471,18 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	d.plcDuration = 0
 	d.lastFrameType = frameNormal
 	d.prefilterAndFold = false
+	if dec.ECTell() > totalBits {
+		// celt_decode_with_ec returns OPUS_INTERNAL_ERROR after the frame
+		// (and all its state) has been decoded.
+		return output, ErrRangeOverrun
+	}
 	return output, nil
 }
+
+// ErrRangeOverrun reports a frame that read past the end of its packet. The
+// decoder state and output are those libopus leaves behind before it
+// returns OPUS_INTERNAL_ERROR.
+var ErrRangeOverrun = errors.New("celt: frame reads past the end of the packet")
 
 // safeLossPrediction is celt_decode_with_ec's energy safety after a loss
 // (inter frames only): continue a falling energy trend or take the minimum

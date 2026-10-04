@@ -362,7 +362,13 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 // NB config 1 -> config 0), where keeping separate 10 ms / 20 ms decoder
 // instances would discontinue the synthesis state at every switch.
 func (d *Decoder) SetFrameMs(frameMs int) {
-	if frameMs != 10 && frameMs != 20 {
+	switch frameMs {
+	case 40, 60:
+		// A 40 or 60 ms packet is two or three 20 ms SILK frames
+		// (silk_decoder_set_fs on payloadSize_ms: nb_subfr = MAX_NB_SUBFR).
+		frameMs = 20
+	case 10, 20:
+	default:
 		return
 	}
 	nSubframes := 4

@@ -308,3 +308,15 @@ func TestDecodeEmptyPacketConceals(t *testing.T) {
 		t.Fatal("empty-packet Decode24 differs from DecodePLC24")
 	}
 }
+
+func TestDecoderPitchUnits(t *testing.T) {
+	const rate = 16000
+	packets := makeFECPackets(t, rate, 320, 6)
+	dec := primedLossDecoder(t, rate, packets)
+	if dec.Pitch48kHz() == 0 {
+		t.Fatal("no pitch after voiced packets")
+	}
+	if got, want := dec.Pitch(), dec.Pitch48kHz()*rate/48000; got != want {
+		t.Fatalf("Pitch()=%d, want Pitch48kHz()*rate/48000=%d", got, want)
+	}
+}

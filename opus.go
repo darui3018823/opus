@@ -2666,8 +2666,10 @@ func (e *Encoder) syncSILKRateMode() {
 // SetMaxPacketSize sets the size of the output buffer that libopus's
 // opus_encode would receive (max_data_bytes): no packet is longer, a VBR
 // packet of more than one frame shares it between its frames, and a CBR
-// packet above 1276 bytes uses it as the packet size limit. It applies
-// under ModePolicyLibopus; the default is 1500 bytes. n must be positive.
+// packet above 1276 bytes uses it as the packet size limit. It takes effect
+// only under ModePolicyLibopus: ModePolicyLegacy stores the value (and
+// MaxPacketSize returns it) but does not limit its packets by it. The default
+// is 1500 bytes. n must be positive.
 func (e *Encoder) SetMaxPacketSize(n int) error {
 	if n < 1 {
 		return fmt.Errorf("%w: max packet size %d", ErrBadArg, n)
@@ -5677,6 +5679,7 @@ func (d *Decoder) FinalRange() uint32 { return d.lastFinalRange }
 
 // Pitch returns the most recently reported decoder pitch period in samples at
 // the decoder output rate. Zero means no pitch period is currently available.
+// Unlike Pitch48kHz it does not keep the last SILK lag over a Reset.
 func (d *Decoder) Pitch() int { return d.lastPitch * d.sampleRate / SampleRate48kHz }
 
 // Pitch48kHz is OPUS_GET_PITCH: the pitch period in 48 kHz samples whatever

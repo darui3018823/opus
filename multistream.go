@@ -34,7 +34,8 @@ type MultistreamEncoder struct {
 // opus_multistream_encode would receive (max_data_bytes) under
 // ModePolicyLibopus: it bounds the whole multistream packet and is the
 // padded size of a CBR packet at BitrateMax. By default no buffer limit
-// applies beyond the elementary encoders. n must be positive.
+// applies beyond the elementary encoders. Under ModePolicyLegacy the value is
+// stored but does not limit the packet. n must be positive.
 func (e *MultistreamEncoder) SetMaxPacketSize(n int) error {
 	if n < 1 {
 		return fmt.Errorf("%w: max packet size %d", ErrBadArg, n)

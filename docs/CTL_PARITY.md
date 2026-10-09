@@ -36,17 +36,17 @@ marked `Out of scope` rather than treated as core parity.
 | `OPUS_SET_MAX_BANDWIDTH` / `OPUS_GET_MAX_BANDWIDTH` | Present | Equivalent | `SetMaxBandwidth`, `MaxBandwidth`; bandwidth selection and round-trip tests |
 | `OPUS_SET_BANDWIDTH` / `OPUS_GET_BANDWIDTH` | Present | Equivalent | `SetBandwidth`, `Bandwidth`, `GetBandwidth`; bandwidth selection and libopus reference tests |
 | `OPUS_SET_COMPLEXITY` / `OPUS_GET_COMPLEXITY` | Present | Equivalent | `SetComplexity`, `Complexity`; control tests cover accepted range and getter state |
-| `OPUS_SET_INBAND_FEC` / `OPUS_GET_INBAND_FEC` | Present | Equivalent | `SetInbandFEC`, `InbandFEC`; SILK/hybrid LBRR and silence-carrier interoperability tests |
+| `OPUS_SET_INBAND_FEC` / `OPUS_GET_INBAND_FEC` | Present | Full | `SetInbandFECMode`, `InbandFECMode` take 0, 1 and 2 (2 keeps music out of SILK for FEC); `SetInbandFEC`, `InbandFEC` select 0 or 1. Changing the settings keeps the pending LBRR frames as libopus does; libopus parity audit (`fec-loss`) |
 | `OPUS_SET_PACKET_LOSS_PERC` / `OPUS_GET_PACKET_LOSS_PERC` | Present | Partial | `SetPacketLossPerc`, `PacketLossPerc`; codec tuning is wired, but the void Go setter clamps out-of-range values instead of returning libopus's `OPUS_BAD_ARG` |
 | `OPUS_SET_DTX` / `OPUS_GET_DTX` | Present | Equivalent | `SetDTX`, `DTX`; DTX, digital-silence, and pending-LBRR tests |
-| `OPUS_SET_VBR` / `OPUS_GET_VBR` | Present | Partial | `SetVBR`, `VBR`; CELT and non-redundant hybrid sizing are wired, while broader SILK/hybrid policy is narrower |
-| `OPUS_SET_VBR_CONSTRAINT` / `OPUS_GET_VBR_CONSTRAINT` | Present | Partial | `SetVBRConstraint`, `VBRConstraint`; corpus byte-total evidence covers CELT, not full predictive CVBR policy |
+| `OPUS_SET_VBR` / `OPUS_GET_VBR` | Present | Full | `SetVBR`, `VBR`; byte-identical to libopus under `ModePolicyLibopus` |
+| `OPUS_SET_VBR_CONSTRAINT` / `OPUS_GET_VBR_CONSTRAINT` | Present | Full | `SetVBRConstraint`, `VBRConstraint`; independent of the VBR setting as in libopus (kept while in CBR, reported in CBR) |
 | `OPUS_SET_FORCE_CHANNELS` / `OPUS_GET_FORCE_CHANNELS` | Present | Equivalent | `SetForceChannels`, `ForceChannels`; forced-mono packet and state-propagation tests |
 | `OPUS_SET_SIGNAL` / `OPUS_GET_SIGNAL` | Present | Partial | `SetSignalType`, `SignalType`; request state is independent from Application, but mode and quality policy is narrower |
 | `OPUS_GET_LOOKAHEAD` | Present | Full | `Lookahead` returns Fs/400 + Fs/250 (the Opus-layer delay compensation), or Fs/400 for RESTRICTED_LOWDELAY / RESTRICTED_CELT, as libopus |
 | `OPUS_SET_LSB_DEPTH` / `OPUS_GET_LSB_DEPTH` | Present | Full | `SetLSBDepth`, `LSBDepth`; min(call depth, setting) drives the CELT silence test and dynalloc noise floor, the tonality analysis and (libopus policy) the digital-silence / DTX decisions; the sweep covers it |
 | `OPUS_SET_EXPERT_FRAME_DURATION` / `OPUS_GET_EXPERT_FRAME_DURATION` | Present | Equivalent | `SetExpertFrameDuration`, `ExpertFrameDuration`; all-rate/PCM/multistream tests and `opusref` semantic comparisons |
-| `OPUS_SET_PREDICTION_DISABLED` / `OPUS_GET_PREDICTION_DISABLED` | Present | Equivalent | `SetPredictionDisabled`, `PredictionDisabled`; routing and transition tests |
+| `OPUS_SET_PREDICTION_DISABLED` / `OPUS_GET_PREDICTION_DISABLED` | Present | Full | `SetPredictionDisabled`, `PredictionDisabled`; under `ModePolicyLibopus` SILK reduced dependency and CELT prediction 0 as libopus (audit `pred` 16/16); under `ModePolicyLegacy` it steers the mode away from SILK/hybrid |
 | `OPUS_SET_DRED_DURATION` / `OPUS_GET_DRED_DURATION` | Absent | Out of scope | DRED payload transport is opaque; neural recovery is outside the compatibility claim |
 | `OPUS_SET_DNN_BLOB` | Absent | Out of scope | DNN blob loading is outside the compatibility claim |
 | `OPUS_SET_OSCE_BWE` / `OPUS_GET_OSCE_BWE` | Absent | Out of scope | OSCE bandwidth-extension DSP is outside the compatibility claim |
@@ -57,9 +57,9 @@ marked `Out of scope` rather than treated as core parity.
 
 | libopus CTL | Surface | Semantics | Evidence / note |
 |---|---:|---:|---|
-| `OPUS_SET_GAIN` / `OPUS_GET_GAIN` | Present | Equivalent | `SetGain`, `Gain`; range and decoded-energy tests |
+| `OPUS_SET_GAIN` / `OPUS_GET_GAIN` | Present | Full | `SetGain`, `Gain` on single-stream, multistream and projection decoders; the gain is applied in float32 with libopus's celt_exp2 (audit 648/648) |
 | `OPUS_GET_LAST_PACKET_DURATION` | Present | Equivalent | `GetLastPacketDuration`; packet/reset tests |
-| `OPUS_GET_PITCH` | Present | Equivalent | `Pitch`; SILK decode and reset tests, reported at output sample rate |
+| `OPUS_GET_PITCH` | Present | Full | `Pitch48kHz` reports libopus's value (48 kHz samples; CELT post-filter period or the voiced SILK lag, kept over a reset); `Pitch` scales it to the output rate |
 | `OPUS_GET_FINAL_RANGE` | Present | Equivalent | `FinalRange`; PLC, SILK/hybrid FEC, multistream XOR, and entropy-range tests |
 | `OPUS_GET_BANDWIDTH` | Present | Equivalent | `Bandwidth`, `GetBandwidth`; getter tests include pre-decode and reset `BandwidthAuto` |
 | `OPUS_SET_PHASE_INVERSION_DISABLED` / `OPUS_GET_PHASE_INVERSION_DISABLED` | Present | Equivalent | Setter/getter and stereo round-trip tests |

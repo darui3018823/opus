@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-09-30
+Last reviewed: 2026-10-09
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -68,6 +68,9 @@ Implemented public entry points:
 - `(*Encoder).SetVBRConstraint(constrained bool)`
 - `(*Encoder).SetDTX(enabled bool)` / `(*Encoder).DTX() bool`
 - `(*Encoder).SetInbandFEC(enabled bool)` / `(*Encoder).InbandFEC() bool`
+- `(*Encoder).SetInbandFECMode(mode int) error` / `(*Encoder).InbandFECMode() int`
+- `(*Encoder).SetMaxPacketSize(n int) error` / `(*Encoder).MaxPacketSize() int`
+  (libopus `max_data_bytes`, default 1500)
 - `(*Encoder).SetPacketLossPerc(perc int)` / `(*Encoder).PacketLossPerc() int`
 - `(*Encoder).SetPacketPadding(n int)`
 - `(*Encoder).SetForceChannels(channels int) error` / `(*Encoder).ForceChannels() int`
@@ -628,6 +631,8 @@ Implemented public entry points:
 - `(*Decoder).Reset() error`
 - `(*Decoder).GetLastPacketDuration() int`
 - `(*Decoder).Bandwidth() int` / `(*Decoder).GetBandwidth() int`
+- `(*Decoder).Pitch() int` (output-rate samples) /
+  `(*Decoder).Pitch48kHz() int` (`OPUS_GET_PITCH`, 48 kHz samples)
 - `(*Decoder).SetPhaseInversionDisabled(bool)` /
   `(*Decoder).PhaseInversionDisabled() bool`
 
@@ -1519,10 +1524,46 @@ reference comparison.
   5.55/5.40 dB. Stateful stereo saving and broader dynamic-allocation parity
   remain future measured candidates.
 - Decoder conformance and reference validation passes the official vectors and
-  the covered libopus comparisons. The remaining compatibility gap is parity
-  with a libopus built with SIMD kernels (a non-goal); `ModePolicyLegacy`
-  remains available but is not libopus-exact. Decoder PCM, including PLC,
-  is sample-exact against the plain-C libopus float decoder.
+  the covered libopus comparisons. Parity with a libopus built with SIMD
+  kernels is a non-goal; `ModePolicyLegacy` remains available but is not
+  libopus-exact. The residual differences found by the libopus parity audit
+  are listed below.
+
+## libopus Parity Audit (2026-10)
+
+The opt-in audit harnesses (`OPUS_LIBOPUS_AUDIT=1`; decoder:
+`internal/audit/decoder` with `scripts/oracle/decoder_audit`, encoder and
+API: `libopus_audit_*_opusref_test.go` with
+`scripts/oracle/build_encoder_audit.ps1`) compare against plain-C libopus
+1.6.1. Results on the fix branch:
+
+- Decoder, every output format and rate: official vectors 216/216 and
+  gain/reset/phase-inversion 648/648 cells sample-exact (including pitch),
+  Go-encoder packets 232/232, random loss 721/768, odd PLC durations
+  329/336, FEC 507/522, spliced vectors 150/160, multistream 183/192.
+- Encoder: long real-audio cells 1582/1584, bitrate extremes (2.5-120 ms,
+  500 b/s to `BitrateMax`, CBR above 1276 bytes) 1620/1620, prediction
+  disabled 16/16; repacketizer, pad/unpad (single and multistream) and
+  `PacketHasLBRR` agree with libopus on every audited input.
+
+Residual differences:
+
+- Decoder: long noise-based CELT concealment drifts by a few LSB after
+  about eight consecutive losses; the concealment after a SILK packet with
+  trailing redundancy followed by a hybrid packet (malformed streams only)
+  differs; the float APIs reject an empty packet (no frame size), where
+  libopus conceals; `Bandwidth()` and `GetLastPacketDuration()` keep their
+  documented values before the first packet instead of libopus's 0.
+- Encoder: rare float-rounding differences in CELT raw bits (fine energy,
+  last coded band at 16 kHz, 2.5 ms and 120 ms VBR frames, 2-byte redundancy
+  frames); stereo SILK `switchReady` on some per-frame bitrate changes;
+  LBRR gain state after toggling `InbandFECNoModeSwitch` on speech; some
+  expert-duration and variable-frame-size sequences; NaN input at 48 kHz;
+  multistream 60 ms VBR framing near the packet limit.
+- API: the packet getters, `PacketExtensionsCount`, `NewEncoder` defaults
+  (Legacy profile), `Bitrate()`/`EffectiveBitrate()`, mid-stream
+  `SetApplication` and the early `SetExpertFrameDuration` validation keep
+  their documented Go semantics.
 
 ## Practical Use Today
 

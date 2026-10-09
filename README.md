@@ -20,7 +20,9 @@ encoder (`ModePolicyLibopus`, the default), and its packets (2.5 to 120 ms)
 are byte-identical to libopus's plain-C float build in the tested
 configurations (automatic mode, mode transitions, 8–48 kHz input, CBR and
 VBR, in-band FEC, and DTX). `SetModePolicy(ModePolicyLegacy)` restores the
-decisions of earlier releases.
+decisions of earlier releases. The residual differences found by the libopus
+parity audit (for example long noise concealment and rare encoder
+float-rounding cases) are listed in the implementation snapshot.
 The authoritative implementation snapshot is
 [docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md).
 

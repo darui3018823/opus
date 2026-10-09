@@ -1567,6 +1567,21 @@ Residual differences:
   `SetApplication` and the early `SetExpertFrameDuration` validation keep
   their documented Go semantics.
 
+Behavior changes from the audit fixes that callers can observe:
+
+- `Decode`, `Decode24` and the multistream and projection equivalents with an
+  empty packet now conceal `len(pcm)/Channels()` samples (like `opus_decode`
+  with no packet) instead of returning an error. The float APIs still reject
+  an empty packet.
+- `NewProjectionDecoder` returns `ErrBadArg` when `channels` exceeds
+  `streams+coupledStreams`, as `opus_projection_decoder_init` does.
+- A CELT or hybrid frame that reads past the end of its packet now fails the
+  call with `ErrInternalError`, with the decoder state libopus leaves behind.
+- The int16 decode APIs soft-clip like libopus; the float and 24-bit APIs do
+  not. `Decode24` no longer clamps to the 24-bit range.
+- `VBRConstraint` reports the stored constraint also while VBR is off.
+- `Encoder.SetMaxPacketSize` only takes effect under `ModePolicyLibopus`.
+
 ## Practical Use Today
 
 The codebase is a Pure Go Opus implementation with a decoder that passes all 12

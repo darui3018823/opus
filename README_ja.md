@@ -18,7 +18,9 @@ plain-C float デコーダーとサンプル単位で一致します (packet los
 v1.5.0 からは自動判断が libopus 1.6.1 に従います (`ModePolicyLibopus`、既定)。
 検証済みの構成 (自動 mode、mode 遷移、8〜48 kHz 入力、CBR/VBR、in-band FEC、
 DTX) では 2.5〜120 ms の packet が libopus の plain-C float build と byte 単位で
-一致します。以前の判断は `SetModePolicy(ModePolicyLegacy)` で使えます。実装状況の正本は
+一致します。以前の判断は `SetModePolicy(ModePolicyLegacy)` で使えます。libopus
+parity 監査で見つかった残差 (長い noise concealment や、まれなエンコーダーの
+float 丸め差など) は実装スナップショットに記載しています。実装状況の正本は
 [docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md) です。
 
 ## インストール

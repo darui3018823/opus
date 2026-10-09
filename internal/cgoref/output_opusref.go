@@ -1,4 +1,4 @@
-//go:build opusref
+//go:build opusref && opus16
 
 package cgoref
 

@@ -1535,7 +1535,9 @@ The opt-in audit harnesses (`OPUS_LIBOPUS_AUDIT=1`; decoder:
 `internal/audit/decoder` with `scripts/oracle/decoder_audit`, encoder and
 API: `libopus_audit_*_opusref_test.go` with
 `scripts/oracle/build_encoder_audit.ps1`) compare against plain-C libopus
-1.6.1. Results on the fix branch:
+1.6.1. The API audit and the decoder output-conversion tests call libopus 1.6
+functions through cgoref and also need the `opus16` build tag (a linked
+libopus 1.6 or later). Results on the fix branch:
 
 - Decoder, every output format and rate: official vectors 216/216 and
   gain/reset/phase-inversion 648/648 cells sample-exact (including pitch),

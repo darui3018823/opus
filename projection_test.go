@@ -238,3 +238,53 @@ func TestProjectionEncoderForwardsControls(t *testing.T) {
 		t.Fatal("projection getters do not report the forwarded controls")
 	}
 }
+
+func TestProjectionEncoderForwardsEveryControl(t *testing.T) {
+	enc, err := NewProjectionEncoder(48000, 4, MappingFamilyProjection, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc.SetVBR(false)
+	enc.SetVBRConstraint(false)
+	if err := enc.SetComplexity(4); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetApplication(ApplicationVOIP); err != nil {
+		t.Fatal(err)
+	}
+	enc.SetSignalType(SignalMusic)
+	if err := enc.SetLSBDepth(16); err != nil {
+		t.Fatal(err)
+	}
+	enc.SetPredictionDisabled(true)
+	enc.SetPhaseInversionDisabled(true)
+	if err := enc.SetBandwidth(BandwidthWideband); err != nil {
+		t.Fatal(err)
+	}
+	if err := enc.SetMaxPacketSize(321); err != nil {
+		t.Fatal(err)
+	}
+	if enc.VBR() || enc.VBRConstraint() || enc.Complexity() != 4 || enc.Application() != ApplicationVOIP ||
+		enc.SignalType() != SignalMusic || enc.LSBDepth() != 16 || !enc.PredictionDisabled() ||
+		!enc.PhaseInversionDisabled() || enc.Bandwidth() != BandwidthWideband || enc.MaxPacketSize() != 321 {
+		t.Fatal("projection getters do not report the forwarded controls")
+	}
+	for s := 0; s < enc.Streams(); s++ {
+		st, err := enc.StreamEncoder(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.VBR() || st.VBRConstraint() || st.Complexity() != 4 || st.Application() != ApplicationVOIP ||
+			st.SignalType() != SignalMusic || st.LSBDepth() != 16 || !st.PredictionDisabled() ||
+			!st.PhaseInversionDisabled() || st.Bandwidth() != BandwidthWideband {
+			t.Fatalf("stream %d did not receive every control", s)
+		}
+	}
+}
+
+func TestProjectionDecoderRejectsMoreChannelsThanCodedChannels(t *testing.T) {
+	// 5 output channels from 2+2 coded channels (opus_projection_decoder_init).
+	if _, err := NewProjectionDecoder(48000, 5, 2, 2, make([]byte, 5*4*2)); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("error=%v", err)
+	}
+}

@@ -186,6 +186,24 @@ func TestSurroundMappingFamilies(t *testing.T) {
 		if _, err := NewSurroundDecoder(48000, tc.channels, MappingFamilyAmbisonics); err != nil {
 			t.Fatalf("family 2 decoder with %d channels: %v", tc.channels, err)
 		}
+		// The layout must also encode and decode.
+		dec, err := NewSurroundDecoder(48000, tc.channels, MappingFamilyAmbisonics)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const frameSize = 960
+		pcm := make([]float64, frameSize*tc.channels)
+		for i := range pcm {
+			pcm[i] = 0.1 * math.Sin(float64(i/tc.channels)*0.05*float64(1+i%tc.channels))
+		}
+		packet, err := enc.EncodeFloat(pcm, frameSize)
+		if err != nil {
+			t.Fatalf("family 2 encode with %d channels: %v", tc.channels, err)
+		}
+		out, err := dec.DecodeFloat(packet)
+		if err != nil || len(out) != frameSize*tc.channels {
+			t.Fatalf("family 2 decode with %d channels: len=%d err=%v", tc.channels, len(out), err)
+		}
 	}
 	if _, err := NewSurroundEncoder(48000, 5, MappingFamilyAmbisonics, ApplicationAudio); !errors.Is(err, ErrBadArg) {
 		t.Fatalf("family 2 with 5ch error=%v", err)

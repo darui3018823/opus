@@ -4355,7 +4355,9 @@ func (d *Decoder) crossfadeRedundancy(out, red []float64, samplesPerFrame int) {
 // smoothFadeWeight is smooth_fade's squared window, in float32.
 func smoothFadeWeight(window float64) float32 {
 	w := float32(window)
-	return w * w
+	// The conversion keeps the square rounded when the caller's 1 - w is
+	// inlined next to it (no fused multiply-subtract).
+	return float32(w * w)
 }
 
 // smoothFadeSample is one smooth_fade output in float32:

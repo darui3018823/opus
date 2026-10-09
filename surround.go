@@ -48,9 +48,10 @@ type SurroundEncoder struct {
 // standard Vorbis channel order for 1 through 8 channels. Family 0 accepts
 // mono or stereo. Family 2 takes full-order ambisonics with an optional
 // non-diegetic stereo pair, one stream per ambisonic channel. Mapping family
-// 255 creates one uncoupled stream per channel. A channel count a family
-// does not cover, or another family, returns an error wrapping both
-// ErrUnimplemented (libopus's OPUS_UNIMPLEMENTED) and ErrBadArg.
+// 255 creates one uncoupled stream per channel. More channels than family 0
+// or 1 covers, or another family, returns an error wrapping both
+// ErrUnimplemented (libopus's OPUS_UNIMPLEMENTED) and ErrBadArg; a channel
+// count that is not an ambisonics layout returns ErrBadArg (OPUS_BAD_ARG).
 func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application Application) (*SurroundEncoder, error) {
 	layout, err := surroundLayoutFor(channels, mappingFamily)
 	if err != nil {

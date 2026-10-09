@@ -264,7 +264,9 @@ func (dec *Decoder) DecodeUint(ft uint32) uint32 {
 		low := dec.DecodeBits(uint(ftb))
 		t := s<<uint(ftb) | low
 		if t > ft-1 {
-			// ec_dec_uint flags the error and clamps to the largest value.
+			// ec_dec_uint clamps to the largest value (it also sets its
+			// error flag, which this decoder does not track: libopus keeps
+			// decoding either way).
 			return ft - 1
 		}
 		return t

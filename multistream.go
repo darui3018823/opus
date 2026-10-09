@@ -713,6 +713,7 @@ func (d *MultistreamDecoder) Decode(data []byte, pcm []int16) (int, error) {
 // DecodePLC performs packet-loss concealment for frameSize samples per channel
 // on every elementary stream.
 func (d *MultistreamDecoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
 		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
@@ -732,6 +733,7 @@ func (d *MultistreamDecoder) DecodePLC(pcm []int16, frameSize int) (int, error) 
 // DecodePLCFloat performs packet-loss concealment on every elementary stream
 // and returns interleaved float64 PCM.
 func (d *MultistreamDecoder) DecodePLCFloat(frameSize int) ([]float64, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
 		return nil, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
@@ -753,6 +755,7 @@ func (d *MultistreamDecoder) DecodePLCFloat(frameSize int) ([]float64, error) {
 
 // DecodePLCFloat32 is DecodePLCFloat with float32 output.
 func (d *MultistreamDecoder) DecodePLCFloat32(frameSize int) ([]float32, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	pcm, err := d.DecodePLCFloat(frameSize)
 	if err != nil {
 		return nil, err
@@ -766,6 +769,7 @@ func (d *MultistreamDecoder) DecodePLCFloat32(frameSize int) ([]float32, error) 
 
 // DecodePLC24 performs packet-loss concealment to signed 24-bit PCM in int32.
 func (d *MultistreamDecoder) DecodePLC24(pcm []int32, frameSize int) (int, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
 		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
@@ -796,6 +800,7 @@ func (d *MultistreamDecoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 // DecodeFECWithDuration decodes recovery data for exactly frameSize lost
 // samples per channel on every elementary stream.
 func (d *MultistreamDecoder) DecodeFECWithDuration(data []byte, pcm []int16, frameSize int) (int, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
 		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
@@ -814,6 +819,7 @@ func (d *MultistreamDecoder) DecodeFECWithDuration(data []byte, pcm []int16, fra
 // DecodeFECFloat decodes recovery data for exactly frameSize lost samples per
 // channel and returns interleaved float64 PCM.
 func (d *MultistreamDecoder) DecodeFECFloat(data []byte, frameSize int) ([]float64, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
 		return nil, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
@@ -850,6 +856,7 @@ func (d *MultistreamDecoder) DecodeFECFloat(data []byte, frameSize int) ([]float
 
 // DecodeFECFloat32 is DecodeFECFloat with float32 output.
 func (d *MultistreamDecoder) DecodeFECFloat32(data []byte, frameSize int) ([]float32, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	pcm, err := d.DecodeFECFloat(data, frameSize)
 	if err != nil {
 		return nil, err
@@ -863,6 +870,7 @@ func (d *MultistreamDecoder) DecodeFECFloat32(data []byte, frameSize int) ([]flo
 
 // DecodeFEC24 decodes recovery data to signed 24-bit PCM stored in int32.
 func (d *MultistreamDecoder) DecodeFEC24(data []byte, pcm []int32, frameSize int) (int, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
 		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
@@ -1194,4 +1202,12 @@ func parseSelfDelimitedPacket(data []byte) ([]byte, int, error) {
 	packet[0] = toc&0xFC | byte(canonicalCode)
 	packet = append(packet, payload...)
 	return packet, consumed, nil
+}
+
+// clampMultistreamFrameSize is opus_multistream_decode_native's
+// frame_size = IMIN(frame_size, Fs/25*3): one multistream or projection
+// call produces at most 120 ms (single-stream concealment has no such
+// limit).
+func clampMultistreamFrameSize(frameSize, sampleRate int) int {
+	return min(frameSize, sampleRate/25*3)
 }

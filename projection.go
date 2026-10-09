@@ -475,6 +475,7 @@ func (d *ProjectionDecoder) Decode24(data []byte, pcm []int32) (int, error) {
 // DecodePLC conceals frameSize lost samples per channel on every elementary
 // stream and demixes the result (opus_projection_decode with no packet).
 func (d *ProjectionDecoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if err := d.checkLossOutput(len(pcm), frameSize); err != nil {
 		return 0, err
 	}
@@ -488,6 +489,7 @@ func (d *ProjectionDecoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
 
 // DecodePLC24 is DecodePLC with signed 24-bit output stored in int32.
 func (d *ProjectionDecoder) DecodePLC24(pcm []int32, frameSize int) (int, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if err := d.checkLossOutput(len(pcm), frameSize); err != nil {
 		return 0, err
 	}
@@ -501,6 +503,7 @@ func (d *ProjectionDecoder) DecodePLC24(pcm []int32, frameSize int) (int, error)
 
 // DecodePLCFloat is DecodePLC with float64 output.
 func (d *ProjectionDecoder) DecodePLCFloat(frameSize int) ([]float64, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	coded, err := d.multistream.DecodePLCFloat(frameSize)
 	if err != nil {
 		return nil, err
@@ -510,6 +513,7 @@ func (d *ProjectionDecoder) DecodePLCFloat(frameSize int) ([]float64, error) {
 
 // DecodePLCFloat32 is DecodePLC with float32 output.
 func (d *ProjectionDecoder) DecodePLCFloat32(frameSize int) ([]float32, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	return float64sToFloat32s(d.DecodePLCFloat(frameSize))
 }
 
@@ -517,6 +521,7 @@ func (d *ProjectionDecoder) DecodePLCFloat32(frameSize int) ([]float32, error) {
 // samples per channel and demixes it (opus_projection_decode with
 // decode_fec set).
 func (d *ProjectionDecoder) DecodeFECWithDuration(data []byte, pcm []int16, frameSize int) (int, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if err := d.checkLossOutput(len(pcm), frameSize); err != nil {
 		return 0, err
 	}
@@ -531,6 +536,7 @@ func (d *ProjectionDecoder) DecodeFECWithDuration(data []byte, pcm []int16, fram
 // DecodeFEC24 is DecodeFECWithDuration with signed 24-bit output stored in
 // int32.
 func (d *ProjectionDecoder) DecodeFEC24(data []byte, pcm []int32, frameSize int) (int, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if err := d.checkLossOutput(len(pcm), frameSize); err != nil {
 		return 0, err
 	}
@@ -544,6 +550,7 @@ func (d *ProjectionDecoder) DecodeFEC24(data []byte, pcm []int32, frameSize int)
 
 // DecodeFECFloat is DecodeFECWithDuration with float64 output.
 func (d *ProjectionDecoder) DecodeFECFloat(data []byte, frameSize int) ([]float64, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	coded, err := d.multistream.DecodeFECFloat(data, frameSize)
 	if err != nil {
 		return nil, err
@@ -553,6 +560,7 @@ func (d *ProjectionDecoder) DecodeFECFloat(data []byte, frameSize int) ([]float6
 
 // DecodeFECFloat32 is DecodeFECWithDuration with float32 output.
 func (d *ProjectionDecoder) DecodeFECFloat32(data []byte, frameSize int) ([]float32, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	return float64sToFloat32s(d.DecodeFECFloat(data, frameSize))
 }
 

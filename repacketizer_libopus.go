@@ -394,7 +394,9 @@ func repacketizeOutRange(toc byte, all []repacketizerFrame, begin, end, maxlen i
 	}
 	if len(extData) > 0 {
 		copy(data[extBegin:], extData)
-	} else if pad {
+	}
+	if pad && len(exts) == 0 {
+		// libopus zero-fills only when there are no extensions.
 		for i := onesBegin; i < onesEnd; i++ {
 			data[i] = 0
 		}

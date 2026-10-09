@@ -2556,6 +2556,10 @@ func (e *Encoder) applyBitrateSetting(frameSize int) error {
 		default:
 			bitrate = e.bitrateSetting
 		}
+		// IMIN(user_bitrate, bits_to_bitrate(max_data_bytes*8)), kept on
+		// every recomputation within the packet.
+		limit := min(e.outBufferBytes(), 6*(MaxFrameBytes+1))
+		bitrate = min(bitrate, bitsToBitrate(limit*8, e.sampleRate, frameSize))
 	}
 	return e.setPacketBitrate(bitrate, frameSize)
 }
@@ -4008,6 +4012,8 @@ func (d *Decoder) decodePacketFloat(data []byte) ([]float64, error) {
 			d.lastCeltDec = activeCeltDec
 			d.lossConfig, d.lossChannels = config, pktChannels
 			d.lastFinalRange = activeCeltDec.LastFinalRange()
+			d.lastFrameConcealed = false
+			d.lastPitch = activeCeltDec.Pitch()
 			d.prevMode, d.prevRedundancy = framing.ModeCELTOnly, false
 			return nil, fmt.Errorf("%w: %w", ErrInternalError, err)
 		}
@@ -4690,6 +4696,9 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 			// The frame completes, then libopus fails the whole call.
 			d.lastFinalRange = rangeFinal
 			d.prevMode, d.prevRedundancy = framing.ModeHybrid, redundancy && !celtToSilk
+			d.lastPitch = info.dec.Pitch() * 48 / rateKHz
+			d.silkPitch48 = d.lastPitch
+			d.prevSilkInternalCh = pktChannels
 			return nil, false, fmt.Errorf("%w: %w", ErrInternalError, celt.ErrRangeOverrun)
 		}
 	}

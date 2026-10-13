@@ -290,3 +290,32 @@ func TestWriterWriteValidatedPacketMultistream(t *testing.T) {
 		t.Fatalf("packet = %+v, want a 20 ms EOS packet", got)
 	}
 }
+
+func TestOggOpusReaderRejectsMultiPageEOSBeforePreSkip(t *testing.T) {
+	var stream bytes.Buffer
+	writer, err := NewWriter(&stream, 3, Head{Version: 1, Channels: 1, PreSkip: 312, InputSampleRate: 48000}, Tags{Vendor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := []byte{0xe0, 0xff} // CELT FB 2.5 ms
+	if err := writer.WritePacket(packet, PacketWriteOptions{GranulePosition: 120, Flush: true}); err != nil {
+		t.Fatal(err)
+	}
+	// The final granule (200) ends the stream before its 312-sample pre-skip.
+	if err := writer.WritePacket(packet, PacketWriteOptions{GranulePosition: 200, EOS: true}); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := NewReader(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, err = reader.NextPacket()
+		if err != nil {
+			break
+		}
+	}
+	if !errors.Is(err, ErrInvalidOpusStream) {
+		t.Fatalf("error = %v, want ErrInvalidOpusStream", err)
+	}
+}

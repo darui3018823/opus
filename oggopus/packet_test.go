@@ -123,6 +123,35 @@ func TestPacketWriterFullPageStartsNextPacketFresh(t *testing.T) {
 	}
 }
 
+func TestPacketWriterSpilledPageKeepsCompletedGranule(t *testing.T) {
+	var stream bytes.Buffer
+	writer := NewPacketWriter(&stream, 6)
+	if err := writer.WritePacket(make([]byte, 10), PacketWriteOptions{GranulePosition: 960}); err != nil {
+		t.Fatal(err)
+	}
+	// The next packet fills the rest of the page and continues on the next.
+	if err := writer.WritePacket(make([]byte, 255*300), PacketWriteOptions{GranulePosition: 1920, EOS: true}); err != nil {
+		t.Fatal(err)
+	}
+	first, n, err := ParsePage(stream.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Segments) != MaxSegments || first.Segments[MaxSegments-1] != 255 {
+		t.Fatalf("first page segments = %d, last lace %d", len(first.Segments), first.Segments[len(first.Segments)-1])
+	}
+	if first.GranulePosition != 960 {
+		t.Fatalf("first page granule = %d, want 960 (the packet completed on it)", first.GranulePosition)
+	}
+	second, _, err := ParsePage(stream.Bytes()[n:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !second.Continued() || second.GranulePosition != 1920 {
+		t.Fatalf("second page continued=%v granule=%d", second.Continued(), second.GranulePosition)
+	}
+}
+
 func TestPacketReaderSequenceContinuationAndTruncation(t *testing.T) {
 	first := Page{
 		Version:         0,

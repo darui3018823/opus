@@ -73,6 +73,45 @@ func TestOggOpusWriterReaderGranuleEOSRoundTrip(t *testing.T) {
 	}
 }
 
+func TestOggOpusReaderReadsHighBitrateWriterOutput(t *testing.T) {
+	// 1275-byte packets fill pages so that a packet completes on a page that
+	// ends inside the next one.
+	packet := make([]byte, 1275)
+	packet[0] = 0xfc // CELT FB 20 ms, code 0
+	var stream bytes.Buffer
+	writer, err := NewWriter(&stream, 9, Head{Version: 1, Channels: 2, PreSkip: 312, InputSampleRate: 48000}, Tags{Vendor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const packets = 100
+	for i := range packets {
+		if err := writer.WriteValidatedPacket(packet, PacketWriteOptions{GranulePosition: int64(i+1) * 960}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := NewReader(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for {
+		_, err := reader.NextPacket()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("after %d packets: %v", n, err)
+		}
+		n++
+	}
+	if n != packets {
+		t.Fatalf("read %d packets, want %d", n, packets)
+	}
+}
+
 func TestOggOpusCloseWritesEmptyEOSPage(t *testing.T) {
 	var stream bytes.Buffer
 	writer, err := NewWriter(&stream, 88,

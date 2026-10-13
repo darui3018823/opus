@@ -352,11 +352,12 @@ func (w *PacketWriter) flush(eos bool) error {
 	if eos {
 		header |= HeaderEOS
 	}
+	// The page carries the granule of the last packet completed on it, or -1
+	// when none completes there (RFC 3533 section 6), even if the page ends
+	// inside the next packet.
 	granule := w.pageGranule
 	if len(w.segments) == 0 {
 		granule = w.lastGranule
-	} else if w.segments[len(w.segments)-1] == 255 {
-		granule = -1
 	}
 	page := Page{
 		Version:         StreamVersion,

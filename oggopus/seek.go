@@ -212,8 +212,10 @@ func scanNextPage(rs io.ReadSeeker, from, end int64) (Page, int64, int64, error)
 			return Page{}, 0, 0, err
 		}
 		readSize := min(int64(len(buffer)), end-from)
-		n, err := rs.Read(buffer[:readSize])
-		if err != nil && !errors.Is(err, io.EOF) {
+		// Fill the chunk so a short Read cannot split the capture pattern
+		// across a smaller overlap than len(CapturePattern)-1.
+		n, err := io.ReadFull(rs, buffer[:readSize])
+		if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 			return Page{}, 0, 0, err
 		}
 		if n == 0 {

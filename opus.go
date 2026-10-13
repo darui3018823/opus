@@ -5002,8 +5002,10 @@ func interleaveSILKOut(l, r []int16, channels int) []float64 {
 }
 
 // DecodePLC performs packet-loss concealment for frameSize samples per channel.
-// frameSize may be any positive multiple of 2.5 ms through 120 ms. Before the
-// first successful packet (and after Reset), concealment returns zero samples.
+// frameSize may be any positive multiple of 2.5 ms; like opus_decode_native,
+// a length beyond the last packet's frame size is concealed in steps of at
+// most that size. Before the first successful packet (and after Reset),
+// concealment returns zero samples.
 func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
 		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
@@ -5239,7 +5241,8 @@ func (d *Decoder) decodeCELTPLCFrame(frameSize int, accum bool) ([]float64, erro
 
 func isValidLossFrameSize(frameSize, sampleRate int) bool {
 	quantum := sampleRate / 400
-	// opus_decode_native conceals any length in calls of at most 120 ms.
+	// opus_decode_native conceals any multiple of 2.5 ms, looping over
+	// opus_decode_frame calls of at most st->frame_size.
 	return quantum > 0 && frameSize > 0 && frameSize%quantum == 0
 }
 

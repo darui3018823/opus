@@ -106,4 +106,4 @@ marked `Out of scope` rather than treated as core parity.
 | `OPUS_PROJECTION_GET_DEMIXING_MATRIX_GAIN` | Present | Equivalent | `MappingMatrix.Gain`; matrix validation and projection interoperability tests |
 | `OPUS_PROJECTION_GET_DEMIXING_MATRIX_SIZE` | Present | Equivalent | Matrix dimensions and serialized byte size; construction/serialization tests |
 | `OPUS_PROJECTION_GET_DEMIXING_MATRIX` | Present | Equivalent | `MappingMatrix.Bytes` and projection decoder construction; round-trip and libopus tests |
-| Generic/multistream CTLs on projection states | Partial | Partial | Projection exposes expert duration and wrapped multistream behavior; aggregate convenience remains incomplete |
+| Generic/multistream CTLs on projection states | Present | Equivalent | `ProjectionEncoder` forwards every encoder control to its inner multistream encoder, as `opus_projection_encoder_ctl` does; `ProjectionDecoder` provides gain, PLC and FEC |

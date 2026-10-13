@@ -2414,9 +2414,10 @@ func (e *Encoder) SetForceChannels(channels int) error {
 // ForceChannels returns the configured forced stream channel count.
 func (e *Encoder) ForceChannels() int { return e.forceChannels }
 
-// SetLSBDepth sets the retained input precision hint in bits per sample. The
-// current encoder exposes this for CTL parity but does not use it in codec
-// decisions.
+// SetLSBDepth sets the input precision hint in bits per sample
+// (OPUS_SET_LSB_DEPTH). As in libopus, the CELT encoder (silence detection and
+// dynamic allocation) and the tonality analysis use it; the int16 Encode caps
+// it at 16.
 func (e *Encoder) SetLSBDepth(depth int) error {
 	if depth < LSBDepthMin || depth > LSBDepthMax {
 		return fmt.Errorf("%w: invalid LSB depth %d", ErrBadArg, depth)
@@ -2507,10 +2508,10 @@ func (e *Encoder) monoEncoder() (*Encoder, error) {
 	return m, nil
 }
 
-// SetBitrate sets the target bitrate in bits per second. It accepts numeric
-// rates of at least 6000, BitrateAuto, or BitrateMax. Numeric requests above
-// libopus' 750000 bit/s per-channel CTL ceiling are clamped to that ceiling;
-// EffectiveBitrate is additionally bounded by the per-frame byte limit.
+// SetBitrate sets the target bitrate in bits per second. It accepts positive
+// numeric rates, BitrateAuto, or BitrateMax. Like OPUS_SET_BITRATE, numeric
+// requests are clamped to [500, 750000 x Channels()]; EffectiveBitrate is
+// additionally bounded by the per-frame byte limit.
 func (e *Encoder) SetBitrate(bitrate int) error {
 	if bitrate != BitrateAuto && bitrate != BitrateMax {
 		// OPUS_SET_BITRATE: positive rates are clamped to
@@ -5306,8 +5307,8 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 }
 
 // DecodeFECWithDuration decodes recovery data for exactly frameSize lost
-// samples per channel. frameSize may be any positive multiple of 2.5 ms through
-// 120 ms. If the packet cannot carry LBRR, concealment is used as in libopus.
+// samples per channel. frameSize may be any positive multiple of 2.5 ms. If the
+// packet cannot carry LBRR, concealment is used as in libopus.
 func (d *Decoder) DecodeFECWithDuration(data []byte, pcm []int16, frameSize int) (int, error) {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
 		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
@@ -5676,8 +5677,9 @@ func (d *Decoder) SampleRate() int { return d.sampleRate }
 // Channels returns the decoder output channel count.
 func (d *Decoder) Channels() int { return d.channels }
 
-// FinalRange returns the XOR of the entropy decoder final ranges for the most
-// recently decoded packet's constituent Opus frames.
+// FinalRange returns the entropy decoder final range of the most recently
+// decoded packet (OPUS_GET_FINAL_RANGE): that of its last Opus frame, or 0
+// after concealment.
 func (d *Decoder) FinalRange() uint32 { return d.lastFinalRange }
 
 // Pitch returns the most recently reported decoder pitch period in samples at

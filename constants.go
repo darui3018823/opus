@@ -103,8 +103,7 @@ const (
 	GainQ8Max = 32767
 )
 
-// Encoder input precision hints accepted by SetLSBDepth. The current encoder
-// retains this setting for CTL parity but does not use it in codec decisions.
+// Encoder input precision hints accepted by SetLSBDepth.
 const (
 	LSBDepthMin     = 8
 	LSBDepthMax     = 24
@@ -119,8 +118,9 @@ const (
 )
 
 // Bitrate policy sentinels and libopus-compatible nominal CTL limits.
-// Encoder.SetBitrate currently accepts numeric rates from 6000 through 510000
-// bits per second; multistream wrappers apply their documented aggregate bounds.
+// Encoder.SetBitrate clamps positive numeric rates to [500, 750000 x channels]
+// like OPUS_SET_BITRATE; multistream wrappers apply their documented aggregate
+// bounds.
 const (
 	BitrateAuto   = -1000
 	BitrateMax    = -1

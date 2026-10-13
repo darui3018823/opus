@@ -104,8 +104,9 @@ padding なし single-stream packet の保守的な上限であり、明示的�
 ## loss recovery
 
 `DecodePLC`、`DecodePLC24`、`DecodePLCFloat32`、`DecodePLCFloat` は、明示した
-欠損 duration を補間します。duration には 2.5 ms の正の整数倍を 120 ms まで指定
-できます。最初の packet を正常に decode する前と `Reset` 後は、PLC は zero
+欠損 duration を補間します。duration には 2.5 ms の正の整数倍を指定できます
+(multistream と projection の decoder は libopus と同じく 1 回の呼び出しで最大
+120 ms まで)。最初の packet を正常に decode する前と `Reset` 後は、PLC は zero
 concealment を返します。
 
 in-band FEC では、int16 用の `DecodeFECWithDuration`、または duration を明示する
@@ -196,8 +197,7 @@ go test -run='^$' -fuzz='^FuzzOggOpusReaderWriter$' -fuzztime=60s ./oggopus
 - Ogg Opus reader は chained logical stream に対応しますが multiplexed physical
   stream の demux はしません。各 Writer は 1 logical stream を出力します。
 - libopus のすべての single-stream / multistream CTL に公開 equivalent があるわけ
-  ではありません。`SetLSBDepth` は互換 hint として保持しますが、現在 codec 判断
-  には影響しません。
+  ではありません。
 
 ## 開発
 

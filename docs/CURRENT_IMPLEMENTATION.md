@@ -209,16 +209,18 @@ through `Encode24` and `Decode24`. Encoder and decoder phase-inversion controls
 are wired to CELT intensity-stereo processing.
 
 A stereo encoder can force a mono Opus stream; input is downmixed before a
-stateful mono codec instance. LSB depth is retained as the libopus-style input
-precision hint. Prediction disabling currently prevents predictive SILK and
-hybrid routing, keeping the stream on CELT.
+stateful mono codec instance. LSB depth bounds the input precision used by the
+CELT encoder and the tonality analysis, as in libopus. Prediction disabling
+follows libopus under `ModePolicyLibopus` (SILK codes every packet as the first
+after a reset and CELT runs without prediction); under `ModePolicyLegacy` it
+keeps the stream off the SILK and hybrid modes.
 
 Accepted sample rates are `8000`, `12000`, `16000`, `24000`, and `48000`.
 Accepted channel counts are mono and stereo.
 
-`SetBitrate` accepts numeric rates of at least 6000 bit/s as well as
-`BitrateAuto` and `BitrateMax`. Numeric requests above 750 kbit/s per channel
-are accepted and clamped at the CTL boundary; `EffectiveBitrate` then applies
+`SetBitrate` accepts positive numeric rates as well as `BitrateAuto` and
+`BitrateMax`. Numeric requests are clamped to [500, 750000 x channels] at the
+CTL boundary, as `OPUS_SET_BITRATE` does; `EffectiveBitrate` then applies
 the same RFC 1275-byte per-frame ceiling as `BitrateMax` (510 kbit/s for 20 ms
 and longer constituent frames, 1.02 Mbit/s for 10 ms). `Bitrate` returns the
 configured/clamped request or policy sentinel. The automatic policy follows
@@ -1093,8 +1095,8 @@ automatic mode / bandwidth / channel policy of libopus is ported as
 `SetModePolicy(ModePolicyLibopus)` (`TestAutoModeOracle`: VOIP/AUDIO ×
 voice/music/auto × mono/stereo × 12–128 kbps, 60/60 automatic-mode cells
 byte-identical, including a stereo input coded as a mono CELT or hybrid
-stream via `CELT_SET_CHANNELS` MDCT averaging and the SILK downmix); the
-default remains the Go policy. Mode transitions follow `opus_encode_native`
+stream via `CELT_SET_CHANNELS` MDCT averaging and the SILK downmix); it has
+been the default since v1.5.0. Mode transitions follow `opus_encode_native`
 under that policy (`TestAutoModeTransitionOracle`, 108 bitrate-schedule
 cells byte-identical): the deferred switch to CELT-only with a trailing
 redundant frame, the leading redundant frame plus SILK re-init and 10 ms
@@ -1477,8 +1479,9 @@ Notes:
 - `TestEncoderHybridSelectionBoundariesStrict` covers the initial hybrid
   selection boundary, including low-bandwidth auto fallback to CELT and forced
   bandwidth overriding a lower max-bandwidth cap.
-- The former `cmd_diag` duplicate-`main` build failure is fixed (the command
-  now lives at `cmd_diag/toccheck/main.go`).
+- The former `cmd_diag` duplicate-`main` build failure is fixed: the TOC
+  checker lives at `cmd_diag/toccheck/main.go`, and `cmd_diag/main.go` is the
+  only `main` package in `cmd_diag` itself.
 - Nightly fuzzing covers int16/float decoding, stateful decoder operation
   sequences, encoder setter/input operation sequences with adversarial PCM
   including non-finite float values, packet extensions, multistream

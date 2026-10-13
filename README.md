@@ -113,7 +113,8 @@ exceed it.
 
 `DecodePLC`, `DecodePLC24`, `DecodePLCFloat32`, and `DecodePLCFloat` conceal an
 explicit missing duration. The duration may be any positive 2.5 ms multiple
-through 120 ms. Before the first successfully decoded packet, and after
+(multistream and projection decoders conceal at most 120 ms per call, as in
+libopus). Before the first successfully decoded packet, and after
 `Reset`, PLC returns zero concealment.
 
 For in-band FEC, prefer `DecodeFECWithDuration` for int16 or the explicit-
@@ -216,8 +217,6 @@ go test -run='^$' -fuzz='^FuzzOggOpusReaderWriter$' -fuzztime=60s ./oggopus
 - The Ogg Opus reader supports chained logical streams but not multiplexed
   physical-stream demultiplexing. Each Writer emits one logical stream.
 - Not every libopus single-stream or multistream CTL has a public equivalent.
-  `SetLSBDepth` is retained as a compatibility hint but currently does not
-  affect codec decisions.
 
 ## Development
 

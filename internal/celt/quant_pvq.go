@@ -238,6 +238,13 @@ func extractCollapseMask(iy []int, n, b int) uint {
 
 func algUnquant(X []float64, n, k, spread, b int, dec *entcode.Decoder, gain float64) uint {
 	var iyBuf [maxPVQN]int
+	return algUnquantBuf(X, n, k, spread, b, dec, gain, &iyBuf)
+}
+
+// algUnquantBuf is algUnquant decoding the pulse vector into iyBuf (only
+// its first n entries are used, and cwrsi clears them), so a caller can
+// keep the buffer instead of zeroing a new one per band.
+func algUnquantBuf(X []float64, n, k, spread, b int, dec *entcode.Decoder, gain float64, iyBuf *[maxPVQN]int) uint {
 	var iy []int
 	if n <= maxPVQN {
 		iy = iyBuf[:n]
@@ -357,6 +364,7 @@ type bandCtx struct {
 	arch          int
 	disableInv    bool
 	avoidSplit    bool
+	qs            *quantAllBandsScratch
 }
 
 // tellFrac returns ec_tell_frac on whichever entropy coder is active.
@@ -784,7 +792,7 @@ func quantPartition(ctx *bandCtx, X []float64, n, b, B int, lowband []float64, l
 		if ctx.encode {
 			cm = algQuant(X, n, K, spread, B, ctx.enc, gain)
 		} else {
-			cm = algUnquant(X, n, K, spread, B, ctx.dec, gain)
+			cm = algUnquantBuf(X, n, K, spread, B, ctx.dec, gain, &ctx.qs.iy)
 		}
 	} else {
 		// fill the band with folded spectrum or noise
@@ -1106,6 +1114,8 @@ func quantAllBandsEncodeTrace(enc *entcode.Encoder, bandE []float64, start, end 
 type quantAllBandsScratch struct {
 	norm    []float64
 	scratch []float64
+	// iy is algUnquant's pulse vector.
+	iy [maxPVQN]int
 }
 
 // zeroedFloat64 returns *buf resized to n zeroed elements, keeping the
@@ -1159,6 +1169,7 @@ func quantAllBandsImpl(encode bool, enc *entcode.Encoder, dec *entcode.Decoder, 
 		seed:       seed,
 		disableInv: disableInv,
 		avoidSplit: B > 1,
+		qs:         qs,
 	}
 
 	lowbandOffset := 0

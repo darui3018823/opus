@@ -351,20 +351,28 @@ func PVQDecode(dec *entcode.Decoder, n, k int) []float64 {
 // U(n,k)=U(n-1,k)+U(n,k-1)+U(n-1,k-1). Values outside libopus's supported
 // uint32 codebooks saturate, while every supported table entry stays exact.
 func celtPVQU(n, k int) uint64 {
-	if n < 0 || k < 0 {
-		return 0
-	}
+	// Table path; negative arguments and pairs outside the table take
+	// celtPVQUSlow. The table also holds U(0,k) (1 for k == 0, else 0).
 	if n > k {
 		n, k = k, n
+	}
+	if uint(n) < pvqUTableSmall && uint(k) < pvqUTableLarge {
+		return uint64(pvqUTable[n][k])
+	}
+	return celtPVQUSlow(n, k)
+}
+
+// celtPVQUSlow is celtPVQU for negative arguments and for pairs outside
+// pvqUTable, memoised in uCache. It expects n <= k.
+func celtPVQUSlow(n, k int) uint64 {
+	if n < 0 || k < 0 {
+		return 0
 	}
 	if n == 0 {
 		if k == 0 {
 			return 1
 		}
 		return 0
-	}
-	if n < pvqUTableSmall && k < pvqUTableLarge {
-		return uint64(pvqUTable[n][k])
 	}
 	key := [2]int{n, k}
 	if cached, ok := uCache.Load(key); ok {
@@ -390,7 +398,7 @@ const (
 	pvqUTableLarge = 320
 )
 
-var pvqUTable = buildPVQUTable()
+var pvqUTable = *buildPVQUTable()
 
 func buildPVQUTable() *[pvqUTableSmall][pvqUTableLarge]uint32 {
 	t := new([pvqUTableSmall][pvqUTableLarge]uint32)

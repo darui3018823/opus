@@ -1,6 +1,9 @@
 package silk
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+)
 
 // This file is a bit-exact port of the libopus SILK sample-rate converter
 // (silk/resampler.c and friends).  It operates on int16 throughout, exactly as
@@ -112,6 +115,11 @@ type Resampler struct {
 	inputDelay        int
 	coefs             []int16
 	forEnc            bool
+
+	// Per-call work buffers. They hold nothing between calls, so a struct
+	// copy (CopyStateFrom) may share them.
+	iirBuf  []int16
+	downBuf []int32
 }
 
 // rateID maps [8000,12000,16000,24000,48000] to [0,1,2,3,4].
@@ -250,10 +258,15 @@ func (s *Resampler) CopyStateFrom(src *Resampler) {
 // Process resamples the int16 input and returns the int16 output, mirroring
 // silk_resampler() including the input-delay buffering across calls.
 func (s *Resampler) Process(in []int16) []int16 {
+	return s.ProcessAppend(nil, in)
+}
+
+// ProcessAppend is Process appending the output to dst.
+func (s *Resampler) ProcessAppend(dst, in []int16) []int16 {
 	inLen := len(in)
 	if inLen < s.fsInKHz {
 		// libopus asserts inLen >= Fs_in_kHz; be defensive instead.
-		return nil
+		return dst
 	}
 	nSamples := s.fsInKHz - s.inputDelay
 
@@ -267,7 +280,7 @@ func (s *Resampler) Process(in []int16) []int16 {
 	// kHz (inputDelay 4/7) the tail must be excluded or it is processed twice.
 	secondEnd := inLen - s.inputDelay
 
-	var out []int16
+	out := dst
 	switch s.resamplerFunction {
 	case useResamplerUp2HQ:
 		out = s.up2HQ(out, s.delayBuf[:s.fsInKHz])
@@ -290,9 +303,10 @@ func (s *Resampler) Process(in []int16) []int16 {
 
 // up2HQ appends 2*len(in) upsampled samples to out.
 func (s *Resampler) up2HQ(out []int16, in []int16) []int16 {
-	o := make([]int16, 2*len(in))
-	s.up2HQInternal(o, in)
-	return append(out, o...)
+	n := len(out)
+	out = slices.Grow(out, 2*len(in))[:n+2*len(in)]
+	s.up2HQInternal(out[n:n+2*len(in)], in)
+	return out
 }
 
 // up2HQInternal mirrors silk_resampler_private_up2_HQ writing into out[0:2*len(in)].
@@ -341,7 +355,11 @@ func (s *Resampler) up2HQInternal(out []int16, in []int16) {
 // iirFIR mirrors silk_resampler_private_IIR_FIR (2x upsample + FIR interpolation).
 func (s *Resampler) iirFIR(out []int16, in []int16) []int16 {
 	inLen := len(in)
-	buf := make([]int16, 2*s.batchSize+resamplerOrderFIR12)
+	if len(s.iirBuf) != 2*s.batchSize+resamplerOrderFIR12 {
+		s.iirBuf = make([]int16, 2*s.batchSize+resamplerOrderFIR12)
+	}
+	buf := s.iirBuf
+	clear(buf)
 	copy(buf[:resamplerOrderFIR12], s.sFIR16[:resamplerOrderFIR12])
 
 	idxInc := s.invRatioQ16
@@ -387,7 +405,11 @@ func iirFIRInterpol(out []int16, buf []int16, maxIndexQ16, idxInc int32) []int16
 // downFIR mirrors silk_resampler_private_down_FIR (AR2 filter + FIR interpolation).
 func (s *Resampler) downFIR(out []int16, in []int16) []int16 {
 	inLen := len(in)
-	buf := make([]int32, s.batchSize+s.firOrder)
+	if len(s.downBuf) != s.batchSize+s.firOrder {
+		s.downBuf = make([]int32, s.batchSize+s.firOrder)
+	}
+	buf := s.downBuf
+	clear(buf)
 	copy(buf[:s.firOrder], s.sFIR32[:s.firOrder])
 	firCoefs := s.coefs[2:]
 

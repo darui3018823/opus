@@ -3169,6 +3169,11 @@ type Decoder struct {
 	// (DecodeFloat copies its result out).
 	pcmScratch      []float64
 	softclipScratch []float32
+	// SILK resampling scratch: resampleSILK returns silkResampled, valid
+	// until its next call.
+	silkLin, silkRin   []int16
+	silkOutL, silkOutR []int16
+	silkResampled      []float64
 
 	// SILK decoders indexed by [rateIdx 0-2][chIdx 0=mono,1=stereo].
 	// rateIdx: 0=8kHz, 1=12kHz, 2=16kHz
@@ -4819,23 +4824,24 @@ func (d *Decoder) resampleSILK(pcm []float64, nFrames, pktChannels int, stereoTo
 		if perChanFrameLen < 1 {
 			return adjustChannels(pcm, pktChannels, d.channels)
 		}
-		lin := make([]int16, perChanFrameLen)
-		rin := make([]int16, perChanFrameLen)
-		estCap := (len(pcm) / 2) * 6
-		outL := make([]int16, 0, estCap)
-		outR := make([]int16, 0, estCap)
+		d.silkLin = growInt16(d.silkLin, perChanFrameLen)
+		d.silkRin = growInt16(d.silkRin, perChanFrameLen)
+		lin, rin := d.silkLin, d.silkRin
+		outL, outR := d.silkOutL[:0], d.silkOutR[:0]
 		for f := 0; f < nFrames; f++ {
 			base := f * perChanFrameLen * 2
 			for i := 0; i < perChanFrameLen; i++ {
 				lin[i] = f64ToI16(pcm[base+i*2])
 				rin[i] = f64ToI16(pcm[base+i*2+1])
 			}
-			outL = append(outL, rs0.Process(lin)...)
+			outL = rs0.ProcessAppend(outL, lin)
 			if rs1 != nil {
-				outR = append(outR, rs1.Process(rin)...)
+				outR = rs1.ProcessAppend(outR, rin)
 			}
 		}
-		return interleaveSILKOut(outL, outR, d.channels)
+		d.silkOutL, d.silkOutR = outL, outR
+		d.silkResampled = interleaveSILKOutInto(d.silkResampled, outL, outR, d.channels)
+		return d.silkResampled
 	}
 
 	// Internal mono: channel 0 carries the sMid 1-sample delay.
@@ -4843,13 +4849,9 @@ func (d *Decoder) resampleSILK(pcm []float64, nFrames, pktChannels int, stereoTo
 	if frameLen < 1 {
 		return adjustChannels(pcm, pktChannels, d.channels)
 	}
-	rin := make([]int16, frameLen)
-	estCap := len(pcm) * 6
-	outL := make([]int16, 0, estCap)
-	var outR []int16
-	if d.channels == 2 {
-		outR = make([]int16, 0, estCap)
-	}
+	d.silkRin = growInt16(d.silkRin, frameLen)
+	rin := d.silkRin
+	outL, outR := d.silkOutL[:0], d.silkOutR[:0]
 	for f := 0; f < nFrames; f++ {
 		chunk := pcm[f*frameLen : (f+1)*frameLen]
 		rin[0] = d.silkSMid[1]
@@ -4860,19 +4862,22 @@ func (d *Decoder) resampleSILK(pcm []float64, nFrames, pktChannels int, stereoTo
 			d.silkSMid[0] = f64ToI16(chunk[frameLen-2])
 		}
 		d.silkSMid[1] = f64ToI16(chunk[frameLen-1])
-		lout := rs0.Process(rin)
-		outL = append(outL, lout...)
+		n0 := len(outL)
+		outL = rs0.ProcessAppend(outL, rin)
+		lout := outL[n0:]
 		if d.channels == 2 {
 			// Only the very first SILK frame after a stereo->mono transition
 			// resamples the right channel separately; otherwise duplicate L.
 			if stereoToMono && f == 0 && rs1 != nil {
-				outR = append(outR, rs1.Process(rin)...)
+				outR = rs1.ProcessAppend(outR, rin)
 			} else {
 				outR = append(outR, lout...)
 			}
 		}
 	}
-	return interleaveSILKOut(outL, outR, d.channels)
+	d.silkOutL, d.silkOutR = outL, outR
+	d.silkResampled = interleaveSILKOutInto(d.silkResampled, outL, outR, d.channels)
+	return d.silkResampled
 }
 
 // celtSilenceFade is opus_decode_frame's hybrid -> SILK fade-out: a 2.5 ms
@@ -5008,8 +5013,13 @@ func f64ToI16(x float64) int16 {
 // For mono output it returns L only; for stereo it interleaves L/R, duplicating
 // L when R is missing or length-mismatched.
 func interleaveSILKOut(l, r []int16, channels int) []float64 {
+	return interleaveSILKOutInto(nil, l, r, channels)
+}
+
+// interleaveSILKOutInto is interleaveSILKOut reusing dst's capacity.
+func interleaveSILKOutInto(dst []float64, l, r []int16, channels int) []float64 {
 	if channels < 2 {
-		out := make([]float64, len(l))
+		out := growFloat64s(dst, len(l))
 		for i, v := range l {
 			out[i] = float64(v) / 32768.0
 		}
@@ -5018,7 +5028,7 @@ func interleaveSILKOut(l, r []int16, channels int) []float64 {
 	if len(r) != len(l) {
 		r = l
 	}
-	out := make([]float64, len(l)*2)
+	out := growFloat64s(dst, len(l)*2)
 	for i := range l {
 		out[i*2] = float64(l[i]) / 32768.0
 		out[i*2+1] = float64(r[i]) / 32768.0
@@ -5752,4 +5762,21 @@ func (d *Decoder) SetPhaseInversionDisabled(disabled bool) {
 // PhaseInversionDisabled reports the decoder phase-inversion setting.
 func (d *Decoder) PhaseInversionDisabled() bool {
 	return d.phaseInversionDisabled
+}
+
+// growFloat64s returns buf resized to n elements, reallocating only when its
+// capacity is too small. The contents are not cleared.
+func growFloat64s(buf []float64, n int) []float64 {
+	if cap(buf) < n {
+		return make([]float64, n)
+	}
+	return buf[:n]
+}
+
+// growInt16 is growFloat64s for int16 buffers.
+func growInt16(buf []int16, n int) []int16 {
+	if cap(buf) < n {
+		return make([]int16, n)
+	}
+	return buf[:n]
 }

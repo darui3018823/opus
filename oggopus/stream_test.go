@@ -319,3 +319,28 @@ func TestOggOpusReaderRejectsMultiPageEOSBeforePreSkip(t *testing.T) {
 		t.Fatalf("error = %v, want ErrInvalidOpusStream", err)
 	}
 }
+
+func TestOggOpusCloseWithoutAudioFails(t *testing.T) {
+	var stream bytes.Buffer
+	writer, err := NewWriter(&stream, 4, Head{Version: 1, Channels: 1, PreSkip: 312, InputSampleRate: 48000}, Tags{Vendor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := stream.Len()
+	if err := writer.Close(); !errors.Is(err, ErrInvalidOpusStream) {
+		t.Fatalf("Close error = %v, want ErrInvalidOpusStream", err)
+	}
+	if stream.Len() != headers {
+		t.Fatalf("Close wrote %d bytes after the headers", stream.Len()-headers)
+	}
+	// The writer is still usable.
+	if err := writer.WritePacket([]byte{0xf8, 0xff, 0xfe}, PacketWriteOptions{GranulePosition: 960}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewReader(bytes.NewReader(stream.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+}

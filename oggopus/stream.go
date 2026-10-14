@@ -342,6 +342,9 @@ func (r *Reader) packetDuration(data []byte) (int, error) {
 type Writer struct {
 	packets *PacketWriter
 	head    Head
+	// wroteAudio is set once an audio packet has been written; RFC 7845
+	// streams need at least one.
+	wroteAudio bool
 }
 
 // NewWriter validates and writes the mandatory headers. The ID header is
@@ -375,7 +378,15 @@ func (w *Writer) WritePacket(data []byte, options PacketWriteOptions) error {
 	if len(data) == 0 {
 		return fmt.Errorf("%w: zero-length audio packet", ErrInvalidOpusStream)
 	}
-	return w.packets.WritePacket(data, options)
+	return w.writeAudio(data, options)
+}
+
+func (w *Writer) writeAudio(data []byte, options PacketWriteOptions) error {
+	if err := w.packets.WritePacket(data, options); err != nil {
+		return err
+	}
+	w.wroteAudio = true
+	return nil
 }
 
 // WriteValidatedPacket validates one complete Opus packet against this
@@ -399,12 +410,19 @@ func (w *Writer) WriteValidatedPacket(data []byte, options PacketWriteOptions) e
 	if err != nil {
 		return fmt.Errorf("%w: packet framing: %v", ErrInvalidOpusStream, err)
 	}
-	return w.packets.WritePacket(data, options)
+	return w.writeAudio(data, options)
 }
 
 // Flush finishes the buffered audio page without ending the logical stream.
 func (w *Writer) Flush() error { return w.packets.Flush() }
 
 // Close writes an EOS page when needed. It is idempotent after success and
-// does not close the underlying writer.
-func (w *Writer) Close() error { return w.packets.Close() }
+// does not close the underlying writer. Closing before any audio packet was
+// written returns ErrInvalidOpusStream and writes nothing, since an Ogg Opus
+// stream needs at least one audio packet.
+func (w *Writer) Close() error {
+	if !w.wroteAudio {
+		return fmt.Errorf("%w: no audio packet written", ErrInvalidOpusStream)
+	}
+	return w.packets.Close()
+}

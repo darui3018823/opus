@@ -143,28 +143,6 @@ func (bp *BandProcessor) DecodeBandCoeffs(dec *entcode.Decoder, bandIdx int, pul
 	copy(band.Coeffs, output)
 }
 
-// ApplyFineEnergy applies fine energy refinement from the end of the packet.
-// q2 is the raw decoded value in [0, 2^fb); fb is the number of fine bits.
-// Offset = (q2+0.5)/2^fb - 0.5 in log2-amplitude; applied as band.Energy *= 4^offset.
-func (bp *BandProcessor) ApplyFineEnergy(bandIdx, q2, fb int) {
-	if bandIdx < 0 || bandIdx >= len(bp.bands) || fb <= 0 {
-		return
-	}
-	band := bp.bands[bandIdx]
-	offset := (float64(q2)+0.5)/float64(int(1)<<fb) - 0.5
-	band.Energy *= math.Exp2(2.0 * offset)
-}
-
-// ApplyFinalFineEnergy applies the one-bit final energy refinement pass.
-func (bp *BandProcessor) ApplyFinalFineEnergy(bandIdx, q2, fb int) {
-	if bandIdx < 0 || bandIdx >= len(bp.bands) || fb < 0 || fb >= MaxFineEnergy {
-		return
-	}
-	band := bp.bands[bandIdx]
-	offset := float64((float64(q2) - 0.5) * math.Exp2(float64(-fb-1)))
-	band.Energy *= math.Exp2(float64(2.0 * offset))
-}
-
 // ComputeBandEnergy computes the energy of a band from coefficients
 func ComputeBandEnergy(coeffs []float64) float64 {
 	energy := 0.0

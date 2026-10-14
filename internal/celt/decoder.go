@@ -792,7 +792,6 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 		}
 		for c := 0; c < ch; c++ {
 			q2 := int(dec.DecodeBits(uint(fb)))
-			d.bandProcs[c].ApplyFineEnergy(i, q2, fb)
 			offset := float32(float32((float32(q2)+0.5)*float32(int(1)<<uint(14-fb)))*(1.0/16384.0)) - 0.5
 			idx := c*numBands + i
 			quantLogE[idx] = float64(float32(quantLogE[idx]) + offset)
@@ -833,7 +832,6 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 			}
 			for c := 0; c < ch; c++ {
 				q2 := int(dec.DecodeBits(1))
-				d.bandProcs[c].ApplyFinalFineEnergy(i, q2, eBits[i])
 				offset := float32(float32((float32(q2)-0.5)*float32(int(1)<<uint(14-eBits[i]-1))) * (1.0 / 16384.0))
 				idx := c*numBands + i
 				quantLogE[idx] = float64(float32(quantLogE[idx]) + offset)

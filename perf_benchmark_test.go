@@ -97,6 +97,8 @@ func benchmarkPerfLongEncode(b *testing.B, wl perfWorkload) {
 
 func TestPerfPredictivePacketRegression(t *testing.T) {
 	want := map[string]string{
+		"celt/mono/48k/20ms":     "eff84d0ddf84d8d2f24727c25fa55883f984f1076042563b45fc554e81eb26c4",
+		"celt/stereo/48k/20ms":   "16a8defe6e68b3c2354b74343e2782dd683530a210c131e9dcca93692322fe47",
 		"silk/mono/48k/20ms":     "6934dcf095c2138cd31d0049fcda44c74b4d0775657b9a55c664280206535b4e",
 		"silk/stereo/48k/20ms":   "5e6879700c6c343e1197884a7438bb18a4da363c431c5665f9d458f3fbba1cf8",
 		"hybrid/mono/48k/20ms":   "f21a316966521d7d10b56d6bda10fc3ffcc11f458d303416961fb95b19930421",
@@ -104,9 +106,6 @@ func TestPerfPredictivePacketRegression(t *testing.T) {
 	}
 	for _, wl := range perfWorkloads() {
 		wantDigest, ok := want[wl.name]
-		if !ok {
-			continue
-		}
 		enc := newPerfEncoder(t, wl)
 		frames := perfInputFrames(wl)
 		h := sha256.New()
@@ -123,7 +122,9 @@ func TestPerfPredictivePacketRegression(t *testing.T) {
 			h.Write(word[:])
 		}
 		got := fmt.Sprintf("%x", h.Sum(nil))
-		if got != wantDigest {
+		if !ok {
+			t.Errorf("%s: no golden digest (got %s)", wl.name, got)
+		} else if got != wantDigest {
 			t.Errorf("%s digest = %s, want %s", wl.name, got, wantDigest)
 		}
 	}

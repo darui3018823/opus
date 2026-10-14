@@ -78,6 +78,12 @@ func (bp *BandProcessor) DenormalizeBands() {
 
 // AssembleMDCT assembles band coefficients into full MDCT spectrum
 func (bp *BandProcessor) AssembleMDCT() []float64 {
+	return bp.AssembleMDCTInto(nil)
+}
+
+// AssembleMDCTInto is AssembleMDCT writing into dst, which is grown when it
+// is shorter than the spectrum. It returns the assembled slice.
+func (bp *BandProcessor) AssembleMDCTInto(dst []float64) []float64 {
 	// libopus keeps a full N-coefficient spectrum and clears the uncoded tail
 	// above the final energy band. Starting at FrameSize preserves those zeros
 	// instead of returning only M*eBands[end] coefficients.
@@ -85,8 +91,8 @@ func (bp *BandProcessor) AssembleMDCT() []float64 {
 	for _, band := range bp.bands {
 		totalCoeffs = max(totalCoeffs, band.Start+band.Size)
 	}
-
-	mdct := make([]float64, totalCoeffs)
+	mdct := growFloat64(dst, totalCoeffs)
+	clear(mdct)
 
 	// Copy band coefficients to MDCT spectrum
 	for _, band := range bp.bands {

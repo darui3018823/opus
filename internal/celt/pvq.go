@@ -421,7 +421,17 @@ func buildPVQUTable() *[pvqUTableSmall][pvqUTableLarge]uint32 {
 // libopus codebook order is defined in terms of U(N,K), so the exact same
 // branch structure is used here.
 func cwrsiLibopus(n, k int, index uint32) []int {
-	y := make([]int, n)
+	return cwrsiLibopusInto(make([]int, n), n, k, index)
+}
+
+// maxPVQN is the widest CELT band (eBands[21]-eBands[20] bins at LM=3), the
+// largest vector cwrsi and the Hadamard reorders handle in practice.
+const maxPVQN = 176
+
+// cwrsiLibopusInto is cwrsiLibopus writing the n-entry pulse vector into y.
+func cwrsiLibopusInto(y []int, n, k int, index uint32) []int {
+	y = y[:n]
+	clear(y)
 	i := uint64(index)
 	pos := 0
 	for n > 2 {

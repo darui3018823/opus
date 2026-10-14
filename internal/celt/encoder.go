@@ -185,6 +185,8 @@ func appendTraceRows(dst [][]float64, rows [][]float64) [][]float64 {
 }
 
 type Encoder struct {
+	// qab is the quant_all_bands scratch reused between frames.
+	qab         quantAllBandsScratch
 	lastTrace   FrameTrace
 	traceCoeffs [][]float64
 	// frame is the per-frame work storage of encodeRange, reused between
@@ -1389,7 +1391,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	bandTells := e.bandTellScratch[:0]
 	e.foldSeed = quantAllBandsEncodeTrace(enc, bandE, start, end, X[:frameLen], Y, collapse,
 		pulses, isTransient, spread, dualStereo, intensity, tfRes,
-		totalBitsQ3, balance, lm, codedBands, e.foldSeed, e.disableInv, e.complexity, &bandTells)
+		totalBitsQ3, balance, lm, codedBands, e.foldSeed, e.disableInv, e.complexity, &bandTells, &e.qab)
 	e.bandTellScratch = bandTells
 	e.lastTrace.BandTellFrac = bandTells
 

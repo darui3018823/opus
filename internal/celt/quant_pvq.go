@@ -125,6 +125,13 @@ func cacheSlice(lm, band int) []uint8 {
 // ---- vq.c (float) ----
 
 func decodePulses(dec *entcode.Decoder, n, k int) ([]int, float64) {
+	iy := make([]int, n)
+	return iy, decodePulsesInto(iy, dec, n, k)
+}
+
+// decodePulsesInto is decodePulses writing the pulse vector into iy (length
+// n) and returning its energy.
+func decodePulsesInto(iy []int, dec *entcode.Decoder, n, k int) float64 {
 	v := cwrsV(n, k)
 	ft := uint32(v)
 	if v > uint64(0xFFFFFFFF) {
@@ -140,12 +147,12 @@ func decodePulses(dec *entcode.Decoder, n, k int) ([]int, float64) {
 	if qabDebug {
 		qabDP = append(qabDP, [8]uint64{uint64(n), uint64(k), v, uint64(idx), uint64(db), uint64(dec.GetDif()), uint64(tb), uint64(dec.TellFrac())})
 	}
-	iy := cwrsiLibopus(n, k, idx)
+	cwrsiLibopusInto(iy, n, k, idx)
 	ryy := 0.0
 	for _, y := range iy {
 		ryy += float64(y * y)
 	}
-	return iy, ryy
+	return ryy
 }
 
 func normaliseResidual(iy []int, X []float64, n int, ryy, gain float64) {
@@ -230,7 +237,14 @@ func extractCollapseMask(iy []int, n, b int) uint {
 }
 
 func algUnquant(X []float64, n, k, spread, b int, dec *entcode.Decoder, gain float64) uint {
-	iy, ryy := decodePulses(dec, n, k)
+	var iyBuf [maxPVQN]int
+	var iy []int
+	if n <= maxPVQN {
+		iy = iyBuf[:n]
+	} else {
+		iy = make([]int, n)
+	}
+	ryy := decodePulsesInto(iy, dec, n, k)
 	normaliseResidual(iy, X, n, ryy, gain)
 	expRotation(X, n, -1, b, k, spread)
 	return extractCollapseMask(iy, n, b)
@@ -274,7 +288,13 @@ var orderyTable = []int{
 
 func deinterleaveHadamard(X []float64, n0, stride, hadamard int) {
 	n := n0 * stride
-	tmp := make([]float64, n)
+	var tmpBuf [maxPVQN]float64
+	var tmp []float64
+	if n <= maxPVQN {
+		tmp = tmpBuf[:n]
+	} else {
+		tmp = make([]float64, n)
+	}
 	if hadamard != 0 {
 		ordery := orderyTable[stride-2:]
 		for i := 0; i < stride; i++ {
@@ -294,7 +314,13 @@ func deinterleaveHadamard(X []float64, n0, stride, hadamard int) {
 
 func interleaveHadamard(X []float64, n0, stride, hadamard int) {
 	n := n0 * stride
-	tmp := make([]float64, n)
+	var tmpBuf [maxPVQN]float64
+	var tmp []float64
+	if n <= maxPVQN {
+		tmp = tmpBuf[:n]
+	} else {
+		tmp = make([]float64, n)
+	}
 	if hadamard != 0 {
 		ordery := orderyTable[stride-2:]
 		for i := 0; i < stride; i++ {
@@ -1059,7 +1085,7 @@ func QuantAllBands(dec *entcode.Decoder, start, end int, X, Y []float64,
 	seed uint32, disableInv bool) uint32 {
 	return quantAllBandsImpl(false, nil, dec, nil, start, end, X, Y,
 		collapseMasks, pulses, shortBlocks, spread, dualStereo, intensity, tfRes,
-		totalBitsQ3, balance, lm, codedBands, seed, disableInv, 0, nil)
+		totalBitsQ3, balance, lm, codedBands, seed, disableInv, 0, nil, nil)
 }
 
 // quantAllBandsEncodeTrace is QuantAllBandsEncode that also appends
@@ -1069,17 +1095,32 @@ func QuantAllBands(dec *entcode.Decoder, start, end int, X, Y []float64,
 func quantAllBandsEncodeTrace(enc *entcode.Encoder, bandE []float64, start, end int, X, Y []float64,
 	collapseMasks []byte, pulses []int, shortBlocks bool, spread int,
 	dualStereo bool, intensity int, tfRes []int, totalBitsQ3, balance, lm, codedBands int,
-	seed uint32, disableInv bool, complexity int, bandTells *[]int) uint32 {
+	seed uint32, disableInv bool, complexity int, bandTells *[]int, qs *quantAllBandsScratch) uint32 {
 	return quantAllBandsImpl(true, enc, nil, bandE, start, end, X, Y,
 		collapseMasks, pulses, shortBlocks, spread, dualStereo, intensity, tfRes,
-		totalBitsQ3, balance, lm, codedBands, seed, disableInv, complexity, bandTells)
+		totalBitsQ3, balance, lm, codedBands, seed, disableInv, complexity, bandTells, qs)
+}
+
+// quantAllBandsScratch holds the norm and fold scratch of quant_all_bands
+// between frames. A nil scratch allocates per call.
+type quantAllBandsScratch struct {
+	norm    []float64
+	scratch []float64
+}
+
+// zeroedFloat64 returns *buf resized to n zeroed elements, keeping the
+// backing array for the next call.
+func zeroedFloat64(buf *[]float64, n int) []float64 {
+	*buf = growFloat64(*buf, n)
+	clear(*buf)
+	return *buf
 }
 
 func quantAllBandsImpl(encode bool, enc *entcode.Encoder, dec *entcode.Decoder, bandE []float64,
 	start, end int, X, Y []float64,
 	collapseMasks []byte, pulses []int, shortBlocks bool, spread int,
 	dualStereo bool, intensity int, tfRes []int, totalBitsQ3, balance, lm, codedBands int,
-	seed uint32, disableInv bool, complexity int, bandTells *[]int) uint32 {
+	seed uint32, disableInv bool, complexity int, bandTells *[]int, qs *quantAllBandsScratch) uint32 {
 	// theta_rdo: at complexity >= 8 the stereo encoder codes each joint band
 	// twice (theta rounded down and up) and keeps the better reconstruction.
 	thetaRdo := encode && Y != nil && !dualStereo && complexity >= 8
@@ -1100,8 +1141,11 @@ func quantAllBandsImpl(encode bool, enc *entcode.Encoder, dec *entcode.Decoder, 
 	if normLen < 0 {
 		normLen = 0
 	}
-	norm := make([]float64, C*normLen)
-	scratch := make([]float64, M*int(eBands[nbEBands]))
+	if qs == nil {
+		qs = new(quantAllBandsScratch)
+	}
+	norm := zeroedFloat64(&qs.norm, C*normLen)
+	scratch := zeroedFloat64(&qs.scratch, M*int(eBands[nbEBands]))
 
 	ctx := &bandCtx{
 		i:          start,

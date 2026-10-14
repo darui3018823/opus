@@ -37,6 +37,10 @@ type Decoder struct {
 	subTail   []float64
 	subCoeffs []float64
 	outBuf    []float64
+	mdctBuf   [2][]float64
+	bandX     []float64
+	collapse  []byte
+	qab       quantAllBandsScratch
 
 	// Decoder energy state in libopus' mean-subtracted log2-amplitude domain.
 	// prevEnergies is oldBandE (used by coarse-energy prediction); prevLogE and
@@ -390,12 +394,14 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	mdctCoeffsPerCh := mdctCoeffsArr[:ch]
 	for c := 0; c < ch; c++ {
 		d.bandProcs[c].DenormalizeBands()
-		coeffs := d.bandProcs[c].AssembleMDCT()
+		d.mdctBuf[c] = d.bandProcs[c].AssembleMDCTInto(d.mdctBuf[c])
+		coeffs := d.mdctBuf[c]
 		if len(coeffs) > frameSize {
 			coeffs = coeffs[:frameSize]
 		} else if len(coeffs) < frameSize {
 			ext := make([]float64, frameSize)
 			copy(ext, coeffs)
+			d.mdctBuf[c] = ext
 			coeffs = ext
 		}
 		if d.coefficientStageHook != nil {
@@ -663,6 +669,11 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 		return
 	}
 	*d = *src
+	// Scratch buffers must not be shared with src.
+	d.synthBuf, d.synthCopy, d.subTail, d.subCoeffs, d.outBuf = nil, nil, nil, nil, nil
+	d.mdctBuf = [2][]float64{}
+	d.bandX, d.collapse = nil, nil
+	d.qab = quantAllBandsScratch{}
 	for ch, proc := range src.bandProcs {
 		if proc == nil {
 			d.bandProcs[ch] = nil
@@ -789,16 +800,20 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	// quant_all_bands: decode all PVQ bands into the interleaved normalised MDCT X[].
 	M := 1 << uint(lm)
 	frameLen := M * int(EBands48000[numBands])
-	X := make([]float64, ch*frameLen)
+	X := zeroedFloat64(&d.bandX, ch*frameLen)
 	var Y []float64
 	if ch == 2 {
 		Y = X[frameLen:]
 	}
-	collapse := make([]byte, numBands*ch)
+	if cap(d.collapse) < numBands*ch {
+		d.collapse = make([]byte, numBands*ch)
+	}
+	collapse := d.collapse[:numBands*ch]
+	clear(collapse)
 	totalBitsQ3 := lenBytes*8<<3 - antiCollapseRsv
-	seed := QuantAllBands(dec, start, end, X[:frameLen], Y, collapse, pulses, isTransient,
-		spread, dualStereo, intensity, tfRes, totalBitsQ3, balance, lm, codedBands,
-		d.lastFinalRange, d.disableInv)
+	seed := quantAllBandsImpl(false, nil, dec, nil, start, end, X[:frameLen], Y,
+		collapse, pulses, isTransient, spread, dualStereo, intensity, tfRes,
+		totalBitsQ3, balance, lm, codedBands, d.lastFinalRange, d.disableInv, 0, nil, &d.qab)
 
 	// Anti-collapse bit — RAW bit (ec_dec_bits), read AFTER PVQ. Does not affect rng.
 	antiCollapseOn := false

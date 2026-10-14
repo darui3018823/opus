@@ -3377,13 +3377,13 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
 	}
 
-	floatPCM, err := d.decodeSoftClipped(data)
+	clipped, err := d.decodeSoftClipped32(data)
 	if err != nil {
 		return 0, err
 	}
 
-	n := len(floatPCM)
-	floatToInt16(pcm[:n], floatPCM)
+	n := len(clipped)
+	float32ToInt16(pcm[:n], clipped)
 
 	samplesPerChannel := n / d.channels
 	return samplesPerChannel, nil
@@ -3892,6 +3892,25 @@ func (d *Decoder) decodeSoftClipped(data []byte) ([]float64, error) {
 		return nil, err
 	}
 	return d.finishOutput(pcm, true), nil
+}
+
+// decodeSoftClipped32 is decodeSoftClipped returning the soft-clipped float32
+// samples (decoder scratch, valid until the next call) without converting
+// them back to float64.
+func (d *Decoder) decodeSoftClipped32(data []byte) ([]float32, error) {
+	pcm, err := d.decodePacketFloat(data)
+	if err != nil {
+		return nil, err
+	}
+	if cap(d.softclipScratch) < len(pcm) {
+		d.softclipScratch = make([]float32, len(pcm))
+	}
+	f := d.softclipScratch[:len(pcm)]
+	for i, v := range pcm {
+		f[i] = float32(v)
+	}
+	_ = SoftClipFloat32(f, d.channels, d.softclipMem[:d.channels])
+	return f, nil
 }
 
 // finishOutput ends a successful opus_decode_native call. The int16 API of a
@@ -5290,6 +5309,27 @@ func floatToInt24(dst []int32, src []float64) {
 	for i, sample := range src {
 		dst[i] = res2Int24(sample)
 	}
+}
+
+// float32ToInt16 is floatToInt16 for float32 samples; float32(float64(v))
+// is exact, so both give the same result.
+func float32ToInt16(dst []int16, src []float32) {
+	dst = dst[:len(src)]
+	for i, v := range src {
+		dst[i] = libopusFloat32ToInt16(v)
+	}
+}
+
+// libopusFloat32ToInt16 is libopusFloatToInt16 for a float32 sample.
+func libopusFloat32ToInt16(sample float32) int16 {
+	scaled := sample * float32(32768)
+	if !(scaled > -32768) {
+		scaled = -32768
+	}
+	if !(scaled < 32767) {
+		scaled = 32767
+	}
+	return int16(math.RoundToEven(float64(scaled)))
 }
 
 func floatToInt16(dst []int16, src []float64) {

@@ -19,6 +19,19 @@ type CELTMode struct {
 	bwdZ   []Complex
 	bwdIn  []opusComplex
 	bwdBuf []float64
+	// trig caches libopusMDCTTwiddle(N, i) for i < N.
+	trig []float32
+}
+
+// twiddles returns the mode's MDCT twiddles, libopusMDCTTwiddle(N, i).
+func (m *CELTMode) twiddles() []float32 {
+	if len(m.trig) != m.N {
+		m.trig = make([]float32, m.N)
+		for i := range m.trig {
+			m.trig[i] = libopusMDCTTwiddle(m.N, i)
+		}
+	}
+	return m.trig
 }
 
 // NewCELTMode creates a CELT mode.  window is the overlap-region window (length = overlap).
@@ -77,6 +90,15 @@ func (m *CELTMode) IMDCTRaw(X []float64) []float64 {
 // imdctRawInto is IMDCTRaw writing the N raw samples into buf. The FFT
 // scratch belongs to the mode.
 func (m *CELTMode) imdctRawInto(X []float64, buf []float64) []float64 {
+	if opusFFTPlanIndex(m.N/2) >= 0 {
+		return m.imdctRawStatic(X, buf)
+	}
+	return m.imdctRawGeneric(X, buf)
+}
+
+// imdctRawGeneric is the reference imdctRawInto through the Complex FFT
+// interface; it also serves sizes without a static FFT plan.
+func (m *CELTMode) imdctRawGeneric(X []float64, buf []float64) []float64 {
 	N := m.N
 	N2 := N
 	N4 := N / 2
@@ -129,6 +151,64 @@ func (m *CELTMode) imdctRawInto(X []float64, buf []float64) []float64 {
 	return buf
 }
 
+// imdctRawStatic is imdctRawInto for the static-mode FFT sizes. It performs
+// the same float32 operations in the same order, but writes the pre-rotation
+// straight into the FFT's bit-reversed float32 buffer and post-rotates from
+// it: the float64 round trips of the generic path are exact, so the output is
+// identical.
+func (m *CELTMode) imdctRawStatic(X []float64, buf []float64) []float64 {
+	N := m.N
+	N2 := N
+	N4 := N / 2
+	trig := m.twiddles()
+	plan := getOpusFFTPlan(N4)
+	if len(m.bwdIn) != N4 {
+		m.bwdIn = make([]opusComplex, N4)
+	}
+	fout := m.bwdIn
+	bitrev := plan.bitrev[:N4]
+	X = X[:N2]
+	for i := 0; i < N4; i++ {
+		xp1 := float32(X[2*i])
+		xp2 := float32(X[N2-1-2*i])
+		t0 := trig[i]
+		t1 := trig[N4+i]
+		yr := float32(xp2*t0) + float32(xp1*t1)
+		yi := float32(xp1*t0) - float32(xp2*t1)
+		fout[bitrev[i]] = opusComplex{r: yi, i: yr}
+	}
+	plan.transform(fout)
+
+	// fout[k] holds the pair buf[2k], buf[2k+1] of the generic path; every
+	// pair is read before the rotation below overwrites it.
+	buf = buf[:N2]
+	for i := 0; i < (N4+1)/2; i++ {
+		yp0 := 2 * i
+		yp1 := N2 - 2 - 2*i
+		k1 := N4 - 1 - i
+
+		re := fout[i].i
+		im := fout[i].r
+		t0 := trig[i]
+		t1 := trig[N4+i]
+		yr := float32(re*t0) + float32(im*t1)
+		yi := float32(re*t1) - float32(im*t0)
+
+		re = fout[k1].i
+		im = fout[k1].r
+		buf[yp0] = float64(yr)
+		buf[yp1+1] = float64(yi)
+
+		t0 = trig[N4-i-1]
+		t1 = trig[N2-i-1]
+		yr = float32(re*t0) + float32(im*t1)
+		yi = float32(re*t1) - float32(im*t0)
+		buf[yp1] = float64(yr)
+		buf[yp0+1] = float64(yi)
+	}
+	return buf
+}
+
 func libopusMDCTTwiddle(n, index int) float32 {
 	offset := 0
 	switch n {
@@ -165,6 +245,14 @@ func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
 // CLTMDCTForwardInto is CLTMDCTForward writing the N coefficients into dst,
 // which must not alias in. It returns dst[:N].
 func (m *CELTMode) CLTMDCTForwardInto(in []float64, dst []float64) []float64 {
+	return m.cltMDCTForward(in, dst, opusFFTPlanIndex(m.N/2) >= 0)
+}
+
+// cltMDCTForward is CLTMDCTForwardInto. With static set (a static-mode FFT
+// size), the pre-rotation goes straight into the FFT's bit-reversed float32
+// buffer and the post-rotation reads it back; the generic path's float64
+// round trips are exact, so both give identical coefficients.
+func (m *CELTMode) cltMDCTForward(in []float64, dst []float64, static bool) []float64 {
 	N := m.N        // libopus N2 (e.g. 960)
 	N2 := N         // 960
 	N4 := N / 2     // 480
@@ -221,6 +309,37 @@ func (m *CELTMode) CLTMDCTForwardInto(in []float64, dst []float64) []float64 {
 		xp2 -= 2
 		wp1 += 2
 		wp2 -= 2
+	}
+
+	if static {
+		trig := m.twiddles()
+		plan := getOpusFFTPlan(N4)
+		fout := m.fwdIn
+		bitrev := plan.bitrev[:N4]
+		// Pre-rotation (float build: scale before the FFT).
+		for i := 0; i < N4; i++ {
+			t0 := trig[i]
+			t1 := trig[N4+i]
+			re := f[2*i]
+			im := f[2*i+1]
+			yr := float32(re*t0) - float32(im*t1)
+			yi := float32(im*t0) + float32(re*t1)
+			fout[bitrev[i]] = opusComplex{r: yr * scale, i: yi * scale}
+		}
+		plan.transform(fout)
+		// Post-rotation (stride=1): out[2i]=yr from the low end, out[N2-1-2i]=yi.
+		out := dst[:N2]
+		for i := 0; i < N4; i++ {
+			t0 := trig[i]
+			t1 := trig[N4+i]
+			fr := fout[i].r
+			fi := fout[i].i
+			yr := float32(fi*t1) - float32(fr*t0)
+			yi := float32(fr*t1) + float32(fi*t0)
+			out[2*i] = float64(yr)
+			out[N2-1-2*i] = float64(yi)
+		}
+		return out
 	}
 
 	// Pre-rotation (float build: scale before the FFT).

@@ -202,13 +202,16 @@ type Decoder struct {
 	subfrmLen  int // subframe length
 
 	// Decoder state (persists across frames)
-	prevNLSFQ15    []int16 // previous NLSF in Q15
-	lagPrev        int     // previous pitch lag
-	prevLagIndex   int     // previous entropy-coded pitch lag index
-	prevGainQ16    int32   // previous gain (Q16) for delta coding
-	prevGainIndex  int8    // previous gain index for conditional coding
-	prevSignalType int     // previous signal type
-	firstFrame     bool    // true until the first decoded frame after reset
+	prevNLSFQ15   []int16 // previous NLSF in Q15
+	lagPrev       int     // previous pitch lag
+	prevLagIndex  int     // previous entropy-coded pitch lag index
+	prevGainQ16   int32   // previous gain (Q16) for delta coding
+	prevGainIndex int8    // previous gain index for conditional coding
+	// noLTPScaling selects CODE_INDEPENDENTLY_NO_LTP_SCALING for the next
+	// independently coded frame: no LTP scale symbol is read.
+	noLTPScaling   bool
+	prevSignalType int  // previous signal type
+	firstFrame     bool // true until the first decoded frame after reset
 	lastFinalRange uint32
 
 	// LPC synthesis state: last MAX_LPC_ORDER samples
@@ -362,7 +365,13 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 // NB config 1 -> config 0), where keeping separate 10 ms / 20 ms decoder
 // instances would discontinue the synthesis state at every switch.
 func (d *Decoder) SetFrameMs(frameMs int) {
-	if frameMs != 10 && frameMs != 20 {
+	switch frameMs {
+	case 40, 60:
+		// A 40 or 60 ms packet is two or three 20 ms SILK frames
+		// (silk_decoder_set_fs on payloadSize_ms: nb_subfr = MAX_NB_SUBFR).
+		frameMs = 20
+	case 10, 20:
+	default:
 		return
 	}
 	nSubframes := 4
@@ -447,8 +456,15 @@ func (d *Decoder) DecodeMultiWithDecoder(dec *entcode.Decoder, nFrames int) ([]f
 // standalone or shared-stream decode.
 func (d *Decoder) LastFinalRange() uint32 { return d.lastFinalRange }
 
-// Pitch returns the most recent SILK pitch period at the internal sample rate.
-func (d *Decoder) Pitch() int { return d.lagPrev }
+// Pitch returns the most recent SILK pitch period at the internal sample
+// rate, or 0 when the last coded frame was not voiced, as silk_Decode
+// exports prevPitchLag.
+func (d *Decoder) Pitch() int {
+	if d.prevSignalType != SignalTypeVoiced {
+		return 0
+	}
+	return d.lagPrev
+}
 
 // DecodeFEC decodes LBRR data carried in the packet following a loss.
 // nFrames is the number of 10 or 20 ms SILK frames represented by the packet.
@@ -834,7 +850,12 @@ func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]floa
 				d.side.applySetFsReset()
 			}
 			sideConditional := i > 0 && !d.prevDecodeOnlyMiddle
+			// A side frame after a skipped one in the same packet is coded
+			// independently without LTP scaling
+			// (CODE_INDEPENDENTLY_NO_LTP_SCALING).
+			d.side.noLTPScaling = i > 0 && d.prevDecodeOnlyMiddle
 			pcm, err := d.side.decodeFrame(dec, vadFlags[1][i], sideConditional)
+			d.side.noLTPScaling = false
 			if err == nil {
 				copy(side, pcm)
 			}
@@ -1270,7 +1291,7 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 			}
 		}
 
-		if !conditionalGain {
+		if !conditionalGain && !d.noLTPScaling {
 			ltpScaleIdx := dec.DecodeIcdf(silkLTPScaleICDF[:], 8)
 			ltpScaleQ14 = silkLTPScalesTable[ltpScaleIdx]
 		} else {
@@ -2056,11 +2077,12 @@ func (d *Decoder) decodeSigns(dec *entcode.Decoder, pulses []int16, frameLen, si
 	}
 
 	for i := 0; i < iter; i++ {
-		p := sumPulses[i] & 0x1F
-		if p == 0 {
+		// silk_decode_signs tests the whole sum (LSB shifts included), so a
+		// block whose shell sum is 0 but has LSB pulses still reads signs.
+		if sumPulses[i] == 0 {
 			continue
 		}
-		col := p
+		col := sumPulses[i] & 0x1F
 		if col > 6 {
 			col = 6
 		}

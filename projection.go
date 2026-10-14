@@ -359,9 +359,14 @@ type ProjectionDecoder struct {
 
 // NewProjectionDecoder creates a family-3 decoder from the little-endian Q15
 // matrix stored in signalling metadata. The matrix must have channels rows
-// and streams+coupledStreams columns.
+// and streams+coupledStreams columns. Like opus_projection_decoder_init,
+// channels may not exceed streams+coupledStreams; when it is smaller, only
+// the first channels coded channels are demixed.
 func NewProjectionDecoder(sampleRate, channels, streams, coupledStreams int, demixingMatrix []byte) (*ProjectionDecoder, error) {
 	codedChannels := streams + coupledStreams
+	if channels > codedChannels {
+		return nil, fmt.Errorf("%w: %d output channels exceed %d coded channels", ErrBadArg, channels, codedChannels)
+	}
 	matrix, err := NewMappingMatrixFromBytes(channels, codedChannels, 0, demixingMatrix)
 	if err != nil {
 		return nil, err
@@ -402,67 +407,252 @@ func (d *ProjectionDecoder) StreamDecoder(stream int) (*Decoder, error) {
 	return d.multistream.StreamDecoder(stream)
 }
 
+// SetGain sets the output gain of every elementary decoder in Q8 dB
+// (OPUS_SET_GAIN on the projection decoder).
+func (d *ProjectionDecoder) SetGain(gainQ8 int) error { return d.multistream.SetGain(gainQ8) }
+
+// Gain returns the output gain in Q8 dB.
+func (d *ProjectionDecoder) Gain() int { return d.multistream.Gain() }
+
 // DecodeFloat decodes and demixes a packet to caller-owned interleaved float64 PCM.
 func (d *ProjectionDecoder) DecodeFloat(data []byte) ([]float64, error) {
 	coded, err := d.multistream.DecodeFloat(data)
 	if err != nil {
 		return nil, err
 	}
-	frames := len(coded) / d.demixing.cols
-	return d.demixing.multiplyFloat64(coded, frames, d.demixing.cols)
+	return d.demixFloat(coded), nil
 }
 
 // DecodeFloat32 decodes and demixes a packet to caller-owned interleaved float32 PCM.
 func (d *ProjectionDecoder) DecodeFloat32(data []byte) ([]float32, error) {
-	pcm, err := d.DecodeFloat(data)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]float32, len(pcm))
-	for i := range out {
-		out[i] = float32(pcm[i])
-	}
-	return out, nil
+	return float64sToFloat32s(d.DecodeFloat(data))
 }
 
 // Decode decodes and demixes a packet into pcm and returns samples per channel.
+// An empty packet conceals len(pcm)/Channels() samples, like DecodePLC.
 func (d *ProjectionDecoder) Decode(data []byte, pcm []int16) (int, error) {
+	if len(data) == 0 {
+		// Like opus_decode with no packet: conceal a buffer's worth.
+		return d.DecodePLC(pcm, len(pcm)/d.channels)
+	}
 	duration, err := multistreamPacketDuration(data, d.streams, d.sampleRate)
 	if err != nil {
 		return 0, err
 	}
-	required := duration * d.channels
-	if len(pcm) < required {
-		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
+	if err := d.checkOutput(len(pcm), duration); err != nil {
+		return 0, err
 	}
-	floatPCM, err := d.DecodeFloat(data)
+	coded, err := d.multistream.decodeMapped(data, true)
 	if err != nil {
 		return 0, err
 	}
-	for i, sample := range floatPCM {
-		pcm[i] = int16(math.Round(max(-32768, min(32767, sample*32768))))
-	}
+	d.demixInt16(pcm, coded, duration)
 	return duration, nil
 }
 
 // Decode24 decodes and demixes a packet to signed 24-bit PCM stored in int32.
+// An empty packet conceals len(pcm)/Channels() samples, like DecodePLC.
 func (d *ProjectionDecoder) Decode24(data []byte, pcm []int32) (int, error) {
+	if len(data) == 0 {
+		// Like opus_decode24 with no packet: conceal a buffer's worth.
+		return d.DecodePLC24(pcm, len(pcm)/d.channels)
+	}
 	duration, err := multistreamPacketDuration(data, d.streams, d.sampleRate)
 	if err != nil {
 		return 0, err
 	}
-	required := duration * d.channels
-	if len(pcm) < required {
-		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
+	if err := d.checkOutput(len(pcm), duration); err != nil {
+		return 0, err
 	}
-	floatPCM, err := d.DecodeFloat(data)
+	coded, err := d.multistream.DecodeFloat(data)
 	if err != nil {
 		return 0, err
 	}
-	for i, sample := range floatPCM {
-		pcm[i] = int32(math.Round(max(-8388608, min(8388607, sample*8388608))))
-	}
+	d.demixInt24(pcm, coded, duration)
 	return duration, nil
+}
+
+// DecodePLC conceals frameSize lost samples per channel on every elementary
+// stream and demixes the result (opus_projection_decode with no packet).
+func (d *ProjectionDecoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
+	if err := d.checkLossOutput(len(pcm), frameSize); err != nil {
+		return 0, err
+	}
+	coded, err := d.multistream.DecodePLCFloat(frameSize)
+	if err != nil {
+		return 0, err
+	}
+	d.demixInt16(pcm, coded, frameSize)
+	return frameSize, nil
+}
+
+// DecodePLC24 is DecodePLC with signed 24-bit output stored in int32.
+func (d *ProjectionDecoder) DecodePLC24(pcm []int32, frameSize int) (int, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
+	if err := d.checkLossOutput(len(pcm), frameSize); err != nil {
+		return 0, err
+	}
+	coded, err := d.multistream.DecodePLCFloat(frameSize)
+	if err != nil {
+		return 0, err
+	}
+	d.demixInt24(pcm, coded, frameSize)
+	return frameSize, nil
+}
+
+// DecodePLCFloat is DecodePLC with float64 output.
+func (d *ProjectionDecoder) DecodePLCFloat(frameSize int) ([]float64, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
+	coded, err := d.multistream.DecodePLCFloat(frameSize)
+	if err != nil {
+		return nil, err
+	}
+	return d.demixFloat(coded), nil
+}
+
+// DecodePLCFloat32 is DecodePLC with float32 output.
+func (d *ProjectionDecoder) DecodePLCFloat32(frameSize int) ([]float32, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
+	return float64sToFloat32s(d.DecodePLCFloat(frameSize))
+}
+
+// DecodeFECWithDuration decodes in-band FEC data for exactly frameSize lost
+// samples per channel and demixes it (opus_projection_decode with
+// decode_fec set).
+func (d *ProjectionDecoder) DecodeFECWithDuration(data []byte, pcm []int16, frameSize int) (int, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
+	if err := d.checkLossOutput(len(pcm), frameSize); err != nil {
+		return 0, err
+	}
+	coded, err := d.multistream.DecodeFECFloat(data, frameSize)
+	if err != nil {
+		return 0, err
+	}
+	d.demixInt16(pcm, coded, frameSize)
+	return frameSize, nil
+}
+
+// DecodeFEC24 is DecodeFECWithDuration with signed 24-bit output stored in
+// int32.
+func (d *ProjectionDecoder) DecodeFEC24(data []byte, pcm []int32, frameSize int) (int, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
+	if err := d.checkLossOutput(len(pcm), frameSize); err != nil {
+		return 0, err
+	}
+	coded, err := d.multistream.DecodeFECFloat(data, frameSize)
+	if err != nil {
+		return 0, err
+	}
+	d.demixInt24(pcm, coded, frameSize)
+	return frameSize, nil
+}
+
+// DecodeFECFloat is DecodeFECWithDuration with float64 output.
+func (d *ProjectionDecoder) DecodeFECFloat(data []byte, frameSize int) ([]float64, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
+	coded, err := d.multistream.DecodeFECFloat(data, frameSize)
+	if err != nil {
+		return nil, err
+	}
+	return d.demixFloat(coded), nil
+}
+
+// DecodeFECFloat32 is DecodeFECWithDuration with float32 output.
+func (d *ProjectionDecoder) DecodeFECFloat32(data []byte, frameSize int) ([]float32, error) {
+	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
+	return float64sToFloat32s(d.DecodeFECFloat(data, frameSize))
+}
+
+func (d *ProjectionDecoder) checkOutput(have, duration int) error {
+	if required := duration * d.channels; have < required {
+		return fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, have, required)
+	}
+	return nil
+}
+
+func (d *ProjectionDecoder) checkLossOutput(have, frameSize int) error {
+	if !isValidLossFrameSize(frameSize, d.sampleRate) {
+		return fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+	}
+	return d.checkOutput(have, frameSize)
+}
+
+// demixedColumns is the number of coded channels that reach the output: the
+// projection decoder's multistream layout maps output channel i to coded
+// channel i, so only the first Channels() coded channels are demixed.
+func (d *ProjectionDecoder) demixedColumns() int {
+	return min(d.channels, d.demixing.cols)
+}
+
+// demixFloat is mapping_matrix_multiply_channel_out_float: each coded
+// channel is accumulated into the output in float32.
+func (d *ProjectionDecoder) demixFloat(coded []float64) []float64 {
+	cols := d.demixing.cols
+	frames := len(coded) / cols
+	acc := make([]float32, frames*d.channels)
+	for col := 0; col < d.demixedColumns(); col++ {
+		for i := 0; i < frames; i++ {
+			x := float32(coded[i*cols+col])
+			for row := 0; row < d.channels; row++ {
+				m := float32(1.0/32768) * float32(d.demixing.data[col*d.demixing.rows+row])
+				acc[i*d.channels+row] += float32(m * x)
+			}
+		}
+	}
+	out := make([]float64, len(acc))
+	for i, v := range acc {
+		out[i] = float64(v)
+	}
+	return out
+}
+
+// demixInt16 is mapping_matrix_multiply_channel_out_short: each coded
+// sample (soft-clipped for a decoded packet) is quantized to int16 and (m*x + 16384) >> 15
+// is accumulated into the int16 output, which wraps rather than saturates.
+func (d *ProjectionDecoder) demixInt16(pcm []int16, coded []float64, frames int) {
+	out := pcm[:frames*d.channels]
+	clear(out)
+	cols := d.demixing.cols
+	for col := 0; col < d.demixedColumns(); col++ {
+		for i := 0; i < frames; i++ {
+			x := int32(libopusFloatToInt16(coded[i*cols+col]))
+			for row := 0; row < d.channels; row++ {
+				tmp := int32(d.demixing.data[col*d.demixing.rows+row]) * x
+				j := i*d.channels + row
+				out[j] = int16(int32(out[j]) + (tmp+16384)>>15)
+			}
+		}
+	}
+}
+
+// demixInt24 is mapping_matrix_multiply_channel_out_int24: RES2INT24 per
+// coded sample, int64 products and a wrapping int32 accumulator.
+func (d *ProjectionDecoder) demixInt24(pcm []int32, coded []float64, frames int) {
+	out := pcm[:frames*d.channels]
+	clear(out)
+	cols := d.demixing.cols
+	for col := 0; col < d.demixedColumns(); col++ {
+		for i := 0; i < frames; i++ {
+			x := int64(res2Int24(coded[i*cols+col]))
+			for row := 0; row < d.channels; row++ {
+				tmp := int64(d.demixing.data[col*d.demixing.rows+row]) * x
+				j := i*d.channels + row
+				out[j] += int32((tmp + 16384) >> 15)
+			}
+		}
+	}
+}
+
+func float64sToFloat32s(pcm []float64, err error) ([]float32, error) {
+	if err != nil {
+		return nil, err
+	}
+	out := make([]float32, len(pcm))
+	for i, v := range pcm {
+		out[i] = float32(v)
+	}
+	return out, nil
 }
 
 // Reset clears all elementary decoder state while retaining configuration.

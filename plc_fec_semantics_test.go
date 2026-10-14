@@ -91,10 +91,16 @@ func TestDecoderLossPCMVariants(t *testing.T) {
 		}
 	}
 
-	for _, bad := range []int{0, rate/400 + 1, rate*120/1000 + rate/400} {
+	for _, bad := range []int{0, rate/400 + 1} {
 		if _, err := intDec.DecodePLC(make([]int16, frameSize), bad); !errors.Is(err, ErrUnsupportedFrameSize) {
 			t.Fatalf("frameSize=%d error=%v, want ErrUnsupportedFrameSize", bad, err)
 		}
+	}
+	// Like opus_decode_native, concealment longer than 120 ms is accepted
+	// and produced in calls of at most 120 ms.
+	long := rate*120/1000 + rate/400
+	if n, err := intDec.DecodePLC(make([]int16, long), long); err != nil || n != long {
+		t.Fatalf("frameSize=%d: n=%d error=%v, want %d samples", long, n, err, long)
 	}
 }
 
@@ -266,4 +272,51 @@ func primedLossDecoder(t *testing.T, rate int, packets [][]byte) *Decoder {
 		}
 	}
 	return dec
+}
+
+func TestDecodeEmptyPacketConceals(t *testing.T) {
+	const (
+		rate      = 16000
+		frameSize = 320
+	)
+	packets := makeFECPackets(t, rate, frameSize, 4)
+	viaDecode := primedLossDecoder(t, rate, packets)
+	viaPLC := primedLossDecoder(t, rate, packets)
+	for _, size := range []int{frameSize, 2 * frameSize, frameSize / 4} {
+		got := make([]int16, size)
+		want := make([]int16, size)
+		n, err := viaDecode.Decode(nil, got)
+		if err != nil || n != size {
+			t.Fatalf("size %d: Decode(nil)=(%d,%v)", size, n, err)
+		}
+		if _, err := viaPLC.DecodePLC(want, size); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("size %d: empty-packet decode differs from DecodePLC", size)
+		}
+	}
+	got24 := make([]int32, frameSize)
+	want24 := make([]int32, frameSize)
+	if n, err := viaDecode.Decode24([]byte{}, got24); err != nil || n != frameSize {
+		t.Fatalf("Decode24(empty)=(%d,%v)", n, err)
+	}
+	if _, err := viaPLC.DecodePLC24(want24, frameSize); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got24, want24) {
+		t.Fatal("empty-packet Decode24 differs from DecodePLC24")
+	}
+}
+
+func TestDecoderPitchUnits(t *testing.T) {
+	const rate = 16000
+	packets := makeFECPackets(t, rate, 320, 6)
+	dec := primedLossDecoder(t, rate, packets)
+	if dec.Pitch48kHz() == 0 {
+		t.Fatal("no pitch after voiced packets")
+	}
+	if got, want := dec.Pitch(), dec.Pitch48kHz()*rate/48000; got != want {
+		t.Fatalf("Pitch()=%d, want Pitch48kHz()*rate/48000=%d", got, want)
+	}
 }

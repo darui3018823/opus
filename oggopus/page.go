@@ -16,6 +16,10 @@ const (
 	MaxSegments = 255
 	// MaxPageData is the maximum payload size represented by one lacing table.
 	MaxPageData = 255 * 255
+	// MaxPacketSize is the largest packet PacketReader reassembles (16 MiB).
+	// It bounds the memory a stream of continued pages can claim, and is
+	// above the largest Opus multistream packet (255 streams of 120 ms).
+	MaxPacketSize = 16 << 20
 )
 
 // HeaderType contains the Ogg page header flags.

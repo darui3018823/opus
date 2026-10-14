@@ -1,6 +1,6 @@
 # Current Implementation Snapshot
 
-Last reviewed: 2026-09-30
+Last reviewed: 2026-10-09
 
 This document describes what the code currently implements. It is intentionally
 more conservative than the roadmap and README marketing text: when this file
@@ -26,8 +26,8 @@ The `oggopus` subpackage implements Ogg page and Ogg Opus container APIs.
 Constants are in `constants.go` and package-level error values in `errors.go`.
 Public version constants are generated into `version_gen.go` from the
 repository-level `VERSION` file; `go generate ./...` refreshes them and CI
-rejects generated-file drift. The current released baseline is `v1.4.1`;
-`VERSION` holds the `v1.5.0` release candidate.
+rejects generated-file drift. The current released baseline is `v1.5.0`;
+`VERSION` holds the `v1.6.0` release candidate.
 Release preparation follows [`docs/RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
 and compatibility-breaking cleanup is recorded separately in
 [`docs/V2_API_CANDIDATES.md`](V2_API_CANDIDATES.md).
@@ -68,6 +68,9 @@ Implemented public entry points:
 - `(*Encoder).SetVBRConstraint(constrained bool)`
 - `(*Encoder).SetDTX(enabled bool)` / `(*Encoder).DTX() bool`
 - `(*Encoder).SetInbandFEC(enabled bool)` / `(*Encoder).InbandFEC() bool`
+- `(*Encoder).SetInbandFECMode(mode int) error` / `(*Encoder).InbandFECMode() int`
+- `(*Encoder).SetMaxPacketSize(n int) error` / `(*Encoder).MaxPacketSize() int`
+  (libopus `max_data_bytes`, default 1500)
 - `(*Encoder).SetPacketLossPerc(perc int)` / `(*Encoder).PacketLossPerc() int`
 - `(*Encoder).SetPacketPadding(n int)`
 - `(*Encoder).SetForceChannels(channels int) error` / `(*Encoder).ForceChannels() int`
@@ -182,14 +185,20 @@ matrix validation, expert frame-duration propagation, and bidirectional family
 The `oggopus` subpackage provides:
 
 - CRC-checked Ogg `Page` parsing, reading, marshaling, and writing
-- lacing and continued-packet reconstruction through `PacketReader`
-- packet-to-page output through `PacketWriter`
-- `OpusHead` and `OpusTags` parsing and marshaling
+- lacing and continued-packet reconstruction through `PacketReader`, which
+  rejects a packet longer than `MaxPacketSize` (16 MiB) with
+  `ErrPacketTooLarge`
+- packet-to-page output through `PacketWriter`; a page that ends inside a
+  packet carries the granule of the last packet completed on it
+- `OpusHead` and `OpusTags` parsing and marshaling, including the RFC 8486
+  mapping family 3 demixing matrix (`Head.DemixingMatrix`) and the Ambisonics
+  channel-count check of families 2 and 3
 - Ogg Opus `Reader` and `Writer` APIs; Reader automatically continues across
   chained logical streams with per-link headers, tags, serials, and packet
   indices, while each Writer emits one logical stream. `WriteValidatedPacket`
   validates single-stream or multistream Opus framing from the `OpusHead`
   mapping before output; `WritePacket` remains available for opaque packets.
+  `Close` before any audio packet returns `ErrInvalidOpusStream`.
 - validated 48 kHz packet timing with pre-skip/end-trim discard metadata
 - `(*Reader).SeekPCM(sample int64)` for granule-position bisection seeking on
   `io.ReadSeeker` sources with RFC 7845 80 ms decoder pre-roll
@@ -206,16 +215,18 @@ through `Encode24` and `Decode24`. Encoder and decoder phase-inversion controls
 are wired to CELT intensity-stereo processing.
 
 A stereo encoder can force a mono Opus stream; input is downmixed before a
-stateful mono codec instance. LSB depth is retained as the libopus-style input
-precision hint. Prediction disabling currently prevents predictive SILK and
-hybrid routing, keeping the stream on CELT.
+stateful mono codec instance. LSB depth bounds the input precision used by the
+CELT encoder and the tonality analysis, as in libopus. Prediction disabling
+follows libopus under `ModePolicyLibopus` (SILK codes every packet as the first
+after a reset and CELT runs without prediction); under `ModePolicyLegacy` it
+keeps the stream off the SILK and hybrid modes.
 
 Accepted sample rates are `8000`, `12000`, `16000`, `24000`, and `48000`.
 Accepted channel counts are mono and stereo.
 
-`SetBitrate` accepts numeric rates of at least 6000 bit/s as well as
-`BitrateAuto` and `BitrateMax`. Numeric requests above 750 kbit/s per channel
-are accepted and clamped at the CTL boundary; `EffectiveBitrate` then applies
+`SetBitrate` accepts positive numeric rates as well as `BitrateAuto` and
+`BitrateMax`. Numeric requests are clamped to [500, 750000 x channels] at the
+CTL boundary, as `OPUS_SET_BITRATE` does; `EffectiveBitrate` then applies
 the same RFC 1275-byte per-frame ceiling as `BitrateMax` (510 kbit/s for 20 ms
 and longer constituent frames, 1.02 Mbit/s for 10 ms). `Bitrate` returns the
 configured/clamped request or policy sentinel. The automatic policy follows
@@ -628,6 +639,8 @@ Implemented public entry points:
 - `(*Decoder).Reset() error`
 - `(*Decoder).GetLastPacketDuration() int`
 - `(*Decoder).Bandwidth() int` / `(*Decoder).GetBandwidth() int`
+- `(*Decoder).Pitch() int` (output-rate samples) /
+  `(*Decoder).Pitch48kHz() int` (`OPUS_GET_PITCH`, 48 kHz samples)
 - `(*Decoder).SetPhaseInversionDisabled(bool)` /
   `(*Decoder).PhaseInversionDisabled() bool`
 
@@ -1088,8 +1101,8 @@ automatic mode / bandwidth / channel policy of libopus is ported as
 `SetModePolicy(ModePolicyLibopus)` (`TestAutoModeOracle`: VOIP/AUDIO ×
 voice/music/auto × mono/stereo × 12–128 kbps, 60/60 automatic-mode cells
 byte-identical, including a stereo input coded as a mono CELT or hybrid
-stream via `CELT_SET_CHANNELS` MDCT averaging and the SILK downmix); the
-default remains the Go policy. Mode transitions follow `opus_encode_native`
+stream via `CELT_SET_CHANNELS` MDCT averaging and the SILK downmix); it has
+been the default since v1.5.0. Mode transitions follow `opus_encode_native`
 under that policy (`TestAutoModeTransitionOracle`, 108 bitrate-schedule
 cells byte-identical): the deferred switch to CELT-only with a trailing
 redundant frame, the leading redundant frame plus SILK re-init and 10 ms
@@ -1472,8 +1485,9 @@ Notes:
 - `TestEncoderHybridSelectionBoundariesStrict` covers the initial hybrid
   selection boundary, including low-bandwidth auto fallback to CELT and forced
   bandwidth overriding a lower max-bandwidth cap.
-- The former `cmd_diag` duplicate-`main` build failure is fixed (the command
-  now lives at `cmd_diag/toccheck/main.go`).
+- The former `cmd_diag` duplicate-`main` build failure is fixed: the TOC
+  checker lives at `cmd_diag/toccheck/main.go`, and `cmd_diag/main.go` is the
+  only `main` package in `cmd_diag` itself.
 - Nightly fuzzing covers int16/float decoding, stateful decoder operation
   sequences, encoder setter/input operation sequences with adversarial PCM
   including non-finite float values, packet extensions, multistream
@@ -1519,10 +1533,69 @@ reference comparison.
   5.55/5.40 dB. Stateful stereo saving and broader dynamic-allocation parity
   remain future measured candidates.
 - Decoder conformance and reference validation passes the official vectors and
-  the covered libopus comparisons. The remaining compatibility gap is parity
-  with a libopus built with SIMD kernels (a non-goal); `ModePolicyLegacy`
-  remains available but is not libopus-exact. Decoder PCM, including PLC,
-  is sample-exact against the plain-C libopus float decoder.
+  the covered libopus comparisons. Parity with a libopus built with SIMD
+  kernels is a non-goal; `ModePolicyLegacy` remains available but is not
+  libopus-exact. The residual differences found by the libopus parity audit
+  are listed below.
+
+## libopus Parity Audit (2026-10)
+
+The opt-in audit harnesses (`OPUS_LIBOPUS_AUDIT=1`; decoder:
+`internal/audit/decoder` with `scripts/oracle/decoder_audit`, encoder and
+API: `libopus_audit_*_opusref_test.go` with
+`scripts/oracle/build_encoder_audit.ps1`) compare against plain-C libopus
+1.6.1. The API audit and the decoder output-conversion tests call libopus 1.6
+functions through cgoref and also need the `opus16` build tag (a linked
+libopus 1.6 or later). Results on the fix branch:
+
+- Decoder, every output format and rate: official vectors 216/216 and
+  gain/reset/phase-inversion 648/648 cells sample-exact (including pitch),
+  Go-encoder packets 232/232, random loss 721/768, odd PLC durations
+  329/336, FEC 507/522, spliced vectors 150/160, multistream 183/192.
+- Encoder: long real-audio cells 1582/1584, bitrate extremes (2.5-120 ms,
+  500 b/s to `BitrateMax`, CBR above 1276 bytes) 1620/1620, prediction
+  disabled 16/16; repacketizer, pad/unpad (single and multistream) and
+  `PacketHasLBRR` agree with libopus on every audited input.
+
+Residual differences:
+
+- Decoder: long noise-based CELT concealment drifts by a few LSB after
+  about eight consecutive losses; the concealment after a SILK packet with
+  trailing redundancy followed by a hybrid packet (malformed streams only)
+  differs; the float APIs reject an empty packet (no frame size), where
+  libopus conceals; `Bandwidth()` and `GetLastPacketDuration()` keep their
+  documented values before the first packet instead of libopus's 0.
+- Encoder: rare float-rounding differences in CELT raw bits (fine energy,
+  last coded band at 16 kHz, 2.5 ms and 120 ms VBR frames, 2-byte redundancy
+  frames); stereo SILK `switchReady` on some per-frame bitrate changes;
+  LBRR gain state after toggling `InbandFECNoModeSwitch` on speech; some
+  expert-duration and variable-frame-size sequences; NaN input at 48 kHz;
+  multistream 60 ms VBR framing near the packet limit.
+- API: the packet getters, `PacketExtensionsCount`, `NewEncoder` defaults
+  (Legacy profile), `Bitrate()`/`EffectiveBitrate()`, mid-stream
+  `SetApplication` and the early `SetExpertFrameDuration` validation keep
+  their documented Go semantics.
+
+Behavior changes from the audit fixes that callers can observe:
+
+- `Decode`, `Decode24` and the multistream and projection equivalents with an
+  empty packet now conceal `len(pcm)/Channels()` samples (like `opus_decode`
+  with no packet) instead of returning an error. The float APIs still reject
+  an empty packet.
+- `NewProjectionDecoder` returns `ErrBadArg` when `channels` exceeds
+  `streams+coupledStreams`, as `opus_projection_decoder_init` does.
+- A CELT or hybrid frame that reads past the end of its packet now fails the
+  call with `ErrInternalError`, with the decoder state libopus leaves behind.
+- The int16 decode APIs soft-clip like libopus; the float and 24-bit APIs do
+  not. `Decode24` no longer clamps to the 24-bit range.
+- `VBRConstraint` reports the stored constraint also while VBR is off.
+- `Encoder.SetMaxPacketSize` only takes effect under `ModePolicyLibopus`.
+- `oggopus`: `PacketWriter` keeps the granule of a packet completed on a page
+  that ends inside the next packet (it wrote -1, which `Reader` rejected);
+  `Writer.Close` before any audio packet returns `ErrInvalidOpusStream`;
+  `PacketReader` rejects packets over `MaxPacketSize` with
+  `ErrPacketTooLarge`; `Head.Validate` rejects family 2 and 3 channel counts
+  that are not an Ambisonics layout.
 
 ## Practical Use Today
 

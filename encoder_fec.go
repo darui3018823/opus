@@ -169,6 +169,21 @@ func (e *Encoder) voiceEst() int {
 // by the toMono rule: the first packet after a stereo->mono decision is still
 // coded stereo with the width collapsed so SILK can downmix smoothly.
 func (e *Encoder) decideStreamChannels(frameSize, mode int) {
+	e.decideStreamChannelsWith(frameSize, mode, e.bitrate, e.voiceEst())
+}
+
+// decideStreamChannelsLibopus is decideStreamChannels as opus_encode_native
+// runs it: from the bitrate rounded to the CBR packet size and with the
+// voice_est of the tonality analysis.
+func (e *Encoder) decideStreamChannelsLibopus(frameSize, maxDataBytes int, analysis celt.AnalysisInfo) {
+	bitrate := e.bitrate
+	if e.rateMode == celt.RateModeCBR {
+		bitrate = bitsToBitrate(maxDataBytes*8, e.sampleRate, frameSize)
+	}
+	e.decideStreamChannelsWith(frameSize, framing.ModeSILKOnly, bitrate, e.libopusVoiceEst(analysis))
+}
+
+func (e *Encoder) decideStreamChannelsWith(frameSize, mode, bitrate, ve int) {
 	if e.channels != 2 {
 		e.streamChannels = 1
 		e.toMono = false
@@ -180,8 +195,7 @@ func (e *Encoder) decideStreamChannels(frameSize, mode int) {
 	if e.forceChannels != ChannelsAuto {
 		e.streamChannels = e.forceChannels
 	} else {
-		equiv := computeEquivRate(e.bitrate, e.channels, e.sampleRate/frameSize, e.rateMode != celt.RateModeCBR, -1, e.complexity, e.packetLossPerc)
-		ve := e.voiceEst()
+		equiv := computeEquivRate(bitrate, e.channels, e.sampleRate/frameSize, e.rateMode != celt.RateModeCBR, -1, e.complexity, e.packetLossPerc)
 		threshold := stereoMusicThreshold + ((ve * ve * (stereoVoiceThreshold - stereoMusicThreshold)) >> 14)
 		if e.streamChannels == 2 {
 			threshold -= 1000

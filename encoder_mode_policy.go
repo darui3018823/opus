@@ -201,7 +201,13 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 		bitrate = bitsToBitrate(maxDataBytes*8, e.sampleRate, frameSize)
 	}
 	streamChannels := e.streamChannelsOrInput()
-	equivRate := computeEquivRate(bitrate, streamChannels, frameRate, vbr, -1, e.complexity, e.packetLossPerc)
+	// The mode decision sees the rate-decided stream channels: libopus
+	// applies the delayed stereo->mono transition (toMono) only afterwards.
+	decidedChannels := streamChannels
+	if e.toMono {
+		decidedChannels = 1
+	}
+	equivRate := computeEquivRate(bitrate, decidedChannels, frameRate, vbr, -1, e.complexity, e.packetLossPerc)
 	voiceEst := e.libopusVoiceEst(analysis)
 	maxRate := bitsToBitrate(maxDataBytes*8, e.sampleRate, frameSize)
 
@@ -235,12 +241,13 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 			mode = framing.ModeSILKOnly
 		}
 		// When FEC is enabled and there's enough packet loss, use SILK.
-		if e.useInbandFEC && e.packetLossPerc > (128-voiceEst)>>4 {
+		if e.useInbandFEC && e.packetLossPerc > (128-voiceEst)>>4 && (e.fecConfig != InbandFECNoModeSwitch || voiceEst > 25) {
 			mode = framing.ModeSILKOnly
 		}
 		// When encoding voice and DTX is enabled but the generalized DTX cannot
-		// be used, use SILK in order to make use of its DTX.
-		if e.dtx && !analysis.Valid && voiceEst > 100 {
+		// be used, use SILK in order to make use of its DTX
+		// (silk_mode.useDTX, which is off for a digitally silent frame).
+		if e.silkUseDTX && voiceEst > 100 {
 			mode = framing.ModeSILKOnly
 		}
 		// If max_data_bytes represents less than 6 kb/s, switch to CELT-only mode.
@@ -292,7 +299,9 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 		bandwidth = e.decideAutoBandwidthVE(equivRate, first, voiceEst)
 		// Prevents any transition to SWB/FB until the SILK layer has fully
 		// switched to WB mode and turned the variable LP filter off.
-		if !first && mode != framing.ModeCELTOnly && e.silkSampleRate != 16000 && bandwidth > framing.BandwidthWideband {
+		// (silk_mode.inWBmodeWithoutVariableLP as the last silk_Encode left it).
+		inWBWithoutLP := e.silkEncoder != nil && e.silkEncoder.InWBModeWithoutVariableLP()
+		if !first && mode != framing.ModeCELTOnly && !inWBWithoutLP && bandwidth > framing.BandwidthWideband {
 			bandwidth = framing.BandwidthWideband
 		}
 	}

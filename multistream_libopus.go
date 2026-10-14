@@ -151,6 +151,12 @@ func (e *MultistreamEncoder) encodeLibopus(pcm []float64, frameSize, lsbDepth in
 		smallest += e.streams
 	}
 	maxDataBytes := msOutDataBytes
+	if e.maxPacketSize > 0 {
+		maxDataBytes = e.maxPacketSize
+	}
+	if maxDataBytes < smallest {
+		return nil, fmt.Errorf("%w: %d bytes for %d streams", ErrBufferTooSmall, maxDataBytes, e.streams)
+	}
 	var commit func()
 	// No surround analysis without the CELT layer (RESTRICTED_SILK).
 	if e.beforeEncodeFloat != nil && e.encoders[0].application != ApplicationRestrictedSILK {

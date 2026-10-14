@@ -50,6 +50,9 @@ type Decoder struct {
 	// (the spectrum above it is cleared and the de-emphasised output
 	// decimated), 1 by default.
 	downsample int
+	// accum is deemphasis's accum flag: the Opus decoder adds a hybrid
+	// layer, its concealment or a silence fade onto the SILK output.
+	accum bool
 	// streamChannels is CELT_SET_CHANNELS (st->stream_channels, C): the
 	// coded channels of the packet, while mode.Channels (CC) is the output.
 	// A mono stream is duplicated to both output channels and a stereo
@@ -220,7 +223,9 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 		silence = dec.DecodeBitLogp(15)
 	}
 	if silence {
-		dec.AdvanceTellTo(totalBits)
+		// libopus sets the tell to the budget, pulling it back too when the
+		// hybrid SILK layer already overran it.
+		dec.SetTell(totalBits)
 	}
 	htr(dec, "silence")
 
@@ -273,12 +278,13 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	htr(dec, "spread")
 
 	// Per-band dynamic allocation boosts (BEFORE alloc_trim, libopus order).
-	offsets := decodeDynalloc(dec, numBands, start, end, lm, ch, totalBits)
+	offsets, tellQ3, boostedTotalQ3 := decodeDynalloc(dec, numBands, start, end, lm, ch, totalBits)
 	htr(dec, "dynalloc")
 
-	// Allocation trim (7-bit ICDF, default 5 = neutral).
+	// Allocation trim (7-bit ICDF, default 5 = neutral). Like libopus, the
+	// gate uses the fractional tell and the budget left after the boosts.
 	allocTrim := 5
-	if dec.ECTell()+6 <= totalBits {
+	if tellQ3+(6<<3) <= boostedTotalQ3 {
 		allocTrim = dec.DecodeIcdf(TrimICDF[:], 7)
 	}
 	htr(dec, "alloc_trim")
@@ -315,7 +321,8 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	// oldBandE value, so derive the linear amplitude only after band decoding.
 	for i := start; i < end; i++ {
 		for c := 0; c < ch; c++ {
-			amp := celtExp2RoundedFloat32(float32(quantLogE[c*numBands+i] + EMean(i)))
+			// denormalise_bands: g = celt_exp2_db(MIN32(32.f, lg)).
+			amp := celtExp2RoundedFloat32(min(32, float32(quantLogE[c*numBands+i]+EMean(i))))
 			e := float64(amp) * float64(amp)
 			if e < 1e-20 {
 				e = 1e-20
@@ -376,8 +383,13 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			d.coefficientStageHook("denormalized", c, coeffs,
 				quantLogE[c*numBands:(c+1)*numBands])
 		}
-		// denormalise_bands' bound: nothing above the output Nyquist.
-		for i := frameSize / d.downsample; i < len(coeffs); i++ {
+		// denormalise_bands' bound: nothing above the output Nyquist, and
+		// nothing at all for a silence frame.
+		bound := frameSize / d.downsample
+		if silence {
+			bound = 0
+		}
+		for i := bound; i < len(coeffs); i++ {
 			coeffs[i] = 0
 		}
 		mdctCoeffsPerCh[c] = coeffs
@@ -468,8 +480,18 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	d.plcDuration = 0
 	d.lastFrameType = frameNormal
 	d.prefilterAndFold = false
+	if dec.ECTell() > totalBits {
+		// celt_decode_with_ec returns OPUS_INTERNAL_ERROR after the frame
+		// (and all its state) has been decoded.
+		return output, ErrRangeOverrun
+	}
 	return output, nil
 }
+
+// ErrRangeOverrun reports a frame that read past the end of its packet. The
+// decoder state and output are those libopus leaves behind before it
+// returns OPUS_INTERNAL_ERROR.
+var ErrRangeOverrun = errors.New("celt: frame reads past the end of the packet")
 
 // safeLossPrediction is celt_decode_with_ec's energy safety after a loss
 // (inter frames only): continue a falling energy trend or take the minimum
@@ -654,14 +676,25 @@ func (d *Decoder) applyDeemphasis(ch int, samples []float64) {
 	mem := d.preemphMem[ch]
 	for i := range samples {
 		// libopus stores celt_sig as float and evaluates
-		// x[i] + VERY_SMALL + mem in that precision and order.
-		y := float32(samples[i]) + verySmall
-		y += mem
+		// x[i] + VERY_SMALL + mem in that precision and order; its
+		// accumulating loop without downsampling adds x[i] + mem first.
+		var y float32
+		if d.accum && d.downsample == 1 {
+			y = float32(samples[i]) + mem
+			y += verySmall
+		} else {
+			y = float32(samples[i]) + verySmall
+			y += mem
+		}
 		mem = coef * y
 		samples[i] = float64(y)
 	}
 	d.preemphMem[ch] = mem
 }
+
+// SetAccumulate selects the deemphasis variant libopus uses when the frame
+// is added onto existing output (celt_decode_with_ec's accum argument).
+func (d *Decoder) SetAccumulate(on bool) { d.accum = on }
 
 // decodeBandEnergies is superseded by UnquantizeCoarseEnergy (RFC 6716 §5.1.2).
 // Kept as an unexported no-op to avoid compilation errors if referenced elsewhere.
@@ -706,6 +739,11 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	for i := start; i < end; i++ {
 		fb := eBits[i]
 		if fb <= 0 {
+			continue
+		}
+		// unquant_fine_energy skips a band whose bits would read past the
+		// buffer (only reachable on a malformed packet).
+		if dec.ECTell()+ch*fb > dec.Storage()*8 {
 			continue
 		}
 		for c := 0; c < ch; c++ {
@@ -882,6 +920,14 @@ func (d *Decoder) DecodePLC() ([]float64, error) {
 	return d.decodeLoss(), nil
 }
 
+// DecodeHybridLoss conceals the CELT layer of a hybrid frame left without
+// CELT data (celt_decode_with_ec with len 0), using that frame's start and
+// end bands as celt_decode_lost does.
+func (d *Decoder) DecodeHybridLoss(start, end int) []float64 {
+	d.lastStartBand, d.lastEndBand = start, end
+	return d.decodeLoss()
+}
+
 // FrameSize returns the decoder's frame size in samples per channel at 48 kHz.
 func (d *Decoder) FrameSize() int {
 	return d.mode.FrameSize
@@ -948,7 +994,10 @@ func (d *Decoder) Reset() {
 // decodeDynalloc decodes per-band dynamic allocation boosts between alloc_trim and
 // compute_allocation. Matches libopus celt_decode_with_ec dynalloc loop.
 // Returns Q3 boost per band. Even when all boosts are 0, the range coder state advances.
-func decodeDynalloc(dec *entcode.Decoder, numBands, start, end, lm, ch, totalBits int) []int {
+// decodeDynalloc returns the band boosts together with libopus's tell
+// (ec_tell_frac as last sampled) and total_bits (Q3, less every boost),
+// which gate the following alloc_trim symbol.
+func decodeDynalloc(dec *entcode.Decoder, numBands, start, end, lm, ch, totalBits int) ([]int, int, int) {
 	offsets := make([]int, numBands)
 	dynallocLogp := 6
 	// libopus: total_bits<<=BITRES (Q3), decreases as boosts are applied;
@@ -997,7 +1046,7 @@ func decodeDynalloc(dec *entcode.Decoder, numBands, start, end, lm, ch, totalBit
 			}
 		}
 	}
-	return offsets
+	return offsets, tell, totalQ3
 }
 
 // tfSelectTable[lm][8] matches libopus tf_select_table in celt/bands.c.

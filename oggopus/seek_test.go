@@ -303,3 +303,28 @@ func TestScanNextPageHonorsEndBoundary(t *testing.T) {
 		t.Fatalf("scanNextPage accepted page extending beyond end: %v", err)
 	}
 }
+
+// oneByteReadSeeker returns at most one byte per Read, as some io.ReadSeeker
+// implementations may.
+type oneByteReadSeeker struct{ *bytes.Reader }
+
+func (r oneByteReadSeeker) Read(p []byte) (int, error) {
+	if len(p) > 1 {
+		p = p[:1]
+	}
+	return r.Reader.Read(p)
+}
+
+func TestReaderSeekWithShortReads(t *testing.T) {
+	data := makeSeekTestStream(t, 12, 312, 0)
+	r, err := NewReader(oneByteReadSeeker{bytes.NewReader(data)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.SeekPCM(7000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.NextPacket(); err != nil {
+		t.Fatal(err)
+	}
+}

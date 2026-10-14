@@ -68,10 +68,16 @@ func TestBitrateMaxLongPacketsMatchNumericFrameMaximum(t *testing.T) {
 				return packet, enc.FinalRange()
 			}
 
+			// Like opus_encode with a 1500-byte buffer, a CBR BitrateMax
+			// packet fills max_data_bytes, as does any numeric rate whose
+			// cbr_bytes reaches it.
 			maxPacket, maxRange := encode(BitrateMax)
-			numericPacket, numericRange := encode(510000)
+			numericPacket, numericRange := encode(750000)
+			if len(maxPacket) != defaultOutDataBytes {
+				t.Fatalf("BitrateMax packet %d bytes, want %d", len(maxPacket), defaultOutDataBytes)
+			}
 			if !bytes.Equal(maxPacket, numericPacket) {
-				t.Fatal("BitrateMax packet differs from numeric 510000 packet")
+				t.Fatal("BitrateMax packet differs from numeric 750000 packet")
 			}
 			if maxRange != numericRange {
 				t.Fatalf("FinalRange max=%08x numeric=%08x", maxRange, numericRange)

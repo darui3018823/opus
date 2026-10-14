@@ -18,7 +18,9 @@ plain-C float デコーダーとサンプル単位で一致します (packet los
 v1.5.0 からは自動判断が libopus 1.6.1 に従います (`ModePolicyLibopus`、既定)。
 検証済みの構成 (自動 mode、mode 遷移、8〜48 kHz 入力、CBR/VBR、in-band FEC、
 DTX) では 2.5〜120 ms の packet が libopus の plain-C float build と byte 単位で
-一致します。以前の判断は `SetModePolicy(ModePolicyLegacy)` で使えます。実装状況の正本は
+一致します。以前の判断は `SetModePolicy(ModePolicyLegacy)` で使えます。libopus
+parity 監査で見つかった残差 (長い noise concealment や、まれなエンコーダーの
+float 丸め差など) は実装スナップショットに記載しています。実装状況の正本は
 [docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md) です。
 
 ## インストール
@@ -91,7 +93,7 @@ func main() {
 | multistream/surround | RFC self-delimited framing、family 0/1（7.1 まで）/255、同じ PCM variant の PLC/FEC |
 | projection/Ambisonics | RFC 8486 family 2/3、family 3 の 1st〜5th order 定義済み matrix |
 | packet 操作 | 検証付き検査、repacketize、padding、soft clip、LBRR 検出、extension |
-| Ogg Opus | CRC/lacing、header/tag、timing trim、chain 読取り、link 単位 seek、検証付き single-link 書込み |
+| Ogg Opus | CRC/lacing、header/tag (mapping family 0〜3 と 255)、timing trim、chain 読取り、link 単位 seek、検証付き single-link 書込み |
 | runtime 依存 | Pure Go。CGO/libopus は `opusref` の任意テストのみ |
 
 `MaxFrameSize` は 48 kHz で 1 channel 当たり 5760 sample（120 ms）です。
@@ -102,8 +104,9 @@ padding なし single-stream packet の保守的な上限であり、明示的�
 ## loss recovery
 
 `DecodePLC`、`DecodePLC24`、`DecodePLCFloat32`、`DecodePLCFloat` は、明示した
-欠損 duration を補間します。duration には 2.5 ms の正の整数倍を 120 ms まで指定
-できます。最初の packet を正常に decode する前と `Reset` 後は、PLC は zero
+欠損 duration を補間します。duration には 2.5 ms の正の整数倍を指定できます
+(multistream と projection の decoder は libopus と同じく 1 回の呼び出しで最大
+120 ms まで)。最初の packet を正常に decode する前と `Reset` 後は、PLC は zero
 concealment を返します。
 
 in-band FEC では、int16 用の `DecodeFECWithDuration`、または duration を明示する
@@ -194,8 +197,7 @@ go test -run='^$' -fuzz='^FuzzOggOpusReaderWriter$' -fuzztime=60s ./oggopus
 - Ogg Opus reader は chained logical stream に対応しますが multiplexed physical
   stream の demux はしません。各 Writer は 1 logical stream を出力します。
 - libopus のすべての single-stream / multistream CTL に公開 equivalent があるわけ
-  ではありません。`SetLSBDepth` は互換 hint として保持しますが、現在 codec 判断
-  には影響しません。
+  ではありません。
 
 ## 開発
 

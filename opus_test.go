@@ -132,9 +132,17 @@ func TestCommonEncoderDecoderGetters(t *testing.T) {
 	if enc.Lookahead() != 312 {
 		t.Fatalf("lookahead = %d, want 312 (Fs/400 overlap + Fs/250 delay compensation)", enc.Lookahead())
 	}
-	if enc.VBRConstraint() {
-		t.Fatal("legacy CBR encoder reports constrained VBR")
+	// OPUS_GET_VBR_CONSTRAINT reports the setting (1 by default) even in CBR.
+	if !enc.VBRConstraint() {
+		t.Fatal("CBR encoder does not report the default VBR constraint")
 	}
+	enc.SetVBRConstraint(false)
+	enc.SetVBR(true)
+	if enc.VBRConstraint() || !enc.VBR() {
+		t.Fatal("VBR constraint set while in CBR was not kept")
+	}
+	enc.SetVBRConstraint(true)
+	enc.SetVBR(false)
 	enc.SetVBR(true)
 	if !enc.VBRConstraint() {
 		t.Fatal("constrained VBR getter did not track SetVBR(true)")
@@ -500,10 +508,11 @@ func TestEncoderBitratePolicies(t *testing.T) {
 	if got, want := mono.EffectiveBitrate(), 510000; got != want {
 		t.Fatalf("maximum effective bitrate = %d, want %d", got, want)
 	}
-	// opus_encode_native: cbr_bytes = (bitrate_to_bits + 4) / 8 including the
-	// TOC = (10200 + 4) / 8 = 1275 at the maximum 20 ms rate.
-	if len(packet) != MaxFrameBytes {
-		t.Fatalf("maximum bitrate packet size = %d, want %d", len(packet), MaxFrameBytes)
+	// opus_encode_native: OPUS_BITRATE_MAX is 1.5 Mb/s, so cbr_bytes is the
+	// whole max_data_bytes (the 1500-byte default output buffer): a 1275-byte
+	// frame padded to 1500 bytes.
+	if len(packet) != defaultOutDataBytes {
+		t.Fatalf("maximum bitrate packet size = %d, want %d", len(packet), defaultOutDataBytes)
 	}
 }
 

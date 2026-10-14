@@ -63,13 +63,11 @@ func (dec *Decoder) Tell() int {
 // so this is simply Tell()+1. Use this where porting libopus guards verbatim.
 func (dec *Decoder) ECTell() int { return dec.Tell() + 1 }
 
-// AdvanceTellTo pretends that bits have been consumed up to the supplied
-// libopus ec_tell position without changing the range. CELT uses this for
-// packets carrying the silence flag.
-func (dec *Decoder) AdvanceTellTo(bits int) {
-	if bits > dec.ECTell() {
-		dec.nbitsTotal += bits - dec.ECTell()
-	}
+// SetTell moves the libopus ec_tell position to bits without changing the
+// range (nbits_total += bits - ec_tell). CELT uses this for frames carrying
+// the silence flag.
+func (dec *Decoder) SetTell(bits int) {
+	dec.nbitsTotal += bits - dec.ECTell()
 }
 
 // TellFrac returns bits consumed in 1/8-bit (Q3) resolution.
@@ -114,6 +112,9 @@ func (dec *Decoder) ShrinkStorage(n int) {
 	}
 	dec.buf = dec.buf[:len(dec.buf)-n]
 }
+
+// Storage returns the decoder's buffer length in bytes (ec_dec storage).
+func (dec *Decoder) Storage() int { return len(dec.buf) }
 
 // readByte reads one byte from the buffer, returning 0 past the end.
 func (dec *Decoder) readByte() byte {
@@ -261,7 +262,14 @@ func (dec *Decoder) DecodeUint(ft uint32) uint32 {
 		s := dec.Decode(ft1 + 1)
 		dec.DecodeUpdate(s, s+1, ft1+1)
 		low := dec.DecodeBits(uint(ftb))
-		return s<<uint(ftb) | low
+		t := s<<uint(ftb) | low
+		if t > ft-1 {
+			// ec_dec_uint clamps to the largest value (it also sets its
+			// error flag, which this decoder does not track: libopus keeps
+			// decoding either way).
+			return ft - 1
+		}
+		return t
 	}
 	s := dec.Decode(ft)
 	dec.DecodeUpdate(s, s+1, ft)

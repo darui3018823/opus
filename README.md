@@ -20,7 +20,9 @@ encoder (`ModePolicyLibopus`, the default), and its packets (2.5 to 120 ms)
 are byte-identical to libopus's plain-C float build in the tested
 configurations (automatic mode, mode transitions, 8–48 kHz input, CBR and
 VBR, in-band FEC, and DTX). `SetModePolicy(ModePolicyLegacy)` restores the
-decisions of earlier releases.
+decisions of earlier releases. The residual differences found by the libopus
+parity audit (for example long noise concealment and rare encoder
+float-rounding cases) are listed in the implementation snapshot.
 The authoritative implementation snapshot is
 [docs/CURRENT_IMPLEMENTATION.md](docs/CURRENT_IMPLEMENTATION.md).
 
@@ -99,7 +101,7 @@ and [Ogg Opus package documentation](https://pkg.go.dev/github.com/darui3018823/
 | Multistream/surround | RFC self-delimited framing; families 0, 1 (through 7.1), and 255; matching PLC/FEC PCM variants |
 | Projection/Ambisonics | RFC 8486 families 2 and 3; predefined first- through fifth-order family-3 matrices |
 | Packet tools | Validated inspection, repacketizing, padding, soft clipping, LBRR detection, extensions |
-| Ogg Opus | CRC/lacing, headers/tags, timing trims, chained reading, per-link seek, validated single-link writing |
+| Ogg Opus | CRC/lacing, headers/tags (mapping families 0-3 and 255), timing trims, chained reading, per-link seek, validated single-link writing |
 | Runtime dependencies | Pure Go; CGO/libopus is optional and test-only under `opusref` |
 
 `MaxFrameSize` is 5760 samples per channel at 48 kHz (120 ms).
@@ -111,7 +113,8 @@ exceed it.
 
 `DecodePLC`, `DecodePLC24`, `DecodePLCFloat32`, and `DecodePLCFloat` conceal an
 explicit missing duration. The duration may be any positive 2.5 ms multiple
-through 120 ms. Before the first successfully decoded packet, and after
+(multistream and projection decoders conceal at most 120 ms per call, as in
+libopus). Before the first successfully decoded packet, and after
 `Reset`, PLC returns zero concealment.
 
 For in-band FEC, prefer `DecodeFECWithDuration` for int16 or the explicit-
@@ -214,8 +217,6 @@ go test -run='^$' -fuzz='^FuzzOggOpusReaderWriter$' -fuzztime=60s ./oggopus
 - The Ogg Opus reader supports chained logical streams but not multiplexed
   physical-stream demultiplexing. Each Writer emits one logical stream.
 - Not every libopus single-stream or multistream CTL has a public equivalent.
-  `SetLSBDepth` is retained as a compatibility hint but currently does not
-  affect codec decisions.
 
 ## Development
 

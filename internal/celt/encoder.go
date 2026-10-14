@@ -943,8 +943,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// missed), promote the frame to transient and re-run the MDCT with short blocks
 	// to limit pre-echo. libopus runs this at complexity>=5 on non-LFE frames
 	// whenever the transient flag still fits the budget (also on the first
-	// frame, against the zero energy history); silent frames returned above.
-	if lm > 0 && enc.ECTell()+3 <= totalBits && !isTransient && e.complexity >= 5 && !e.lfe {
+	// frame, against the zero energy history) but never on hybrid frames;
+	// silent frames returned above.
+	if lm > 0 && enc.ECTell()+3 <= totalBits && !isTransient && e.complexity >= 5 && !e.lfe && start == 0 {
 		threshold := 1.0 // libopus GCONST(1.f)
 		if patchTransientDecision(logE, e.prevBandEnergies, numBands, start, end, ch, threshold) {
 			isTransient = true
@@ -1651,7 +1652,9 @@ func (e *Encoder) CopyStateFrom(src *Encoder) {
 // SetBitrate sets the target bitrate.
 func (e *Encoder) SetBitrate(bitrate int) {
 	if bitrate > 0 {
-		e.bitrate = bitrate
+		// OPUS_SET_BITRATE on the CELT encoder caps the rate at 750 kb/s
+		// per channel.
+		e.bitrate = min(bitrate, 750000*e.mode.Channels)
 	}
 }
 
@@ -1746,7 +1749,12 @@ func (e *Encoder) signalBandwidth(end, equivRate int) int {
 	if !e.analysis.Valid {
 		return end - 1
 	}
-	C := e.mode.Channels
+	// C is st->stream_channels: a stereo input coded as a mono stream uses
+	// the mono thresholds.
+	C := e.streamChannels
+	if C < 1 {
+		C = e.mode.Channels
+	}
 	var minBandwidth int
 	switch {
 	case equivRate < 32000*C:

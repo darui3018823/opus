@@ -166,6 +166,11 @@ func (r *PacketReader) readPage() error {
 			r.partialBOS = true
 		}
 		size := int(lace)
+		if len(r.partial)+size > MaxPacketSize {
+			r.partial = nil
+			r.partialBOS = false
+			return fmt.Errorf("%w: more than %d bytes", ErrPacketTooLarge, MaxPacketSize)
+		}
 		r.partial = append(r.partial, pageData[offset:offset+size]...)
 		offset += size
 		if lace < 255 {
@@ -352,11 +357,12 @@ func (w *PacketWriter) flush(eos bool) error {
 	if eos {
 		header |= HeaderEOS
 	}
+	// The page carries the granule of the last packet completed on it, or -1
+	// when none completes there (RFC 3533 section 6), even if the page ends
+	// inside the next packet.
 	granule := w.pageGranule
 	if len(w.segments) == 0 {
 		granule = w.lastGranule
-	} else if w.segments[len(w.segments)-1] == 255 {
-		granule = -1
 	}
 	page := Page{
 		Version:         StreamVersion,

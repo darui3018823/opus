@@ -73,6 +73,45 @@ func TestOggOpusWriterReaderGranuleEOSRoundTrip(t *testing.T) {
 	}
 }
 
+func TestOggOpusReaderReadsHighBitrateWriterOutput(t *testing.T) {
+	// 1275-byte packets fill pages so that a packet completes on a page that
+	// ends inside the next one.
+	packet := make([]byte, 1275)
+	packet[0] = 0xfc // CELT FB 20 ms, code 0
+	var stream bytes.Buffer
+	writer, err := NewWriter(&stream, 9, Head{Version: 1, Channels: 2, PreSkip: 312, InputSampleRate: 48000}, Tags{Vendor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const packets = 100
+	for i := range packets {
+		if err := writer.WriteValidatedPacket(packet, PacketWriteOptions{GranulePosition: int64(i+1) * 960}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := NewReader(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for {
+		_, err := reader.NextPacket()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatalf("after %d packets: %v", n, err)
+		}
+		n++
+	}
+	if n != packets {
+		t.Fatalf("read %d packets, want %d", n, packets)
+	}
+}
+
 func TestOggOpusCloseWritesEmptyEOSPage(t *testing.T) {
 	var stream bytes.Buffer
 	writer, err := NewWriter(&stream, 88,
@@ -249,5 +288,129 @@ func TestWriterWriteValidatedPacketMultistream(t *testing.T) {
 	}
 	if !bytes.Equal(got.Data, packet) || got.Duration48k != opus.FrameSize20ms || !got.EOS {
 		t.Fatalf("packet = %+v, want a 20 ms EOS packet", got)
+	}
+}
+
+func TestOggOpusReaderRejectsMultiPageEOSBeforePreSkip(t *testing.T) {
+	var stream bytes.Buffer
+	writer, err := NewWriter(&stream, 3, Head{Version: 1, Channels: 1, PreSkip: 312, InputSampleRate: 48000}, Tags{Vendor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	packet := []byte{0xe0, 0xff} // CELT FB 2.5 ms
+	if err := writer.WritePacket(packet, PacketWriteOptions{GranulePosition: 120, Flush: true}); err != nil {
+		t.Fatal(err)
+	}
+	// The final granule (200) ends the stream before its 312-sample pre-skip.
+	if err := writer.WritePacket(packet, PacketWriteOptions{GranulePosition: 200, EOS: true}); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := NewReader(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, err = reader.NextPacket()
+		if err != nil {
+			break
+		}
+	}
+	if !errors.Is(err, ErrInvalidOpusStream) {
+		t.Fatalf("error = %v, want ErrInvalidOpusStream", err)
+	}
+}
+
+func TestOggOpusCloseWithoutAudioFails(t *testing.T) {
+	var stream bytes.Buffer
+	writer, err := NewWriter(&stream, 4, Head{Version: 1, Channels: 1, PreSkip: 312, InputSampleRate: 48000}, Tags{Vendor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	headers := stream.Len()
+	if err := writer.Close(); !errors.Is(err, ErrInvalidOpusStream) {
+		t.Fatalf("Close error = %v, want ErrInvalidOpusStream", err)
+	}
+	if stream.Len() != headers {
+		t.Fatalf("Close wrote %d bytes after the headers", stream.Len()-headers)
+	}
+	// The writer is still usable.
+	if err := writer.WritePacket([]byte{0xf8, 0xff, 0xfe}, PacketWriteOptions{GranulePosition: 960}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewReader(bytes.NewReader(stream.Bytes())); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOggOpusProjectionFamily3RoundTrip(t *testing.T) {
+	enc, err := opus.NewProjectionEncoder(48000, 4, 3, opus.ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := Head{
+		Version:         1,
+		Channels:        4,
+		PreSkip:         uint16(enc.Lookahead()),
+		InputSampleRate: 48000,
+		OutputGain:      int16(enc.DemixingMatrixGain()),
+		MappingFamily:   3,
+		StreamCount:     uint8(enc.Streams()),
+		CoupledCount:    uint8(enc.CoupledStreams()),
+		DemixingMatrix:  enc.DemixingMatrixBytes(),
+	}
+	var stream bytes.Buffer
+	writer, err := NewWriter(&stream, 12, head, Tags{Vendor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcm := make([]int16, 960*4)
+	for i := range pcm {
+		pcm[i] = int16((i * 37) % 2000)
+	}
+	const packets = 5
+	for i := range packets {
+		packet, err := enc.Encode(pcm, 960)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.WriteValidatedPacket(packet, PacketWriteOptions{GranulePosition: int64(i+1) * 960}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := NewReader(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(reader.Head.DemixingMatrix, head.DemixingMatrix) {
+		t.Fatal("demixing matrix changed in the round trip")
+	}
+	dec, err := opus.NewProjectionDecoder(48000, 4, int(reader.Head.StreamCount), int(reader.Head.CoupledCount), reader.Head.DemixingMatrix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]int16, 5760*4)
+	n := 0
+	for {
+		packet, err := reader.NextPacket()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := dec.Decode(packet.Data, out); err != nil {
+			t.Fatal(err)
+		}
+		n++
+	}
+	if n != packets {
+		t.Fatalf("decoded %d packets, want %d", n, packets)
 	}
 }

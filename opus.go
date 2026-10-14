@@ -109,8 +109,13 @@ type Encoder struct {
 
 	// Inband FEC (SILK LBRR). useInbandFEC requests redundant coding; the SILK
 	// encoder only emits LBRR when this is on and packetLossPerc > 0.
-	useInbandFEC   bool
-	packetLossPerc int
+	useInbandFEC bool
+	// fecConfig is st->fec_config (OPUS_SET_INBAND_FEC: 0, 1 or 2).
+	fecConfig int
+	// vbrUnconstrained is !st->vbr_constraint: kept independently of the
+	// VBR setting, as OPUS_SET_VBR and OPUS_SET_VBR_CONSTRAINT are.
+	vbrUnconstrained bool
+	packetLossPerc   int
 	// lbrrCoded is the previous packet's LBRR_coded decision (decide_fec
 	// hysteresis).
 	lbrrCoded bool
@@ -158,7 +163,18 @@ type Encoder struct {
 	// the input the tonality analysis reads instead of the packet's (the
 	// projection encoder's unmixed channels), and libopusForcedMode
 	// st->user_forced_mode (-1 for automatic) under the libopus policy.
-	outDataBytes      int
+	outDataBytes int
+	// maxPacketSize is SetMaxPacketSize: the caller's output buffer for a
+	// single-stream packet (0 = defaultOutDataBytes).
+	maxPacketSize int
+	// callerPCM / callerFrameSize are the caller's whole input when an
+	// expert frame duration codes only a prefix (analysis_pcm).
+	callerPCM       []float64
+	callerFrameSize int
+	// reportedBitrate is EffectiveBitrate: the setting bounded by 1275
+	// bytes per coded frame. Under the libopus policy the packet bitrate
+	// (e.bitrate) is st->bitrate_bps instead, bounded by max_data_bytes.
+	reportedBitrate   int
 	analysisInput     []float64
 	libopusForcedMode int
 	// lfe is st->lfe (OPUS_SET_LFE), set by the surround encoder on its
@@ -473,14 +489,13 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	}
 
 	// Convert int16 to float64
-	selectedSize := selectedFrameSize * e.channels
-	floatPCM := make([]float64, selectedSize)
-	for i := 0; i < selectedSize; i++ {
+	floatPCM := make([]float64, expectedSize)
+	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768.0
 	}
 
 	e.inputLSBDepth = 16
-	return e.encodeFloat(floatPCM, selectedFrameSize)
+	return e.encodeCallerFrame(floatPCM, frameSize, selectedFrameSize)
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
@@ -496,13 +511,12 @@ func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
 	if len(pcm) < expectedSize {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
-	selectedSize := selectedFrameSize * e.channels
-	floatPCM := make([]float64, selectedSize)
+	floatPCM := make([]float64, expectedSize)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608.0
 	}
 	e.inputLSBDepth = 24
-	return e.encodeFloat(floatPCM, selectedFrameSize)
+	return e.encodeCallerFrame(floatPCM, frameSize, selectedFrameSize)
 }
 
 // EncodeFloat encodes floating-point PCM samples
@@ -520,9 +534,8 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
 
-	selectedSize := selectedFrameSize * e.channels
 	e.inputLSBDepth = 24
-	return e.encodeFloat(pcm[:selectedSize], selectedFrameSize)
+	return e.encodeCallerFrame(pcm[:expectedSize], frameSize, selectedFrameSize)
 }
 
 // EncodeFloat32 encodes interleaved float32 PCM samples in range [-1.0, 1.0].
@@ -537,12 +550,25 @@ func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
 	if len(pcm) < expectedSize {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
-	selectedSize := selectedFrameSize * e.channels
-	floatPCM := make([]float64, selectedSize)
+	floatPCM := make([]float64, expectedSize)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i])
 	}
-	return e.encodeFloat(floatPCM, selectedFrameSize)
+	// opus_encode_float passes an LSB depth of 24.
+	e.inputLSBDepth = 24
+	return e.encodeCallerFrame(floatPCM, frameSize, selectedFrameSize)
+}
+
+// encodeCallerFrame codes the first selectedFrameSize samples of the
+// caller's frameSize samples. Like opus_encode_native's analysis_pcm and
+// analysis_frame_size, the tonality analysis sees all the caller's samples
+// when an expert frame duration selects fewer.
+func (e *Encoder) encodeCallerFrame(pcm []float64, frameSize, selectedFrameSize int) ([]byte, error) {
+	if selectedFrameSize < frameSize {
+		e.callerPCM, e.callerFrameSize = pcm, frameSize
+		defer func() { e.callerPCM, e.callerFrameSize = nil, 0 }()
+	}
+	return e.encodeFloat(pcm[:selectedFrameSize*e.channels], selectedFrameSize)
 }
 
 // encodeFloat is the internal encoding path shared by Encode and EncodeFloat.
@@ -613,11 +639,13 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 			e.analysis = celt.NewTonalityAnalysis(e.sampleRate)
 		}
 		e.analysisReadPos, e.analysisReadSubframe = e.analysis.ReadPosition()
-		analysisPCM := pcm
+		analysisPCM, analysisFrameSize := pcm, frameSize
 		if e.analysisInput != nil {
 			analysisPCM = e.analysisInput
+		} else if e.callerPCM != nil {
+			analysisPCM, analysisFrameSize = e.callerPCM, e.callerFrameSize
 		}
-		analysisInfo = e.analysis.Run(analysisPCM, frameSize, e.channels, lsbDepth)
+		analysisInfo = e.analysis.Run(analysisPCM, analysisFrameSize, frameSize, e.channels, lsbDepth)
 	} else if e.analysis != nil && e.analysis.Initialized() {
 		e.analysis.Reset()
 	}
@@ -637,18 +665,20 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 	// decision (the toMono delay only applies to SILK and hybrid packets),
 	// before the high-pass conditioning whose cutoff depends on the mode.
 	maxDataBytes := MaxFrameBytes + 1
-	if e.rateMode == celt.RateModeCBR {
+	if e.libopusModePolicy {
+		// max_data_bytes = IMIN(1276*6, out_data_bytes); in CBR it becomes
+		// cbr_bytes (applyOutDataBytes).
+		maxDataBytes = 6 * (MaxFrameBytes + 1)
+		if err := e.applyOutDataBytes(frameSize, &maxDataBytes); err != nil {
+			return nil, err
+		}
+	} else if e.rateMode == celt.RateModeCBR {
 		maxDataBytes = (bitrateToBits(e.bitrate, e.sampleRate, frameSize) + 4) / 8
 		if maxDataBytes > MaxFrameBytes+1 {
 			maxDataBytes = MaxFrameBytes + 1
 		}
 		if maxDataBytes < 1 {
 			maxDataBytes = 1
-		}
-	}
-	if e.libopusModePolicy && e.outDataBytes > 0 {
-		if err := e.applyOutDataBytes(frameSize, &maxDataBytes); err != nil {
-			return nil, err
 		}
 	}
 	var decision modeDecision
@@ -662,12 +692,18 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 			e.packetStereoWidth = e.stereoWidth.compute(raw, frameSize, e.sampleRate)
 		}
 		if pkt, ok := e.libopusPLCFrame(frameSize, maxDataBytes); ok {
+			// opus_encode_native clears rangeFinal on entry and a PLC frame
+			// codes nothing.
+			e.lastFinalRange = 0
 			return pkt, nil
 		}
 		e.silkUseDTX = e.dtx && !(analysisInfo.Valid || isSilence)
+		if e.silkEncoder != nil {
+			e.silkEncoder.SetReducedDependency(e.predictionDisabled)
+		}
 		e.frameIsSilence, e.frameAnalysis, e.packetLSBDepth = isSilence, analysisInfo, lsbDepth
 		defer func() { e.packetEquivRate = 0 }()
-		e.decideStreamChannels(frameSize, framing.ModeSILKOnly)
+		e.decideStreamChannelsLibopus(frameSize, maxDataBytes, analysisInfo)
 		decision = e.decideLibopusMode(raw, frameSize, maxDataBytes, analysisInfo)
 		if decision.mode == framing.ModeCELTOnly && e.toMono {
 			e.toMono = false
@@ -725,6 +761,10 @@ func (e *Encoder) encodeDecidedFrame(pcm []float64, frameSize, nFrames, maxDataB
 	if !e.libopusModePolicy || nFrames < 1 {
 		return e.encodeDecidedFrameCore(pcm, frameSize, nFrames, maxDataBytes, decision)
 	}
+	// opus_encode_frame_native codes within IMIN(max_data_bytes, 1276) and
+	// pads a CBR packet to the full max_data_bytes.
+	origMaxDataBytes := maxDataBytes
+	maxDataBytes = min(maxDataBytes, MaxFrameBytes+1)
 	// opus_encode_frame_native's voice activity, passed to SILK.
 	activity := e.frameActivity(pcm, e.frameIsSilence, e.frameAnalysis, decision.mode)
 	if e.silkEncoder != nil {
@@ -769,6 +809,9 @@ func (e *Encoder) encodeDecidedFrame(pcm []float64, frameSize, nFrames, maxDataB
 		}
 	} else {
 		e.nbNoActivityMsQ1 = 0
+	}
+	if e.rateMode == celt.RateModeCBR && len(out) > 1 && len(out) < origMaxDataBytes {
+		return PacketPad(out, origMaxDataBytes)
 	}
 	return out, nil
 }
@@ -903,8 +946,13 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 		// The deferral (to_celt) and the redundancy were decided with the mode.
 		redundancy, celtToSilk, redundancyBytes = decision.redundancy, decision.celtToSilk, decision.redundancyBytes
 		if hybrid || decision.mode == framing.ModeCELTOnly {
-			// CELT_SET_PREDICTION(2) at the start of every non-SILK packet.
-			e.celtEncoder.SetPrediction(2)
+			// CELT_SET_PREDICTION(2) at the start of every non-SILK packet,
+			// 0 with reduced dependency (OPUS_SET_PREDICTION_DISABLED).
+			pred := 2
+			if e.predictionDisabled {
+				pred = 0
+			}
+			e.celtEncoder.SetPrediction(pred)
 		}
 	} else if !hybrid && e.prevMode == framing.ModeHybrid && e.canDeferToHybrid(nFrames) {
 		bw = e.deferredHybridBandwidth(raw)
@@ -2279,7 +2327,12 @@ func (e *Encoder) Bitrate() int { return e.bitrateSetting }
 
 // EffectiveBitrate returns the numeric bitrate currently applied internally.
 // For BitrateAuto and BitrateMax this is updated for each encoded frame size.
-func (e *Encoder) EffectiveBitrate() int { return e.bitrate }
+func (e *Encoder) EffectiveBitrate() int {
+	if e.reportedBitrate > 0 {
+		return e.reportedBitrate
+	}
+	return e.bitrate
+}
 
 // Complexity returns the current complexity setting (0–10).
 func (e *Encoder) Complexity() int { return e.complexity }
@@ -2287,8 +2340,9 @@ func (e *Encoder) Complexity() int { return e.complexity }
 // VBR reports whether variable bitrate is enabled.
 func (e *Encoder) VBR() bool { return e.rateMode != celt.RateModeCBR }
 
-// VBRConstraint reports whether constrained VBR is enabled.
-func (e *Encoder) VBRConstraint() bool { return e.rateMode == celt.RateModeCVBR }
+// VBRConstraint reports the VBR constraint setting
+// (OPUS_GET_VBR_CONSTRAINT), whether or not VBR is on.
+func (e *Encoder) VBRConstraint() bool { return !e.vbrUnconstrained }
 
 // SampleRate returns the encoder input sample rate in Hz.
 func (e *Encoder) SampleRate() int { return e.sampleRate }
@@ -2360,9 +2414,10 @@ func (e *Encoder) SetForceChannels(channels int) error {
 // ForceChannels returns the configured forced stream channel count.
 func (e *Encoder) ForceChannels() int { return e.forceChannels }
 
-// SetLSBDepth sets the retained input precision hint in bits per sample. The
-// current encoder exposes this for CTL parity but does not use it in codec
-// decisions.
+// SetLSBDepth sets the input precision hint in bits per sample
+// (OPUS_SET_LSB_DEPTH). As in libopus, the CELT encoder (silence detection and
+// dynamic allocation) and the tonality analysis use it; the int16 Encode caps
+// it at 16.
 func (e *Encoder) SetLSBDepth(depth int) error {
 	if depth < LSBDepthMin || depth > LSBDepthMax {
 		return fmt.Errorf("%w: invalid LSB depth %d", ErrBadArg, depth)
@@ -2374,8 +2429,11 @@ func (e *Encoder) SetLSBDepth(depth int) error {
 // LSBDepth returns the configured input precision hint.
 func (e *Encoder) LSBDepth() int { return e.lsbDepth }
 
-// SetPredictionDisabled disables predictive SILK/hybrid mode routing. CELT
-// remains available for all supported frame durations.
+// SetPredictionDisabled is OPUS_SET_PREDICTION_DISABLED. Under
+// ModePolicyLibopus it reduces inter-packet dependency as libopus does: SILK
+// codes every packet as the first frame after a reset and CELT runs without
+// prediction (no prefilter, intra energy). Under ModePolicyLegacy it
+// instead keeps the encoder away from the SILK and hybrid modes.
 func (e *Encoder) SetPredictionDisabled(disabled bool) {
 	e.predictionDisabled = disabled
 }
@@ -2450,10 +2508,10 @@ func (e *Encoder) monoEncoder() (*Encoder, error) {
 	return m, nil
 }
 
-// SetBitrate sets the target bitrate in bits per second. It accepts numeric
-// rates of at least 6000, BitrateAuto, or BitrateMax. Numeric requests above
-// libopus' 750000 bit/s per-channel CTL ceiling are clamped to that ceiling;
-// EffectiveBitrate is additionally bounded by the per-frame byte limit.
+// SetBitrate sets the target bitrate in bits per second. It accepts positive
+// numeric rates, BitrateAuto, or BitrateMax. Like OPUS_SET_BITRATE, numeric
+// requests are clamped to [500, 750000 x Channels()]; EffectiveBitrate is
+// additionally bounded by the per-frame byte limit.
 func (e *Encoder) SetBitrate(bitrate int) error {
 	if bitrate != BitrateAuto && bitrate != BitrateMax {
 		// OPUS_SET_BITRATE: positive rates are clamped to
@@ -2486,6 +2544,23 @@ func (e *Encoder) applyBitrateSetting(frameSize int) error {
 		if maximum := e.maxBitrateForFrame(frameSize); bitrate > maximum {
 			bitrate = maximum
 		}
+	}
+	e.reportedBitrate = bitrate
+	if e.libopusModePolicy && e.outDataBytes == 0 {
+		// user_bitrate_to_bitrate: OPUS_BITRATE_MAX is 1.5 Mb/s and a
+		// numeric setting is used as is; max_data_bytes bounds both when
+		// the packet is coded (applyOutDataBytes).
+		switch e.bitrateSetting {
+		case BitrateAuto:
+		case BitrateMax:
+			bitrate = 1500000
+		default:
+			bitrate = e.bitrateSetting
+		}
+		// IMIN(user_bitrate, bits_to_bitrate(max_data_bytes*8)), kept on
+		// every recomputation within the packet.
+		limit := min(e.outBufferBytes(), 6*(MaxFrameBytes+1))
+		bitrate = min(bitrate, bitsToBitrate(limit*8, e.sampleRate, frameSize))
 	}
 	return e.setPacketBitrate(bitrate, frameSize)
 }
@@ -2541,13 +2616,15 @@ func (e *Encoder) SetComplexity(complexity int) error {
 	return nil
 }
 
-// SetVBR enables or disables variable bitrate mode.
-// When enabled, this sets constrained VBR (CVBR), which is the libopus default:
-// the encoder produces variable-size packets but keeps the average bitrate
-// close to the target. Use SetVBRConstraint(false) for unconstrained VBR.
+// SetVBR enables or disables variable bitrate mode (OPUS_SET_VBR). With
+// VBR on, the VBR constraint setting (constrained by default, the libopus
+// default) selects constrained or unconstrained VBR.
 func (e *Encoder) SetVBR(vbr bool) {
 	if vbr {
 		e.rateMode = celt.RateModeCVBR
+		if e.vbrUnconstrained {
+			e.rateMode = celt.RateModeVBR
+		}
 	} else {
 		e.rateMode = celt.RateModeCBR
 	}
@@ -2555,11 +2632,14 @@ func (e *Encoder) SetVBR(vbr bool) {
 	e.syncSILKRateMode()
 }
 
-// SetVBRConstraint controls the VBR constraint. When true (default), CVBR is
-// used; when false, unconstrained VBR is used. Has no effect if VBR is disabled.
+// SetVBRConstraint sets the VBR constraint (OPUS_SET_VBR_CONSTRAINT): true
+// (the default) for constrained VBR, false for unconstrained VBR. Like
+// libopus the setting is kept while VBR is off and applies when it is
+// turned on.
 func (e *Encoder) SetVBRConstraint(constrained bool) {
+	e.vbrUnconstrained = !constrained
 	if e.rateMode == celt.RateModeCBR {
-		return // VBR not enabled, nothing to do
+		return
 	}
 	if constrained {
 		e.rateMode = celt.RateModeCVBR
@@ -2582,6 +2662,36 @@ func (e *Encoder) syncSILKRateMode() {
 	default:
 		e.silkEncoder.SetRateMode(silk.RateModeCBR)
 	}
+}
+
+// SetMaxPacketSize sets the size of the output buffer that libopus's
+// opus_encode would receive (max_data_bytes): no packet is longer, a VBR
+// packet of more than one frame shares it between its frames, and a CBR
+// packet above 1276 bytes uses it as the packet size limit. It takes effect
+// only under ModePolicyLibopus: ModePolicyLegacy stores the value (and
+// MaxPacketSize returns it) but does not limit its packets by it. The default
+// is 1500 bytes. n must be positive.
+func (e *Encoder) SetMaxPacketSize(n int) error {
+	if n < 1 {
+		return fmt.Errorf("%w: max packet size %d", ErrBadArg, n)
+	}
+	e.maxPacketSize = n
+	return nil
+}
+
+// MaxPacketSize returns the SetMaxPacketSize value (1500 by default).
+func (e *Encoder) MaxPacketSize() int { return e.outBufferBytes() }
+
+// outBufferBytes is out_data_bytes: the multistream encoder's per-stream
+// budget while it codes a stream, otherwise SetMaxPacketSize.
+func (e *Encoder) outBufferBytes() int {
+	if e.outDataBytes > 0 {
+		return e.outDataBytes
+	}
+	if e.maxPacketSize > 0 {
+		return e.maxPacketSize
+	}
+	return defaultOutDataBytes
 }
 
 // SetPacketPadding sets the number of code-3 padding-data bytes appended to each
@@ -2621,12 +2731,43 @@ func (e *Encoder) DTX() bool { return e.dtx }
 // FEC applies to SILK-only and hybrid speech paths; it is off by default and has
 // no effect on CELT-only packets.
 func (e *Encoder) SetInbandFEC(enabled bool) {
-	e.useInbandFEC = enabled
-	e.syncSILKFEC()
+	if enabled {
+		_ = e.SetInbandFECMode(InbandFECOn)
+	} else {
+		_ = e.SetInbandFECMode(InbandFECOff)
+	}
 }
 
 // InbandFEC reports whether inband FEC is enabled.
 func (e *Encoder) InbandFEC() bool { return e.useInbandFEC }
+
+// In-band FEC modes of SetInbandFECMode (the OPUS_SET_INBAND_FEC values).
+const (
+	// InbandFECOff disables LBRR.
+	InbandFECOff = 0
+	// InbandFECOn enables LBRR and may move the encoder to SILK so that
+	// it can carry it.
+	InbandFECOn = 1
+	// InbandFECNoModeSwitch enables LBRR without moving music (a voice
+	// estimate of at most 25) to SILK for it.
+	InbandFECNoModeSwitch = 2
+)
+
+// SetInbandFECMode is OPUS_SET_INBAND_FEC with its three values; mode 2
+// differs from 1 only in the libopus mode decision. Other values return
+// ErrBadArg.
+func (e *Encoder) SetInbandFECMode(mode int) error {
+	if mode < InbandFECOff || mode > InbandFECNoModeSwitch {
+		return fmt.Errorf("%w: in-band FEC mode %d", ErrBadArg, mode)
+	}
+	e.fecConfig = mode
+	e.useInbandFEC = mode != InbandFECOff
+	e.syncSILKFEC()
+	return nil
+}
+
+// InbandFECMode returns the SetInbandFECMode value (OPUS_GET_INBAND_FEC).
+func (e *Encoder) InbandFECMode() int { return e.fecConfig }
 
 // SetPacketLossPerc sets the expected packet-loss percentage used to tune FEC
 // redundancy (higher loss → smaller, more frequent LBRR frames). Values are
@@ -2653,6 +2794,12 @@ func (e *Encoder) syncSILKFEC() {
 		return
 	}
 	e.silkEncoder.SetPacketLossPerc(e.packetLossPerc)
+	if e.libopusModePolicy {
+		// decide_fec sets LBRR_coded per packet (SetLBRRCoded); changing
+		// the settings keeps the LBRR frames coded with the previous
+		// packet, which silk_Encode still writes into the next one.
+		return
+	}
 	e.silkEncoder.SetInbandFEC(e.useInbandFEC && e.packetLossPerc > 0)
 }
 
@@ -3011,6 +3158,12 @@ type Decoder struct {
 	// lastPacketConfig follows every packet's TOC (st->mode, st->bandwidth).
 	lossConfig   int
 	lossChannels int
+	// plcFrameSize is st->frame_size: the frame size of the last packet
+	// (Fs/400 before any and after a reset). Each concealment call is cut to
+	// it before the 20 / 10 / 5 ms rounding.
+	plcFrameSize int
+	// softclipMem is the soft-clip memory of the int16 decode (softclip_mem).
+	softclipMem [2]float32
 
 	// SILK decoders indexed by [rateIdx 0-2][chIdx 0=mono,1=stereo].
 	// rateIdx: 0=8kHz, 1=12kHz, 2=16kHz
@@ -3044,13 +3197,17 @@ type Decoder struct {
 	// Resampler for non-48kHz CELT output rates
 	celtResampler *resampler.Resampler // 48kHz -> outRate
 
-	frameSize              int // frame size in samples at sampleRate
-	internalFrameSize      int // always 960 (20ms at 48kHz)
-	lastPacketDuration     int // samples per channel decoded by the last packet
-	lastPacketConfig       int // TOC config of the last successfully decoded packet
-	lastPacketChannels     int // coded channels of the last successfully decoded packet
-	lastFinalRange         uint32
-	lastPitch              int
+	frameSize          int // frame size in samples at sampleRate
+	internalFrameSize  int // always 960 (20ms at 48kHz)
+	lastPacketDuration int // samples per channel decoded by the last packet
+	lastPacketConfig   int // TOC config of the last successfully decoded packet
+	lastPacketChannels int // coded channels of the last successfully decoded packet
+	lastFinalRange     uint32
+	lastPitch          int // in 48 kHz samples, like OPUS_GET_PITCH
+	// silkPitch48 is DecControl.prevPitchLag (48 kHz samples), which
+	// OPUS_GET_PITCH reports outside CELT-only mode and which survives a
+	// reset.
+	silkPitch48            int
 	gainQ8                 int
 	phaseInversionDisabled bool
 }
@@ -3112,6 +3269,7 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 		prevMode:          -1,
 		lastPacketConfig:  -1,
 		lossConfig:        -1,
+		plcFrameSize:      sampleRate / 400,
 		silkActiveRi:      -1,
 	}
 
@@ -3190,7 +3348,12 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 // Decode decodes an Opus packet into interleaved int16 PCM and returns the
 // number of samples per channel. pcm must have room for the packet duration
 // times Channels() values; a short buffer returns ErrBufferTooSmall.
+// An empty packet conceals len(pcm)/Channels() samples, like DecodePLC.
 func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
+	if len(data) == 0 {
+		// Like opus_decode with no packet: conceal a buffer's worth.
+		return d.DecodePLC(pcm, len(pcm)/d.channels)
+	}
 	required, err := d.packetOutputSamples(data)
 	if err != nil {
 		return 0, err
@@ -3199,7 +3362,7 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
 	}
 
-	floatPCM, err := d.DecodeFloat(data)
+	floatPCM, err := d.decodeSoftClipped(data)
 	if err != nil {
 		return 0, err
 	}
@@ -3212,10 +3375,16 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 }
 
 // Decode24 decodes an Opus packet to interleaved signed 24-bit PCM stored in
-// int32 values. Output is saturated to [-8388608, 8388607]. pcm must have room
+// int32 values, converted like libopus RES2INT24 (rounded to nearest even and
+// not clamped, so positive decoder gain can exceed the 24-bit range). pcm must have room
 // for the packet duration times Channels() values; the return value is samples
 // per channel, and a short buffer returns ErrBufferTooSmall.
+// An empty packet conceals len(pcm)/Channels() samples, like DecodePLC.
 func (d *Decoder) Decode24(data []byte, pcm []int32) (int, error) {
+	if len(data) == 0 {
+		// Like opus_decode24 with no packet: conceal a buffer's worth.
+		return d.DecodePLC24(pcm, len(pcm)/d.channels)
+	}
 	required, err := d.packetOutputSamples(data)
 	if err != nil {
 		return 0, err
@@ -3229,13 +3398,7 @@ func (d *Decoder) Decode24(data []byte, pcm []int32) (int, error) {
 		return 0, err
 	}
 	for i, sample := range floatPCM {
-		scaled := sample * 8388608.0
-		if scaled > 8388607.0 {
-			scaled = 8388607.0
-		} else if scaled < -8388608.0 {
-			scaled = -8388608.0
-		}
-		pcm[i] = int32(math.Round(scaled))
+		pcm[i] = res2Int24(sample)
 	}
 	return len(floatPCM) / d.channels, nil
 }
@@ -3689,10 +3852,57 @@ func is10msConfig(config int) bool {
 // full-scale input. Positive decoder gain can produce values outside that
 // nominal range.
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
+	pcm, err := d.decodePacketFloat(data)
+	if err != nil {
+		return nil, err
+	}
+	return d.finishOutput(pcm, false), nil
+}
+
+// decodeSoftClipped decodes a packet for the int16 API.
+func (d *Decoder) decodeSoftClipped(data []byte) ([]float64, error) {
+	pcm, err := d.decodePacketFloat(data)
+	if err != nil {
+		return nil, err
+	}
+	return d.finishOutput(pcm, true), nil
+}
+
+// finishOutput ends a successful opus_decode_native call. The int16 API of a
+// float build soft-clips the output (opus_pcm_soft_clip) with the decoder's
+// clipping memory; the float and 24-bit APIs do not, and restart the memory.
+func (d *Decoder) finishOutput(pcm []float64, softClip bool) []float64 {
+	if !softClip {
+		d.softclipMem = [2]float32{}
+		return pcm
+	}
+	f := make([]float32, len(pcm))
+	for i, v := range pcm {
+		f[i] = float32(v)
+	}
+	_ = SoftClipFloat32(f, d.channels, d.softclipMem[:d.channels])
+	for i, v := range f {
+		pcm[i] = float64(v)
+	}
+	return pcm
+}
+
+// res2Int24 is libopus RES2INT24 for a float build: the sample scaled by
+// 2^23 in float32 and rounded to nearest even (lrintf), without a clamp.
+func res2Int24(v float64) int32 {
+	return int32(math.RoundToEven(float64(float32(v) * 8388608)))
+}
+
+// decodePacketFloat decodes one packet (opus_decode_native without the
+// output conversion).
+func (d *Decoder) decodePacketFloat(data []byte) ([]float64, error) {
 	info, err := inspectPacket(data, d.sampleRate)
 	if err != nil {
 		return nil, err
 	}
+	// st->frame_size is updated before the packet's frames are decoded (a
+	// mode-switch concealment inside the packet is cut to it).
+	d.plcFrameSize = info.samplesPerFrame
 
 	toc := data[0]
 	config, stereo, countCode := framing.ParseTOC(toc)
@@ -3793,15 +4003,28 @@ func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
 			activeCeltDec.CopyStateFrom(d.lastCeltDec)
 		}
 		activeCeltDec.SetStreamChannels(pktChannels)
+		activeCeltDec.SetAccumulate(false)
 		pcm, err := activeCeltDec.Decode(frame)
-		if err != nil {
+		overrun := errors.Is(err, celt.ErrRangeOverrun)
+		if err != nil && !overrun {
 			return nil, fmt.Errorf("CELT decoding failed: %w", err)
+		}
+		if overrun {
+			// libopus keeps the frame's decoder state, range and mode, but
+			// fails the whole call (OPUS_INTERNAL_ERROR).
+			d.lastCeltDec = activeCeltDec
+			d.lossConfig, d.lossChannels = config, pktChannels
+			d.lastFinalRange = activeCeltDec.LastFinalRange()
+			d.lastFrameConcealed = false
+			d.lastPitch = activeCeltDec.Pitch()
+			d.prevMode, d.prevRedundancy = framing.ModeCELTOnly, false
+			return nil, fmt.Errorf("%w: %w", ErrInternalError, err)
 		}
 		d.lastCeltDec = activeCeltDec
 		d.lastFrameConcealed = false
 		d.lossConfig, d.lossChannels = config, pktChannels
 		rangeFinal = activeCeltDec.LastFinalRange()
-		d.lastPitch = activeCeltDec.Pitch() * d.sampleRate / 48000
+		d.lastPitch = activeCeltDec.Pitch()
 
 		// Resample from 48kHz to output sample rate if needed
 		if d.celtResampler != nil {
@@ -3829,9 +4052,13 @@ func (d *Decoder) applyGain(pcm []float64) {
 	if d.gainQ8 == 0 {
 		return
 	}
-	scale := math.Pow(10, float64(d.gainQ8)/(20*256))
+	// opus_decode_frame (float build):
+	// gain = celt_exp2(6.48814081e-4f * decode_gain), with celt_exp2(x) =
+	// (float)exp(0.6931471805599453094*x), applied in float32.
+	g := float32(6.48814081e-4) * float32(d.gainQ8)
+	scale := float32(math.Exp(0.6931471805599453094 * float64(g)))
 	for i := range pcm {
-		pcm[i] *= scale
+		pcm[i] = float64(float32(pcm[i]) * scale)
 	}
 }
 
@@ -4018,15 +4245,19 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		redundancy := false
 		redundancyBytes := 0
 		celtToSilk := false
+		sanityFailed := false
 		if dec.ECTell()+17 <= len(stream)*8 {
 			redundancy = true
 			celtToSilk = dec.DecodeBitLogp(1)
 			redundancyBytes = len(stream) - ((dec.ECTell() + 7) >> 3)
 			mainBytes := len(stream) - redundancyBytes
 			if redundancyBytes < 2 || mainBytes < 0 || mainBytes*8 < dec.ECTell() {
+				// libopus's sanity check sets len = 0, so the frame's final
+				// range becomes 0.
 				redundancy = false
 				redundancyBytes = 0
 				celtToSilk = false
+				sanityFailed = true
 			} else {
 				dec.ShrinkStorage(redundancyBytes)
 			}
@@ -4075,13 +4306,17 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		decodedAny = true
 		allPCM = append(allPCM, pcm...)
 		rangeFinal = dec.GetRng() ^ redundantRange
+		if sanityFailed {
+			rangeFinal = 0
+		}
 	}
 	d.lastFinalRange = rangeFinal
 	if !decodedAny {
 		// Only concealed frames: the SILK configuration is unchanged.
 		return allPCM, trailingRedundancy, nil
 	}
-	d.lastPitch = info.dec.Pitch() * d.sampleRate / (rateKHz * 1000)
+	d.lastPitch = info.dec.Pitch() * 48 / rateKHz
+	d.silkPitch48 = d.lastPitch
 	d.prevSilkInternalCh = pktChannels
 
 	if pktChannels == 1 && stereoPeer != nil && stereoPeer.dec != nil {
@@ -4117,14 +4352,27 @@ func (d *Decoder) crossfadeRedundancy(out, red []float64, samplesPerFrame int) {
 	}
 	base := (frameSamplesPerCh - f25) * ch // first interleaved sample of the tail
 	for i := 0; i < f25; i++ {
-		wi := win[i*inc]
-		w := float64(wi * wi)
+		w := smoothFadeWeight(win[i*inc])
 		for c := 0; c < ch; c++ {
 			o := base + i*ch + c
 			r := (f25+i)*ch + c
-			out[o] = float64(w*red[r]) + float64((1.0-w)*out[o])
+			out[o] = smoothFadeSample(w, out[o], red[r])
 		}
 	}
+}
+
+// smoothFadeWeight is smooth_fade's squared window, in float32.
+func smoothFadeWeight(window float64) float32 {
+	w := float32(window)
+	// The conversion keeps the square rounded when the caller's 1 - w is
+	// inlined next to it (no fused multiply-subtract).
+	return float32(w * w)
+}
+
+// smoothFadeSample is one smooth_fade output in float32:
+// w*in2 + (1-w)*in1, each product rounded (no fused multiply-add).
+func smoothFadeSample(w float32, in1, in2 float64) float64 {
+	return float64(float32(w*float32(in2)) + float32((1-w)*float32(in1)))
 }
 
 // crossfadeLeadingRedundancy replaces the first 2.5 ms with the first half of
@@ -4143,11 +4391,10 @@ func (d *Decoder) crossfadeLeadingRedundancy(out, red []float64) {
 		inc = 1
 	}
 	for i := 0; i < f25; i++ {
-		w := win[i*inc]
-		w = float64(w * w)
+		w := smoothFadeWeight(win[i*inc])
 		for c := 0; c < ch; c++ {
 			o := (f25+i)*ch + c
-			out[o] = float64((1.0-w)*red[o]) + float64(w*out[o])
+			out[o] = smoothFadeSample(w, red[o], out[o])
 		}
 	}
 }
@@ -4181,11 +4428,10 @@ func (d *Decoder) applyTransition(out, trans []float64) {
 	win := celt.OverlapWindow48()
 	inc := max(48000/d.sampleRate, 1)
 	for i := 0; i < f25; i++ {
-		w := win[i*inc]
-		w = float64(w * w)
+		w := smoothFadeWeight(win[i*inc])
 		for c := 0; c < ch; c++ {
 			o := i*ch + c
-			out[off+o] = float64((1.0-w)*in1[o]) + float64(w*out[off+o])
+			out[off+o] = smoothFadeSample(w, in1[o], out[off+o])
 		}
 	}
 }
@@ -4342,6 +4588,9 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		celtToSilk := false
 		redundancyBytes := 0
 		celtLen := len(stream)
+		// celtLost is libopus's sanity-check failure (len = 0): the CELT
+		// layer is concealed and the frame's final range is 0.
+		celtLost := false
 		if dec.ECTell()+37 <= len(stream)*8 {
 			redundancy = dec.DecodeBitLogp(12)
 		}
@@ -4353,6 +4602,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 				celtLen = len(stream)
 				redundancyBytes = 0
 				redundancy = false
+				celtLost = true
 			} else {
 				dec.ShrinkStorage(redundancyBytes)
 			}
@@ -4389,7 +4639,18 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		} else if d.lastCeltDec != nil && d.lastCeltDec != celtDec {
 			celtDec.CopyStateFrom(d.lastCeltDec)
 		}
-		celtPCM, cerr := celtDec.DecodeHybrid(dec, celtLen, celtStart, celtEnd)
+		var celtPCM []float64
+		var cerr error
+		celtDec.SetAccumulate(true)
+		if celtLost {
+			celtPCM = celtDec.DecodeHybridLoss(celtStart, celtEnd)
+		} else {
+			celtPCM, cerr = celtDec.DecodeHybrid(dec, celtLen, celtStart, celtEnd)
+		}
+		overrun := errors.Is(cerr, celt.ErrRangeOverrun)
+		if overrun {
+			cerr = nil
+		}
 		if cerr == nil {
 			d.lastCeltDec = celtDec
 			if d.celtResampler != nil {
@@ -4397,15 +4658,11 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 			}
 			celtPCM = adjustChannels(celtPCM, celtActualCh, d.channels)
 			celtPCM = padOrTrim(celtPCM, samplesPerFrame)
-			// Time-domain sum of the two layers, clipped to [-1, 1].
+			// Time-domain sum of the two layers. libopus accumulates the CELT
+			// layer into the SILK output in float32 (celt deemphasis with
+			// accum) without clipping; the decoder gain comes later.
 			for i := 0; i < samplesPerFrame; i++ {
-				v := silkOut[i] + celtPCM[i]
-				if v > 1.0 {
-					v = 1.0
-				} else if v < -1.0 {
-					v = -1.0
-				}
-				silkOut[i] = v
+				silkOut[i] = float64(float32(silkOut[i]) + float32(celtPCM[i]))
 			}
 			if len(leadingRedundancy) >= (d.sampleRate/200)*d.channels && (frameMode != framing.ModeSILKOnly || frameRedundancy) {
 				d.crossfadeLeadingRedundancy(silkOut, leadingRedundancy)
@@ -4435,13 +4692,26 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		decodedAny = true
 		allPCM = append(allPCM, silkOut...)
 		rangeFinal = dec.GetRng() ^ redundantRange
+		if celtLost {
+			rangeFinal = 0
+		}
+		if overrun {
+			// The frame completes, then libopus fails the whole call.
+			d.lastFinalRange = rangeFinal
+			d.prevMode, d.prevRedundancy = framing.ModeHybrid, redundancy && !celtToSilk
+			d.lastPitch = info.dec.Pitch() * 48 / rateKHz
+			d.silkPitch48 = d.lastPitch
+			d.prevSilkInternalCh = pktChannels
+			return nil, false, fmt.Errorf("%w: %w", ErrInternalError, celt.ErrRangeOverrun)
+		}
 	}
 	d.lastFinalRange = rangeFinal
 	if !decodedAny {
 		// Only concealed frames: the SILK configuration is unchanged.
 		return allPCM, trailingRedundancy, nil
 	}
-	d.lastPitch = info.dec.Pitch() * d.sampleRate / (rateKHz * 1000)
+	d.lastPitch = info.dec.Pitch() * 48 / rateKHz
+	d.silkPitch48 = d.lastPitch
 	d.prevSilkInternalCh = pktChannels
 
 	if pktChannels == 1 && stereoPeer != nil && stereoPeer.dec != nil {
@@ -4603,6 +4873,7 @@ func (d *Decoder) celtSilenceFade(pcm []float64, pktChannels, endBand int) {
 		dec.CopyStateFrom(d.lastCeltDec)
 	}
 	dec.SetStreamChannels(pktChannels)
+	dec.SetAccumulate(true)
 	out, err := dec.Decode([]byte{0xFF, 0xFF})
 	if err != nil {
 		return
@@ -4732,8 +5003,10 @@ func interleaveSILKOut(l, r []int16, channels int) []float64 {
 }
 
 // DecodePLC performs packet-loss concealment for frameSize samples per channel.
-// frameSize may be any positive multiple of 2.5 ms through 120 ms. Before the
-// first successful packet (and after Reset), concealment returns zero samples.
+// frameSize may be any positive multiple of 2.5 ms; like opus_decode_native,
+// a length beyond the last packet's frame size is concealed in steps of at
+// most that size. Before the first successful packet (and after Reset),
+// concealment returns zero samples.
 func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
 		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
@@ -4770,6 +5043,9 @@ func (d *Decoder) DecodePLC24(pcm []int32, frameSize int) (int, error) {
 
 // DecodePLCFloat performs packet-loss concealment and returns interleaved
 // float64 PCM. frameSize follows DecodePLC semantics.
+//
+// Like opus_decode_native, concealment is never soft-clipped and leaves the
+// soft-clip memory of the int16 API untouched.
 func (d *Decoder) DecodePLCFloat(frameSize int) ([]float64, error) {
 	if err := d.validatePLCState(frameSize); err != nil {
 		return nil, err
@@ -4842,8 +5118,8 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 	if lossMode == framing.ModeCELTOnly {
 		out := make([]float64, 0, frameSize*d.channels)
 		for remaining := frameSize; remaining > 0; {
-			chunk := lossDecodeChunk(remaining, d.sampleRate, lossMode)
-			frame, err := d.decodeCELTPLCFrame(chunk)
+			chunk := lossDecodeChunk(min(remaining, d.plcFrameSize), d.sampleRate, lossMode)
+			frame, err := d.decodeCELTPLCFrame(chunk, false)
 			if err != nil {
 				return nil, err
 			}
@@ -4871,7 +5147,7 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 	}
 	out := make([]float64, 0, frameSize*d.channels)
 	for remaining := frameSize; remaining > 0; {
-		chunk := lossDecodeChunk(remaining, d.sampleRate, lossMode)
+		chunk := lossDecodeChunk(min(remaining, d.plcFrameSize), d.sampleRate, lossMode)
 		decodeSamples := chunk
 		minSILKSamples := d.sampleRate / 100 // SILK PLC produces at least 10 ms.
 		if decodeSamples < minSILKSamples {
@@ -4892,24 +5168,20 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 		frame = padOrTrim(frame, decodeSamples*d.channels)
 		frame = frame[:chunk*d.channels]
 		if lossMode == framing.ModeHybrid {
-			celtPCM, err := d.decodeCELTPLCFrame(chunk)
+			celtPCM, err := d.decodeCELTPLCFrame(chunk, true)
 			if err != nil {
 				return nil, err
 			}
+			// Accumulated onto the SILK output in float32, unclipped.
 			for i := range celtPCM {
-				v := frame[i] + celtPCM[i]
-				if v > 1 {
-					v = 1
-				} else if v < -1 {
-					v = -1
-				}
-				frame[i] = v
+				frame[i] = float64(float32(frame[i]) + float32(celtPCM[i]))
 			}
 		}
 		out = append(out, frame...)
 		remaining -= chunk
 	}
-	d.lastPitch = info.dec.Pitch() * d.sampleRate / (rateKHz * 1000)
+	d.lastPitch = info.dec.Pitch() * 48 / rateKHz
+	d.silkPitch48 = d.lastPitch
 	d.prevSilkInternalCh = d.lossChannels
 	if peer := d.silkDecoders[ri][1-ci]; peer != nil && peer.dec != nil {
 		peer.dec.CopyPrimaryStateFrom(info.dec)
@@ -4917,7 +5189,9 @@ func (d *Decoder) decodePLCFloat(frameSize int) ([]float64, error) {
 	return out, nil
 }
 
-func (d *Decoder) decodeCELTPLCFrame(frameSize int) ([]float64, error) {
+// accum is set when the concealed CELT layer is added onto SILK output
+// (libopus celt_accum, mode != MODE_CELT_ONLY).
+func (d *Decoder) decodeCELTPLCFrame(frameSize int, accum bool) ([]float64, error) {
 	if d.lastCeltDec == nil || d.lossConfig < 0 || d.lossChannels < 1 {
 		return nil, fmt.Errorf("%w: missing CELT decoder history", ErrInvalidState)
 	}
@@ -4937,8 +5211,8 @@ func (d *Decoder) decodeCELTPLCFrame(frameSize int) ([]float64, error) {
 	switch bandwidth {
 	case framing.BandwidthNarrowband:
 		bw = 0
-	case framing.BandwidthWideband:
-		bw = 1
+	case framing.BandwidthMediumband, framing.BandwidthWideband:
+		bw = 1 // libopus uses CELT end band 17 for both
 	case framing.BandwidthSuperwideband:
 		bw = 2
 	case framing.BandwidthFullband:
@@ -4953,6 +5227,7 @@ func (d *Decoder) decodeCELTPLCFrame(frameSize int) ([]float64, error) {
 	if active != d.lastCeltDec {
 		active.CopyStateFrom(d.lastCeltDec)
 	}
+	active.SetAccumulate(accum)
 	frame, err := active.DecodePLC()
 	if err != nil {
 		return nil, fmt.Errorf("CELT PLC decoding failed: %w", err)
@@ -4967,18 +5242,14 @@ func (d *Decoder) decodeCELTPLCFrame(frameSize int) ([]float64, error) {
 
 func isValidLossFrameSize(frameSize, sampleRate int) bool {
 	quantum := sampleRate / 400
-	return quantum > 0 && frameSize > 0 && frameSize <= sampleRate*120/1000 && frameSize%quantum == 0
+	// opus_decode_native conceals any multiple of 2.5 ms, looping over
+	// opus_decode_frame calls of at most st->frame_size.
+	return quantum > 0 && frameSize > 0 && frameSize%quantum == 0
 }
 
 func floatToInt24(dst []int32, src []float64) {
 	for i, sample := range src {
-		scaled := sample * 8388608.0
-		if scaled > 8388607.0 {
-			scaled = 8388607.0
-		} else if scaled < -8388608.0 {
-			scaled = -8388608.0
-		}
-		dst[i] = int32(math.Round(scaled))
+		dst[i] = res2Int24(sample)
 	}
 }
 
@@ -4993,10 +5264,13 @@ func floatToInt16(dst []int16, src []float64) {
 // saturate, then use the platform's default nearest-even rounding semantics.
 func libopusFloatToInt16(sample float64) int16 {
 	scaled := float32(sample) * float32(32768)
-	if scaled > 32767 {
-		scaled = 32767
-	} else if scaled < -32768 {
+	// FLOAT2INT16: MAX32(x, -32768) then MIN32(x, 32767), written as the
+	// (a > b ? a : b) macros so NaN becomes -32768 as in libopus.
+	if !(scaled > -32768) {
 		scaled = -32768
+	}
+	if !(scaled < 32767) {
+		scaled = 32767
 	}
 	return int16(math.RoundToEven(float64(scaled)))
 }
@@ -5033,8 +5307,8 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 }
 
 // DecodeFECWithDuration decodes recovery data for exactly frameSize lost
-// samples per channel. frameSize may be any positive multiple of 2.5 ms through
-// 120 ms. If the packet cannot carry LBRR, concealment is used as in libopus.
+// samples per channel. frameSize may be any positive multiple of 2.5 ms. If the
+// packet cannot carry LBRR, concealment is used as in libopus.
 func (d *Decoder) DecodeFECWithDuration(data []byte, pcm []int16, frameSize int) (int, error) {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
 		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
@@ -5072,6 +5346,8 @@ func (d *Decoder) DecodeFEC24(data []byte, pcm []int32, frameSize int) (int, err
 
 // DecodeFECFloat decodes recovery data for exactly frameSize lost samples per
 // channel and returns interleaved float64 PCM.
+// Like opus_decode_native, FEC output is never soft-clipped and leaves the
+// soft-clip memory of the int16 API untouched.
 func (d *Decoder) DecodeFECFloat(data []byte, frameSize int) ([]float64, error) {
 	if err := d.validateFECState(data, frameSize); err != nil {
 		return nil, err
@@ -5131,6 +5407,8 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 		}
 		out = append(out, plc...)
 	}
+	// st->frame_size follows the FEC packet only after the concealed prefix.
+	d.plcFrameSize = packetFrameSize
 
 	rateKHz := silkConfigRateKHz(config)
 	if rateKHz != 8 && rateKHz != 12 && rateKHz != 16 {
@@ -5169,18 +5447,13 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 		// CELT carries no in-band FEC. Its high band advances through PLC and,
 		// as in libopus, supplies the combined final range.
 		if d.lastCeltDec != nil {
-			celtPCM, err := d.decodeCELTPLCFrame(packetFrameSize)
+			celtPCM, err := d.decodeCELTPLCFrame(packetFrameSize, true)
 			if err != nil {
 				return nil, 0, err
 			}
+			// Accumulated onto the SILK output in float32, unclipped.
 			for i := range silkPCM {
-				v := silkPCM[i] + celtPCM[i]
-				if v > 1 {
-					v = 1
-				} else if v < -1 {
-					v = -1
-				}
-				silkPCM[i] = v
+				silkPCM[i] = float64(float32(silkPCM[i]) + float32(celtPCM[i]))
 			}
 			finalRange = d.lastCeltDec.LastFinalRange()
 		} else {
@@ -5247,9 +5520,12 @@ func (d *Decoder) cloneState() (*Decoder, error) {
 	clone.lastPacketConfig = d.lastPacketConfig
 	clone.lastPacketChannels = d.lastPacketChannels
 	clone.lossConfig = d.lossConfig
+	clone.plcFrameSize = d.plcFrameSize
+	clone.softclipMem = d.softclipMem
 	clone.lossChannels = d.lossChannels
 	clone.lastFinalRange = d.lastFinalRange
 	clone.lastPitch = d.lastPitch
+	clone.silkPitch48 = d.silkPitch48
 	clone.gainQ8 = d.gainQ8
 	clone.phaseInversionDisabled = d.phaseInversionDisabled
 	clone.prevSilkInternalCh = d.prevSilkInternalCh
@@ -5363,6 +5639,8 @@ func (d *Decoder) Reset() error {
 	d.lastPacketConfig = -1
 	d.lastPacketChannels = 0
 	d.lossConfig = -1
+	d.plcFrameSize = d.sampleRate / 400
+	d.softclipMem = [2]float32{}
 	d.lossChannels = 0
 	d.lastFinalRange = 0
 	d.lastPitch = 0
@@ -5399,13 +5677,25 @@ func (d *Decoder) SampleRate() int { return d.sampleRate }
 // Channels returns the decoder output channel count.
 func (d *Decoder) Channels() int { return d.channels }
 
-// FinalRange returns the XOR of the entropy decoder final ranges for the most
-// recently decoded packet's constituent Opus frames.
+// FinalRange returns the entropy decoder final range of the most recently
+// decoded packet (OPUS_GET_FINAL_RANGE): that of its last Opus frame, or 0
+// after concealment.
 func (d *Decoder) FinalRange() uint32 { return d.lastFinalRange }
 
 // Pitch returns the most recently reported decoder pitch period in samples at
 // the decoder output rate. Zero means no pitch period is currently available.
-func (d *Decoder) Pitch() int { return d.lastPitch }
+// Unlike Pitch48kHz it does not keep the last SILK lag over a Reset.
+func (d *Decoder) Pitch() int { return d.lastPitch * d.sampleRate / SampleRate48kHz }
+
+// Pitch48kHz is OPUS_GET_PITCH: the pitch period in 48 kHz samples whatever
+// the decoder output rate. After a CELT-only frame it is the CELT post-filter
+// period, otherwise the last SILK lag (0 when unvoiced), which a reset keeps.
+func (d *Decoder) Pitch48kHz() int {
+	if d.prevMode == framing.ModeCELTOnly {
+		return d.lastPitch
+	}
+	return d.silkPitch48
+}
 
 // SetGain sets the decoder output gain in Q8 dB.
 func (d *Decoder) SetGain(gainQ8 int) error {

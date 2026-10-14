@@ -67,6 +67,20 @@ jobs:
           CGO_CFLAGS: -I${{ github.workspace }}/libopus/include -I${{ github.workspace }}/libopus/celt -I${{ github.workspace }}/libopus/src
         run: go test -tags "opusref opusextsrc" -count=1 -run '^TestPacketExtensionsLibopusOracle$' .
 
+      - name: Build libopus 1.6.1 (static)
+        # The distro libopus (1.4) lacks the 1.6 APIs the opus16-tagged tests
+        # call (opus_packet_has_lbrr, opus_decode24 and their multistream and
+        # projection variants), so build the vendored tree for them.
+        run: |
+          cmake -S libopus -B opus-build -DCMAKE_BUILD_TYPE=Release -DOPUS_BUILD_SHARED_LIBRARY=OFF -DOPUS_BUILD_TESTING=OFF -DOPUS_BUILD_PROGRAMS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+          cmake --build opus-build -j"$(nproc)"
+
+      - name: libopus 1.6 output APIs (opus16)
+        env:
+          CGO_CFLAGS: -I${{ github.workspace }}/libopus/include
+          CGO_LDFLAGS: -L${{ github.workspace }}/opus-build
+        run: go test -tags "opusref opus16" -count=1 -run '^(TestCGODecoderOutputConversionMatchesLibopus|TestCGOMultistreamProjectionOutputMatchesLibopus)$' .
+
       - name: Build the libopus encoder oracle
         # A plain scalar C build (no SIMD, no FMA) of the vendored 1.6.1 tree
         # with the trace instrumentation the encoder oracle tests parse.

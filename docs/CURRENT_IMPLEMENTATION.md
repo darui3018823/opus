@@ -185,14 +185,20 @@ matrix validation, expert frame-duration propagation, and bidirectional family
 The `oggopus` subpackage provides:
 
 - CRC-checked Ogg `Page` parsing, reading, marshaling, and writing
-- lacing and continued-packet reconstruction through `PacketReader`
-- packet-to-page output through `PacketWriter`
-- `OpusHead` and `OpusTags` parsing and marshaling
+- lacing and continued-packet reconstruction through `PacketReader`, which
+  rejects a packet longer than `MaxPacketSize` (16 MiB) with
+  `ErrPacketTooLarge`
+- packet-to-page output through `PacketWriter`; a page that ends inside a
+  packet carries the granule of the last packet completed on it
+- `OpusHead` and `OpusTags` parsing and marshaling, including the RFC 8486
+  mapping family 3 demixing matrix (`Head.DemixingMatrix`) and the Ambisonics
+  channel-count check of families 2 and 3
 - Ogg Opus `Reader` and `Writer` APIs; Reader automatically continues across
   chained logical streams with per-link headers, tags, serials, and packet
   indices, while each Writer emits one logical stream. `WriteValidatedPacket`
   validates single-stream or multistream Opus framing from the `OpusHead`
   mapping before output; `WritePacket` remains available for opaque packets.
+  `Close` before any audio packet returns `ErrInvalidOpusStream`.
 - validated 48 kHz packet timing with pre-skip/end-trim discard metadata
 - `(*Reader).SeekPCM(sample int64)` for granule-position bisection seeking on
   `io.ReadSeeker` sources with RFC 7845 80 ms decoder pre-roll
@@ -1584,6 +1590,12 @@ Behavior changes from the audit fixes that callers can observe:
   not. `Decode24` no longer clamps to the 24-bit range.
 - `VBRConstraint` reports the stored constraint also while VBR is off.
 - `Encoder.SetMaxPacketSize` only takes effect under `ModePolicyLibopus`.
+- `oggopus`: `PacketWriter` keeps the granule of a packet completed on a page
+  that ends inside the next packet (it wrote -1, which `Reader` rejected);
+  `Writer.Close` before any audio packet returns `ErrInvalidOpusStream`;
+  `PacketReader` rejects packets over `MaxPacketSize` with
+  `ErrPacketTooLarge`; `Head.Validate` rejects family 2 and 3 channel counts
+  that are not an Ambisonics layout.
 
 ## Practical Use Today
 

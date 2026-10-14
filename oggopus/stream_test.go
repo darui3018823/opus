@@ -344,3 +344,73 @@ func TestOggOpusCloseWithoutAudioFails(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestOggOpusProjectionFamily3RoundTrip(t *testing.T) {
+	enc, err := opus.NewProjectionEncoder(48000, 4, 3, opus.ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := Head{
+		Version:         1,
+		Channels:        4,
+		PreSkip:         uint16(enc.Lookahead()),
+		InputSampleRate: 48000,
+		OutputGain:      int16(enc.DemixingMatrixGain()),
+		MappingFamily:   3,
+		StreamCount:     uint8(enc.Streams()),
+		CoupledCount:    uint8(enc.CoupledStreams()),
+		DemixingMatrix:  enc.DemixingMatrixBytes(),
+	}
+	var stream bytes.Buffer
+	writer, err := NewWriter(&stream, 12, head, Tags{Vendor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcm := make([]int16, 960*4)
+	for i := range pcm {
+		pcm[i] = int16((i * 37) % 2000)
+	}
+	const packets = 5
+	for i := range packets {
+		packet, err := enc.Encode(pcm, 960)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.WriteValidatedPacket(packet, PacketWriteOptions{GranulePosition: int64(i+1) * 960}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := NewReader(bytes.NewReader(stream.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(reader.Head.DemixingMatrix, head.DemixingMatrix) {
+		t.Fatal("demixing matrix changed in the round trip")
+	}
+	dec, err := opus.NewProjectionDecoder(48000, 4, int(reader.Head.StreamCount), int(reader.Head.CoupledCount), reader.Head.DemixingMatrix)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]int16, 5760*4)
+	n := 0
+	for {
+		packet, err := reader.NextPacket()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := dec.Decode(packet.Data, out); err != nil {
+			t.Fatal(err)
+		}
+		n++
+	}
+	if n != packets {
+		t.Fatalf("decoded %d packets, want %d", n, packets)
+	}
+}

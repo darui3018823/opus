@@ -101,7 +101,7 @@ and [Ogg Opus package documentation](https://pkg.go.dev/github.com/darui3018823/
 | Multistream/surround | RFC self-delimited framing; families 0, 1 (through 7.1), and 255; matching PLC/FEC PCM variants |
 | Projection/Ambisonics | RFC 8486 families 2 and 3; predefined first- through fifth-order family-3 matrices |
 | Packet tools | Validated inspection, repacketizing, padding, soft clipping, LBRR detection, extensions |
-| Ogg Opus | CRC/lacing, headers/tags, timing trims, chained reading, per-link seek, validated single-link writing |
+| Ogg Opus | CRC/lacing, headers/tags (mapping families 0-3 and 255), timing trims, chained reading, per-link seek, validated single-link writing |
 | Runtime dependencies | Pure Go; CGO/libopus is optional and test-only under `opusref` |
 
 `MaxFrameSize` is 5760 samples per channel at 48 kHz (120 ms).

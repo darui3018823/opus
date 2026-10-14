@@ -34,8 +34,28 @@ type Head struct {
 	// CoupledCount is the number of stereo elementary streams.
 	CoupledCount uint8
 	// ChannelMapping maps output channels to coded channels. A value of 255
-	// means silence. Family 0 requires this slice to be empty.
+	// means silence. Families 0 and 3 require this slice to be empty.
 	ChannelMapping []uint8
+	// DemixingMatrix is the RFC 8486 mapping family 3 demixing matrix:
+	// Channels rows by StreamCount+CoupledCount columns of little-endian
+	// signed Q15 coefficients in column-major order, 2*(StreamCount+
+	// CoupledCount)*Channels bytes. Other families require it to be empty.
+	DemixingMatrix []byte
+}
+
+// ambisonicsChannelsValid reports whether channels is an RFC 8486 Ambisonics
+// layout, (N+1)^2 or (N+1)^2+2 channels for order N from 0 through 14, as
+// libopus's validate_ambisonics accepts.
+func ambisonicsChannelsValid(channels int) bool {
+	if channels < 1 || channels > 227 {
+		return false
+	}
+	orderPlusOne := 1
+	for (orderPlusOne+1)*(orderPlusOne+1) <= channels {
+		orderPlusOne++
+	}
+	nondiegetic := channels - orderPlusOne*orderPlusOne
+	return nondiegetic == 0 || nondiegetic == 2
 }
 
 // Validate checks the OpusHead version, channel counts, and mapping fields.
@@ -53,13 +73,34 @@ func (h Head) Validate() error {
 		if len(h.ChannelMapping) != 0 {
 			return fmt.Errorf("%w: mapping family 0 includes a mapping table", ErrInvalidOpusHead)
 		}
+		if len(h.DemixingMatrix) != 0 {
+			return fmt.Errorf("%w: mapping family 0 includes a demixing matrix", ErrInvalidOpusHead)
+		}
 		return nil
 	}
 	if h.StreamCount == 0 || h.CoupledCount > h.StreamCount {
 		return fmt.Errorf("%w: invalid stream counts %d/%d", ErrInvalidOpusHead, h.StreamCount, h.CoupledCount)
 	}
 	decodedChannels := int(h.StreamCount) + int(h.CoupledCount)
-	if decodedChannels > 255 || len(h.ChannelMapping) != int(h.Channels) {
+	if decodedChannels > 255 {
+		return fmt.Errorf("%w: %d coded channels", ErrInvalidOpusHead, decodedChannels)
+	}
+	if (h.MappingFamily == 2 || h.MappingFamily == 3) && !ambisonicsChannelsValid(int(h.Channels)) {
+		return fmt.Errorf("%w: mapping family %d has %d channels, not an Ambisonics layout", ErrInvalidOpusHead, h.MappingFamily, h.Channels)
+	}
+	if h.MappingFamily == 3 {
+		if len(h.ChannelMapping) != 0 {
+			return fmt.Errorf("%w: mapping family 3 includes a mapping table", ErrInvalidOpusHead)
+		}
+		if len(h.DemixingMatrix) != 2*decodedChannels*int(h.Channels) {
+			return fmt.Errorf("%w: demixing matrix is %d bytes, want %d", ErrInvalidOpusHead, len(h.DemixingMatrix), 2*decodedChannels*int(h.Channels))
+		}
+		return nil
+	}
+	if len(h.DemixingMatrix) != 0 {
+		return fmt.Errorf("%w: mapping family %d includes a demixing matrix", ErrInvalidOpusHead, h.MappingFamily)
+	}
+	if len(h.ChannelMapping) != int(h.Channels) {
 		return fmt.Errorf("%w: invalid channel mapping size", ErrInvalidOpusHead)
 	}
 	for _, index := range h.ChannelMapping {
@@ -81,7 +122,7 @@ func (h Head) MarshalBinary() ([]byte, error) {
 	}
 	size := 19
 	if h.MappingFamily != 0 {
-		size += 2 + int(h.Channels)
+		size += 2 + len(h.ChannelMapping) + len(h.DemixingMatrix)
 	}
 	out := make([]byte, size)
 	copy(out, OpusHeadSignature)
@@ -95,11 +136,13 @@ func (h Head) MarshalBinary() ([]byte, error) {
 		out[19] = h.StreamCount
 		out[20] = h.CoupledCount
 		copy(out[21:], h.ChannelMapping)
+		copy(out[21+len(h.ChannelMapping):], h.DemixingMatrix)
 	}
 	return out, nil
 }
 
-// ParseHead validates and parses an OpusHead packet. ChannelMapping is copied.
+// ParseHead validates and parses an OpusHead packet. ChannelMapping (and, for
+// mapping family 3, DemixingMatrix) is copied.
 // Version 1 requires the exact defined length; trailing fields accepted for
 // versions 2 through 15 are not preserved.
 func ParseHead(packet []byte) (Head, error) {
@@ -115,7 +158,20 @@ func ParseHead(packet []byte) (Head, error) {
 		MappingFamily:   packet[18],
 	}
 	expected := 19
-	if h.MappingFamily != 0 {
+	switch h.MappingFamily {
+	case 0:
+	case 3:
+		if len(packet) < 21 {
+			return Head{}, ErrInvalidOpusHead
+		}
+		h.StreamCount = packet[19]
+		h.CoupledCount = packet[20]
+		expected = 21 + 2*(int(h.StreamCount)+int(h.CoupledCount))*int(h.Channels)
+		if len(packet) < expected {
+			return Head{}, ErrInvalidOpusHead
+		}
+		h.DemixingMatrix = append([]byte(nil), packet[21:expected]...)
+	default:
 		expected += 2 + int(h.Channels)
 		if len(packet) < expected {
 			return Head{}, ErrInvalidOpusHead

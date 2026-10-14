@@ -88,7 +88,7 @@ Encoder (default libopus policy):
 go test -count=1 -run 'TestOfficialVectorDecodeDigests|TestPerfPredictivePacketRegression|TestPerfDefaultPolicyPacketRegression' .
 go test -run '^$' -bench 'BenchmarkDecodeOfficialVectors|BenchmarkPerfDefault' -benchmem -benchtime 2s -count 6 . > new.txt
 benchstat base.txt new.txt
-GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -gcflags='all=-S' ./... 2>&1 | grep -E '\b(FMADD[SD]|FMSUB[SD]|FNMADD[SD]|FNMSUB[SD])\b'
+GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -a -gcflags='all=-S' ./... 2>&1 | grep -E '\b(FMADD[SD]|FMSUB[SD]|FNMADD[SD]|FNMSUB[SD])\b' | grep -F Programs/Go/opus
 ```
 
 ## Progress log

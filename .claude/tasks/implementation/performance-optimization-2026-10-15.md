@@ -166,6 +166,31 @@ the opusref suite green at every step.
   SILK `pulseBlocks`, `nsqScratch` and `pitchBuf`; `shellSumsFit` works in a
   stack array and `pitchResidual` takes `r.res` without a copy.
 
+- 2026-10-15 06:30 (scheduled run) review items 1-5:
+  - `089d843` static-size MDCTs rotate straight through the float32 FFT
+    buffer with a cached twiddle slice (`imdctRawStatic`,
+    `cltMDCTForward(static)`); `TestIMDCTRawStaticMatchesGeneric` and
+    `TestMDCTForwardStaticMatchesGeneric` compare against the generic path
+    bit for bit. CELT decode -6% to -11%, CELT encode -3% to -6%.
+  - `be670d8` output loop hoists `frameSize/d.downsample`. -1% to -3%.
+  - `8c82d9e` shorter `celtPVQU` table path (still not inlinable: cost 88
+    of 80) and the pulse vector lives in `quantAllBandsScratch.iy`.
+    -1% to -5% on CELT vectors.
+  - `5bbd5ba` `Decode` soft-clips into float32 and converts float32 to int16
+    directly (`decodeSoftClipped32`, `float32ToInt16`). -1% to -4%.
+  - `c7a3afb` `ApplyFineEnergy`/`ApplyFinalFineEnergy` removed: their
+    `band.Energy` writes were always overwritten in `decodeCELTRange`
+    (`decodeBandCoeffs` has no error return in between). -1% to -3%.
+
+| Vector | v1.6.0 | after pass 1 | now |
+|---|---:|---:|---:|
+| tv01 | 328 ms | 175 ms | 150 ms |
+| tv02 | 54 ms | 42 ms | 41 ms |
+| tv05 | 181 ms | 123 ms | 108 ms |
+| tv09 | 343 ms | 144 ms | 123 ms |
+| tv10 | 384 ms | 185 ms | 160 ms |
+| tv11 | 272 ms | 127 ms | 108 ms |
+
 Note on the FMA check: run it with `-a`
 (`GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -a -gcflags='all=-S' ./...`);
 without `-a`, cached packages print no assembly and the check passes
@@ -187,22 +212,22 @@ unless marked measured). Every item below keeps output bit-identical by
 construction (lossless float32<->float64 round trips, integer work or buffer
 reuse); guard each with the digest tests.
 
-1. Decoder MDCT (`internal/dsp/mdct_celt.go` `imdctRawInto`,
+1. (done) Decoder MDCT (`internal/dsp/mdct_celt.go` `imdctRawInto`,
    `fft_opus.go` `opusFFTInto`): write the pre-rotation straight into
    `opusComplex` at `fout[bitrev[i]]`, post-rotate from `fout`, use a
    precomputed per-mode twiddle slice instead of `libopusMDCTTwiddle`
    (not inlined, called 4x per element). Measured in an experiment: 960-pt
    8.7 -> 4.7 µs. Same for `CLTMDCTForwardInto` (encoder).
-2. `internal/celt/decoder.go` output loop
+2. (done) `internal/celt/decoder.go` output loop
    (`for i := 0; i < frameSize/d.downsample; i++ { output[i*cc+c] = samplesOut[i*d.downsample] ... }`):
    hoist `frameSize/d.downsample` and `d.downsample` into locals (the loop
    divides and reloads per sample; verified by reading the code).
-3. `celtPVQU` fast path: make the table lookup inlinable (keep the slow
+3. (done) `celtPVQU` fast path: make the table lookup inlinable (keep the slow
    path in a separate function); avoid clearing the whole `[176]int` in
    `algUnquant` (only `n` entries are used).
-4. Output conversion (`finishOutput`, `floatToInt16`, `SoftClipFloat32`):
+4. (done) Output conversion (`finishOutput`, `floatToInt16`, `SoftClipFloat32`):
    soft clip in float32 and convert to int16 in one pass.
-5. `ApplyFineEnergy`/`ApplyFinalFineEnergy` (`internal/celt/bands.go`) write
+5. (done) `ApplyFineEnergy`/`ApplyFinalFineEnergy` (`internal/celt/bands.go`) write
    `band.Energy` that `decodeCELTRange` overwrites before any read
    (verified); drop the `math.Exp2` work if PLC and the digests agree.
 6. Encoder allocations (GC is ~10-12% of encode CPU): `opPVQSearch`/

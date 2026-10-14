@@ -888,20 +888,14 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		e.pendingShape32 = e.noiseShapeFLP32Trace(signal, signalType, pitchLags)
 		e.haveShape32 = true
 		e.haveLambda32 = false
-		gainTargets, shape := e.shapeGainAnalysis(signal, bootstrap.lpcQ12, nil, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
-		domainGainTargets = gainTargets
-		gainIndices := e.resolveGainIndices(gainTargets, conditionalGain)
-		invGains := invGainsFromIndices(gainIndices)
-		codingQuality := shape.CodingQuality
-		if e.haveShape32 {
-			// find_pred_coefs_FLP scales LPC_in_pre by 1.0f / Gains[i], the
-			// unquantised noise-shape gains, and find_LPC's minInvGain reads
-			// the exact coding_quality.
-			for k := range invGains {
-				invGains[k] = f32(1.0 / e.pendingShape32.gains[k])
-			}
-			codingQuality = e.pendingShape32.codingQuality
+		// find_pred_coefs_FLP scales LPC_in_pre by 1.0f / Gains[i], the
+		// unquantised noise-shape gains, and find_LPC's minInvGain reads
+		// the exact coding_quality.
+		invGains := make([]float64, e.nSubframes)
+		for k := range invGains {
+			invGains[k] = f32(1.0 / e.pendingShape32.gains[k])
 		}
+		codingQuality := e.pendingShape32.codingQuality
 		domainConfig = []lpcInPreConfig{{
 			input:           e.lpcInPreInput(signal),
 			subframeLengths: equalSubframeLengths(e.frameSize, e.nSubframes),
@@ -2872,11 +2866,15 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 	}
 
 	pitchGain := estimatePitchGainFromLTP(ltpCoeffsQ14)
-	shape := e.analyzeNoiseShapeFLP(signal, lpcQ12, signalType, quantOffset, pitchLags, pitchGain, e.speechActivity)
+	var shape silkNoiseShapeAnalysis
 	if e.haveShape32 {
 		// wrappers_FLP.c conversions of the float32 noise_shape_analysis_FLP
-		// outputs: AR_Q13, LF_shp_Q14, Tilt_Q14, HarmShapeGain_Q14, Lambda_Q10.
+		// outputs: AR_Q13, LF_shp_Q14, Tilt_Q14, HarmShapeGain_Q14, Lambda_Q10
+		// and everything else the quantiser reads, so the float64 analysis
+		// is not needed.
 		e.applyShape32(&shape, signalType, quantOffset)
+	} else {
+		shape = e.analyzeNoiseShapeFLP(signal, lpcQ12, signalType, quantOffset, pitchLags, pitchGain, e.speechActivity)
 	}
 
 	lambdaQ10 := shape.Lambda_Q10

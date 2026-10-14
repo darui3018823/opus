@@ -223,3 +223,26 @@ func TestPacketReaderRejectsUnfinishedPacketAtEOFAndEOS(t *testing.T) {
 		t.Fatalf("EOS error = %v", err)
 	}
 }
+
+func TestPacketReaderRejectsPacketOverMaxPacketSize(t *testing.T) {
+	var stream bytes.Buffer
+	writer := NewPacketWriter(&stream, 8)
+	if err := writer.WritePacket(make([]byte, MaxPacketSize+1), PacketWriteOptions{GranulePosition: 960, EOS: true}); err != nil {
+		t.Fatal(err)
+	}
+	reader := NewPacketReader(bytes.NewReader(stream.Bytes()))
+	if _, err := reader.Next(); !errors.Is(err, ErrPacketTooLarge) {
+		t.Fatalf("error = %v, want ErrPacketTooLarge", err)
+	}
+
+	stream.Reset()
+	writer = NewPacketWriter(&stream, 8)
+	if err := writer.WritePacket(make([]byte, MaxPacketSize), PacketWriteOptions{GranulePosition: 960, EOS: true}); err != nil {
+		t.Fatal(err)
+	}
+	reader = NewPacketReader(bytes.NewReader(stream.Bytes()))
+	got, err := reader.Next()
+	if err != nil || len(got.Data) != MaxPacketSize {
+		t.Fatalf("MaxPacketSize packet: len %d, error %v", len(got.Data), err)
+	}
+}

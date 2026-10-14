@@ -166,6 +166,11 @@ func (r *PacketReader) readPage() error {
 			r.partialBOS = true
 		}
 		size := int(lace)
+		if len(r.partial)+size > MaxPacketSize {
+			r.partial = nil
+			r.partialBOS = false
+			return fmt.Errorf("%w: more than %d bytes", ErrPacketTooLarge, MaxPacketSize)
+		}
 		r.partial = append(r.partial, pageData[offset:offset+size]...)
 		offset += size
 		if lace < 255 {

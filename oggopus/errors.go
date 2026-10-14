@@ -41,6 +41,9 @@ var (
 	ErrMissingContinue = errors.New("oggopus: missing continued packet page")
 	// ErrTruncatedPacket indicates an unfinished packet at logical stream end.
 	ErrTruncatedPacket = errors.New("oggopus: truncated packet")
+	// ErrPacketTooLarge indicates a packet spanning more than MaxPacketSize
+	// bytes of continued pages.
+	ErrPacketTooLarge = errors.New("oggopus: packet exceeds MaxPacketSize")
 	// ErrAfterEOS indicates page data encountered after an EOS page.
 	//
 	// Deprecated: PacketReader.Next returns io.EOF after draining its EOS page,

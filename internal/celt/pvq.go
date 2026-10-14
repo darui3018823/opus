@@ -363,6 +363,9 @@ func celtPVQU(n, k int) uint64 {
 		}
 		return 0
 	}
+	if n < pvqUTableSmall && k < pvqUTableLarge {
+		return uint64(pvqUTable[n][k])
+	}
 	key := [2]int{n, k}
 	if cached, ok := uCache.Load(key); ok {
 		return cached.(uint64)
@@ -376,6 +379,41 @@ func celtPVQU(n, k int) uint64 {
 	}
 	uCache.Store(key, value)
 	return value
+}
+
+// pvqUTable holds U(n,k) for n < pvqUTableSmall and k < pvqUTableLarge with
+// n <= k, saturated at cwrsMax like celtPVQU. It is the dense counterpart of
+// libopus's CELT_PVQ_U_ROW table and covers every (min(n,k), max(n,k)) pair
+// CELT codes, so celtPVQU only falls back to uCache for out-of-range calls.
+const (
+	pvqUTableSmall = 64
+	pvqUTableLarge = 320
+)
+
+var pvqUTable = buildPVQUTable()
+
+func buildPVQUTable() *[pvqUTableSmall][pvqUTableLarge]uint32 {
+	t := new([pvqUTableSmall][pvqUTableLarge]uint32)
+	at := func(n, k int) uint64 {
+		if n > k {
+			n, k = k, n
+		}
+		return uint64(t[n][k])
+	}
+	t[0][0] = 1
+	for n := 1; n < pvqUTableSmall; n++ {
+		for k := n; k < pvqUTableLarge; k++ {
+			a := at(n-1, k)
+			b := at(n, k-1)
+			c := at(n-1, k-1)
+			value := cwrsMax
+			if a <= cwrsMax-b && a+b <= cwrsMax-c {
+				value = a + b + c
+			}
+			t[n][k] = uint32(value)
+		}
+	}
+	return t
 }
 
 // cwrsiLibopus decodes a CWRS index into a pulse vector matching libopus

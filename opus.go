@@ -100,6 +100,8 @@ type Encoder struct {
 	// delayedCELTInput's per-packet outputs.
 	conditionBuf []float64
 	delayJoined  []float64
+	// hybridFadeBuf holds a hybrid frame's faded CELT input.
+	hybridFadeBuf []float64
 
 	// Configuration
 	bitrateSetting      int // requested bitrate or BitrateAuto/BitrateMax
@@ -1519,7 +1521,9 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 			hbGain = 1
 		}
 		if e.prevHBGain < 1 || hbGain < 1 {
-			celtChunk = append([]float64(nil), celtChunk...)
+			// Fade a copy: celtPCM stays the unfaded input.
+			e.hybridFadeBuf = append(e.hybridFadeBuf[:0], celtChunk...)
+			celtChunk = e.hybridFadeBuf
 			applyGainFade(celtChunk, e.prevHBGain, hbGain, e.channels, e.sampleRate)
 			celtInput = e.celtInputFrame(celtChunk)
 		}
@@ -1531,7 +1535,10 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 			if e.streamChannelsOrInput() == 2 {
 				widthQ14 = e.silkEncoder.StereoWidthQ14()
 			}
-			celtChunk = append([]float64(nil), celtChunk...)
+			// celtChunk may already be hybridFadeBuf; copying it onto itself
+			// is a no-op.
+			e.hybridFadeBuf = append(e.hybridFadeBuf[:0], celtChunk...)
+			celtChunk = e.hybridFadeBuf
 			e.applyStereoWidthFade(celtChunk, widthQ14)
 			celtInput = e.celtInputFrame(celtChunk)
 		}

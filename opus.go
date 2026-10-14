@@ -3164,6 +3164,11 @@ type Decoder struct {
 	plcFrameSize int
 	// softclipMem is the soft-clip memory of the int16 decode (softclip_mem).
 	softclipMem [2]float32
+	// pcmScratch backs the PCM a packet decode returns internally, and
+	// softclipScratch the int16 soft clip; both are reused between calls
+	// (DecodeFloat copies its result out).
+	pcmScratch      []float64
+	softclipScratch []float32
 
 	// SILK decoders indexed by [rateIdx 0-2][chIdx 0=mono,1=stereo].
 	// rateIdx: 0=8kHz, 1=12kHz, 2=16kHz
@@ -3393,7 +3398,7 @@ func (d *Decoder) Decode24(data []byte, pcm []int32) (int, error) {
 		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
 	}
 
-	floatPCM, err := d.DecodeFloat(data)
+	floatPCM, err := d.decodeFloatShared(data)
 	if err != nil {
 		return 0, err
 	}
@@ -3852,6 +3857,17 @@ func is10msConfig(config int) bool {
 // full-scale input. Positive decoder gain can produce values outside that
 // nominal range.
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
+	pcm, err := d.decodeFloatShared(data)
+	if err != nil {
+		return nil, err
+	}
+	return append([]float64(nil), pcm...), nil
+}
+
+// decodeFloatShared is DecodeFloat returning the decoder's reusable output
+// buffer, valid until the next decode call, for callers that convert the
+// samples straight away.
+func (d *Decoder) decodeFloatShared(data []byte) ([]float64, error) {
 	pcm, err := d.decodePacketFloat(data)
 	if err != nil {
 		return nil, err
@@ -3876,7 +3892,10 @@ func (d *Decoder) finishOutput(pcm []float64, softClip bool) []float64 {
 		d.softclipMem = [2]float32{}
 		return pcm
 	}
-	f := make([]float32, len(pcm))
+	if cap(d.softclipScratch) < len(pcm) {
+		d.softclipScratch = make([]float32, len(pcm))
+	}
+	f := d.softclipScratch[:len(pcm)]
 	for i, v := range pcm {
 		f[i] = float32(v)
 	}
@@ -3969,7 +3988,7 @@ func (d *Decoder) decodePacketFloat(data []byte) ([]float64, error) {
 		return nil, fmt.Errorf("no CELT decoder for config=%d (bw=%d lm=%d ch=%d)", config, bwIdx, lmIdx, pktChannels)
 	}
 
-	var allPCM []float64
+	allPCM := d.pcmScratch[:0]
 	// opus_decode_native overwrites rangeFinal for each constituent frame, so
 	// OPUS_GET_FINAL_RANGE reports the last frame rather than an XOR across the
 	// frames of one single-stream packet.
@@ -4045,6 +4064,7 @@ func (d *Decoder) decodePacketFloat(data []byte) ([]float64, error) {
 		d.prevMode, d.prevRedundancy = framing.ModeCELTOnly, false
 	}
 	d.applyGain(allPCM)
+	d.pcmScratch = allPCM
 	return allPCM, nil
 }
 
@@ -4065,7 +4085,7 @@ func (d *Decoder) applyGain(pcm []float64) {
 // DecodeFloat32 decodes an Opus packet to caller-owned interleaved float32 PCM.
 // Positive decoder gain can produce values outside the nominal [-1, 1] scale.
 func (d *Decoder) DecodeFloat32(data []byte) ([]float32, error) {
-	pcm, err := d.DecodeFloat(data)
+	pcm, err := d.decodeFloatShared(data)
 	if err != nil {
 		return nil, err
 	}
@@ -4187,7 +4207,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 	stereoToMono := pktChannels == 1 && d.prevSilkInternalCh == 2 &&
 		d.silkRS[1] != nil && d.silkRSInKHz[1] == rateKHz
 
-	var allPCM []float64
+	allPCM := d.pcmScratch[:0]
 	// A single-stream packet reports its last constituent frame range. XOR is
 	// reserved for combining elementary streams in the multistream API.
 	var rangeFinal uint32
@@ -4313,6 +4333,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 	d.lastFinalRange = rangeFinal
 	if !decodedAny {
 		// Only concealed frames: the SILK configuration is unchanged.
+		d.pcmScratch = allPCM
 		return allPCM, trailingRedundancy, nil
 	}
 	d.lastPitch = info.dec.Pitch() * 48 / rateKHz
@@ -4325,6 +4346,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		monoPeer.dec.CopyPrimaryStateFrom(info.dec)
 	}
 
+	d.pcmScratch = allPCM
 	return allPCM, trailingRedundancy, nil
 }
 
@@ -4527,7 +4549,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 
 	samplesPerFrame := (d.sampleRate * frameDurationMs / 1000) * d.channels
 
-	var allPCM []float64
+	allPCM := d.pcmScratch[:0]
 	// Match opus_decode_native: each packet frame replaces rangeFinal rather
 	// than being XORed with preceding frames from the same stream.
 	var rangeFinal uint32
@@ -4708,6 +4730,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 	d.lastFinalRange = rangeFinal
 	if !decodedAny {
 		// Only concealed frames: the SILK configuration is unchanged.
+		d.pcmScratch = allPCM
 		return allPCM, trailingRedundancy, nil
 	}
 	d.lastPitch = info.dec.Pitch() * 48 / rateKHz
@@ -4720,6 +4743,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		monoPeer.dec.CopyPrimaryStateFrom(info.dec)
 	}
 
+	d.pcmScratch = allPCM
 	return allPCM, trailingRedundancy, nil
 }
 

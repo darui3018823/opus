@@ -1,7 +1,7 @@
 # Performance Optimisation (v1.7 cycle)
 
 - Status: in progress
-- Last updated: 2026-10-15
+- Last updated: 2026-10-15 02:00 JST
 - Branch: `perf/decoder-encoder-optimization`
 
 ## Objective
@@ -93,5 +93,54 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -gcflags='all=-S' ./... 2>&1 | gr
 
 ## Progress log
 
-- 2026-10-15: guards and benchmarks added (`perf_vectors_test.go`,
-  `perf_libopus_policy_test.go`, CELT digests in `perf_benchmark_test.go`).
+- 2026-10-15 `27e9938`, `327ee87`: guards and benchmarks added
+  (`perf_vectors_test.go`, `perf_libopus_policy_test.go`, CELT digests in
+  `perf_benchmark_test.go`). Note: `BenchmarkPerf` pins `ModePolicyLegacy`;
+  `BenchmarkPerfDefault` measures the default libopus policy.
+- 2026-10-15 `a501b5f` D1 done: dense `pvqUTable` (64x320 uint32) replaces
+  the `sync.Map` lookup; `TestPVQUTableMatchesRecurrence` checks every entry.
+  Decode -16% to -43% on CELT/hybrid vectors, CELT encode -8%.
+- 2026-10-15 `357f955` D2 part 1: `CELTMode` keeps backward-MDCT scratch,
+  `CLTMDCTBackwardInto` writes into a caller buffer (`Decoder.synthBuf` on the
+  non-transient path), FFT plans are a static array, `transform` uses a stack
+  `fstride`. Decode another -5% to -9% on CELT vectors, allocations -35%.
+
+| Vector | baseline | now | pion |
+|---|---:|---:|---:|
+| tv01 | 328 ms | 218 ms | 109 ms |
+| tv05 | 181 ms | 159 ms | 95 ms |
+| tv09 | 343 ms | 184 ms | 98 ms |
+| tv10 | 384 ms | 236 ms | 127 ms |
+| tv11 | 272 ms | 162 ms | 87 ms |
+| tv02 (SILK) | 54 ms | 56 ms | 39 ms |
+
+## Next steps (in order)
+
+1. D2 part 2, `internal/celt/decoder.go` `decodeCELTRange`: the transient
+   path allocates `subTail`, `samplesOut` and one `subCoeffs` per short block
+   (around line 427); the `ch/cc` mixing allocates `synth`/`mixed`; `output`
+   is allocated per frame. Use decoder-owned scratch. Check every caller of
+   the returned `output` slice (`opus.go` `decodePacketFloat`,
+   `decodeHybridPacket`, PLC in `internal/celt/plc.go`) before reusing it:
+   `PostFilter.Apply` returns its input slice in place, and the PLC path
+   stores `samples[c]`.
+2. D2 part 3: `quantAllBandsImpl`, `decodeBandCoeffs`,
+   `BandProcessor.AssembleMDCT`, `cwrsiLibopus` (returns a new `[]int`)
+   allocations. Re-profile with
+   `go test -run '^$' -bench BenchmarkDecodeOfficialVectors -benchtime 1x -memprofile mem.out .`
+   and `go tool pprof -sample_index=alloc_space -top`.
+3. D3: root-package decode path (`decodePacketFloat`, `finishOutput`,
+   `interleaveSILKOut`, `resampleSILK`) and SILK `synthesize` / resampler
+   `iirFIR` allocations. This is the only lever for the SILK vectors
+   (tv02-04, tv12).
+4. E2 (`silkTraceSNR` caches `os.Getenv` in a package variable), then E1
+   (is the float64 `analyzeNoiseShapeFLP` result used when `haveShape32`?),
+   then E3 encoder allocations.
+5. Before opening the PR: `go test ./...`, `go test -race ./...`,
+   PowerShell `go test -tags opusref ./...`, arm64 FMA check, update
+   `docs/PERF_BASELINE.md`, draft PR.
+
+Re-run the pion comparison with the harness in the session scratchpad
+(`vcmp/`); if it is gone, rebuild it from the description in this brief:
+decode each `testdata/opus_newvectors/testvectorNN.bit` with both libraries
+at 48 kHz stereo int16 and time it with `testing.B`.

@@ -9,13 +9,31 @@ import "math"
 // sequential float32, as in the plain C build of libopus.
 
 // pitchXcorr32 is celt_pitch_xcorr_c: xcorr[i] = Σ_j x[j]*y[i+j] for
-// i < maxPitch, each lag accumulated sequentially.
+// i < maxPitch, each lag accumulated sequentially. Like libopus's
+// xcorr_kernel it computes four lags per pass; every lag still sums its
+// products in j order, so the result is unchanged.
 func pitchXcorr32(x, y []float32, xcorr []float32, length, maxPitch int) {
-	for i := 0; i < maxPitch; i++ {
+	x = x[:length]
+	i := 0
+	for ; i+3 < maxPitch; i += 4 {
+		y0 := y[i : i+length]
+		y1 := y[i+1 : i+1+length]
+		y2 := y[i+2 : i+2+length]
+		y3 := y[i+3 : i+3+length]
+		var s0, s1, s2, s3 float32
+		for j, xj := range x {
+			s0 += float32(xj * y0[j])
+			s1 += float32(xj * y1[j])
+			s2 += float32(xj * y2[j])
+			s3 += float32(xj * y3[j])
+		}
+		xcorr[i], xcorr[i+1], xcorr[i+2], xcorr[i+3] = s0, s1, s2, s3
+	}
+	for ; i < maxPitch; i++ {
+		yi := y[i : i+length]
 		var sum float32
-		yi := y[i:]
-		for j := 0; j < length; j++ {
-			sum += float32(x[j] * yi[j])
+		for j, xj := range x {
+			sum += float32(xj * yi[j])
 		}
 		xcorr[i] = sum
 	}

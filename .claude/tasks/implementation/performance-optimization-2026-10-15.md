@@ -147,15 +147,43 @@ each operation converts float32<->float64 (`imdctRawInto`, `quantPartition`,
 lever but touches the whole CELT package; do it only with the digests and
 the opusref suite green at every step.
 
+- 2026-10-15 `bfed07e` E2: `silkTraceSNREnabled` read once; call sites
+  test it before boxing the trace arguments. SILK encode allocs -10%.
+- 2026-10-15 `1a63ff7` E1: with `haveShape32` (set on every frame, never
+  cleared) `applyShape32` provides every shape field the NSQ reads and the
+  LPC_in_pre gains, so the float64 `analyzeNoiseShapeFLP` is skipped in
+  `closedLoopNSQWithRateScale` and `shapeGainAnalysis` is no longer called
+  from `encodeRangeFrame`. SILK/hybrid encode -21% to -26%. Full
+  `go test -tags opusref ./...` passed on this commit (7m24s).
+- 2026-10-15 `e252745` E6 (part): `pitchXcorr32` computes four lags per pass
+  (each lag still sums in j order) without bounds checks. CELT encode -14%
+  to -21%.
+
+Note on the FMA check: run it with `-a`
+(`GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -a -gcflags='all=-S' ./...`);
+without `-a`, cached packages print no assembly and the check passes
+vacuously.
+
+| Encoder workload | baseline | now |
+|---|---:|---:|
+| celt/mono/96k | 202 µs | 140 µs |
+| celt/stereo/128k | 312 µs | 230 µs |
+| silk/mono/12k | 738 µs | 536 µs |
+| silk/stereo/12k | 793 µs | 582 µs |
+| hybrid/mono/24k | 426 µs | 319 µs |
+| hybrid/stereo/36k | 1151 µs | 851 µs |
+
 ## Next steps (in order)
 
 1. Small decoder leftovers: SILK `decodeFrame` result/stereo copies and
    `DecodeMulti*` `allPCM`, `stereoMSToLR`, `decodePulses`;
    `NewPostFilter`/`NewDecoderEx` per redundancy frame; precomputed
    per-mode MDCT twiddle slices instead of the `libopusMDCTTwiddle` switch.
-2. E2 (`silkTraceSNR` caches `os.Getenv` in a package variable), then E1
-   (is the float64 `analyzeNoiseShapeFLP` result used when `haveShape32`?),
-   then E3 encoder allocations.
+2. E3 encoder allocations (~900 allocs per SILK frame, ~160-260 per CELT
+   frame; runtime lock/preempt/semasleep is ~13% of encode CPU). Then the
+   NSQ (`silkNoiseShapeQuantizerDelDec`, 19%) for bounds checks only. The
+   `selectRateControlPlan` branch of `encodeRangeFrame` is unreachable
+   (`exactProcessGains` never returns nil) and can be removed separately.
 3. Investigate CELT `[]float32` storage (see above).
 4. Before opening the PR: `go test ./...`, `go test -race ./...`,
    PowerShell `go test -tags opusref ./...`, arm64 FMA check, update

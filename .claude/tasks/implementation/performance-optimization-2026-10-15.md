@@ -182,19 +182,60 @@ vacuously.
 
 ## Next steps (in order)
 
-1. Small decoder leftovers: SILK `decodeFrame` result/stereo copies and
-   `DecodeMulti*` `allPCM`, `stereoMSToLR`, `decodePulses`;
-   `NewPostFilter`/`NewDecoderEx` per redundancy frame; precomputed
-   per-mode MDCT twiddle slices instead of the `libopusMDCTTwiddle` switch.
-2. E3 encoder allocations (~900 allocs per SILK frame, ~160-260 per CELT
-   frame; runtime lock/preempt/semasleep is ~13% of encode CPU). Then the
-   NSQ (`silkNoiseShapeQuantizerDelDec`, 19%) for bounds checks only. The
-   `selectRateControlPlan` branch of `encodeRangeFrame` is unreachable
-   (`exactProcessGains` never returns nil) and can be removed separately.
-3. Investigate CELT `[]float32` storage (see above).
-4. Before opening the PR: `go test ./...`, `go test -race ./...`,
-   PowerShell `go test -tags opusref ./...`, arm64 FMA check, update
-   `docs/PERF_BASELINE.md`, draft PR.
+From an Opus read-only review on 2026-10-15 (commit `52969ac`; estimates
+unless marked measured). Every item below keeps output bit-identical by
+construction (lossless float32<->float64 round trips, integer work or buffer
+reuse); guard each with the digest tests.
+
+1. Decoder MDCT (`internal/dsp/mdct_celt.go` `imdctRawInto`,
+   `fft_opus.go` `opusFFTInto`): write the pre-rotation straight into
+   `opusComplex` at `fout[bitrev[i]]`, post-rotate from `fout`, use a
+   precomputed per-mode twiddle slice instead of `libopusMDCTTwiddle`
+   (not inlined, called 4x per element). Measured in an experiment: 960-pt
+   8.7 -> 4.7 µs. Same for `CLTMDCTForwardInto` (encoder).
+2. `internal/celt/decoder.go` output loop
+   (`for i := 0; i < frameSize/d.downsample; i++ { output[i*cc+c] = samplesOut[i*d.downsample] ... }`):
+   hoist `frameSize/d.downsample` and `d.downsample` into locals (the loop
+   divides and reloads per sample; verified by reading the code).
+3. `celtPVQU` fast path: make the table lookup inlinable (keep the slow
+   path in a separate function); avoid clearing the whole `[176]int` in
+   `algUnquant` (only `n` entries are used).
+4. Output conversion (`finishOutput`, `floatToInt16`, `SoftClipFloat32`):
+   soft clip in float32 and convert to int16 in one pass.
+5. `ApplyFineEnergy`/`ApplyFinalFineEnergy` (`internal/celt/bands.go`) write
+   `band.Energy` that `decodeCELTRange` overwrites before any read
+   (verified); drop the `math.Exp2` work if PLC and the digests agree.
+6. Encoder allocations (GC is ~10-12% of encode CPU): `opPVQSearch`/
+   `algQuant` (16% of encode bytes), `snapshotFrameState` and
+   `silkNSQState.clone` (double-buffer), hybrid `celtChunk` copies
+   (`opus.go` `encodeHybridPacket`), pitch-analysis scratch, `tfAnalysis`,
+   `buildLPCInPre`/`lpcInPreInput`/`exactProcessGains`.
+7. Gate the SILK encoder traces (`recordNSQTrace`, `loopTrace`,
+   `traceLPCInPre`, `pendingTrace` copies) behind a flag; the opusref
+   oracle tests read `LastFrameTrace`/`PacketFrameTraces` and must enable
+   it.
+8. SILK decode: keep int16 through `decodeFrame`, stereo and resampling
+   and convert to float once (today int16 -> float64 -> int16 -> ...);
+   remove the remaining per-frame allocations in `decodeMultiStereoEC`,
+   `decodeFrame`, `stereoMSToLR`, `decodePulses`, `decodeNLSF`.
+9. NSQ (`internal/silk/nsq_del_dec.go`): add an assertion that the
+   short-prediction index never goes out of range, then reslice windows to
+   drop bounds checks and preallocate `sampleState`.
+10. Smaller: postfilter history branch per sample, SILK LPC synthesis and
+    `iirFIRInterpol` bounds checks; remove the unreachable
+    `selectRateControlPlan` branch.
+11. Only after re-profiling: CELT `[]float32` storage. pion's CELT speed
+    comes from float32 buffers, precomputed trig slices and bit reversal
+    applied in the pre-rotation, all compatible with bit-exactness, but the
+    migration needs an audit of every float64 expression. Medium risk.
+
+Do not: reorder float sums, unroll float32 reductions into partial sums,
+replace `math.Exp2`/`Floor`/`RoundToEven` with approximations, or write
+`x*y+z` without explicit `float32(...)` rounding.
+
+Before opening the PR: `go test ./...`, `go test -race ./...`, PowerShell
+`go test -tags opusref ./...`, the arm64 FMA check with `-a`, update
+`docs/PERF_BASELINE.md`, draft PR.
 
 Re-run the pion comparison with the harness in the session scratchpad
 (`vcmp/`); if it is gone, rebuild it from the description in this brief:

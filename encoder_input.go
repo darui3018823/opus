@@ -155,7 +155,8 @@ func (e *Encoder) conditionInput(pcm []float64, frameSize, nFrames int) []float6
 		e.hpFreqSmth1(nFrames)-e.variableHPSmth2Q15, variableHPSmthQ16)
 	cutoffHz := silk.Log2Lin(e.variableHPSmth2Q15 >> 8)
 
-	out := make([]float64, len(pcm))
+	e.conditionBuf = growFloat64s(e.conditionBuf, len(pcm))
+	out := e.conditionBuf
 	if e.application == ApplicationVOIP {
 		hpCutoff(pcm, cutoffHz, out, &e.hpMem, frameSize, e.channels, e.sampleRate)
 	} else {

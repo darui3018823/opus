@@ -94,8 +94,12 @@ type Encoder struct {
 	// lastConditionedInput is the conditioned input of the most recent
 	// packet, the signal the codec actually coded; tests measure quality
 	// against it because the high-pass shifts phase relative to the caller's
-	// samples. Read-only after the call.
+	// samples. Read-only after the call, and reused by the next call.
 	lastConditionedInput []float64
+	// conditionBuf and delayJoined back conditionInput's and
+	// delayedCELTInput's per-packet outputs.
+	conditionBuf []float64
+	delayJoined  []float64
 
 	// Configuration
 	bitrateSetting      int // requested bitrate or BitrateAuto/BitrateMax
@@ -2275,7 +2279,8 @@ func (e *Encoder) delayedCELTInput(pcm []float64) []float64 {
 	if len(e.delayBuffer) != d {
 		e.delayBuffer = make([]float64, d)
 	}
-	joined := make([]float64, d+len(pcm))
+	e.delayJoined = growFloat64s(e.delayJoined, d+len(pcm))
+	joined := e.delayJoined
 	copy(joined, e.delayBuffer)
 	copy(joined[d:], pcm)
 	copy(e.delayBuffer, joined[len(pcm):])

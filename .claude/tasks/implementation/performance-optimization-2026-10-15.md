@@ -116,27 +116,47 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -gcflags='all=-S' ./... 2>&1 | gr
   shares buffers. CELT vectors -6% to -12%, allocations -30% to -57%, CELT
   encode -5%.
 
+- 2026-10-15 `cebd0e6` D3 part 1: the packet decoders build their PCM in
+  `Decoder.pcmScratch`; the public `DecodeFloat` copies it out, while
+  `decodeFloatShared` (used by `Decode24`, `DecodeFloat32` and multistream)
+  does not; the int16 soft clip reuses `softclipScratch`. CELT vectors now
+  allocate 3-7 MiB instead of 283 MiB.
+- 2026-10-15 `2a2eb49`, `758afa0` D3 part 2: 8 kHz and 12 kHz digests added
+  (taken from v1.6.0 `2edb1c2`, identical to the optimised code). The SILK
+  resampler gained `ProcessAppend` and reusable work buffers; `resampleSILK`
+  returns `Decoder.silkResampled`, valid until its next call. SILK vectors
+  -12% to -16%.
+- 2026-10-15 `283509e` D3 part 3: SILK `synthesize` work buffers are decoder
+  scratch (cleared on use, dropped by `CopyAllStateFrom`). SILK -4%.
+
 | Vector | baseline | now | pion |
 |---|---:|---:|---:|
-| tv01 | 328 ms | 192 ms | 109 ms |
-| tv05 | 181 ms | 147 ms | 95 ms |
-| tv09 | 343 ms | 158 ms | 98 ms |
-| tv10 | 384 ms | 209 ms | 127 ms |
-| tv11 | 272 ms | 145 ms | 87 ms |
-| tv02 (SILK) | 54 ms | 54 ms | 39 ms |
+| tv01 | 328 ms | 179 ms | 110 ms |
+| tv05 | 181 ms | 127 ms | 95 ms |
+| tv09 | 343 ms | 144 ms | 98 ms |
+| tv10 | 384 ms | 187 ms | 127 ms |
+| tv11 | 272 ms | 128 ms | 86 ms |
+| tv02 (SILK) | 54 ms | 44 ms | 39 ms |
+| tv12 (SILK) | 70 ms | 54 ms | 43 ms |
+| all 12 | 2.54 s | 1.30 s | 0.90 s |
+
+GC is no longer visible in the decode profile. The remaining CELT gap is
+compute: every CELT buffer is `[]float64` holding float32-rounded values, so
+each operation converts float32<->float64 (`imdctRawInto`, `quantPartition`,
+`decodeCELTRange`). Moving CELT to `[]float32` storage is the next large
+lever but touches the whole CELT package; do it only with the digests and
+the opusref suite green at every step.
 
 ## Next steps (in order)
 
-1. D2 is done apart from small leftovers (`NewPostFilter` per redundancy
-   decoder, `UnquantizeCoarseEnergy`/`decodeDynalloc`/`celtTFDecode` small
-   slices).
-2. D3: root-package decode path (`decodePacketFloat`, `finishOutput`,
-   `interleaveSILKOut`, `resampleSILK`) and SILK `synthesize` / resampler
-   `iirFIR` allocations. This is the only lever for the SILK vectors
-   (tv02-04, tv12).
-3. E2 (`silkTraceSNR` caches `os.Getenv` in a package variable), then E1
+1. Small decoder leftovers: SILK `decodeFrame` result/stereo copies and
+   `DecodeMulti*` `allPCM`, `stereoMSToLR`, `decodePulses`;
+   `NewPostFilter`/`NewDecoderEx` per redundancy frame; precomputed
+   per-mode MDCT twiddle slices instead of the `libopusMDCTTwiddle` switch.
+2. E2 (`silkTraceSNR` caches `os.Getenv` in a package variable), then E1
    (is the float64 `analyzeNoiseShapeFLP` result used when `haveShape32`?),
    then E3 encoder allocations.
+3. Investigate CELT `[]float32` storage (see above).
 4. Before opening the PR: `go test ./...`, `go test -race ./...`,
    PowerShell `go test -tags opusref ./...`, arm64 FMA check, update
    `docs/PERF_BASELINE.md`, draft PR.

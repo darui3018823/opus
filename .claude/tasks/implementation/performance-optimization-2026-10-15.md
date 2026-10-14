@@ -159,19 +159,26 @@ the opusref suite green at every step.
   (each lag still sums in j order) without bounds checks. CELT encode -14%
   to -21%.
 
+- 2026-10-15 `679e3cc`, `1555b07`, `b6daa13` E3 (part): reuse the
+  conditioned-input and CELT delay buffers (`conditionBuf`, `delayJoined`;
+  `lastConditionedInput` is now valid until the next call), forward MDCT
+  outputs (`CLTMDCTForwardInto`, encoder `mdctOut`/`mdctCoeffs`/`mdctLong`),
+  SILK `pulseBlocks`, `nsqScratch` and `pitchBuf`; `shellSumsFit` works in a
+  stack array and `pitchResidual` takes `r.res` without a copy.
+
 Note on the FMA check: run it with `-a`
 (`GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -a -gcflags='all=-S' ./...`);
 without `-a`, cached packages print no assembly and the check passes
 vacuously.
 
-| Encoder workload | baseline | now |
-|---|---:|---:|
-| celt/mono/96k | 202 µs | 140 µs |
-| celt/stereo/128k | 312 µs | 230 µs |
-| silk/mono/12k | 738 µs | 536 µs |
-| silk/stereo/12k | 793 µs | 582 µs |
-| hybrid/mono/24k | 426 µs | 319 µs |
-| hybrid/stereo/36k | 1151 µs | 851 µs |
+| Encoder workload | baseline | now | alloc baseline | alloc now |
+|---|---:|---:|---:|---:|
+| celt/mono/96k | 202 µs | 128 µs | 63 KiB | 23 KiB |
+| celt/stereo/128k | 312 µs | 206 µs | 109 KiB | 35 KiB |
+| silk/mono/12k | 738 µs | 496 µs | 245 KiB | 118 KiB |
+| silk/stereo/12k | 793 µs | 532 µs | 274 KiB | 129 KiB |
+| hybrid/mono/24k | 426 µs | 300 µs | 179 KiB | 89 KiB |
+| hybrid/stereo/36k | 1151 µs | 801 µs | 424 KiB | 212 KiB |
 
 ## Next steps (in order)
 

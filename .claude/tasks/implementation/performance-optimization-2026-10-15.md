@@ -182,6 +182,13 @@ the opusref suite green at every step.
     `band.Energy` writes were always overwritten in `decodeCELTRange`
     (`decodeBandCoeffs` has no error return in between). -1% to -3%.
 
+  - `db0dde4` (item 6, part) `opPVQSearch`/`algQuant` vectors on the stack:
+    CELT encode -5% to -7%, CELT encode bytes -45% to -62%.
+  - `b114619` (item 6, part) hybrid HB-gain/stereo-width fades copy into
+    `Encoder.hybridFadeBuf`: hybrid encode -2%, bytes -10% to -15%.
+  - Full `go test ./...`, the `-a` FMA check and `go test -tags opusref ./...`
+    (7m19s) pass on `b114619`.
+
 | Vector | v1.6.0 | after pass 1 | now |
 |---|---:|---:|---:|
 | tv01 | 328 ms | 175 ms | 150 ms |
@@ -230,10 +237,10 @@ reuse); guard each with the digest tests.
 5. (done) `ApplyFineEnergy`/`ApplyFinalFineEnergy` (`internal/celt/bands.go`) write
    `band.Energy` that `decodeCELTRange` overwrites before any read
    (verified); drop the `math.Exp2` work if PLC and the digests agree.
-6. Encoder allocations (GC is ~10-12% of encode CPU): `opPVQSearch`/
-   `algQuant` (16% of encode bytes), `snapshotFrameState` and
-   `silkNSQState.clone` (double-buffer), hybrid `celtChunk` copies
-   (`opus.go` `encodeHybridPacket`), pitch-analysis scratch, `tfAnalysis`,
+6. Encoder allocations (GC is ~10-12% of encode CPU): done for
+   `opPVQSearch`/`algQuant` and the hybrid `celtChunk` copies; left:
+   `snapshotFrameState` and
+   `silkNSQState.clone` (double-buffer), pitch-analysis scratch, `tfAnalysis`,
    `buildLPCInPre`/`lpcInPreInput`/`exactProcessGains`.
 7. Gate the SILK encoder traces (`recordNSQTrace`, `loopTrace`,
    `traceLPCInPre`, `pendingTrace` copies) behind a flag; the opusref

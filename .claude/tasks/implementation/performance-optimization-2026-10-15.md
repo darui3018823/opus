@@ -1,7 +1,7 @@
 # Performance Optimisation (v1.7 cycle)
 
 - Status: in progress
-- Last updated: 2026-10-15 02:00 JST
+- Last updated: 2026-10-15
 - Branch: `perf/decoder-encoder-optimization`
 
 ## Objective
@@ -105,38 +105,39 @@ GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -gcflags='all=-S' ./... 2>&1 | gr
   non-transient path), FFT plans are a static array, `transform` uses a stack
   `fstride`. Decode another -5% to -9% on CELT vectors, allocations -35%.
 
+- 2026-10-15 `5fdf739` D2 part 2: `decodeCELTRange` reuses decoder-owned
+  synthesis buffers; `celt.Decoder.Decode`/`DecodeHybrid` now return a slice
+  valid until the next decode call (every root-package caller copies it
+  immediately). CELT vectors -2% to -5%, allocations -13% to -33%.
+- 2026-10-15 `1fc230d` D2 part 3: `AssembleMDCTInto`, `quantAllBandsScratch`
+  (decoder and CELT encoder), decoder `bandX`/`collapse`, stack arrays
+  (`maxPVQN` = 176) for the cwrsi pulse vector and the Hadamard reorders.
+  `CopyAllStateFrom` clears the scratch after its struct copy so a clone never
+  shares buffers. CELT vectors -6% to -12%, allocations -30% to -57%, CELT
+  encode -5%.
+
 | Vector | baseline | now | pion |
 |---|---:|---:|---:|
-| tv01 | 328 ms | 218 ms | 109 ms |
-| tv05 | 181 ms | 159 ms | 95 ms |
-| tv09 | 343 ms | 184 ms | 98 ms |
-| tv10 | 384 ms | 236 ms | 127 ms |
-| tv11 | 272 ms | 162 ms | 87 ms |
-| tv02 (SILK) | 54 ms | 56 ms | 39 ms |
+| tv01 | 328 ms | 192 ms | 109 ms |
+| tv05 | 181 ms | 147 ms | 95 ms |
+| tv09 | 343 ms | 158 ms | 98 ms |
+| tv10 | 384 ms | 209 ms | 127 ms |
+| tv11 | 272 ms | 145 ms | 87 ms |
+| tv02 (SILK) | 54 ms | 54 ms | 39 ms |
 
 ## Next steps (in order)
 
-1. D2 part 2, `internal/celt/decoder.go` `decodeCELTRange`: the transient
-   path allocates `subTail`, `samplesOut` and one `subCoeffs` per short block
-   (around line 427); the `ch/cc` mixing allocates `synth`/`mixed`; `output`
-   is allocated per frame. Use decoder-owned scratch. Check every caller of
-   the returned `output` slice (`opus.go` `decodePacketFloat`,
-   `decodeHybridPacket`, PLC in `internal/celt/plc.go`) before reusing it:
-   `PostFilter.Apply` returns its input slice in place, and the PLC path
-   stores `samples[c]`.
-2. D2 part 3: `quantAllBandsImpl`, `decodeBandCoeffs`,
-   `BandProcessor.AssembleMDCT`, `cwrsiLibopus` (returns a new `[]int`)
-   allocations. Re-profile with
-   `go test -run '^$' -bench BenchmarkDecodeOfficialVectors -benchtime 1x -memprofile mem.out .`
-   and `go tool pprof -sample_index=alloc_space -top`.
-3. D3: root-package decode path (`decodePacketFloat`, `finishOutput`,
+1. D2 is done apart from small leftovers (`NewPostFilter` per redundancy
+   decoder, `UnquantizeCoarseEnergy`/`decodeDynalloc`/`celtTFDecode` small
+   slices).
+2. D3: root-package decode path (`decodePacketFloat`, `finishOutput`,
    `interleaveSILKOut`, `resampleSILK`) and SILK `synthesize` / resampler
    `iirFIR` allocations. This is the only lever for the SILK vectors
    (tv02-04, tv12).
-4. E2 (`silkTraceSNR` caches `os.Getenv` in a package variable), then E1
+3. E2 (`silkTraceSNR` caches `os.Getenv` in a package variable), then E1
    (is the float64 `analyzeNoiseShapeFLP` result used when `haveShape32`?),
    then E3 encoder allocations.
-5. Before opening the PR: `go test ./...`, `go test -race ./...`,
+4. Before opening the PR: `go test ./...`, `go test -race ./...`,
    PowerShell `go test -tags opusref ./...`, arm64 FMA check, update
    `docs/PERF_BASELINE.md`, draft PR.
 

@@ -828,7 +828,8 @@ func runSILKEncoderOracleComplexity(t *testing.T, lossPerc, bitrate int, vbr boo
 					for _, v := range cond {
 						goPCMBuf = append(goPCMBuf, float32(v))
 					}
-					prevCond = cond
+					// lastConditionedInput is reused by the next call.
+					prevCond = append(prevCond[:0], cond...)
 					idx, ok := firstFloat32Mismatch(goPCMBuf, r.pcmBuf)
 					cutoffOK := enc.variableHPSmth2Q15 == r.smth2
 					if !ok || !cutoffOK {

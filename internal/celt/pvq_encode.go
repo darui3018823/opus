@@ -95,9 +95,16 @@ func opPVQSearch(X []float64, iy []int, k, n int) float64 {
 	// Float32 port of libopus op_pvq_search_c (float build): every sum,
 	// product and comparison rounds to float32 exactly as opus_val16 /
 	// opus_val32 do there.
-	y := make([]float32, n)
-	signx := make([]int, n)
-	x := make([]float32, n)
+	// Zeroed stack buffers for every band width CELT codes.
+	var yBuf, xBuf [maxPVQN]float32
+	var signBuf [maxPVQN]int
+	var y, x []float32
+	var signx []int
+	if n <= maxPVQN {
+		y, x, signx = yBuf[:n], xBuf[:n], signBuf[:n]
+	} else {
+		y, x, signx = make([]float32, n), make([]float32, n), make([]int, n)
+	}
 	var sum, xy, yy float32
 
 	// Get rid of the sign.
@@ -195,7 +202,13 @@ func opPVQSearch(X []float64, iy []int, k, n int) float64 {
 // identical normalised spectrum. Returns the band collapse mask.
 func algQuant(X []float64, n, k, spread, b int, enc *entcode.Encoder, gain float64) uint {
 	expRotation(X, n, 1, b, k, spread)
-	iy := make([]int, n)
+	var iyBuf [maxPVQN]int
+	var iy []int
+	if n <= maxPVQN {
+		iy = iyBuf[:n]
+	} else {
+		iy = make([]int, n)
+	}
 	yy := opPVQSearch(X, iy, k, n)
 	encodePulses(enc, iy, n, k)
 	normaliseResidual(iy, X, n, yy, gain)

@@ -504,8 +504,10 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			d.synthesisStageHook("pcm", c, samplesOut)
 		}
 
-		for i := 0; i < frameSize/d.downsample; i++ {
-			output[i*cc+c] = samplesOut[i*d.downsample] * celtFloatScale
+		ds := d.downsample
+		outLen := frameSize / ds
+		for i := 0; i < outLen; i++ {
+			output[i*cc+c] = samplesOut[i*ds] * celtFloatScale
 		}
 	}
 

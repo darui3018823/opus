@@ -220,10 +220,10 @@ func (e *Encoder) silkNSQDelDec(
 	if len(e.nsq.xq) != ltpMemLen+e.frameSize {
 		e.nsq = newSilkNSQState(e.frameSize, ltpMemLen)
 	}
-	sLTPQ15 := make([]int32, ltpMemLen+e.frameSize)
-	sLTP := make([]int16, ltpMemLen+e.frameSize)
-	xScQ10 := make([]int32, subframeLen)
-	delayedGainQ10 := make([]int32, silkDecisionDelay)
+	sLTPQ15 := zeroedInt32(&e.nsqScratch.sLTPQ15, ltpMemLen+e.frameSize)
+	sLTP := zeroedInt16(&e.nsqScratch.sLTP, ltpMemLen+e.frameSize)
+	xScQ10 := zeroedInt32(&e.nsqScratch.xScQ10, subframeLen)
+	delayedGainQ10 := zeroedInt32(&e.nsqScratch.delayedGainQ10, silkDecisionDelay)
 
 	e.nsq.sLTPShpBufIdx = ltpMemLen
 	e.nsq.sLTPBufIdx = ltpMemLen
@@ -758,4 +758,24 @@ func (e *Encoder) syncTrellisNSQState() {
 	e.nsq.sLTPShpBufIdx = ltpMemLen
 	e.nsq.prevGainQ16 = e.prevGainQ16
 	e.nsq.rewhiteFlag = false
+}
+
+// nsqWorkBuffers are the delayed-decision NSQ's per-call buffers, cleared on
+// every use and reused between calls.
+type nsqWorkBuffers struct {
+	sLTPQ15        []int32
+	sLTP           []int16
+	xScQ10         []int32
+	delayedGainQ10 []int32
+}
+
+// zeroedInt16 is zeroedInt32 for int16 buffers.
+func zeroedInt16(buf *[]int16, n int) []int16 {
+	if cap(*buf) < n {
+		*buf = make([]int16, n)
+	} else {
+		*buf = (*buf)[:n]
+		clear(*buf)
+	}
+	return *buf
 }

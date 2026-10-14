@@ -363,7 +363,11 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64, va
 
 	// Analysis buffer [history | frame | la_pitch] in silk_float int16 scale,
 	// read from x_buf exactly like silk_find_pitch_lags_FLP.
-	buf := make([]float64, bufLen)
+	// Every element of buf is written below.
+	if cap(e.pitchBuf) < bufLen {
+		e.pitchBuf = make([]float64, bufLen)
+	}
+	buf := e.pitchBuf[:bufLen]
 	for i := 0; i < ltpMem; i++ {
 		buf[i] = f32(e.pitchHist[i] * 32768.0)
 	}
@@ -389,7 +393,8 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64, va
 	// silk_find_pred_coefs_FLP correlates this residual (res_pitch) for the
 	// LTP quantizer; the la_pitch tail covers the LTP_ORDER samples it reads
 	// past the frame.
-	e.pitchResidual = append([]float64(nil), r.res...)
+	// r.res is freshly allocated for this call and nothing else holds it.
+	e.pitchResidual = r.res
 	e.pitchPredGain = r.predGain
 	if !runCore {
 		e.ltpCorrState = 0

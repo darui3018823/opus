@@ -21,6 +21,13 @@ const (
 
 // Encoder represents a SILK encoder instance
 type Encoder struct {
+	// pulseBlocks is encodePulses' shell-block scratch, reused between calls.
+	pulseBlocks []pulseBlock
+	// nsqScratch holds silkNSQDelDec's work buffers.
+	nsqScratch nsqWorkBuffers
+	// pitchBuf is silkFindPitchLags' analysis buffer.
+	pitchBuf []float64
+
 	sampleRate       int // Sample rate (8000, 12000, 16000, 24000)
 	frameSize        int // Frame size in samples
 	frameMs          int // Frame duration in milliseconds (10 or 20)
@@ -2618,7 +2625,8 @@ type pulseBlock struct {
 }
 
 func (e *Encoder) encodePulses(enc *entcode.Encoder, pulses []int16, signalType, quantOffset int) {
-	blocks := makePulseBlocks(pulses, e.frameSize)
+	e.pulseBlocks = makePulseBlocksInto(e.pulseBlocks, pulses, e.frameSize)
+	blocks := e.pulseBlocks
 
 	row := signalType >> 1
 	if row > 1 {
@@ -3225,12 +3233,23 @@ func decodedExcitationQ14(pulse int, offsetQ14 int32, flipSign bool) int32 {
 }
 
 func makePulseBlocks(pulses []int16, frameSize int) []pulseBlock {
+	return makePulseBlocksInto(nil, pulses, frameSize)
+}
+
+// makePulseBlocksInto is makePulseBlocks reusing dst's capacity.
+func makePulseBlocksInto(dst []pulseBlock, pulses []int16, frameSize int) []pulseBlock {
 	iter := frameSize >> log2ShellCodecFrameLen
 	if iter*shellCodecFrameLength < frameSize {
 		iter++
 	}
 
-	blocks := make([]pulseBlock, iter)
+	var blocks []pulseBlock
+	if cap(dst) >= iter {
+		blocks = dst[:iter]
+		clear(blocks)
+	} else {
+		blocks = make([]pulseBlock, iter)
+	}
 	for blockIdx := range blocks {
 		blockStart := blockIdx * shellCodecFrameLength
 		for i := 0; i < shellCodecFrameLength; i++ {
@@ -3270,17 +3289,26 @@ func makePulseBlocks(pulses []int16, frameSize int) []pulseBlock {
 // whether any level exceeded its limit (scale_down).
 func shellSumsFit(abs []int) (int, bool) {
 	limits := [4]int{8, 10, 12, 16}
-	cur := append([]int(nil), abs...)
+	// Each level halves the vector in place: cur[i] is written only after
+	// cur[2i] and cur[2i+1] have been read.
+	var buf [shellCodecFrameLength]int
+	var cur []int
+	if len(abs) <= len(buf) {
+		cur = buf[:len(abs)]
+	} else {
+		cur = make([]int, len(abs))
+	}
+	copy(cur, abs)
 	scaleDown := false
+	n := len(cur)
 	for level := 0; level < 4; level++ {
-		next := make([]int, len(cur)/2)
-		for i := range next {
-			next[i] = cur[2*i] + cur[2*i+1]
-			if next[i] > limits[level] {
+		n /= 2
+		for i := 0; i < n; i++ {
+			cur[i] = cur[2*i] + cur[2*i+1]
+			if cur[i] > limits[level] {
 				scaleDown = true
 			}
 		}
-		cur = next
 	}
 	return cur[0], scaleDown
 }

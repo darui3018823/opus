@@ -185,6 +185,12 @@ func appendTraceRows(dst [][]float64, rows [][]float64) [][]float64 {
 }
 
 type Encoder struct {
+	// Forward MDCT outputs reused between frames: mdctOut/mdctCoeffs hold
+	// compute_mdcts' result for the frame, mdctLong the logE2 long block.
+	mdctOut    [2][]float64
+	mdctCoeffs [2][]float64
+	mdctShort  []float64
+	mdctLong   [2][]float64
 	// qab is the quant_all_bands scratch reused between frames.
 	qab         quantAllBandsScratch
 	lastTrace   FrameTrace
@@ -778,23 +784,24 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// and for a stereo input coded as a mono stream the average of the two
 	// channels' coefficients. The result holds C channels.
 	computeMDCTs := func(transient bool) [][]float64 {
-		out := make([][]float64, CC)
+		out := e.mdctOut[:CC]
 		for c := 0; c < CC; c++ {
 			buf := bufs[c]
-			var coeffs []float64
+			e.mdctCoeffs[c] = growFloat64(e.mdctCoeffs[c], frameSize)
+			coeffs := e.mdctCoeffs[c]
 			if transient {
 				// M short MDCTs over overlapping NBase windows, interleaved into the
 				// layout the decoder's transient synthesis expects (coeff k+i*M).
-				coeffs = make([]float64, frameSize)
+				e.mdctShort = growFloat64(e.mdctShort, nBase)
 				for b := 0; b < M; b++ {
 					sub := buf[b*nBase : b*nBase+nBase+ov]
-					sc := e.shortCeltMode.CLTMDCTForward(sub)
+					sc := e.shortCeltMode.CLTMDCTForwardInto(sub, e.mdctShort)
 					for i := 0; i < nBase; i++ {
 						coeffs[b+i*M] = sc[i]
 					}
 				}
 			} else {
-				coeffs = e.celtMode.CLTMDCTForward(buf)
+				coeffs = e.celtMode.CLTMDCTForwardInto(buf, coeffs)
 			}
 			copy(e.overlap[c], buf[frameSize:frameSize+ov])
 			out[c] = coeffs
@@ -858,16 +865,16 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// overlap state already advanced by computeSpectrum.
 	computeLogE2Long := func(corr float64) {
 		for c := 0; c < ch; c++ {
-			longCoeffs := e.celtMode.CLTMDCTForward(bufs[c])
+			e.mdctLong[0] = growFloat64(e.mdctLong[0], frameSize)
+			longCoeffs := e.celtMode.CLTMDCTForwardInto(bufs[c], e.mdctLong[0])
 			if CC == 2 && ch == 1 {
-				other := e.celtMode.CLTMDCTForward(bufs[1])
-				longCoeffs = append([]float64(nil), longCoeffs...)
+				e.mdctLong[1] = growFloat64(e.mdctLong[1], frameSize)
+				other := e.celtMode.CLTMDCTForwardInto(bufs[1], e.mdctLong[1])
 				for i := range longCoeffs {
 					longCoeffs[i] = float64(float32(float32(0.5)*float32(longCoeffs[i])) + float32(float32(0.5)*float32(other[i])))
 				}
 			}
 			if e.upsample > 1 {
-				longCoeffs = append([]float64(nil), longCoeffs...)
 				bound := frameSize / e.upsample
 				for i := 0; i < bound; i++ {
 					longCoeffs[i] = float64(float32(longCoeffs[i]) * float32(e.upsample))

@@ -159,6 +159,12 @@ func libopusMDCTTwiddle(n, index int) float32 {
 // in+b*N over a buffer of stride B*N+overlap). Output is N MDCT coefficients
 // matching the layout consumed by CLTMDCTBackward.
 func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
+	return m.CLTMDCTForwardInto(in, make([]float64, m.N))
+}
+
+// CLTMDCTForwardInto is CLTMDCTForward writing the N coefficients into dst,
+// which must not alias in. It returns dst[:N].
+func (m *CELTMode) CLTMDCTForwardInto(in []float64, dst []float64) []float64 {
 	N := m.N        // libopus N2 (e.g. 960)
 	N2 := N         // 960
 	N4 := N / 2     // 480
@@ -233,7 +239,7 @@ func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
 	z := opusFFTInto(fc, m.fwdIn, m.fwdZ)
 
 	// Post-rotation (stride=1): out[2i]=yr from the low end, out[N2-1-2i]=yi.
-	out := make([]float64, N2)
+	out := dst[:N2]
 	for i := 0; i < N4; i++ {
 		t0 := libopusMDCTTwiddle(N, i)
 		t1 := libopusMDCTTwiddle(N, N4+i)

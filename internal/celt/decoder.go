@@ -30,7 +30,13 @@ type Decoder struct {
 	shortCeltMode *dsp.CELTMode     // short-block (NBase-point) IMDCT mode for transient frames
 	bandProcs     [2]*BandProcessor // band processors per channel (index 0 = L/M, index 1 = R/S)
 	overlap       [][]float64       // Overlap buffer per channel (NBase samples each)
-	synthBuf      []float64         // long-block IMDCT output, reused per channel
+	// Synthesis scratch reused between frames. outBuf is the slice returned
+	// by Decode and DecodeHybrid, valid until the next decode call.
+	synthBuf  []float64
+	synthCopy []float64
+	subTail   []float64
+	subCoeffs []float64
+	outBuf    []float64
 
 	// Decoder energy state in libopus' mean-subtracted log2-amplitude domain.
 	// prevEnergies is oldBandE (used by coarse-energy prediction); prevLogE and
@@ -170,7 +176,8 @@ func NewDecoderEx(frameSize, sampleRate, numBands, channels int) (*Decoder, erro
 	return d, nil
 }
 
-// Decode decodes a CELT frame to PCM samples
+// Decode decodes a CELT frame to PCM samples. The returned slice is owned by
+// the decoder and valid until the next decode call.
 func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	if len(frameData) == 0 {
 		d.lastFinalRange = 0x01000000
@@ -180,12 +187,22 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	return d.decodeCELTRange(dec, len(frameData), 0, d.mode.Bands.NumBands)
 }
 
+// growFloat64 returns buf resized to n elements, reallocating only when its
+// capacity is too small. The contents are not cleared.
+func growFloat64(buf []float64, n int) []float64 {
+	if cap(buf) < n {
+		return make([]float64, n)
+	}
+	return buf[:n]
+}
+
 // DecodeHybrid decodes the CELT high-band layer of a hybrid Opus frame,
 // continuing from a range decoder that the SILK layer has already partially
 // consumed. start/end select the active CELT band range (hybrid uses start=17;
 // end=19 for SWB, 21 for FB). totalBytes is the full Opus frame byte length,
 // shared as the bit budget. Bands below `start` produce zero output, so the
-// result is the high-frequency signal to be summed with the SILK layer.
+// result is the high-frequency signal to be summed with the SILK layer. Like
+// Decode, the returned slice is reused by the next decode call.
 func (d *Decoder) DecodeHybrid(dec *entcode.Decoder, totalBytes, start, end int) ([]float64, error) {
 	return d.decodeCELTRange(dec, totalBytes, start, end)
 }
@@ -369,7 +386,8 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 
 	// Apply energy denormalization per channel
 	frameSize := d.mode.FrameSize
-	mdctCoeffsPerCh := make([][]float64, ch)
+	var mdctCoeffsArr [2][]float64
+	mdctCoeffsPerCh := mdctCoeffsArr[:ch]
 	for c := 0; c < ch; c++ {
 		d.bandProcs[c].DenormalizeBands()
 		coeffs := d.bandProcs[c].AssembleMDCT()
@@ -398,15 +416,20 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	// celt_synthesis: a mono stream feeds both output channels, a stereo
 	// stream on a mono output is averaged before the IMDCT.
 	synth := mdctCoeffsPerCh
+	var synthArr [2][]float64
 	switch {
 	case ch == 1 && cc == 2:
-		synth = [][]float64{mdctCoeffsPerCh[0], append([]float64(nil), mdctCoeffsPerCh[0]...)}
+		d.synthCopy = append(d.synthCopy[:0], mdctCoeffsPerCh[0]...)
+		synthArr[0], synthArr[1] = mdctCoeffsPerCh[0], d.synthCopy
+		synth = synthArr[:2]
 	case ch == 2 && cc == 1:
-		mixed := make([]float64, len(mdctCoeffsPerCh[0]))
+		d.synthCopy = growFloat64(d.synthCopy, len(mdctCoeffsPerCh[0]))
+		mixed := d.synthCopy
 		for i := range mixed {
 			mixed[i] = float64(float32(float32(0.5)*float32(mdctCoeffsPerCh[0][i])) + float32(float32(0.5)*float32(mdctCoeffsPerCh[1][i])))
 		}
-		synth = [][]float64{mixed}
+		synthArr[0] = mixed
+		synth = synthArr[:1]
 	}
 
 	// Note: stereo M/S→L/R merge is handled inside quant_all_bands (quant_band_stereo).
@@ -414,7 +437,9 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	// Perform IMDCT per channel.
 	// Transient frames (isTransient=true, lm>0) use M=2^lm separate NBase-point IMDCTs
 	// (libopus "shortMdct" path). Non-transient frames use a single N-point IMDCT.
-	output := make([]float64, frameSize/d.downsample*cc)
+	// output is decoder-owned and valid until the next decode call.
+	d.outBuf = growFloat64(d.outBuf, frameSize/d.downsample*cc)
+	output := d.outBuf
 	nBase := d.mode.NBase // = NBase (e.g. 120 for 48kHz)
 	M := 1 << uint(lm)    // number of sub-frames for transient
 
@@ -427,28 +452,29 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 
 		if isTransient && lm > 0 {
 			// Transient synthesis: M separate NBase-point IMDCTs.
-			subTail := make([]float64, nBase)
+			d.subTail = growFloat64(d.subTail, nBase)
+			subTail := d.subTail
 			copy(subTail, d.overlap[c])
 
-			samplesOut = make([]float64, frameSize)
+			d.synthBuf = growFloat64(d.synthBuf, frameSize)
+			samplesOut = d.synthBuf
+			d.subCoeffs = growFloat64(d.subCoeffs, nBase)
+			subCoeffs := d.subCoeffs
 			for k := 0; k < M; k++ {
-				subCoeffs := make([]float64, nBase)
 				for i := range subCoeffs {
+					subCoeffs[i] = 0
 					idx := k + i*M
 					if idx < len(coeffs) {
 						subCoeffs[i] = coeffs[idx]
 					}
 				}
-				subOut := d.shortCeltMode.CLTMDCTBackward(subCoeffs, subTail)
-				copy(samplesOut[k*nBase:], subOut)
+				d.shortCeltMode.CLTMDCTBackwardInto(subCoeffs, subTail, samplesOut[k*nBase:(k+1)*nBase])
 			}
 			copy(d.overlap[c], subTail)
 		} else {
 			// Non-transient: single N-point IMDCT. samplesOut is consumed
 			// into output before the next channel reuses synthBuf.
-			if len(d.synthBuf) != frameSize {
-				d.synthBuf = make([]float64, frameSize)
-			}
+			d.synthBuf = growFloat64(d.synthBuf, frameSize)
 			samplesOut = d.celtMode.CLTMDCTBackwardInto(coeffs, d.overlap[c], d.synthBuf)
 		}
 		if d.synthesisStageHook != nil {

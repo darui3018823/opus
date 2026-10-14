@@ -193,6 +193,14 @@ var nlsf2AOrdering16 = [16]int{0, 15, 8, 7, 4, 11, 12, 3, 2, 13, 10, 5, 6, 9, 14
 
 // Decoder represents a SILK decoder instance.
 type Decoder struct {
+	// synthesize work buffers, cleared on every use and reused between
+	// frames.
+	synthExc      []int32
+	synthSLTPQ15  []int32
+	synthOutBufQ0 []int32
+	synthSLPCQ14  []int32
+	synthSLTP     []int16
+
 	sampleRate int // 8000, 12000, 16000, 24000
 	frameSize  int // samples per 20ms frame
 	channels   int // 1 or 2
@@ -2250,7 +2258,7 @@ func (d *Decoder) synthesize(
 	// exc += offset_Q10 << 4   (unconditional)
 	// if rand_seed < 0: exc = -exc
 	// rand_seed += pulses[i]   (silk_ADD32_ovflw)
-	excQ14 := make([]int32, d.frameSize)
+	excQ14 := zeroedInt32(&d.synthExc, d.frameSize)
 	for i := 0; i < d.frameSize; i++ {
 		seed = 196314165*seed + 907633515 // silk_RAND: LCG first
 		excQ14[i] = int32(pulses[i]) << 14
@@ -2273,12 +2281,12 @@ func (d *Decoder) synthesize(
 	copy(d.excQ14[:d.frameSize], excQ14)
 
 	ltpMemLen := len(d.ltpState)
-	sLTPQ15 := make([]int32, ltpMemLen+d.frameSize)
-	outBufQ0 := make([]int32, ltpMemLen+d.frameSize)
+	sLTPQ15 := zeroedInt32(&d.synthSLTPQ15, ltpMemLen+d.frameSize)
+	outBufQ0 := zeroedInt32(&d.synthOutBufQ0, ltpMemLen+d.frameSize)
 	copy(outBufQ0, d.ltpState)
 	sLTPBufIdx := ltpMemLen
 
-	sLPCQ14 := make([]int32, silkMaxLPCOrder+d.subfrmLen)
+	sLPCQ14 := zeroedInt32(&d.synthSLPCQ14, silkMaxLPCOrder+d.subfrmLen)
 	copy(sLPCQ14[:silkMaxLPCOrder], d.lpcState)
 	output := make([]int16, d.frameSize)
 	nlsfInterpolation := false
@@ -2331,7 +2339,11 @@ func (d *Decoder) synthesize(
 					}
 				}
 				filterLen := sLTPBufIdx - startIdx
-				sLTP := make([]int16, filterLen)
+				if cap(d.synthSLTP) < filterLen {
+					d.synthSLTP = make([]int16, filterLen)
+				}
+				sLTP := d.synthSLTP[:filterLen]
+				clear(sLTP)
 				silkLPCAnalysisFilter(sLTP, outBufQ0[startIdx:startIdx+filterLen], lpc, filterLen, d.lpcOrder)
 				if sf == 0 {
 					invGainQ31 = silkSMULWB(invGainQ31, ltpScaleQ14) << 2
@@ -2547,6 +2559,8 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 	}
 	dstSide := d.side
 	*d = *src
+	// Work buffers must not be shared with src.
+	d.synthExc, d.synthSLTPQ15, d.synthOutBufQ0, d.synthSLPCQ14, d.synthSLTP = nil, nil, nil, nil, nil
 	d.prevNLSFQ15 = append([]int16(nil), src.prevNLSFQ15...)
 	d.lpcState = append([]int32(nil), src.lpcState...)
 	d.ltpState = append([]int32(nil), src.ltpState...)
@@ -2583,4 +2597,16 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 		}
 		d.trace = trace
 	}
+}
+
+// zeroedInt32 returns *buf resized to n zeroed elements, keeping the backing
+// array for the next call.
+func zeroedInt32(buf *[]int32, n int) []int32 {
+	if cap(*buf) < n {
+		*buf = make([]int32, n)
+	} else {
+		*buf = (*buf)[:n]
+		clear(*buf)
+	}
+	return *buf
 }

@@ -30,6 +30,7 @@ type Decoder struct {
 	shortCeltMode *dsp.CELTMode     // short-block (NBase-point) IMDCT mode for transient frames
 	bandProcs     [2]*BandProcessor // band processors per channel (index 0 = L/M, index 1 = R/S)
 	overlap       [][]float64       // Overlap buffer per channel (NBase samples each)
+	synthBuf      []float64         // long-block IMDCT output, reused per channel
 
 	// Decoder energy state in libopus' mean-subtracted log2-amplitude domain.
 	// prevEnergies is oldBandE (used by coarse-energy prediction); prevLogE and
@@ -443,8 +444,12 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			}
 			copy(d.overlap[c], subTail)
 		} else {
-			// Non-transient: single N-point IMDCT.
-			samplesOut = d.celtMode.CLTMDCTBackward(coeffs, d.overlap[c])
+			// Non-transient: single N-point IMDCT. samplesOut is consumed
+			// into output before the next channel reuses synthBuf.
+			if len(d.synthBuf) != frameSize {
+				d.synthBuf = make([]float64, frameSize)
+			}
+			samplesOut = d.celtMode.CLTMDCTBackwardInto(coeffs, d.overlap[c], d.synthBuf)
 		}
 		if d.synthesisStageHook != nil {
 			d.synthesisStageHook("synthesis", c, samplesOut)

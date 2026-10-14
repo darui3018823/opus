@@ -14,6 +14,11 @@ type CELTMode struct {
 	fwdFC []Complex
 	fwdZ  []Complex
 	fwdIn []opusComplex
+	// Backward MDCT scratch.
+	bwdF   []Complex
+	bwdZ   []Complex
+	bwdIn  []opusComplex
+	bwdBuf []float64
 }
 
 // NewCELTMode creates a CELT mode.  window is the overlap-region window (length = overlap).
@@ -66,11 +71,22 @@ func (m *CELTMode) IMDCT(X []float64) []float64 {
 // TDAC mirror/window step. Unlike IMDCT, this is not normalised by 2/N and the
 // samples are in libopus' internal half-overlap-shifted order.
 func (m *CELTMode) IMDCTRaw(X []float64) []float64 {
+	return m.imdctRawInto(X, make([]float64, m.N))
+}
+
+// imdctRawInto is IMDCTRaw writing the N raw samples into buf. The FFT
+// scratch belongs to the mode.
+func (m *CELTMode) imdctRawInto(X []float64, buf []float64) []float64 {
 	N := m.N
 	N2 := N
 	N4 := N / 2
 
-	f := make([]Complex, N4)
+	if len(m.bwdF) != N4 {
+		m.bwdF = make([]Complex, N4)
+		m.bwdZ = make([]Complex, N4)
+		m.bwdIn = make([]opusComplex, N4)
+	}
+	f := m.bwdF
 	for i := 0; i < N4; i++ {
 		xp1 := float32(X[2*i])
 		xp2 := float32(X[N2-1-2*i])
@@ -80,8 +96,8 @@ func (m *CELTMode) IMDCTRaw(X []float64) []float64 {
 		yi := float32(xp1*t0) - float32(xp2*t1)
 		f[i] = Complex{Real: float64(yi), Imag: float64(yr)}
 	}
-	z := opusFFT(f)
-	buf := make([]float64, N2)
+	z := opusFFTInto(f, m.bwdIn, m.bwdZ)
+	buf = buf[:N2]
 	for i, c := range z {
 		buf[2*i] = c.Real
 		buf[2*i+1] = c.Imag
@@ -235,13 +251,21 @@ func (m *CELTMode) CLTMDCTForward(in []float64) []float64 {
 // step matching libopus clt_mdct_backward. carry holds the ov/2 future samples
 // preserved from the previous call in libopus' decode_mem layout.
 func (m *CELTMode) CLTMDCTBackward(X []float64, carry []float64) []float64 {
+	return m.CLTMDCTBackwardInto(X, carry, make([]float64, m.N))
+}
+
+// CLTMDCTBackwardInto is CLTMDCTBackward writing the N output samples into
+// dst, which must not alias X or carry. It returns dst[:N].
+func (m *CELTMode) CLTMDCTBackwardInto(X []float64, carry []float64, dst []float64) []float64 {
 	N := m.N
 	ov := m.Overlap
 	half := ov / 2
-	raw := m.IMDCTRaw(X)
-	buf := make([]float64, N+half)
+	if len(m.bwdBuf) != N+half {
+		m.bwdBuf = make([]float64, N+half)
+	}
+	buf := m.bwdBuf
 	copy(buf[:half], carry)
-	copy(buf[half:], raw)
+	m.imdctRawInto(X, buf[half:])
 
 	for i := 0; i < half; i++ {
 		x1 := float32(buf[ov-1-i])
@@ -256,7 +280,9 @@ func (m *CELTMode) CLTMDCTBackward(X []float64, carry []float64) []float64 {
 	for i := half; i < len(carry); i++ {
 		carry[i] = 0
 	}
-	return buf[:N]
+	dst = dst[:N]
+	copy(dst, buf[:N])
+	return dst
 }
 
 // InverseOverlapAdd is the MDCT-IV overlap-add currently used by CELT synthesis.

@@ -1,9 +1,6 @@
 package dsp
 
-import (
-	"math"
-	"sync"
-)
+import "math"
 
 // opusComplex is the scalar type used by the floating-point libopus KISS FFT.
 type opusComplex struct {
@@ -35,7 +32,25 @@ type opusFFTPlan struct {
 	twiddles []opusComplex
 }
 
-var opusFFTPlans sync.Map
+// opusFFTPlans holds the plans for the four static-mode sizes, indexed by
+// opusFFTPlanIndex.
+var opusFFTPlans = [4]*opusFFTPlan{
+	buildOpusFFTPlan(60), buildOpusFFTPlan(120), buildOpusFFTPlan(240), buildOpusFFTPlan(480),
+}
+
+func opusFFTPlanIndex(n int) int {
+	switch n {
+	case 60:
+		return 0
+	case 120:
+		return 1
+	case 240:
+		return 2
+	case 480:
+		return 3
+	}
+	return -1
+}
 
 // opusFFT computes the unscaled DFT using the float KISS FFT stage ordering
 // used by the static 48 kHz CELT mode. CELT's MDCT uses only these four sizes.
@@ -66,9 +81,13 @@ func opusFFTInto(input []Complex, fout []opusComplex, out []Complex) []Complex {
 }
 
 func getOpusFFTPlan(n int) *opusFFTPlan {
-	if cached, ok := opusFFTPlans.Load(n); ok {
-		return cached.(*opusFFTPlan)
+	if i := opusFFTPlanIndex(n); i >= 0 {
+		return opusFFTPlans[i]
 	}
+	return buildOpusFFTPlan(n)
+}
+
+func buildOpusFFTPlan(n int) *opusFFTPlan {
 	plan := &opusFFTPlan{n: n}
 	for scaled := n; scaled < 480; scaled <<= 1 {
 		plan.shift++
@@ -100,8 +119,7 @@ func getOpusFFTPlan(n int) *opusFFTPlan {
 			i: math.Float32frombits(libopusFFTTwiddleBits[2*i+1]),
 		}
 	}
-	actual, _ := opusFFTPlans.LoadOrStore(n, plan)
-	return actual.(*opusFFTPlan)
+	return plan
 }
 
 func opusFFTFactors(n int) []int {
@@ -141,9 +159,10 @@ func opusFFTFactors(n int) []int {
 	return factors
 }
 
-func (p opusFFTPlan) transform(fout []opusComplex) {
+func (p *opusFFTPlan) transform(fout []opusComplex) {
 	stages := len(p.factors) / 2
-	fstride := make([]int, stages+1)
+	var fstrideBuf [8]int
+	fstride := fstrideBuf[:stages+1]
 	fstride[0] = 1
 	for i := 0; i < stages; i++ {
 		fstride[i+1] = fstride[i] * p.factors[2*i]
@@ -195,7 +214,7 @@ func opusBfly2(fout []opusComplex, m, groups int) {
 	}
 }
 
-func (p opusFFTPlan) bfly4(fout []opusComplex, fstride, m, groups, mm int) {
+func (p *opusFFTPlan) bfly4(fout []opusComplex, fstride, m, groups, mm int) {
 	if m == 1 {
 		for group := 0; group < groups; group++ {
 			base := group * 4
@@ -230,7 +249,7 @@ func (p opusFFTPlan) bfly4(fout []opusComplex, fstride, m, groups, mm int) {
 	}
 }
 
-func (p opusFFTPlan) bfly3(fout []opusComplex, fstride, m, groups, mm int) {
+func (p *opusFFTPlan) bfly3(fout []opusComplex, fstride, m, groups, mm int) {
 	epi := p.twiddles[fstride*m].i
 	for group := 0; group < groups; group++ {
 		base := group * mm
@@ -249,7 +268,7 @@ func (p opusFFTPlan) bfly3(fout []opusComplex, fstride, m, groups, mm int) {
 	}
 }
 
-func (p opusFFTPlan) bfly5(fout []opusComplex, fstride, m, groups, mm int) {
+func (p *opusFFTPlan) bfly5(fout []opusComplex, fstride, m, groups, mm int) {
 	ya := p.twiddles[fstride*m]
 	yb := p.twiddles[fstride*2*m]
 	for group := 0; group < groups; group++ {

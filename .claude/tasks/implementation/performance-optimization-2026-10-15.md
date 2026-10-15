@@ -298,6 +298,14 @@ vacuously.
   allocations -3% to -10%. LTP/shaping-lag windowing: no change, reverted.
   `go test ./...`, FMA `-a` and Windows opusref (7m42s, on `04ab664`) pass.
 
+- 2026-10-15 evening: item 10. `6efb65c` ILog via `bits.Len32`
+  (interleaved: tv01 -8%, tv07 -11%, tv09 -12%); `ddedb9b` silkCLZ32 via
+  `bits.LeadingZeros32` (hybrid/stereo -1.6%). Both have equality tests
+  against the old loops. CELT decode profile after this: `cwrsiLibopusInto`
+  10%, `imdctRawStatic` 11% cumulative, `applyDeemphasis` 4.5%,
+  `expRotation1` 4%, `celtPVQU` 4%, `SoftClipFloat32` 3%; no single float64
+  hot spot stands out for item 11.
+
 ## Next steps (in order)
 
 From an Opus read-only review on 2026-10-15 (commit `52969ac`; estimates
@@ -344,9 +352,14 @@ reuse); guard each with the digest tests.
    lag taps the same way measured no change and was dropped. The warped AR
    loop (`sAR2Q14`) is the remaining NSQ hot spot; its bounds checks depend
    on the runtime `shapingLPCOrder`.
-10. Smaller: postfilter history branch per sample, SILK LPC synthesis and
-    `iirFIRInterpol` bounds checks; remove the unreachable
-    `selectRateControlPlan` branch.
+10. (done, partly) Smaller: `6efb65c` `entcode.ILog`/`Log2Ceiling` use
+    `math/bits` (CELT decode -8% to -12%); `ddedb9b` `silkCLZ32` uses
+    `bits.LeadingZeros32` (-1.4%). Not worth it: `iirFIRInterpol` already
+    does libopus's per-sample work with sliced rows (19% of SILK decode
+    is the filter itself); the postfilter's `getHistorySample` is inlined
+    and its branch predictable (`combFilterConst` is 2.6% of CELT decode).
+    Not done: the unreachable `selectRateControlPlan` branch (cleanup, no
+    speed effect).
 11. Only after re-profiling: CELT `[]float32` storage. pion's CELT speed
     comes from float32 buffers, precomputed trig slices and bit reversal
     applied in the pre-rotation, all compatible with bit-exactness, but the

@@ -293,6 +293,11 @@ vacuously.
   - CPU profile now (tv02-tv04): `iirFIRInterpol` 19%, `synthesize` 18%
     cumulative, `SoftClipFloat32` 7%, int16 output conversion 7%.
 
+- 2026-10-15 evening: item 9. `14aaea8` NSQ short prediction fast path and
+  stack sample state: interleaved SILK/hybrid encode -5% geomean (noisy),
+  allocations -3% to -10%. LTP/shaping-lag windowing: no change, reverted.
+  `go test ./...`, FMA `-a` and Windows opusref (7m42s, on `04ab664`) pass.
+
 ## Next steps (in order)
 
 From an Opus read-only review on 2026-10-15 (commit `52969ac`; estimates
@@ -332,9 +337,13 @@ reuse); guard each with the digest tests.
    profile of tv02-tv04 puts `SoftClipFloat32` plus the int16 conversion at
    about 13%, but bypassing the soft clip needs proof that its per-channel
    memory stays unchanged for SILK-only output; left for later.
-9. NSQ (`internal/silk/nsq_del_dec.go`): add an assertion that the
-   short-prediction index never goes out of range, then reslice windows to
-   drop bounds checks and preallocate `sampleState`.
+9. (done, partly) NSQ: `14aaea8` short-term prediction takes a fast path
+   when its whole window is in range (no tap can be skipped, so no
+   assertion is needed) with orders 16 and 10 unrolled; `sampleState` is on
+   the stack. SILK encode about -5%. Windowing the LTP and harmonic-shaping
+   lag taps the same way measured no change and was dropped. The warped AR
+   loop (`sAR2Q14`) is the remaining NSQ hot spot; its bounds checks depend
+   on the runtime `shapingLPCOrder`.
 10. Smaller: postfilter history branch per sample, SILK LPC synthesis and
     `iirFIRInterpol` bounds checks; remove the unreachable
     `selectRateControlPlan` branch.

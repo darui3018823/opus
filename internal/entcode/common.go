@@ -3,6 +3,8 @@
 // celt/entenc.c, celt/entdec.c).
 package entcode
 
+import "math/bits"
+
 // Range coding constants matching libopus.
 const (
 	// EC_SYM_BITS: number of bits per symbol output.
@@ -35,22 +37,11 @@ func Log2Ceiling(n int) int {
 	if n <= 1 {
 		return 0
 	}
-	log := 0
-	n--
-	for n > 0 {
-		n >>= 1
-		log++
-	}
-	return log
+	return bits.Len(uint(n - 1))
 }
 
 // ILog returns the number of bits needed to represent val (floor(log2(val))+1).
 // Returns 0 for val == 0. Matches libopus EC_ILOG.
 func ILog(val uint32) int {
-	log := 0
-	for val > 0 {
-		val >>= 1
-		log++
-	}
-	return log
+	return bits.Len32(val)
 }

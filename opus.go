@@ -3682,9 +3682,20 @@ func packOpusFramesCode3(frames [][]byte, vbr, padding bool, padBytes int) ([]by
 // based on the count code (RFC 6716 §3.3).
 // countCode: 0=1 frame, 1=2 equal frames, 2=2 unequal frames, 3=arbitrary frames
 func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
+	return splitOpusFramesInto(nil, payload, countCode)
+}
+
+// maxPacketFrames is the RFC 6716 code 3 frame-count limit.
+const maxPacketFrames = 48
+
+// splitOpusFramesInto is splitOpusFrames writing the frame slices into
+// dst[:0]; a caller passing a [maxPacketFrames][]byte array avoids the
+// allocation.
+func splitOpusFramesInto(dst [][]byte, payload []byte, countCode int) ([][]byte, error) {
+	dst = dst[:0]
 	switch countCode {
 	case 0:
-		return [][]byte{payload}, nil
+		return append(dst, payload), nil
 
 	case 1:
 		// Two frames of equal size
@@ -3692,7 +3703,7 @@ func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
 			return nil, fmt.Errorf("code 1: odd payload length %d", len(payload))
 		}
 		half := len(payload) / 2
-		return [][]byte{payload[:half], payload[half:]}, nil
+		return append(dst, payload[:half], payload[half:]), nil
 
 	case 2:
 		// Two frames: first frame length is encoded in first byte (or two bytes)
@@ -3707,7 +3718,7 @@ func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
 		if n1 > len(payload) {
 			return nil, fmt.Errorf("code 2: frame1 length %d > remaining %d", n1, len(payload))
 		}
-		return [][]byte{payload[:n1], payload[n1:]}, nil
+		return append(dst, payload[:n1], payload[n1:]), nil
 
 	case 3:
 		// Multiple frames: see RFC 6716 §3.2.5
@@ -3719,7 +3730,7 @@ func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
 		padding := (payload[0] & 0x40) != 0  // padding flag
 		payload = payload[1:]
 
-		if frameCount == 0 || frameCount > 48 {
+		if frameCount == 0 || frameCount > maxPacketFrames {
 			return nil, fmt.Errorf("code 3: invalid frame count %d", frameCount)
 		}
 
@@ -3750,7 +3761,8 @@ func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
 
 		if vbr {
 			// VBR: the first M-1 frame lengths are stored first, followed by all frame payloads.
-			sizes := make([]int, frameCount)
+			var sizeBuf [maxPacketFrames]int
+			sizes := sizeBuf[:frameCount]
 			lastSize := len(payload)
 			for i := 0; i < frameCount-1; i++ {
 				n, used, err := parseOpusFrameLength(payload)
@@ -3765,27 +3777,25 @@ func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
 				}
 			}
 			sizes[frameCount-1] = lastSize
-			frames := make([][]byte, frameCount)
 			offset := 0
 			for i, n := range sizes {
 				if offset+n > len(payload) {
 					return nil, fmt.Errorf("code 3 VBR: frame %d length %d > remaining %d", i, n, len(payload)-offset)
 				}
-				frames[i] = payload[offset : offset+n]
+				dst = append(dst, payload[offset:offset+n])
 				offset += n
 			}
-			return frames, nil
+			return dst, nil
 		}
 		// CBR: all frames equal size
 		if len(payload)%frameCount != 0 {
 			return nil, fmt.Errorf("code 3 CBR: payload %d not divisible by frameCount %d", len(payload), frameCount)
 		}
 		frameSize := len(payload) / frameCount
-		frames := make([][]byte, frameCount)
 		for i := 0; i < frameCount; i++ {
-			frames[i] = payload[i*frameSize : (i+1)*frameSize]
+			dst = append(dst, payload[i*frameSize:(i+1)*frameSize])
 		}
-		return frames, nil
+		return dst, nil
 
 	default:
 		return nil, fmt.Errorf("unknown count code %d", countCode)
@@ -3999,7 +4009,8 @@ func (d *Decoder) decodePacketFloat(data []byte) ([]float64, error) {
 	}
 
 	// CELT-only mode: split payload into individual frame payloads and decode each
-	frames, err := splitOpusFrames(payload, countCode)
+	var frameBuf [maxPacketFrames][]byte
+	frames, err := splitOpusFramesInto(frameBuf[:0], payload, countCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to split frames: %w", err)
 	}
@@ -4210,7 +4221,8 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		info.dec.CopyPrimaryStateFrom(monoPeer.dec)
 	}
 
-	silkStreams, err := splitOpusFrames(payload, countCode)
+	var frameBuf [maxPacketFrames][]byte
+	silkStreams, err := splitOpusFramesInto(frameBuf[:0], payload, countCode)
 	if err != nil {
 		return nil, false, err
 	}
@@ -4564,9 +4576,10 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 
 	// One SILK frame per Opus frame in hybrid mode.
 	nSilkFrames := silkSubframesPerOpusFrame(config)
-	silkStreams, err := splitOpusFrames(payload, countCode)
+	var frameBuf [maxPacketFrames][]byte
+	silkStreams, err := splitOpusFramesInto(frameBuf[:0], payload, countCode)
 	if err != nil {
-		silkStreams = [][]byte{payload}
+		silkStreams = append(frameBuf[:0], payload)
 	}
 
 	// Bit-exact SILK resampler setup, identical to the SILK-only path so that
@@ -4950,7 +4963,8 @@ func (d *Decoder) celtSilenceFade(pcm []float64, pktChannels, endBand int) {
 // returns ok == false, without decoding, when the packet has a frame to
 // decode or cannot be split.
 func (d *Decoder) concealOnlyPacket(payload []byte, countCode, frameSamples int) ([]float64, bool, error) {
-	frames, err := splitOpusFrames(payload, countCode)
+	var frameBuf [maxPacketFrames][]byte
+	frames, err := splitOpusFramesInto(frameBuf[:0], payload, countCode)
 	if err != nil {
 		return nil, false, nil
 	}

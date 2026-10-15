@@ -33,6 +33,9 @@ type Encoder struct {
 	// state snapshots of encodeRangeFrame, the rate-control loop's "lower"
 	// result and the LBRR re-quantization; each lives within one frame.
 	frameSnapInitial, frameSnapLower, frameSnapLBRR encoderFrameState
+	// frameScratch holds per-frame analysis buffers that do not outlive
+	// encodeRangeFrame.
+	frameScratch encoderFrameScratch
 
 	sampleRate       int // Sample rate (8000, 12000, 16000, 24000)
 	frameSize        int // Frame size in samples
@@ -273,6 +276,15 @@ type lpcBurgDomain struct {
 	subfrLength int
 	nbSubfr     int
 	minInvGain  float64
+}
+
+// encoderFrameScratch holds the noise-shape, LPC_in_pre and process_gains
+// working buffers of one frame.
+type encoderFrameScratch struct {
+	nsX, nsPitchRes                []float64
+	nsPitchL                       []int
+	lpcInPreIn, lpcInPre, pgScaled []float64
+	pgA                            [2][silkMaxLPCOrder]float64
 }
 
 type encoderFrameState struct {
@@ -910,7 +922,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		}
 		codingQuality := e.pendingShape32.codingQuality
 		domainConfig = []lpcInPreConfig{{
-			input:           e.lpcInPreInput(signal),
+			input:           e.lpcInPreInputInto(&e.frameScratch.lpcInPreIn, signal),
 			subframeLengths: equalSubframeLengths(e.frameSize, e.nSubframes),
 			invGains:        invGains,
 			ltpCoefs:        ltpQ14ToFloat(ltpCoeffsQ14),

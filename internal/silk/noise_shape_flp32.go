@@ -316,16 +316,17 @@ func (e *Encoder) noiseShapeFLP32Trace(signal []float64, signalType int, pitchLa
 	cfg := e.silkComplexityConfig()
 	fsKHz := e.sampleRate / 1000
 	buf := e.noiseShapeAnalysisBuffer(signal, cfg.laShape)
-	x := make([]float64, len(buf))
+	sc := &e.frameScratch
+	x := scratchSlice(&sc.nsX, len(buf))
 	for i, v := range buf {
 		x[i] = f32(v * 32768)
 	}
 	ltpMem := e.ltpMemLength()
-	pitchRes := make([]float64, e.frameSize)
+	pitchRes := scratchSlice(&sc.nsPitchRes, e.frameSize)
 	if len(e.pitchResidual) >= ltpMem+e.frameSize {
 		copy(pitchRes, e.pitchResidual[ltpMem:ltpMem+e.frameSize])
 	}
-	pitchL := make([]int, e.nSubframes)
+	pitchL := scratchSlice(&sc.nsPitchL, e.nSubframes)
 	for k := range pitchL {
 		if k < len(pitchLags) && pitchLags[k] > 0 {
 			pitchL[k] = pitchLags[k]

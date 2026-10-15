@@ -145,9 +145,10 @@ func silkProcessGainsFLP32(signalType, quantOffset int, shapeGains []float64, lt
 // LTP coding gain, and the frame's SNR_dB_Q7.
 func (e *Encoder) exactProcessGains(signal []float64, signalType, quantOffset int, nlsf nlsfAnalysis, cfg lpcInPreConfig, conditional bool) *silkProcessGainsResult {
 	subfrLength := e.frameSize / e.nSubframes
-	lpcInPre := buildLPCInPre(cfg.input, cfg.subframeLengths, cfg.invGains, cfg.ltpCoefs, cfg.pitchLags, e.lpcOrder, cfg.voiced)
+	sc := &e.frameScratch
+	lpcInPre := buildLPCInPreInto(&sc.lpcInPre, cfg.input, cfg.subframeLengths, cfg.invGains, cfg.ltpCoefs, cfg.pitchLags, e.lpcOrder, cfg.voiced)
 	// LPC_in_pre is in [-1,1]; the residual energies scale by 2^30 exactly.
-	scaled := make([]float64, len(lpcInPre))
+	scaled := scratchSlice(&sc.pgScaled, len(lpcInPre))
 	e.traceLPCInPre = make([]float32, len(lpcInPre))
 	for i, v := range lpcInPre {
 		scaled[i] = v * 32768
@@ -158,13 +159,13 @@ func (e *Encoder) exactProcessGains(signal []float64, signalType, quantOffset in
 		e.traceInvGains[i] = float32(v)
 	}
 	var a [2][]float64
-	a[1] = make([]float64, e.lpcOrder)
+	a[1] = sc.pgA[1][:e.lpcOrder]
 	for i := 0; i < e.lpcOrder; i++ {
 		a[1][i] = float64(nlsf.lpcQ12[i]) / 4096
 	}
 	a[0] = a[1]
 	if nlsf.lpcQ12Interp != nil {
-		a[0] = make([]float64, e.lpcOrder)
+		a[0] = sc.pgA[0][:e.lpcOrder]
 		for i := 0; i < e.lpcOrder; i++ {
 			a[0][i] = float64(nlsf.lpcQ12Interp[i]) / 4096
 		}

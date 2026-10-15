@@ -38,6 +38,12 @@ func lpcMinInvGain(ltpPredCodGain, codingQuality float64, firstFrameAfterReset b
 // x is preceding history followed by the current frame; each output subframe is
 // order warm-up samples plus the subframe, scaled by the matching inverse gain.
 func buildLPCInPre(x []float64, subframeLengths []int, invGains []float64, ltpCoefs [][]float64, pitchLags []int, order int, voiced bool) []float64 {
+	return buildLPCInPreInto(nil, x, subframeLengths, invGains, ltpCoefs, pitchLags, order, voiced)
+}
+
+// buildLPCInPreInto is buildLPCInPre writing into *buf (grown as needed);
+// a nil buf allocates. The result aliases *buf.
+func buildLPCInPreInto(buf *[]float64, x []float64, subframeLengths []int, invGains []float64, ltpCoefs [][]float64, pitchLags []int, order int, voiced bool) []float64 {
 	if order < 0 {
 		order = 0
 	}
@@ -55,7 +61,12 @@ func buildLPCInPre(x []float64, subframeLengths []int, invGains []float64, ltpCo
 		frameStart = 0
 	}
 	outLen := frameLen + order*len(subframeLengths)
-	out := make([]float64, outLen)
+	var out []float64
+	if buf == nil {
+		out = make([]float64, outLen)
+	} else {
+		out = scratchSlice(buf, outLen)
+	}
 	dst := 0
 	cum := 0
 	for sf, subLen := range subframeLengths {
@@ -169,11 +180,22 @@ func lastHalfBurgNLSF(preSignal []float64, subfrLength, order, nbSubfr int, minI
 }
 
 func (e *Encoder) lpcInPreInput(signal []float64) []float64 {
+	return e.lpcInPreInputInto(nil, signal)
+}
+
+// lpcInPreInputInto is lpcInPreInput writing into *dst (grown as needed);
+// a nil dst allocates. The result aliases *dst.
+func (e *Encoder) lpcInPreInputInto(dst *[]float64, signal []float64) []float64 {
 	histLen := len(e.pitchHist)
 	if histLen < e.lpcOrder {
 		histLen = e.lpcOrder
 	}
-	buf := make([]float64, histLen+len(signal))
+	var buf []float64
+	if dst == nil {
+		buf = make([]float64, histLen+len(signal))
+	} else {
+		buf = scratchSlice(dst, histLen+len(signal))
+	}
 	if len(e.pitchHist) >= histLen {
 		copy(buf[:histLen], e.pitchHist[len(e.pitchHist)-histLen:])
 	} else {

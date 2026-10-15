@@ -93,3 +93,53 @@ func TestPerfDefaultPolicyPacketRegression(t *testing.T) {
 		}
 	}
 }
+
+// BenchmarkPerfDefaultDecodeFEC decodes default-policy VoIP packets that
+// carry in-band FEC (LBRR) data, which the decoder has to parse past on
+// every packet.
+func BenchmarkPerfDefaultDecodeFEC(b *testing.B) {
+	// 12 kb/s is too low for LBRR, so these run above the defaults' rates.
+	workloads := []perfWorkload{
+		{name: "voip/mono/20k", channels: 1, app: ApplicationVOIP, bitrate: 20000, signal: SignalVoice, gen: perfSpeechFrame},
+		{name: "voip/stereo/24k", channels: 2, app: ApplicationVOIP, bitrate: 24000, signal: SignalVoice, gen: perfSpeechFrame},
+		{name: "voip/mono/32k", channels: 1, app: ApplicationVOIP, bitrate: 32000, signal: SignalVoice, gen: perfSpeechFrame},
+	}
+	for _, wl := range workloads {
+		b.Run(wl.name, func(b *testing.B) {
+			enc := newPerfDefaultEncoder(b, wl)
+			enc.SetInbandFEC(true)
+			enc.SetPacketLossPerc(20)
+			frames := perfInputFrames(wl)
+			packets := make([][]byte, len(frames))
+			withLBRR := 0
+			for i, frame := range frames {
+				pkt, err := enc.EncodeFloat(frame, perfFrameSize)
+				if err != nil {
+					b.Fatalf("packet %d: EncodeFloat: %v", i, err)
+				}
+				if has, err := PacketHasLBRR(pkt); err == nil && has {
+					withLBRR++
+				}
+				packets[i] = append([]byte(nil), pkt...)
+			}
+			if withLBRR == 0 {
+				b.Fatal("no packet carries LBRR data")
+			}
+			dec, err := NewDecoder(perfSampleRate, wl.channels)
+			if err != nil {
+				b.Fatal(err)
+			}
+			out := make([]int16, perfFrameSize*wl.channels)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				n, err := dec.Decode(packets[i%len(packets)], out)
+				if err != nil {
+					b.Fatal(err)
+				}
+				perfSampleSink = n
+				perfRangeSink = dec.FinalRange()
+			}
+		})
+	}
+}

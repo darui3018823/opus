@@ -220,6 +220,8 @@ type Decoder struct {
 	msOut    []float64
 	sideI16  []int16
 	msX      []int16
+	// packetOut backs DecodeMultiWithDecoderReuse's result.
+	packetOut []float64
 	// Decoders that parse past the LBRR frames of a packet; re-initialised
 	// for every packet (see consumeLBRRFrames).
 	lbrrMid, lbrrSide *Decoder
@@ -373,6 +375,7 @@ func (d *Decoder) init(sampleRate, channels, frameMs int) error {
 		msOut:         d.msOut,
 		sideI16:       d.sideI16,
 		msX:           d.msX,
+		packetOut:     d.packetOut,
 		lbrrMid:       lbrrMid,
 		lbrrSide:      lbrrSide,
 
@@ -507,7 +510,7 @@ func (d *Decoder) DecodeMulti(packet []byte, nFrames int) ([]float64, error) {
 	if dec.Error() != nil {
 		return d.concealPacketLoss()
 	}
-	pcm, err := d.decodeMultiMonoEC(dec, nFrames)
+	pcm, err := d.decodeMultiMonoEC(dec, nFrames, nil)
 	d.lastFinalRange = dec.GetRng()
 	return pcm, err
 }
@@ -518,15 +521,25 @@ func (d *Decoder) DecodeMulti(packet []byte, nFrames int) ([]float64, error) {
 // not create or finalise it. The result is interleaved SILK PCM at the internal
 // rate (one frame's worth per SILK frame).
 func (d *Decoder) DecodeMultiWithDecoder(dec *entcode.Decoder, nFrames int) ([]float64, error) {
+	return d.decodeMultiWithDecoder(dec, nFrames, nil)
+}
+
+// DecodeMultiWithDecoderReuse is DecodeMultiWithDecoder writing into a
+// decoder-owned buffer: the result is valid until the next call.
+func (d *Decoder) DecodeMultiWithDecoderReuse(dec *entcode.Decoder, nFrames int) ([]float64, error) {
+	return d.decodeMultiWithDecoder(dec, nFrames, &d.packetOut)
+}
+
+func (d *Decoder) decodeMultiWithDecoder(dec *entcode.Decoder, nFrames int, out *[]float64) ([]float64, error) {
 	if nFrames < 1 {
 		nFrames = 1
 	}
 	var pcm []float64
 	var err error
 	if d.channels == 2 {
-		pcm, err = d.decodeMultiStereoEC(dec, nFrames)
+		pcm, err = d.decodeMultiStereoEC(dec, nFrames, out)
 	} else {
-		pcm, err = d.decodeMultiMonoEC(dec, nFrames)
+		pcm, err = d.decodeMultiMonoEC(dec, nFrames, out)
 	}
 	d.lastFinalRange = dec.GetRng()
 	return pcm, err
@@ -762,7 +775,19 @@ func (d *Decoder) concealLostFrames(nFrames int) ([]float64, error) {
 }
 
 // decodeMultiMonoEC decodes the mono SILK frames from a shared range decoder.
-func (d *Decoder) decodeMultiMonoEC(dec *entcode.Decoder, nFrames int) ([]float64, error) {
+// packetOutput returns an empty slice with room for n samples: (*out)[:0]
+// grown as needed, or a new slice when out is nil.
+func packetOutput(out *[]float64, n int) []float64 {
+	if out == nil {
+		return make([]float64, 0, n)
+	}
+	if cap(*out) < n {
+		*out = make([]float64, 0, n)
+	}
+	return (*out)[:0]
+}
+
+func (d *Decoder) decodeMultiMonoEC(dec *entcode.Decoder, nFrames int, out *[]float64) ([]float64, error) {
 	// Per libopus dec_API.c: decode VAD flags for all frames first, then LBRR flag
 	var vadBuf [maxSILKFramesPerPacket]uint32
 	vadFlags := vadBuf[:0]
@@ -804,7 +829,7 @@ func (d *Decoder) decodeMultiMonoEC(dec *entcode.Decoder, nFrames int) ([]float6
 	}
 
 	// Decode each frame sequentially
-	allPCM := make([]float64, 0, nFrames*d.frameSize*max(d.channels, 1))
+	allPCM := packetOutput(out, nFrames*d.frameSize*max(d.channels, 1))
 	for i := 0; i < nFrames; i++ {
 		pcm, err := d.decodeFrame(dec, vadFlags[i], i > 0)
 		if err != nil {
@@ -870,11 +895,11 @@ func (d *Decoder) decodeMultiStereo(packet []byte, nFrames int) ([]float64, erro
 	if dec.Error() != nil {
 		return d.concealPacketLoss()
 	}
-	return d.decodeMultiStereoEC(dec, nFrames)
+	return d.decodeMultiStereoEC(dec, nFrames, nil)
 }
 
 // decodeMultiStereoEC decodes the stereo SILK frames from a shared range decoder.
-func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]float64, error) {
+func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int, out *[]float64) ([]float64, error) {
 	if d.side == nil {
 		return nil, fmt.Errorf("missing SILK side-channel decoder")
 	}
@@ -928,7 +953,7 @@ func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]floa
 	if d.apiMono {
 		outCh = 1
 	}
-	allPCM := make([]float64, 0, nFrames*d.frameSize*outCh)
+	allPCM := packetOutput(out, nFrames*d.frameSize*outCh)
 	for i := 0; i < nFrames; i++ {
 		predQ13 := decodeStereoPredQ13(dec)
 		decodeOnlyMiddle := false
@@ -2814,7 +2839,7 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 	*d = *src
 	// Work buffers must not be shared with src.
 	d.synthExc, d.synthSLTPQ15, d.synthOutBufQ0, d.synthSLPCQ14, d.synthSLTP, d.synthOut, d.pulseBuf = nil, nil, nil, nil, nil, nil, nil
-	d.frameOut, d.msOut, d.sideI16, d.msX = nil, nil, nil, nil
+	d.frameOut, d.msOut, d.sideI16, d.msX, d.packetOut = nil, nil, nil, nil, nil
 	d.lbrrMid, d.lbrrSide = nil, nil
 	d.prevNLSFQ15 = append([]int16(nil), src.prevNLSFQ15...)
 	d.lpcState = append([]int32(nil), src.lpcState...)

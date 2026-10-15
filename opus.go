@@ -4335,7 +4335,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		// the mandatory SILK-only redundancy direction bit can be read when the
 		// packet has enough trailing data for a 5 ms CELT redundancy frame.
 		d.prepareSILKStream(info.dec, pktChannels)
-		pcm, err := info.dec.DecodeMultiWithDecoder(dec, nSilkFramesPerStream)
+		pcm, err := info.dec.DecodeMultiWithDecoderReuse(dec, nSilkFramesPerStream)
 		if err != nil {
 			allPCM = append(allPCM, make([]float64, samplesPerStream)...)
 			continue
@@ -4672,7 +4672,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 
 		// SILK low-band layer (front of the stream), at the 16 kHz internal rate.
 		d.prepareSILKStream(info.dec, pktChannels)
-		silkPCM, serr := info.dec.DecodeMultiWithDecoder(dec, nSilkFrames)
+		silkPCM, serr := info.dec.DecodeMultiWithDecoderReuse(dec, nSilkFrames)
 		if serr != nil {
 			silkPCM = make([]float64, info.dec.FrameSize()*pktChannels*nSilkFrames)
 		}

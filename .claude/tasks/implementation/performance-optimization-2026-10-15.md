@@ -233,6 +233,7 @@ vacuously.
     read `LastFrameTrace`/`PacketFrameTraces` call it. SILK encode -3% to -5%,
     allocations -19% to -41%. The trace-reading opusref oracle tests pass
     (PowerShell, 4m54s).
+  - Full `go test -tags opusref ./...` passes on `0057598` (root 453s).
   - Timing on this machine drifted during the session (celt/mono read 118 to
     132 µs on unchanged code), so the per-commit numbers above come from
     interleaved old/new binaries.

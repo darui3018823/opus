@@ -441,3 +441,23 @@ Against libopus (`BenchmarkPerfVsLibopus`, same command and machine as the
 The encode ratio fell from 2.5-3.7x to 1.9-2.7x and the decode ratio from
 3.5-6.7x to 2.4-2.6x. Remaining candidates are recorded in
 `.claude/tasks/implementation/performance-optimization-2026-10-15.md`.
+
+## Real-Audio Comparison With ffmpeg's libopus (2026-10-16)
+
+A 280 s stereo music track from YouTube (its own Opus stream, ~130 kb/s)
+was decoded and re-encoded at 32/64/128 kb/s (VBR, complexity 10) by this
+codec and by the SIMD libopus inside ffmpeg 8.1.2, on commit `af80912`.
+Full tables, method and caveats:
+[real-audio comparison](../.claude/tasks/investigation/real-audio-libopus-comparison-2026-10-16.md).
+
+| | libopus (ffmpeg) | this codec |
+|---|---:|---:|
+| Decoder agreement with libopus | - | 99.925% identical samples, max 1 LSB |
+| Encoder SNR 32k / 64k / 128k | 10.87 / 14.14 / 22.14 dB | 10.99 / 14.19 / 21.55 dB |
+| Same mode (TOC) as libopus | - | 100% of packets |
+| Decode, x realtime | 361 | 225 |
+| Encode 64k, x realtime | 164 | 76 |
+| Peak working set | ~20 MB (incl. ffmpeg) | 15-17 MB |
+
+Per 20 ms frame the Go decoder takes about 89 µs and the 64k encoder about
+264 µs (0.4% and 1.3% of one core in real time).

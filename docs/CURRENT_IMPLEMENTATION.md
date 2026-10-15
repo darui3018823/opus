@@ -1570,7 +1570,11 @@ Residual differences:
   frames); stereo SILK `switchReady` on some per-frame bitrate changes;
   LBRR gain state after toggling `InbandFECNoModeSwitch` on speech; some
   expert-duration and variable-frame-size sequences; NaN input at 48 kHz;
-  multistream 60 ms VBR framing near the packet limit.
+  multistream 60 ms VBR framing near the packet limit; VoIP speech with
+  in-band FEC (20-24 kb/s mono and stereo, some stereo 28-48 kb/s cells)
+  diverges in mode, bandwidth or SILK content after a few hundred ms (17 of
+  120 cells of a 10-64 kb/s, 10/20/40 % loss, CBR/VBR sweep on
+  `perfSpeechFrame`, 2026-10-15).
 - API: the packet getters, `PacketExtensionsCount`, `NewEncoder` defaults
   (Legacy profile), `Bitrate()`/`EffectiveBitrate()`, mid-stream
   `SetApplication` and the early `SetExpertFrameDuration` validation keep
@@ -1590,6 +1594,11 @@ Behavior changes from the audit fixes that callers can observe:
   not. `Decode24` no longer clamps to the 24-bit range.
 - `VBRConstraint` reports the stored constraint also while VBR is off.
 - `Encoder.SetMaxPacketSize` only takes effect under `ModePolicyLibopus`.
+- A hybrid frame whose SILK part (with the previous packet's LBRR data)
+  overruns the frame budget no longer fails the encode with "hybrid frame
+  exceeds target": as in libopus, CELT is skipped and the frame is sent as a
+  one-byte PLC frame (padded to the CBR size) with a zero final range
+  (`TestHybridFECBustOracle`).
 - `oggopus`: `PacketWriter` keeps the granule of a packet completed on a page
   that ends inside the next packet (it wrote -1, which `Reader` rejected);
   `Writer.Close` before any audio packet returns `ErrInvalidOpusStream`;

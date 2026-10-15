@@ -324,6 +324,14 @@ vacuously.
   arithmetic itself, CELT prefilter/pre-emphasis float64<->float32
   conversion (item 11 territory), PVQ search.
 
+- 2026-10-16 06:30 scheduled run (clock checked 06:30:07): item 11 needs
+  the user's decision (medium risk), so this run took item 6's remaining
+  encoder allocations, which the real-audio comparison flagged (115 to 214
+  GCs per track). `e79a02d`: stack arrays / encoder scratch for local
+  analysis temporaries. Interleaved, 2 s x 6: SILK/hybrid encode bytes -18%
+  to -37%, allocations -23% to -31%, hybrid/mono -1.3%, hybrid/stereo
+  -2.2%, others within noise; decode unchanged.
+
 ## Next steps (in order)
 
 From an Opus read-only review on 2026-10-15 (commit `52969ac`; estimates
@@ -352,9 +360,15 @@ reuse); guard each with the digest tests.
 6. (done) Encoder allocations: `opPVQSearch`/`algQuant`, hybrid `celtChunk`,
    pitch analysis, frame state snapshots, noise-shape/LPC_in_pre/
    process_gains buffers, CELT pitch search/remove_doubling/tfAnalysis.
-   Remaining SILK allocations (`frontEndFrame`, `silkInput`, `analyzeNLSF`,
-   `silkBurgModifiedFLP`, `downFIRInterpol`) need lifetime checks first:
-   their results leave the function.
+   `21b779c` (cloud) moved `analyzeNLSF`/`frontEndFrame`/`silkInput`
+   temporaries to scratch; `e79a02d` moved Burg's work rows, find_LPC's
+   interpolation buffers, the residual-energy output, NLSF unpack tables,
+   the VAD filter-bank buffer and the NSQ input frame off the heap.
+   Remaining per-frame allocations: the rate loop's `frameLoopSnapshot`
+   (`encode_frame_loop.go`), NSQ `pulses` (returned and kept as the
+   "lower" result), `silkNLSFDelDecQuant`'s `raw` (kept as `bestRaw`),
+   `DownmixToMono`, `int16SliceToInt32`, `entcode.NewEncoder`; each needs a
+   lifetime check because the result outlives the call.
 7. (done) FrameTrace recording is gated by `silk.EnableFrameTraces()`.
 8. (done) SILK decode: kernels and parameter buffers (`1f6e3ba`), LBRR
    decoders (`b04dd8d`), stereo mid/side stay int16 into MS-to-LR and the

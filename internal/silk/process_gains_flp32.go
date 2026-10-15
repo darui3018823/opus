@@ -68,7 +68,12 @@ func silkGainsQuant(gainQ16 []int32, prevInd *int, conditional bool, nbSubfr int
 func silkResidualEnergyFLP32(x []float64, a [2][]float64, gains []float64, subfrLength, nbSubfr, order int) [silkMaxNBSubframes]float64 {
 	var nrgs [silkMaxNBSubframes]float64
 	shift := order + subfrLength
-	res := make([]float64, 2*shift)
+	var resArr [256]float64
+	res := resArr[:]
+	if 2*shift > len(resArr) {
+		res = make([]float64, 2*shift)
+	}
+	res = res[:2*shift]
 	for half := 0; half < 2; half++ {
 		if half == 1 && nbSubfr != silkMaxNBSubframes {
 			break

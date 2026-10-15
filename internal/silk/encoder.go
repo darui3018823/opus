@@ -290,6 +290,7 @@ type encoderFrameScratch struct {
 	nsPitchL                       []int
 	lpcInPreIn, lpcInPre, pgScaled []float64
 	pgA                            [2][silkMaxLPCOrder]float64
+	nsqX16                         []int16
 }
 
 type encoderFrameState struct {
@@ -2888,7 +2889,7 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 		rateScale = 1
 	}
 
-	x16 := make([]int16, e.frameSize)
+	x16 := scratchSlice(&e.frameScratch.nsqX16, e.frameSize)
 	for i := 0; i < e.frameSize && i < len(signal); i++ {
 		x16[i] = clamp16(int32(math.Round(signal[i] * 32768.0)))
 	}

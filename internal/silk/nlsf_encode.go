@@ -158,7 +158,15 @@ func silkNLSFEncode(targetQ15 []int16, cb *nlsfCBParams, weightsQ2 []int16, muQ2
 			}
 		}
 
-		ecIx, predQ8 := nlsfUnpack(cb, cb1)
+		var ecIxArr [silkMaxLPCOrder]int
+		var predQ8Arr [silkMaxLPCOrder]uint8
+		var ecIx []int
+		var predQ8 []uint8
+		if cb.order <= silkMaxLPCOrder {
+			ecIx, predQ8 = nlsfUnpackInto(cb, cb1, ecIxArr[:cb.order], predQ8Arr[:cb.order])
+		} else {
+			ecIx, predQ8 = nlsfUnpack(cb, cb1)
+		}
 		raw, rd := silkNLSFDelDecQuant(resQ10, wAdjQ5, predQ8, ecIx, cb.cb2RatesQ5, cb.quantStepSizeQ16, cb.invQuantStepSizeQ6, muQ20)
 
 		icdf := cb.cb1ICDF[(signalType>>1)*cb.nEntries:]
@@ -343,8 +351,11 @@ func nlsfResidualRatesQ5(indTmp, ecIx int, ecRatesQ5 []uint8) (int32, int32) {
 }
 
 func nlsfUnpack(cb *nlsfCBParams, cb1Idx int) ([]int, []uint8) {
-	ecIx := make([]int, cb.order)
-	predQ8 := make([]uint8, cb.order)
+	return nlsfUnpackInto(cb, cb1Idx, make([]int, cb.order), make([]uint8, cb.order))
+}
+
+// nlsfUnpackInto is nlsfUnpack writing into ecIx and predQ8 (cb.order long).
+func nlsfUnpackInto(cb *nlsfCBParams, cb1Idx int, ecIx []int, predQ8 []uint8) ([]int, []uint8) {
 	ecSelBase := cb1Idx * (cb.order / 2)
 	for i := 0; i < cb.order; i += 2 {
 		entry := cb.cb2Select[ecSelBase+i/2]

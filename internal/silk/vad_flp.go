@@ -122,7 +122,13 @@ func (st *silkVADState) getSAQ8(pIn []int16, frameLength, fsKHz int) (saQ8, tilt
 	xOffset[1] = decimatedFramelength + decimatedFramelength2
 	xOffset[2] = xOffset[1] + decimatedFramelength
 	xOffset[3] = xOffset[2] + decimatedFramelength2
-	x := make([]int16, xOffset[3]+decimatedFramelength1)
+	var xArr [512]int16
+	x := xArr[:]
+	if n := xOffset[3] + decimatedFramelength1; n > len(xArr) {
+		x = make([]int16, n)
+	} else {
+		x = x[:n]
+	}
 
 	// 0-8 kHz to 0-4 kHz and 4-8 kHz
 	silkAnaFiltBank1(pIn[:frameLength], &st.anaState, x, x[xOffset[3]:])

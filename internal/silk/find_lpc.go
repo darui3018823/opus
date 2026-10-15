@@ -64,9 +64,17 @@ func silkFindLPCFLP(
 
 		// Search over interpolation indices to find the one with lowest residual energy
 		resNrg2nd := float64(math.MaxFloat32)
-		nlsf0Q15 := make([]int16, order)
-		aInterp := make([]float64, order)
-		lpcRes := make([]float64, 2*subfrLength)
+		var nlsf0Arr [silkMaxLPCOrder]int16
+		var aInterpArr [silkMaxLPCOrder]float64
+		var lpcResArr [256]float64
+		nlsf0Q15, aInterp, lpcRes := nlsf0Arr[:], aInterpArr[:], lpcResArr[:]
+		if order > len(nlsf0Arr) {
+			nlsf0Q15, aInterp = make([]int16, order), make([]float64, order)
+		}
+		if 2*subfrLength > len(lpcResArr) {
+			lpcRes = make([]float64, 2*subfrLength)
+		}
+		nlsf0Q15, aInterp, lpcRes = nlsf0Q15[:order], aInterp[:order], lpcRes[:2*subfrLength]
 
 		for k := 3; k >= 0; k-- {
 			// Interpolate NLSFs for first half

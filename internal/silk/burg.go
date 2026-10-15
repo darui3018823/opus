@@ -18,11 +18,17 @@ const findLPCCondFac32 = float32(1e-5)
 func silkBurgModifiedFLP(x []float64, minInvGain float64, subfrLength, nbSubfr, order int) ([]float64, float64) {
 	D := order
 	A := make([]float64, D)
-	CFirstRow := make([]float64, D)
-	CLastRow := make([]float64, D)
-	CAf := make([]float64, D+1)
-	CAb := make([]float64, D+1)
-	Af := make([]float64, D)
+	// The work rows stay on the stack for every SILK order (<= 24).
+	var firstArr, lastArr, afArr [24]float64
+	var cafArr, cabArr [25]float64
+	CFirstRow, CLastRow, Af := firstArr[:], lastArr[:], afArr[:]
+	CAf, CAb := cafArr[:], cabArr[:]
+	if D > len(firstArr) {
+		CFirstRow, CLastRow, Af = make([]float64, D), make([]float64, D), make([]float64, D)
+		CAf, CAb = make([]float64, D+1), make([]float64, D+1)
+	}
+	CFirstRow, CLastRow, Af = CFirstRow[:D], CLastRow[:D], Af[:D]
+	CAf, CAb = CAf[:D+1], CAb[:D+1]
 
 	// Compute autocorrelations, added over subframes.
 	C0 := silkEnergyFLP32(x[:nbSubfr*subfrLength])

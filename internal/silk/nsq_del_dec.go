@@ -57,6 +57,14 @@ func (s silkNSQState) clone() silkNSQState {
 	return c
 }
 
+// cloneInto stores a clone of s in dst, reusing dst's slices.
+func (s *silkNSQState) cloneInto(dst *silkNSQState) {
+	xq, sLTPShpQ14 := dst.xq, dst.sLTPShpQ14
+	*dst = *s
+	dst.xq = append(xq[:0], s.xq...)
+	dst.sLTPShpQ14 = append(sLTPShpQ14[:0], s.sLTPShpQ14...)
+}
+
 func (s *silkNSQState) copyFrom(src silkNSQState) {
 	xq := s.xq
 	sLTPShpQ14 := s.sLTPShpQ14

@@ -244,7 +244,7 @@ func (e *Encoder) encodeFrameLoop(
 				// Copy part of the output state.
 				lower = &frameLoopSnapshot{
 					enc:    enc.Clone(),
-					state:  e.snapshotFrameState(),
+					state:  e.snapshotFrameStateInto(&e.frameSnapLower),
 					trace:  e.pendingTrace,
 					result: res,
 				}

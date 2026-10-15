@@ -29,6 +29,10 @@ type Encoder struct {
 	pitchBuf []float64
 	// pitchScratch holds the pitch analysis working buffers.
 	pitchScratch pitchAnalysisScratch
+	// frameSnapInitial, frameSnapLower and frameSnapLBRR back the frame
+	// state snapshots of encodeRangeFrame, the rate-control loop's "lower"
+	// result and the LBRR re-quantization; each lives within one frame.
+	frameSnapInitial, frameSnapLower, frameSnapLBRR encoderFrameState
 
 	sampleRate       int // Sample rate (8000, 12000, 16000, 24000)
 	frameSize        int // Frame size in samples
@@ -826,7 +830,7 @@ func encodeStereoPred(enc *entcode.Encoder, ix [2][3]int8) {
 // first voiced path: simple pitch/LTP decisions are encoded before the seed,
 // and pulse coding is driven from a short-term residual instead of raw samples.
 func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadActive, conditionalGain bool) {
-	initialState := e.snapshotFrameState()
+	initialState := e.snapshotFrameStateInto(&e.frameSnapInitial)
 	e.curLTP = nil
 	e.pitchResidual = nil
 	// The VAD, like silk_encode_do_VAD_FLP, sees the caller's frame; every
@@ -1101,6 +1105,21 @@ func (e *Encoder) advanceInputBuffer() {
 	}
 	copy(e.xBuf, e.xBuf[e.frameSize:])
 	clear(e.xBuf[len(e.xBuf)-e.frameSize:])
+}
+
+// snapshotFrameStateInto stores the same state as snapshotFrameState in
+// dst, reusing dst's slices; any earlier copy of *dst is overwritten.
+func (e *Encoder) snapshotFrameStateInto(dst *encoderFrameState) encoderFrameState {
+	dst.prevPitchLag = e.prevPitchLag
+	dst.prevLagIndex = e.prevLagIndex
+	dst.prevGainQ16 = e.prevGainQ16
+	dst.lpcState = append(dst.lpcState[:0], e.lpcState...)
+	dst.ltpState = append(dst.ltpState[:0], e.ltpState...)
+	e.nsq.cloneInto(&dst.nsq)
+	dst.shapeHarmSmooth = e.shapeHarmSmooth
+	dst.shapeTiltSmooth = e.shapeTiltSmooth
+	dst.ltpSumLogGainQ7 = e.ltpSumLogGainQ7
+	return *dst
 }
 
 func (e *Encoder) snapshotFrameState() encoderFrameState {

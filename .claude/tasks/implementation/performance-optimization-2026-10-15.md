@@ -306,6 +306,24 @@ vacuously.
   `expRotation1` 4%, `celtPVQU` 4%, `SoftClipFloat32` 3%; no single float64
   hot spot stands out for item 11.
 
+- 2026-10-15 night (Linux cloud run): encoder pass, item 11 deferred.
+  Cross-implementation baseline first (scratch harness, 48 kHz, complexity
+  10, constrained VBR, libopus 1.6.1 Release = 1x): decode all 12 vectors
+  libopus 837 ms, pion `44637de` 1.91x, v1.0.0 9.25x, v1.5.0 5.00x, v1.6.0
+  5.54x, HEAD 2.07x; encode HEAD 2.2-2.6x (v1.5+ packets match libopus
+  mode mix and bitrate; v1.0.0 codes everything as CELT so is not
+  comparable). `21b779c`: NSQ del-dec fixed-window taps, BCE in the warped
+  AR loop, live-window-only `copyDelayedDecisionSuffix`; PVQ search BCE;
+  LPC analysis filter converts coefficients once; inner product / warped
+  autocorrelation subslices; NLSF tables on the stack; scratch reuse in
+  `analyzeNLSF`, `frontEndFrame`, `silkInput`; `isDigitalSilence` early
+  exit. Interleaved `BenchmarkPerfDefault` (n=10): SILK -11%, hybrid -7% to
+  -13%, CELT not significant; B/op -18% to -36% on SILK/hybrid. Harness
+  after: encode 2.2-2.5x libopus. `go test ./...`, packet digests and the
+  encoder oracle suite pass on `21b779c`. Remaining encode cost: NSQ
+  arithmetic itself, CELT prefilter/pre-emphasis float64<->float32
+  conversion (item 11 territory), PVQ search.
+
 ## Next steps (in order)
 
 From an Opus read-only review on 2026-10-15 (commit `52969ac`; estimates

@@ -3,6 +3,7 @@ package silk
 import (
 	"fmt"
 	"math"
+	"math/bits"
 
 	"github.com/darui3018823/opus/internal/entcode"
 )
@@ -2381,16 +2382,7 @@ func silkAbs32(a int32) int32 {
 }
 
 func silkCLZ32(a int32) int {
-	u := uint32(a)
-	if u == 0 {
-		return 32
-	}
-	n := 0
-	for (u & 0x80000000) == 0 {
-		n++
-		u <<= 1
-	}
-	return n
+	return bits.LeadingZeros32(uint32(a))
 }
 
 func silkDIV32VarQ(a32, b32 int32, qres int) int32 {

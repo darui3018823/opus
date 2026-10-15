@@ -5,6 +5,7 @@ package opus
 import (
 	"bytes"
 	"fmt"
+	"github.com/darui3018823/opus/internal/silk"
 	"math"
 	"os"
 	"testing"
@@ -17,6 +18,7 @@ import (
 // are gated; the others report the first divergent frame and the CELT-side
 // stage differences.
 func TestHybridEncoderOracle(t *testing.T) {
+	t.Cleanup(silk.EnableFrameTraces())
 	t.Parallel()
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())

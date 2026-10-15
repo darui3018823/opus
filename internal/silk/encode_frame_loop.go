@@ -104,7 +104,11 @@ func (e *Encoder) encodeFrameLoop(
 	res.quantOffset = quantOffset
 	var nBits int32
 	var loopTrace []LoopIteration
+	tracing := frameTracesEnabled()
 	record := func(iter int, damage bool) {
+		if !tracing {
+			return
+		}
 		loopTrace = append(loopTrace, LoopIteration{
 			Iter: iter, NBits: int(nBits), MaxBits: maxBits, UseCBR: useCBR, GainMultQ8: gainMultQ8, GainsID: gainsID,
 			FoundLower: foundLower, FoundUpper: foundUpper, Lambda: float32(e.lambda32), QuantOffset: quantOffset,
@@ -186,8 +190,10 @@ func (e *Encoder) encodeFrameLoop(
 				// indices.Seed still holds the last NSQ run's winning seed.
 				enc.EncodeIcdf(int(e.nsqSeed), silkUniform4ICDF[:], 8)
 				e.encodePulses(enc, res.pulses, signalType, quantOffset)
-				e.pendingTrace.Pulses = append([]int16(nil), res.pulses...)
-				e.pendingTrace.GainsIndices = append([]int(nil), absIdx...)
+				if tracing {
+					e.pendingTrace.Pulses = append([]int16(nil), res.pulses...)
+					e.pendingTrace.GainsIndices = append([]int(nil), absIdx...)
+				}
 				nBits = int32(enc.ECTell())
 				record(iter, true)
 			}

@@ -599,10 +599,12 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 		e.frameMaxBits, e.frameUseCBR = e.frameBitBudget(nFrames, i)
 		e.encodeRangeFrame(enc, signal, vadFlags[i], i > 0)
 		e.recordRateTrace(nFrames, tell, lbrrBits)
-		if i == 0 {
-			e.packetTraces = e.packetTraces[:0]
+		if frameTracesEnabled() {
+			if i == 0 {
+				e.packetTraces = e.packetTraces[:0]
+			}
+			e.packetTraces = append(e.packetTraces, e.lastTrace)
 		}
-		e.packetTraces = append(e.packetTraces, e.lastTrace)
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 	}
 	e.finishLBRRPacket(nFrames)
@@ -759,10 +761,12 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		st.Tell[0], st.SpeechActQ8[0], st.FirstAfterRst[0] = enc.ECTell(), e.frameVAD[i].speechActivityQ8, e.firstFrameAfterReset
 		e.encodeRangeFrame(enc, mid, vadFlags[0][i], i > 0)
 		e.recordRateTrace(nFrames, tell, lbrrBits)
-		if i == 0 {
-			e.packetTraces = e.packetTraces[:0]
+		if frameTracesEnabled() {
+			if i == 0 {
+				e.packetTraces = e.packetTraces[:0]
+			}
+			e.packetTraces = append(e.packetTraces, e.lastTrace)
 		}
-		e.packetTraces = append(e.packetTraces, e.lastTrace)
 		e.lastSNRVBRStream = e.lastSNRVBRStream || e.lastSNRVBRFrame
 		if ms.midSideRates[1] > 0 {
 			st.SideCoded = true
@@ -1005,12 +1009,14 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		enc.EncodeIcdf(int(e.nsqSeed), silkUniform4ICDF[:], 8)
 		e.encodePulses(enc, pulses, signalType, quantOffset)
 	}
-	e.pendingTrace.Shape32 = e.pendingShape32
-	e.pendingTrace.NLSFTargetQ15 = append([]int16(nil), e.traceNLSFTargetQ15...)
-	e.pendingTrace.InterpFactor = nlsf.interpFactor
-	e.pendingTrace.MinInvGain = e.traceMinInvGain
-	e.pendingTrace.LPCInPre = e.traceLPCInPre
-	e.pendingTrace.InvGains = e.traceInvGains
+	if frameTracesEnabled() {
+		e.pendingTrace.Shape32 = e.pendingShape32
+		e.pendingTrace.NLSFTargetQ15 = append([]int16(nil), e.traceNLSFTargetQ15...)
+		e.pendingTrace.InterpFactor = nlsf.interpFactor
+		e.pendingTrace.MinInvGain = e.traceMinInvGain
+		e.pendingTrace.LPCInPre = e.traceLPCInPre
+		e.pendingTrace.InvGains = e.traceInvGains
+	}
 	e.lastTrace = e.pendingTrace
 
 	// Low-Bitrate Redundancy: generate (but do not yet emit) a coarse redundant
@@ -2936,8 +2942,10 @@ func (e *Encoder) closedLoopNSQWithRateScale(
 		pulses = e.silkNSQDelDec(x16, lpcQ12, lpcQ12Interp, ltpCoeffsQ14, shape, gainsQ16, pitchL,
 			lambdaQ10, ltpScaleQ14, signalType, quantOffset, seed)
 	}
-	e.recordNSQTrace(lpcQ12, lpcQ12Interp, e.traceNLSFQ15, gainIndices, gainsQ16, pitchL, shape, lambdaQ10,
-		ltpCoeffsQ14, ltpScaleQ14, signalType, quantOffset, seed, pulses)
+	if frameTracesEnabled() {
+		e.recordNSQTrace(lpcQ12, lpcQ12Interp, e.traceNLSFQ15, gainIndices, gainsQ16, pitchL, shape, lambdaQ10,
+			ltpCoeffsQ14, ltpScaleQ14, signalType, quantOffset, seed, pulses)
+	}
 	return pulses
 }
 

@@ -4,6 +4,7 @@ package opus
 
 import (
 	"fmt"
+	"github.com/darui3018823/opus/internal/silk"
 	"os"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ func envI(name string, def int) int {
 // AP_CTLS ("bitrate=20000,complexity=10,...") applied before frame 0.
 // AP_CPX is a comma list of complexities to sweep.
 func TestAuditProbe(t *testing.T) {
+	t.Cleanup(silk.EnableFrameTraces())
 	auditSkip(t)
 	srcs := auditLoadSources(t)
 	src := srcs[envI("AP_SRC", 0)]

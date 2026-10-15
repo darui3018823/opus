@@ -149,14 +149,18 @@ func (e *Encoder) exactProcessGains(signal []float64, signalType, quantOffset in
 	lpcInPre := buildLPCInPreInto(&sc.lpcInPre, cfg.input, cfg.subframeLengths, cfg.invGains, cfg.ltpCoefs, cfg.pitchLags, e.lpcOrder, cfg.voiced)
 	// LPC_in_pre is in [-1,1]; the residual energies scale by 2^30 exactly.
 	scaled := scratchSlice(&sc.pgScaled, len(lpcInPre))
-	e.traceLPCInPre = make([]float32, len(lpcInPre))
 	for i, v := range lpcInPre {
 		scaled[i] = v * 32768
-		e.traceLPCInPre[i] = float32(scaled[i])
 	}
-	e.traceInvGains = make([]float32, len(cfg.invGains))
-	for i, v := range cfg.invGains {
-		e.traceInvGains[i] = float32(v)
+	if frameTracesEnabled() {
+		e.traceLPCInPre = make([]float32, len(lpcInPre))
+		for i, v := range scaled {
+			e.traceLPCInPre[i] = float32(v)
+		}
+		e.traceInvGains = make([]float32, len(cfg.invGains))
+		for i, v := range cfg.invGains {
+			e.traceInvGains[i] = float32(v)
+		}
 	}
 	var a [2][]float64
 	a[1] = sc.pgA[1][:e.lpcOrder]

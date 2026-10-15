@@ -212,6 +212,40 @@ vacuously.
 | hybrid/mono/24k | 426 µs | 300 µs | 179 KiB | 89 KiB |
 | hybrid/stereo/36k | 1151 µs | 801 µs | 424 KiB | 212 KiB |
 
+- 2026-10-15 afternoon (user said to continue): items 6 and 7.
+  - `db3cbd8` SILK pitch analysis (`silkFindPitchLagsFLP32`,
+    `silkPitchAnalysisCoreFLP32`) works in `Encoder.pitchScratch`; every
+    buffer is cleared when handed out, like the old `make`. SILK/hybrid
+    encode -2% to -4%, bytes -12% to -20%.
+  - `fa8ca5d` frame state snapshots (`snapshotFrameStateInto`,
+    `silkNSQState.cloneInto`) reuse three per-encoder buffers (initial,
+    rate-loop "lower", LBRR); each snapshot lives within one frame. Bytes
+    -8% to -21%, time within noise.
+  - `2042bc4` noise-shape `x`/`pitchRes`/`pitchL`, `lpcInPreInputInto`,
+    `buildLPCInPreInto` and the process_gains `scaled`/LPC arrays use
+    `Encoder.frameScratch`. Interleaved run: hybrid/mono -3.6%, bytes -27% to
+    -33%.
+  - `a0fb31a` CELT `pitchSearch32`, `removeDoubling32` and `tfAnalysis` use
+    stack arrays with a `make` fallback for larger sizes. CELT encode bytes
+    -79% to -85%, time within noise.
+  - `3b43b5e` (item 7) FrameTrace recording runs only while
+    `silk.EnableFrameTraces()` is held; the seven opusref test functions that
+    read `LastFrameTrace`/`PacketFrameTraces` call it. SILK encode -3% to -5%,
+    allocations -19% to -41%. The trace-reading opusref oracle tests pass
+    (PowerShell, 4m54s).
+  - Timing on this machine drifted during the session (celt/mono read 118 to
+    132 µs on unchanged code), so the per-commit numbers above come from
+    interleaved old/new binaries.
+
+| Encoder workload | baseline | after pass 1 | now | alloc baseline | alloc now | allocs/op now |
+|---|---:|---:|---:|---:|---:|---:|
+| celt/mono/96k | 202 µs | 128 µs | 121-132 µs | 63 KiB | 1.8 KiB | 16 |
+| celt/stereo/128k | 312 µs | 206 µs | 187-209 µs | 109 KiB | 2.8 KiB | 17 |
+| silk/mono/12k | 738 µs | 496 µs | 474-506 µs | 245 KiB | 54 KiB | 219 |
+| silk/stereo/12k | 793 µs | 532 µs | 508-522 µs | 274 KiB | 73 KiB | 208 |
+| hybrid/mono/24k | 426 µs | 300 µs | 277-286 µs | 179 KiB | 34 KiB | 136 |
+| hybrid/stereo/36k | 1151 µs | 801 µs | 741-761 µs | 424 KiB | 88 KiB | 322 |
+
 ## Next steps (in order)
 
 From an Opus read-only review on 2026-10-15 (commit `52969ac`; estimates
@@ -237,15 +271,13 @@ reuse); guard each with the digest tests.
 5. (done) `ApplyFineEnergy`/`ApplyFinalFineEnergy` (`internal/celt/bands.go`) write
    `band.Energy` that `decodeCELTRange` overwrites before any read
    (verified); drop the `math.Exp2` work if PLC and the digests agree.
-6. Encoder allocations (GC is ~10-12% of encode CPU): done for
-   `opPVQSearch`/`algQuant` and the hybrid `celtChunk` copies; left:
-   `snapshotFrameState` and
-   `silkNSQState.clone` (double-buffer), pitch-analysis scratch, `tfAnalysis`,
-   `buildLPCInPre`/`lpcInPreInput`/`exactProcessGains`.
-7. Gate the SILK encoder traces (`recordNSQTrace`, `loopTrace`,
-   `traceLPCInPre`, `pendingTrace` copies) behind a flag; the opusref
-   oracle tests read `LastFrameTrace`/`PacketFrameTraces` and must enable
-   it.
+6. (done) Encoder allocations: `opPVQSearch`/`algQuant`, hybrid `celtChunk`,
+   pitch analysis, frame state snapshots, noise-shape/LPC_in_pre/
+   process_gains buffers, CELT pitch search/remove_doubling/tfAnalysis.
+   Remaining SILK allocations (`frontEndFrame`, `silkInput`, `analyzeNLSF`,
+   `silkBurgModifiedFLP`, `downFIRInterpol`) need lifetime checks first:
+   their results leave the function.
+7. (done) FrameTrace recording is gated by `silk.EnableFrameTraces()`.
 8. SILK decode: keep int16 through `decodeFrame`, stereo and resampling
    and convert to float once (today int16 -> float64 -> int16 -> ...);
    remove the remaining per-frame allocations in `decodeMultiStereoEC`,

@@ -246,6 +246,38 @@ vacuously.
 | hybrid/mono/24k | 426 µs | 300 µs | 277-286 µs | 179 KiB | 34 KiB | 136 |
 | hybrid/stereo/36k | 1151 µs | 801 µs | 741-761 µs | 424 KiB | 88 KiB | 322 |
 
+- 2026-10-15 evening (Linux cloud run, Xeon @ 2.8 GHz, 4 vCPU, Go 1.24.11,
+  libopus 1.6.1 built static from the release tarball): item 8 (part) and
+  Linux verification.
+  - `1f6e3ba` SILK decode: `silkLPCPredictQ10` unrolls orders 10/16, the
+    LTP filter reads one 5-tap window when every tap is in range,
+    `iirFIRInterpol` sizes its output once; per-frame parameter slices are
+    stack arrays or decoder scratch (`synthOut`, `pulseBuf`, `nlsfQ15Buf`,
+    `lpcSetBuf`). `decode_kernels_test.go` checks the kernels against the
+    old loops.
+  - `c9b8211` `splitOpusFramesInto` + `[48][]byte` stack buffers in
+    `inspectPacket` and the decoder packet paths.
+  - Interleaved old/new binaries, 6 runs each: tv02 -16%, tv04 -21%,
+    tv06 -15%, tv12 -15%, tv03/05/07/10 -4% to -6%, CELT-only vectors
+    within noise; allocations -24% to -83% (SILK vectors -75% to -83%).
+  - Tried and dropped: splitting `combFilterConst` into a history part and
+    a direct-index part showed no difference on CELT vectors.
+  - `a5e94a4` `scripts/oracle/build_celt_coeff.ps1` did not run on Linux
+    (`$env:TEMP`, backslash paths, helper inserted after `static`; glibc's
+    `stdio.h` then fails to compile). `TestCELTScalarSynthesisStageScan`
+    passes on Linux for tv01/tv07/tv11. tv09 exits 2 because the oracle
+    accepts CELT-only packets of at least 2 bytes (not platform-specific).
+  - Linux results on the final commit: `go test ./...`, `go test -race
+    ./...`, `go test -tags opusref ./...` (all 12 vectors, encoder oracles
+    via `build_encoder.ps1` under pwsh 7.4), the `opus16` and `opusextsrc`
+    steps of `opusref.yml`, and the arm64 `-a` FMA check (no site in this
+    module) pass. No Linux/Windows behaviour difference was found in the
+    codec. Opt-in audits (`OPUS_LIBOPUS_AUDIT=1`) were not run.
+  - pwsh on a host without ICU needs `DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1`.
+  - `scripts/oracle/build.ps1` (diag-only IMDCT oracle) is still
+    Windows-only and pins libopus 1.5.2; port it to 1.6.1 before relying on
+    `OPUS_ORACLE_IMDCT_COMPARE`.
+
 ## Next steps (in order)
 
 From an Opus read-only review on 2026-10-15 (commit `52969ac`; estimates
@@ -278,10 +310,11 @@ reuse); guard each with the digest tests.
    `silkBurgModifiedFLP`, `downFIRInterpol`) need lifetime checks first:
    their results leave the function.
 7. (done) FrameTrace recording is gated by `silk.EnableFrameTraces()`.
-8. SILK decode: keep int16 through `decodeFrame`, stereo and resampling
-   and convert to float once (today int16 -> float64 -> int16 -> ...);
-   remove the remaining per-frame allocations in `decodeMultiStereoEC`,
-   `decodeFrame`, `stereoMSToLR`, `decodePulses`, `decodeNLSF`.
+8. (part done) SILK decode: kernels and parameter buffers done. Remaining:
+   keep int16 through `decodeFrame`, stereo and resampling and convert to
+   float once (today int16 -> float64 -> int16 -> ...); the float64 frame
+   buffers in `decodeFrame`, `stereoMSToLR` and the `decodeMulti*` appends;
+   `consumeLBRRFrames` builds a new decoder per packet with LBRR.
 9. NSQ (`internal/silk/nsq_del_dec.go`): add an assertion that the
    short-prediction index never goes out of range, then reslice windows to
    drop bounds checks and preallocate `sampleState`.

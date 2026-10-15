@@ -1638,9 +1638,15 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 				return nil, false, err
 			}
 		}
-		chosenBytes, celtErr := e.celtEncoder.EncodeHybrid(
-			celtInput, enc, targetBytes, 17, celtEnd, isSilentPCM(celtChunk),
-		)
+		// "If false, we already busted the budget and we'll end up with a
+		// 'PLC frame'": CELT is not run, so its state stays as it was.
+		chosenBytes := targetBytes
+		var celtErr error
+		if enc.ECTell() <= 8*targetBytes {
+			chosenBytes, celtErr = e.celtEncoder.EncodeHybrid(
+				celtInput, enc, targetBytes, 17, celtEnd, isSilentPCM(celtChunk),
+			)
+		}
 		e.celtEncoder.SetRateMode(e.rateMode)
 		e.celtEncoder.SetBitrate(e.bitrate)
 		if celtErr != nil {
@@ -1650,16 +1656,25 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		// redundant frame appended after it.
 		targetBytes = chosenBytes
 		frameBytes = targetBytes + redundancyBytes
-		rangeFinal ^= enc.GetRng()
+		// opus_encode_frame_native: "in the unlikely case that the SILK
+		// encoder busted its target, tell the decoder to call the PLC". SILK
+		// can overrun silk_mode.maxBits when the LBRR data of the previous
+		// packet already fills the budget; the frame then becomes the TOC and
+		// a zero byte (plus the redundancy bytes) with a zero final range.
+		busted := enc.ECTell() > (maxDataBytes-1)*8
+		frameRng := enc.GetRng()
 		enc.Flush()
 		frame := enc.Bytes()
-		if len(frame) > targetBytes {
-			return nil, false, fmt.Errorf("hybrid frame %d exceeds target: %d > %d bytes", k, len(frame), targetBytes)
-		}
-		if len(frame) < targetBytes {
-			padded := make([]byte, targetBytes)
-			copy(padded, frame)
-			frame = padded
+		if !busted {
+			rangeFinal ^= frameRng
+			if len(frame) > targetBytes {
+				return nil, false, fmt.Errorf("hybrid frame %d exceeds target: %d > %d bytes", k, len(frame), targetBytes)
+			}
+			if len(frame) < targetBytes {
+				padded := make([]byte, targetBytes)
+				copy(padded, frame)
+				frame = padded
+			}
 		}
 
 		// Append the 5 ms redundant CELT frame so the decoder recovers it from
@@ -1681,11 +1696,27 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 				}
 				redFrame, redundantRng = rf, rng
 			}
-			redPadded := make([]byte, redundancyBytes)
-			copy(redPadded, redFrame)
-			frame = append(frame, redPadded...)
 			redundancyEmitted = true
-			rangeFinal ^= redundantRng
+			if !busted {
+				redPadded := make([]byte, redundancyBytes)
+				copy(redPadded, redFrame)
+				frame = append(frame, redPadded...)
+				rangeFinal ^= redundantRng
+			}
+		}
+		if busted {
+			// data[1] = 0, ret = 1: the packet keeps 1 + redundancy_bytes
+			// payload bytes, of which only the first is rewritten.
+			n := 1
+			if frameRedundancy {
+				n += redundancyBytes
+			}
+			plc := make([]byte, n)
+			if n > 1 {
+				copy(plc[1:], frame[min(1, len(frame)):])
+			}
+			frames = append(frames, plc)
+			continue
 		}
 		if len(frame) != frameBytes && frameRedundancy {
 			// Defensive: redundant frame must total exactly maxBytes.

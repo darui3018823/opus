@@ -136,6 +136,50 @@ func silkSMLAWT(a, b, c int32) int32 {
 }
 
 func silkNoiseShapeQuantizerShortPrediction(buf []int32, ptr int, aQ12 []int16, order int) int32 {
+	// Fast path: the whole window buf[ptr-order+1 : ptr+1] is in range, so
+	// no tap is skipped. The taps are accumulated in the same order.
+	if order > 0 && ptr-order+1 >= 0 && ptr < len(buf) && order <= len(aQ12) {
+		w := buf[ptr-order+1 : ptr+1] // w[order-1-i] is buf[ptr-i]
+		a := aQ12[:order]
+		out := int32(order >> 1)
+		switch order {
+		case 16:
+			w, a := w[:16:16], a[:16:16]
+			out = silkSMLAWB(out, w[15], a[0])
+			out = silkSMLAWB(out, w[14], a[1])
+			out = silkSMLAWB(out, w[13], a[2])
+			out = silkSMLAWB(out, w[12], a[3])
+			out = silkSMLAWB(out, w[11], a[4])
+			out = silkSMLAWB(out, w[10], a[5])
+			out = silkSMLAWB(out, w[9], a[6])
+			out = silkSMLAWB(out, w[8], a[7])
+			out = silkSMLAWB(out, w[7], a[8])
+			out = silkSMLAWB(out, w[6], a[9])
+			out = silkSMLAWB(out, w[5], a[10])
+			out = silkSMLAWB(out, w[4], a[11])
+			out = silkSMLAWB(out, w[3], a[12])
+			out = silkSMLAWB(out, w[2], a[13])
+			out = silkSMLAWB(out, w[1], a[14])
+			out = silkSMLAWB(out, w[0], a[15])
+		case 10:
+			w, a := w[:10:10], a[:10:10]
+			out = silkSMLAWB(out, w[9], a[0])
+			out = silkSMLAWB(out, w[8], a[1])
+			out = silkSMLAWB(out, w[7], a[2])
+			out = silkSMLAWB(out, w[6], a[3])
+			out = silkSMLAWB(out, w[5], a[4])
+			out = silkSMLAWB(out, w[4], a[5])
+			out = silkSMLAWB(out, w[3], a[6])
+			out = silkSMLAWB(out, w[2], a[7])
+			out = silkSMLAWB(out, w[1], a[8])
+			out = silkSMLAWB(out, w[0], a[9])
+		default:
+			for i := range a {
+				out = silkSMLAWB(out, w[order-1-i], a[i])
+			}
+		}
+		return out
+	}
 	out := int32(order >> 1)
 	for i := 0; i < order; i++ {
 		idx := ptr - i
@@ -395,7 +439,12 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 	smplBufIdx *int,
 	decisionDelay int,
 ) {
-	sampleState := make([][2]nsqSampleState, nStatesDelayedDecision)
+	var sampleStateArr [4][2]nsqSampleState
+	sampleState := sampleStateArr[:]
+	if nStatesDelayedDecision > len(sampleStateArr) {
+		sampleState = make([][2]nsqSampleState, nStatesDelayedDecision)
+	}
+	sampleState = sampleState[:nStatesDelayedDecision]
 	shpLagBase := e.nsq.sLTPShpBufIdx - lag + silkHarmShapeFIRTaps/2
 	predLagBase := e.nsq.sLTPBufIdx - lag + 5/2
 	gainQ10 := silkRSHIFT32(gainQ16, 6)

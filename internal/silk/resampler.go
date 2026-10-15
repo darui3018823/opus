@@ -386,18 +386,32 @@ func (s *Resampler) iirFIR(out []int16, in []int16) []int16 {
 }
 
 func iirFIRInterpol(out []int16, buf []int16, maxIndexQ16, idxInc int32) []int16 {
-	for indexQ16 := int32(0); indexQ16 < maxIndexQ16; indexQ16 += idxInc {
-		tableIndex := silkSMULWB(indexQ16&0xFFFF, 12)
+	if maxIndexQ16 <= 0 {
+		return out
+	}
+	// The loop below visits indexQ16 = 0, idxInc, ... < maxIndexQ16.
+	n := int((maxIndexQ16-1)/idxInc) + 1
+	base := len(out)
+	out = slices.Grow(out, n)[:base+n]
+	dst := out[base:]
+	indexQ16 := int32(0)
+	for i := range dst {
+		// silk_SMULWB(index_Q16 & 0xFFFF, 12): the product fits in int32.
+		tableIndex := ((indexQ16 & 0xFFFF) * 12) >> 16
+		c0 := &silkResamplerFracFIR12[tableIndex]
+		c1 := &silkResamplerFracFIR12[11-tableIndex]
 		bp := buf[indexQ16>>16:]
-		res := silkSMULBB(int32(bp[0]), int32(silkResamplerFracFIR12[tableIndex][0]))
-		res = silkSMLABB(res, int32(bp[1]), int32(silkResamplerFracFIR12[tableIndex][1]))
-		res = silkSMLABB(res, int32(bp[2]), int32(silkResamplerFracFIR12[tableIndex][2]))
-		res = silkSMLABB(res, int32(bp[3]), int32(silkResamplerFracFIR12[tableIndex][3]))
-		res = silkSMLABB(res, int32(bp[4]), int32(silkResamplerFracFIR12[11-tableIndex][3]))
-		res = silkSMLABB(res, int32(bp[5]), int32(silkResamplerFracFIR12[11-tableIndex][2]))
-		res = silkSMLABB(res, int32(bp[6]), int32(silkResamplerFracFIR12[11-tableIndex][1]))
-		res = silkSMLABB(res, int32(bp[7]), int32(silkResamplerFracFIR12[11-tableIndex][0]))
-		out = append(out, silkSAT16(rshiftRound(int64(res), 15)))
+		bp = bp[:8]
+		res := int32(bp[0]) * int32(c0[0])
+		res += int32(bp[1]) * int32(c0[1])
+		res += int32(bp[2]) * int32(c0[2])
+		res += int32(bp[3]) * int32(c0[3])
+		res += int32(bp[4]) * int32(c1[3])
+		res += int32(bp[5]) * int32(c1[2])
+		res += int32(bp[6]) * int32(c1[1])
+		res += int32(bp[7]) * int32(c1[0])
+		dst[i] = silkSAT16(rshiftRound(int64(res), 15))
+		indexQ16 += idxInc
 	}
 	return out
 }

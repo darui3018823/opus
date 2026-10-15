@@ -234,6 +234,8 @@ vacuously.
     allocations -19% to -41%. The trace-reading opusref oracle tests pass
     (PowerShell, 4m54s).
   - Full `go test -tags opusref ./...` passes on `0057598` (root 453s).
+  - After rebasing onto the cloud commits (`1f6e3ba`..`67340e0`): `go test ./...`,
+    the `-a` FMA check and Windows `go test -tags opusref ./...` (7m31s) pass.
   - Timing on this machine drifted during the session (celt/mono read 118 to
     132 µs on unchanged code), so the per-commit numbers above come from
     interleaved old/new binaries.
@@ -314,8 +316,8 @@ reuse); guard each with the digest tests.
 8. (part done) SILK decode: kernels and parameter buffers done. Remaining:
    keep int16 through `decodeFrame`, stereo and resampling and convert to
    float once (today int16 -> float64 -> int16 -> ...); the float64 frame
-   buffers in `decodeFrame`, `stereoMSToLR` and the `decodeMulti*` appends;
-   `consumeLBRRFrames` builds a new decoder per packet with LBRR.
+   buffers in `decodeFrame`, `stereoMSToLR` and the `decodeMulti*` appends.
+   (`consumeLBRRFrames` decoder reuse is done in `b04dd8d`.)
 9. NSQ (`internal/silk/nsq_del_dec.go`): add an assertion that the
    short-prediction index never goes out of range, then reslice windows to
    drop bounds checks and preallocate `sampleState`.

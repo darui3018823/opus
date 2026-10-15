@@ -197,9 +197,19 @@ func findBestPitch32(xcorr []float32, y []float32, length, maxPitch int, bestPit
 // search at 2x around the two best candidates and a pseudo-interpolation.
 func pitchSearch32(xLP []float32, y []float32, length, maxPitch int) int {
 	lag := length + maxPitch
-	xLP4 := make([]float32, length>>2)
-	yLP4 := make([]float32, lag>>2)
-	xcorr := make([]float32, maxPitch>>1)
+	// Stack buffers cover the encoder (960 + 979) and PLC (1328 + 620) sizes.
+	var xLP4Arr, yLP4Arr, xcorrArr [512]float32
+	xLP4, yLP4, xcorr := xLP4Arr[:], yLP4Arr[:], xcorrArr[:]
+	if length>>2 > len(xLP4Arr) {
+		xLP4 = make([]float32, length>>2)
+	}
+	if lag>>2 > len(yLP4Arr) {
+		yLP4 = make([]float32, lag>>2)
+	}
+	if maxPitch>>1 > len(xcorrArr) {
+		xcorr = make([]float32, maxPitch>>1)
+	}
+	xLP4, yLP4, xcorr = xLP4[:length>>2], yLP4[:lag>>2], xcorr[:maxPitch>>1]
 	// Downsample by 2 again.
 	for j := 0; j < length>>2; j++ {
 		xLP4[j] = xLP[2*j]
@@ -272,7 +282,12 @@ func removeDoubling32(x []float32, maxPeriod, minPeriod, N, T0 int, prevPeriod i
 		T0 = maxPeriod - 1
 	}
 	T := T0
-	yyLookup := make([]float32, maxPeriod+1)
+	var yyLookupArr [combFilterMaxPeriod/2 + 1]float32
+	yyLookup := yyLookupArr[:]
+	if maxPeriod+1 > len(yyLookupArr) {
+		yyLookup = make([]float32, maxPeriod+1)
+	}
+	yyLookup = yyLookup[:maxPeriod+1]
 	xx, xy := dualInnerProd32(xs, xs, x[maxPeriod-T0:], N)
 	yyLookup[0] = xx
 	yy := xx

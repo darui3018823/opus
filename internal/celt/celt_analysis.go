@@ -490,12 +490,20 @@ func tfAnalysis(end int, isTransient bool, tfRes []int, lambda int, X []float64,
 	// bias = .04f * MAX16(-.25f, .5f - tf_estimate), in float32.
 	bias := float32(0.04) * max(float32(-0.25), float32(0.5)-float32(tfEstimate))
 
-	metric := make([]int, end)
-	path0 := make([]int, end)
-	path1 := make([]int, end)
+	// Stack buffers for the usual sizes (end <= 21 bands, maxN <= 176).
+	var metricArr, path0Arr, path1Arr [32]int
+	var tmpArr, tmp1Arr [maxPVQN]float64
+	metric, path0, path1 := metricArr[:], path0Arr[:], path1Arr[:]
+	if end > len(metricArr) {
+		metric, path0, path1 = make([]int, end), make([]int, end), make([]int, end)
+	}
+	metric, path0, path1 = metric[:end], path0[:end], path1[:end]
 	maxN := (int(EBands48000[end]) - int(EBands48000[end-1])) << uint(lm)
-	tmp := make([]float64, maxN)
-	tmp1 := make([]float64, maxN)
+	tmp, tmp1 := tmpArr[:], tmp1Arr[:]
+	if maxN > len(tmpArr) {
+		tmp, tmp1 = make([]float64, maxN), make([]float64, maxN)
+	}
+	tmp, tmp1 = tmp[:maxN], tmp1[:maxN]
 
 	for i := 0; i < end; i++ {
 		bw := int(EBands48000[i+1]) - int(EBands48000[i])

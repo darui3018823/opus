@@ -50,23 +50,25 @@ func silkSigmoidFLP32(x float64) float64 {
 // silkWarpedAutocorrelationFLP32 ports silk_warped_autocorrelation_FLP: double
 // state and accumulators, float32 outputs.
 func silkWarpedAutocorrelationFLP32(corr, input []float64, warping float64, length, order int) {
-	var state [silkMaxShapeLPCOrder + 1]float64
-	var c [silkMaxShapeLPCOrder + 1]float64
-	for n := 0; n < length; n++ {
-		tmp1 := input[n]
-		for i := 0; i < order; i += 2 {
-			tmp2 := state[i] + float64(warping*(state[i+1]-tmp1))
-			state[i] = tmp1
-			c[i] += float64(state[0] * tmp1)
-			tmp1 = state[i+1] + float64(warping*(state[i+2]-tmp2))
-			state[i+1] = tmp2
-			c[i+1] += float64(state[0] * tmp2)
+	var stateBuf [silkMaxShapeLPCOrder + 1]float64
+	var cBuf [silkMaxShapeLPCOrder + 1]float64
+	// order is even (libopus asserts it), so i < order is i+2 < order+1.
+	state, c := stateBuf[:order+1], cBuf[:order+1]
+	for _, tmp1 := range input[:length] {
+		for i := 0; i+2 < len(state); i += 2 {
+			st, ci := state[i:i+3:i+3], c[i:i+2:i+2]
+			tmp2 := st[0] + float64(warping*(st[1]-tmp1))
+			st[0] = tmp1
+			ci[0] += float64(state[0] * tmp1)
+			tmp1 = st[1] + float64(warping*(st[2]-tmp2))
+			st[1] = tmp2
+			ci[1] += float64(state[0] * tmp2)
 		}
 		state[order] = tmp1
 		c[order] += float64(state[0] * tmp1)
 	}
-	for i := 0; i <= order; i++ {
-		corr[i] = f32(c[i])
+	for i, v := range c {
+		corr[i] = f32(v)
 	}
 }
 

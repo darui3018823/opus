@@ -168,11 +168,13 @@ func silkEnergyFLP32(x []float64) float64 {
 func silkInnerProductFLP32(x, y []float64, n int) float64 {
 	result := 0.0
 	i := 0
+	x, y = x[:n], y[:n]
 	for ; i < n-3; i += 4 {
-		result += float64(silkFloat32Value(x[i])*silkFloat32Value(y[i])) +
-			float64(silkFloat32Value(x[i+1])*silkFloat32Value(y[i+1])) +
-			float64(silkFloat32Value(x[i+2])*silkFloat32Value(y[i+2])) +
-			float64(silkFloat32Value(x[i+3])*silkFloat32Value(y[i+3]))
+		xs, ys := x[i:i+4:i+4], y[i:i+4:i+4]
+		result += float64(silkFloat32Value(xs[0])*silkFloat32Value(ys[0])) +
+			float64(silkFloat32Value(xs[1])*silkFloat32Value(ys[1])) +
+			float64(silkFloat32Value(xs[2])*silkFloat32Value(ys[2])) +
+			float64(silkFloat32Value(xs[3])*silkFloat32Value(ys[3]))
 	}
 	for ; i < n; i++ {
 		result += float64(silkFloat32Value(x[i]) * silkFloat32Value(y[i]))

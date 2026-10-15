@@ -71,11 +71,18 @@ func Float2Int16Sample(v float64) int16 {
 // coder pushes into x_buf. Values stay in [-1,1] (int16 / 32768).
 func (e *Encoder) frontEndFrame(input []float64, mono bool) []float64 {
 	n := len(input)
-	q := make([]float64, n)
+	d := e.frontEndDelay(mono)
+	var q []float64
+	if d == 0 {
+		// q is the result.
+		q = make([]float64, n)
+	} else {
+		// q is consumed below.
+		q = scratchSlice(&e.frontEndScratch, n)
+	}
 	for i, v := range input {
 		q[i] = float64(Float2Int16Sample(v)) / 32768
 	}
-	d := e.frontEndDelay(mono)
 	if d == 0 {
 		return q
 	}

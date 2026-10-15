@@ -448,14 +448,25 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 	shpLagBase := e.nsq.sLTPShpBufIdx - lag + silkHarmShapeFIRTaps/2
 	predLagBase := e.nsq.sLTPBufIdx - lag + 5/2
 	gainQ10 := silkRSHIFT32(gainQ16, 6)
+	warp := int16(warpingQ16)
+	sIdx := *smplBufIdx
 	for i := 0; i < length; i++ {
 		ltpPredQ14 := int32(0)
 		if signalType == SignalTypeVoiced {
 			ltpPredQ14 = 2
-			for k := 0; k < 5; k++ {
-				idx := predLagBase + i - k
-				if idx >= 0 && idx < len(sLTPQ15) {
-					ltpPredQ14 = silkSMLAWB(ltpPredQ14, sLTPQ15[idx], bQ14[k])
+			if p := predLagBase + i; p-4 >= 0 && p < len(sLTPQ15) && len(bQ14) >= 5 {
+				w, b := sLTPQ15[p-4:p+1:p+1], bQ14[:5:5]
+				ltpPredQ14 = silkSMLAWB(ltpPredQ14, w[4], b[0])
+				ltpPredQ14 = silkSMLAWB(ltpPredQ14, w[3], b[1])
+				ltpPredQ14 = silkSMLAWB(ltpPredQ14, w[2], b[2])
+				ltpPredQ14 = silkSMLAWB(ltpPredQ14, w[1], b[3])
+				ltpPredQ14 = silkSMLAWB(ltpPredQ14, w[0], b[4])
+			} else {
+				for k := 0; k < 5; k++ {
+					idx := predLagBase + i - k
+					if idx >= 0 && idx < len(sLTPQ15) {
+						ltpPredQ14 = silkSMLAWB(ltpPredQ14, sLTPQ15[idx], bQ14[k])
+					}
 				}
 			}
 			ltpPredQ14 = silkLSHIFT32(ltpPredQ14, 1)
@@ -464,14 +475,19 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 		if lag > 0 {
 			idx := shpLagBase + i
 			s0, s1, s2 := int32(0), int32(0), int32(0)
-			if idx >= 0 && idx < len(e.nsq.sLTPShpQ14) {
-				s0 = e.nsq.sLTPShpQ14[idx]
-			}
-			if idx-1 >= 0 && idx-1 < len(e.nsq.sLTPShpQ14) {
-				s1 = e.nsq.sLTPShpQ14[idx-1]
-			}
-			if idx-2 >= 0 && idx-2 < len(e.nsq.sLTPShpQ14) {
-				s2 = e.nsq.sLTPShpQ14[idx-2]
+			if shp := e.nsq.sLTPShpQ14; idx-2 >= 0 && idx < len(shp) {
+				w := shp[idx-2 : idx+1 : idx+1]
+				s0, s1, s2 = w[2], w[1], w[0]
+			} else {
+				if idx >= 0 && idx < len(shp) {
+					s0 = shp[idx]
+				}
+				if idx-1 >= 0 && idx-1 < len(shp) {
+					s1 = shp[idx-1]
+				}
+				if idx-2 >= 0 && idx-2 < len(shp) {
+					s2 = shp[idx-2]
+				}
 			}
 			nLTPQ14 = silkSMULWB(silkADDSAT32(s0, s2), int16(harmShapeFIRPackedQ14))
 			nLTPQ14 = silkSMLAWT(nLTPQ14, s1, harmShapeFIRPackedQ14)
@@ -482,29 +498,33 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 			dd := &delDec[k]
 			ss := &sampleState[k]
 			dd.seed = silkRAND(dd.seed)
-			lpcPredQ14 := silkNoiseShapeQuantizerShortPrediction(dd.sLPCQ14[:], silkMaxLPCOrder-1+i, aQ12, predictLPCOrder)
+			// The window ending at sLPC_Q14[NSQ_LPC_BUF_LENGTH-1+i] is always
+			// in range (i < length <= 120).
+			lpcPredQ14 := silkLPCPredictQ10((*[silkMaxLPCOrder]int32)(dd.sLPCQ14[i:i+silkMaxLPCOrder]), aQ12, predictLPCOrder)
 			lpcPredQ14 = silkLSHIFT32(lpcPredQ14, 4)
 
-			tmp2 := silkSMLAWB(dd.diffQ14, dd.sAR2Q14[0], int16(warpingQ16))
-			tmp1 := silkSMLAWB(dd.sAR2Q14[0], silkSUB32Ovflw(dd.sAR2Q14[1], tmp2), int16(warpingQ16))
-			dd.sAR2Q14[0] = tmp2
+			sAR2 := dd.sAR2Q14[:shapingLPCOrder]
+			ar := arShpQ13[:len(sAR2)]
+			tmp2 := silkSMLAWB(dd.diffQ14, sAR2[0], warp)
+			tmp1 := silkSMLAWB(sAR2[0], silkSUB32Ovflw(sAR2[1], tmp2), warp)
+			sAR2[0] = tmp2
 			nARQ14 := int32(shapingLPCOrder >> 1)
-			nARQ14 = silkSMLAWB(nARQ14, tmp2, arShpQ13[0])
-			for j := 2; j < shapingLPCOrder; j += 2 {
-				tmp2 = silkSMLAWB(dd.sAR2Q14[j-1], silkSUB32Ovflw(dd.sAR2Q14[j], tmp1), int16(warpingQ16))
-				dd.sAR2Q14[j-1] = tmp1
-				nARQ14 = silkSMLAWB(nARQ14, tmp1, arShpQ13[j-1])
-				tmp1 = silkSMLAWB(dd.sAR2Q14[j], silkSUB32Ovflw(dd.sAR2Q14[j+1], tmp2), int16(warpingQ16))
-				dd.sAR2Q14[j] = tmp2
-				nARQ14 = silkSMLAWB(nARQ14, tmp2, arShpQ13[j])
+			nARQ14 = silkSMLAWB(nARQ14, tmp2, ar[0])
+			for j := 2; j+1 < len(sAR2); j += 2 {
+				tmp2 = silkSMLAWB(sAR2[j-1], silkSUB32Ovflw(sAR2[j], tmp1), warp)
+				sAR2[j-1] = tmp1
+				nARQ14 = silkSMLAWB(nARQ14, tmp1, ar[j-1])
+				tmp1 = silkSMLAWB(sAR2[j], silkSUB32Ovflw(sAR2[j+1], tmp2), warp)
+				sAR2[j] = tmp2
+				nARQ14 = silkSMLAWB(nARQ14, tmp2, ar[j])
 			}
-			dd.sAR2Q14[shapingLPCOrder-1] = tmp1
-			nARQ14 = silkSMLAWB(nARQ14, tmp1, arShpQ13[shapingLPCOrder-1])
+			sAR2[len(sAR2)-1] = tmp1
+			nARQ14 = silkSMLAWB(nARQ14, tmp1, ar[len(ar)-1])
 			nARQ14 = silkLSHIFT32(nARQ14, 1)
 			nARQ14 = silkSMLAWB(nARQ14, dd.lfARQ14, int16(tiltQ14))
 			nARQ14 = silkLSHIFT32(nARQ14, 2)
 
-			nLFQ14 := silkSMULWB(dd.shapeQ14[*smplBufIdx], int16(lfShpQ14))
+			nLFQ14 := silkSMULWB(dd.shapeQ14[sIdx], int16(lfShpQ14))
 			nLFQ14 = silkSMLAWT(nLFQ14, dd.lfARQ14, lfShpQ14)
 			nLFQ14 = silkLSHIFT32(nLFQ14, 2)
 
@@ -543,11 +563,11 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 			}
 		}
 
-		*smplBufIdx = (*smplBufIdx - 1) % silkDecisionDelay
-		if *smplBufIdx < 0 {
-			*smplBufIdx += silkDecisionDelay
+		sIdx = (sIdx - 1) % silkDecisionDelay
+		if sIdx < 0 {
+			sIdx += silkDecisionDelay
 		}
-		lastIdx := (*smplBufIdx + decisionDelay) % silkDecisionDelay
+		lastIdx := (sIdx + decisionDelay) % silkDecisionDelay
 
 		winner := 0
 		rdMin := sampleState[0][0].rdQ10
@@ -609,16 +629,17 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 			dd.lfARQ14 = ss.lfARQ14
 			dd.diffQ14 = ss.diffQ14
 			dd.sLPCQ14[silkMaxLPCOrder+i] = ss.xqQ14
-			dd.xqQ14[*smplBufIdx] = ss.xqQ14
-			dd.qQ10[*smplBufIdx] = ss.qQ10
-			dd.predQ15[*smplBufIdx] = silkLSHIFT32(ss.lpcExcQ14, 1)
-			dd.shapeQ14[*smplBufIdx] = ss.sLTPShpQ14
+			dd.xqQ14[sIdx] = ss.xqQ14
+			dd.qQ10[sIdx] = ss.qQ10
+			dd.predQ15[sIdx] = silkLSHIFT32(ss.lpcExcQ14, 1)
+			dd.shapeQ14[sIdx] = ss.sLTPShpQ14
 			dd.seed = silkADD32Ovflw(dd.seed, silkRShiftRound(int64(ss.qQ10), 10))
-			dd.randState[*smplBufIdx] = dd.seed
+			dd.randState[sIdx] = dd.seed
 			dd.rdQ10 = ss.rdQ10
 		}
-		delayedGainQ10[*smplBufIdx] = gainQ10
+		delayedGainQ10[sIdx] = gainQ10
 	}
+	*smplBufIdx = sIdx
 	for k := 0; k < nStatesDelayedDecision; k++ {
 		copy(delDec[k].sLPCQ14[:silkMaxLPCOrder], delDec[k].sLPCQ14[length:length+silkMaxLPCOrder])
 	}
@@ -673,7 +694,10 @@ func nsqQuantCandidates(rQ10, offsetQ10, lambdaQ10 int32) (q1Q10, q2Q10, rd1Q10,
 }
 
 func copyDelayedDecisionSuffix(dst, src *nsqDelayedDecision, sample int) {
-	copy(dst.sLPCQ14[sample:], src.sLPCQ14[sample:])
+	// libopus copies the whole struct tail from sLPC_Q14[sample]. Only the
+	// short-term prediction window sLPC_Q14[sample : sample+order] is live:
+	// every later entry is written at its own sample before it is read.
+	copy(dst.sLPCQ14[sample:sample+silkMaxLPCOrder], src.sLPCQ14[sample:sample+silkMaxLPCOrder])
 	dst.randState = src.randState
 	dst.qQ10 = src.qQ10
 	dst.xqQ14 = src.xqQ14

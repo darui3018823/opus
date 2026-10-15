@@ -106,9 +106,12 @@ func opPVQSearch(X []float64, iy []int, k, n int) float64 {
 		y, x, signx = make([]float32, n), make([]float32, n), make([]int, n)
 	}
 	var sum, xy, yy float32
+	// Equal-length views let the compiler drop the per-element bounds checks.
+	y, signx = y[:len(x)], signx[:len(x)]
+	X, iy = X[:len(x)], iy[:len(x)]
 
 	// Get rid of the sign.
-	for j := 0; j < n; j++ {
+	for j := range x {
 		x[j] = float32(X[j])
 		if x[j] < 0 {
 			signx[j] = 1
@@ -122,21 +125,19 @@ func opPVQSearch(X []float64, iy []int, k, n int) float64 {
 
 	// Do a pre-search by projecting on the pyramid.
 	if k > (n >> 1) {
-		for j := 0; j < n; j++ {
-			sum += x[j]
+		for _, v := range x {
+			sum += v
 		}
 		// Prevents infinities and NaNs from causing too many pulses to be
 		// allocated. 64 is an approximation of infinity here.
 		if !(sum > 1e-15 && sum < 64) {
 			x[0] = 1
-			for j := 1; j < n; j++ {
-				x[j] = 0
-			}
+			clear(x[1:])
 			sum = 1
 		}
 		// Using K+e with e < 1 guarantees we cannot get more than K pulses.
 		rcp := float32(float32(k)+float32(0.8)) * (float32(1) / sum)
-		for j := 0; j < n; j++ {
+		for j := range x {
 			iy[j] = int(math.Floor(float64(float32(rcp * x[j]))))
 			y[j] = float32(iy[j])
 			yy += float32(y[j] * y[j])
@@ -168,7 +169,7 @@ func opPVQSearch(X []float64, iy []int, k, n int) float64 {
 		rxy = float32(rxy * rxy)
 		bestDen := ryy
 		bestNum := rxy
-		for j := 1; j < n; j++ {
+		for j := 1; j < len(x); j++ {
 			rxy = xy + x[j]
 			ryy = yy + y[j]
 			rxy = float32(rxy * rxy)
@@ -186,7 +187,7 @@ func opPVQSearch(X []float64, iy []int, k, n int) float64 {
 	}
 
 	// Put the original sign back.
-	for j := 0; j < n; j++ {
+	for j := range x {
 		if signx[j] != 0 {
 			iy[j] = -iy[j]
 		}

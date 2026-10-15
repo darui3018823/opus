@@ -203,8 +203,7 @@ func silkNLSFVQErrors(target []int16, cb *nlsfCBParams) []int64 {
 
 func silkNLSFDelDecQuant(xQ10, wQ5 []int16, predCoefQ8 []uint8, ecIx []int, ecRatesQ5 []uint8, quantStepSizeQ16, invQuantStepSizeQ6, muQ20 int32) ([]int, int64) {
 	order := len(xQ10)
-	out0Table := make([]int32, 2*nlsfQuantMaxAmplitudeExt)
-	out1Table := make([]int32, 2*nlsfQuantMaxAmplitudeExt)
+	var out0Table, out1Table [2 * nlsfQuantMaxAmplitudeExt]int32
 	for i := -nlsfQuantMaxAmplitudeExt; i <= nlsfQuantMaxAmplitudeExt-1; i++ {
 		out0 := int32(i << 10)
 		out1 := out0 + 1024

@@ -260,6 +260,9 @@ type Encoder struct {
 	// libopus policy (-1 otherwise), read by the high-pass cutoff smoother.
 	pendingMode     int
 	celtFadeScratch []float64
+	// silkInScratch and silkResScratch hold silkInput's per-channel int16
+	// resampler input and output; both are consumed before it returns.
+	silkInScratch, silkResScratch [2][]int16
 	// celtPrefillTail is the last 2.5 ms of the previous packet's CELT input
 	// (libopus tmp_prefill from the delay buffer), the prefill of the CELT
 	// encoder after a mode transition.
@@ -2237,13 +2240,16 @@ func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
 		if len(e.silkInputResamplers) == 0 {
 			return mono
 		}
-		in := make([]int16, len(mono))
-		for i, v := range mono {
-			in[i] = silk.Float2Int16Sample(v)
+		in := e.silkInScratch[0][:0]
+		for _, v := range mono {
+			in = append(in, silk.Float2Int16Sample(v))
 		}
-		out0 := e.silkInputResamplers[0].Process(in)
+		e.silkInScratch[0] = in
+		out0 := e.silkInputResamplers[0].ProcessAppend(e.silkResScratch[0][:0], in)
+		e.silkResScratch[0] = out0
 		if e.silkPrevChannels == 2 && len(e.silkInputResamplers) > 1 {
-			out1 := e.silkInputResamplers[1].Process(in)
+			out1 := e.silkInputResamplers[1].ProcessAppend(e.silkResScratch[1][:0], in)
+			e.silkResScratch[1] = out1
 			for i := range out0 {
 				if i < len(out1) {
 					out0[i] = int16((int32(out0[i]) + int32(out1[i])) >> 1)
@@ -2264,13 +2270,24 @@ func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
 	ch := e.channels
 	n := len(pcm) / ch
 	out := make([]float64, 0, want)
-	perChannel := make([][]int16, ch)
+	var perChannelBuf [2][]int16
+	perChannel := perChannelBuf[:0]
+	if ch > len(perChannelBuf) {
+		perChannel = make([][]int16, 0, ch)
+	}
 	for c := 0; c < ch; c++ {
-		in := make([]int16, n)
-		for i := 0; i < n; i++ {
-			in[i] = silk.Float2Int16Sample(pcm[i*ch+c])
+		var in, res []int16
+		if c < len(e.silkInScratch) {
+			in, res = e.silkInScratch[c][:0], e.silkResScratch[c][:0]
 		}
-		perChannel[c] = e.silkInputResamplers[c].Process(in)
+		for i := 0; i < n; i++ {
+			in = append(in, silk.Float2Int16Sample(pcm[i*ch+c]))
+		}
+		res = e.silkInputResamplers[c].ProcessAppend(res, in)
+		if c < len(e.silkInScratch) {
+			e.silkInScratch[c], e.silkResScratch[c] = in, res
+		}
+		perChannel = append(perChannel, res)
 	}
 	m := want / ch
 	for i := 0; i < m; i++ {

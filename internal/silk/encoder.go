@@ -25,6 +25,11 @@ type Encoder struct {
 	pulseBlocks []pulseBlock
 	// nsqScratch holds silkNSQDelDec's work buffers.
 	nsqScratch nsqWorkBuffers
+	// lpcInPreScratch and lpcInScaled are analyzeNLSF's LPC_in_pre buffers,
+	// fully rewritten on each use.
+	lpcInPreScratch, lpcInScaled []float64
+	// frontEndScratch is frontEndFrame's quantised input before the delay.
+	frontEndScratch []float64
 	// pitchBuf is silkFindPitchLags' analysis buffer.
 	pitchBuf []float64
 	// pitchScratch holds the pitch analysis working buffers.
@@ -2321,7 +2326,7 @@ func (e *Encoder) analyzeNLSF(signal []float64, cb *nlsfCBParams, signalType int
 		if len(cfg.input) > 0 {
 			input = cfg.input
 		}
-		lpcInPre := buildLPCInPre(input, cfg.subframeLengths, cfg.invGains, cfg.ltpCoefs, cfg.pitchLags, cb.order, cfg.voiced)
+		lpcInPre := buildLPCInPreInto(&e.lpcInPreScratch, input, cfg.subframeLengths, cfg.invGains, cfg.ltpCoefs, cfg.pitchLags, cb.order, cfg.voiced)
 		if len(cfg.subframeLengths) > 0 && len(lpcInPre) > 0 {
 			sfLen := cfg.subframeLengths[0] + cb.order
 			uniform := sfLen > cb.order
@@ -2335,7 +2340,7 @@ func (e *Encoder) analyzeNLSF(signal []float64, cb *nlsfCBParams, signalType int
 				// silk_find_LPC_FLP runs on LPC_in_pre in int16 scale; Burg's
 				// absolute 1e-9f regulariser makes the analysis scale-dependent,
 				// so present the same values libopus sees.
-				x = make([]float64, len(lpcInPre))
+				x = scratchSlice(&e.lpcInScaled, len(lpcInPre))
 				for i, v := range lpcInPre {
 					x[i] = v * 32768
 				}

@@ -213,6 +213,9 @@ type Decoder struct {
 	nlsfIndexBuf [silkMaxLPCOrder + 1]int
 	lpcSetBuf    [2][silkMaxLPCOrder]int16
 	pulseBuf     []int16
+	// Decoders that parse past the LBRR frames of a packet; re-initialised
+	// for every packet (see consumeLBRRFrames).
+	lbrrMid, lbrrSide *Decoder
 
 	sampleRate int // 8000, 12000, 16000, 24000
 	frameSize  int // samples per 20ms frame
@@ -308,14 +311,26 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 // NewDecoderWithFrameMs creates a new SILK decoder with the given frame duration in ms.
 // frameMs must be 10 or 20 (40ms and 60ms are handled by calling DecodeMulti with nFrames=2 or 3).
 func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) {
+	d := &Decoder{}
+	if err := d.init(sampleRate, channels, frameMs); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+// init puts d in the state NewDecoderWithFrameMs returns. Every field is
+// overwritten; only the work buffers (cleared on every use) and the memory
+// of the state slices are kept, so a decoder can be re-initialised without
+// allocating.
+func (d *Decoder) init(sampleRate, channels, frameMs int) error {
 	if sampleRate != 8000 && sampleRate != 12000 && sampleRate != 16000 && sampleRate != 24000 {
-		return nil, fmt.Errorf("invalid sample rate: %d (must be 8000, 12000, 16000, or 24000)", sampleRate)
+		return fmt.Errorf("invalid sample rate: %d (must be 8000, 12000, 16000, or 24000)", sampleRate)
 	}
 	if channels != 1 && channels != 2 {
-		return nil, fmt.Errorf("invalid channels: %d (must be 1 or 2)", channels)
+		return fmt.Errorf("invalid channels: %d (must be 1 or 2)", channels)
 	}
 	if frameMs != 10 && frameMs != 20 {
-		return nil, fmt.Errorf("invalid frame duration: %d ms (must be 10 or 20)", frameMs)
+		return fmt.Errorf("invalid frame duration: %d ms (must be 10 or 20)", frameMs)
 	}
 
 	fsKHz := sampleRate / 1000
@@ -335,7 +350,21 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 	subfrmLen := frameSize / nSubframes
 	ltpMemLen := silkLTPMemLengthMs * fsKHz
 
-	d := &Decoder{
+	prevNLSF := reuseInt16(d.prevNLSFQ15, lpcOrder)
+	lpcState := reuseInt32(d.lpcState, silkMaxLPCOrder)
+	ltpState := reuseInt32(d.ltpState, ltpMemLen)
+	side, lbrrMid, lbrrSide := d.side, d.lbrrMid, d.lbrrSide
+	*d = Decoder{
+		synthExc:      d.synthExc,
+		synthSLTPQ15:  d.synthSLTPQ15,
+		synthOutBufQ0: d.synthOutBufQ0,
+		synthSLPCQ14:  d.synthSLPCQ14,
+		synthSLTP:     d.synthSLTP,
+		synthOut:      d.synthOut,
+		pulseBuf:      d.pulseBuf,
+		lbrrMid:       lbrrMid,
+		lbrrSide:      lbrrSide,
+
 		sampleRate:     sampleRate,
 		frameSize:      frameSize,
 		channels:       channels,
@@ -343,15 +372,15 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 		fsKHz:          fsKHz,
 		nSubframes:     nSubframes,
 		subfrmLen:      subfrmLen,
-		prevNLSFQ15:    make([]int16, lpcOrder),
+		prevNLSFQ15:    prevNLSF,
 		lagPrev:        100,
 		prevLagIndex:   0,
 		prevGainQ16:    65536,
 		prevGainIndex:  10,
 		prevSignalType: SignalTypeUnvoiced,
 		firstFrame:     true,
-		lpcState:       make([]int32, silkMaxLPCOrder),
-		ltpState:       make([]int32, ltpMemLen),
+		lpcState:       lpcState,
+		ltpState:       ltpState,
 		randSeed:       7818,
 	}
 	d.plcReset()
@@ -365,14 +394,33 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 	}
 
 	if channels == 2 {
-		side, err := NewDecoderWithFrameMs(sampleRate, 1, frameMs)
-		if err != nil {
-			return nil, err
+		if side == nil {
+			side = &Decoder{}
+		}
+		if err := side.init(sampleRate, 1, frameMs); err != nil {
+			return err
 		}
 		d.side = side
 	}
+	return nil
+}
 
-	return d, nil
+func reuseInt16(buf []int16, n int) []int16 {
+	if cap(buf) < n {
+		return make([]int16, n)
+	}
+	buf = buf[:n]
+	clear(buf)
+	return buf
+}
+
+func reuseInt32(buf []int32, n int) []int32 {
+	if cap(buf) < n {
+		return make([]int32, n)
+	}
+	buf = buf[:n]
+	clear(buf)
+	return buf
 }
 
 // SetFrameMs reconfigures the decoder's Opus frame duration (10 or 20 ms)
@@ -765,7 +813,7 @@ func (d *Decoder) decodeMultiMonoEC(dec *entcode.Decoder, nFrames int) ([]float6
 // regular decoder's synthesis and predictor state remains untouched.
 func (d *Decoder) consumeLBRRFrames(dec *entcode.Decoder, nFrames, mask int) error {
 	frameMs := d.frameSize * 1000 / d.sampleRate
-	tmp, err := NewDecoderWithFrameMs(d.sampleRate, 1, frameMs)
+	tmp, err := d.freshLBRRDecoder(&d.lbrrMid, frameMs)
 	if err != nil {
 		return err
 	}
@@ -782,6 +830,19 @@ func (d *Decoder) consumeLBRRFrames(dec *entcode.Decoder, nFrames, mask int) err
 		prevPresent = true
 	}
 	return nil
+}
+
+// freshLBRRDecoder returns *slot re-initialised as a new mono decoder at
+// d's rate, creating it on first use.
+func (d *Decoder) freshLBRRDecoder(slot **Decoder, frameMs int) (*Decoder, error) {
+	if *slot == nil {
+		*slot = &Decoder{}
+	}
+	if err := (*slot).init(d.sampleRate, 1, frameMs); err != nil {
+		*slot = nil
+		return nil, err
+	}
+	return *slot, nil
 }
 
 func (d *Decoder) decodeMultiStereo(packet []byte, nFrames int) ([]float64, error) {
@@ -899,11 +960,11 @@ func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]floa
 
 func (d *Decoder) consumeStereoLBRRFrames(dec *entcode.Decoder, nFrames int, masks [2]int) error {
 	frameMs := d.frameSize * 1000 / d.sampleRate
-	mid, err := NewDecoderWithFrameMs(d.sampleRate, 1, frameMs)
+	mid, err := d.freshLBRRDecoder(&d.lbrrMid, frameMs)
 	if err != nil {
 		return err
 	}
-	side, err := NewDecoderWithFrameMs(d.sampleRate, 1, frameMs)
+	side, err := d.freshLBRRDecoder(&d.lbrrSide, frameMs)
 	if err != nil {
 		return err
 	}
@@ -2671,6 +2732,7 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 	*d = *src
 	// Work buffers must not be shared with src.
 	d.synthExc, d.synthSLTPQ15, d.synthOutBufQ0, d.synthSLPCQ14, d.synthSLTP, d.synthOut, d.pulseBuf = nil, nil, nil, nil, nil, nil, nil
+	d.lbrrMid, d.lbrrSide = nil, nil
 	d.prevNLSFQ15 = append([]int16(nil), src.prevNLSFQ15...)
 	d.lpcState = append([]int32(nil), src.lpcState...)
 	d.ltpState = append([]int32(nil), src.ltpState...)

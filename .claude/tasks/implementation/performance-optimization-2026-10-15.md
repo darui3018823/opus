@@ -281,6 +281,18 @@ vacuously.
     Windows-only and pins libopus 1.5.2; port it to 1.6.1 before relying on
     `OPUS_ORACLE_IMDCT_COMPARE`.
 
+- 2026-10-15 evening: item 8.
+  - `bed2914` `decodeFrameI16`; stereo mid/side go to MS-to-LR as int16
+    (the float64 detour was an exact round trip); decodeFrame/MS-to-LR
+    outputs in decoder scratch. Interleaved: tv02-tv06 bytes -54% to -63%,
+    allocations -24% to -41%, time -4% (not significant);
+    `BenchmarkPerfDefaultDecodeFEC` -4% to -13%.
+  - `6a9cb8c` `DecodeMultiWithDecoderReuse` for the Opus SILK-only and
+    hybrid paths (they consume the PCM within the frame). tv03/tv04 -3%,
+    bytes another -59% to -75%.
+  - CPU profile now (tv02-tv04): `iirFIRInterpol` 19%, `synthesize` 18%
+    cumulative, `SoftClipFloat32` 7%, int16 output conversion 7%.
+
 ## Next steps (in order)
 
 From an Opus read-only review on 2026-10-15 (commit `52969ac`; estimates
@@ -313,11 +325,13 @@ reuse); guard each with the digest tests.
    `silkBurgModifiedFLP`, `downFIRInterpol`) need lifetime checks first:
    their results leave the function.
 7. (done) FrameTrace recording is gated by `silk.EnableFrameTraces()`.
-8. (part done) SILK decode: kernels and parameter buffers done. Remaining:
-   keep int16 through `decodeFrame`, stereo and resampling and convert to
-   float once (today int16 -> float64 -> int16 -> ...); the float64 frame
-   buffers in `decodeFrame`, `stereoMSToLR` and the `decodeMulti*` appends.
-   (`consumeLBRRFrames` decoder reuse is done in `b04dd8d`.)
+8. (done) SILK decode: kernels and parameter buffers (`1f6e3ba`), LBRR
+   decoders (`b04dd8d`), stereo mid/side stay int16 into MS-to-LR and the
+   frame/packet outputs live in decoder scratch (`bed2914`, `6a9cb8c`).
+   Not done: skipping the float round trip after the resampler. A CPU
+   profile of tv02-tv04 puts `SoftClipFloat32` plus the int16 conversion at
+   about 13%, but bypassing the soft clip needs proof that its per-channel
+   memory stays unchanged for SILK-only output; left for later.
 9. NSQ (`internal/silk/nsq_del_dec.go`): add an assertion that the
    short-prediction index never goes out of range, then reslice windows to
    drop bounds checks and preallocate `sampleState`.

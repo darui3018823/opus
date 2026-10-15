@@ -1,43 +1,55 @@
-# Rebuilds the instrumented-libopus CELT oracle used to debug bit-exact decoding.
-# Run from anywhere (paths are absolute-ish via $PSScriptRoot).
+# Rebuilds the instrumented-libopus CELT/SILK oracle used to debug bit-exact
+# decoding, from the checked-in libopus 1.6.1 source tree (repo `libopus/`).
 #
-#   pwsh scripts/oracle/build.ps1
-#   $env:TEMP\opusoracle\oracle.exe <path-to>\testvectorNN.bit <pktIndex>
+#   pwsh scripts/oracle/build.ps1 [-Source <libopus-1.6.1 tree>]
+#   <os temp dir>/opusoracle/oracle.exe <path-to>/testvectorNN.bit <pktIndex>
 #
 # The oracle decodes through ONE target packet with REAL libopus internals and
 # prints, to stderr, CELT or SILK stage dumps for that target packet only, plus
 # the final range vs the .bit-stored expected value.
 #
-# Requires: gcc (msys2 mingw64), curl, tar. No cmake/make needed.
+# Requires: gcc (msys2 mingw64 on Windows, the system gcc on Linux).
+# Scalar build (no SIMD, no FMA): -O1 -ffp-contract=off, like the other
+# libopus 1.6.1 oracles.
+
+param([string]$Source = "")
 
 $ErrorActionPreference = 'Stop'
-$srcRoot = "$env:TEMP\opussrc"
-$srcDir  = "$srcRoot\opus-1.5.2"
-$bld     = "$env:TEMP\opusoracle"
-New-Item -ItemType Directory -Force $srcRoot | Out-Null
+# Every instrumentation anchor must match; a silent no-op would drop a trace.
+Update-TypeData -TypeName System.String -MemberType ScriptMethod -MemberName ReplaceChecked -Force -Value {
+    param([string]$old, [string]$new)
+    if (-not $this.Contains($old)) {
+        $label = $old.Substring(0, [Math]::Min(72, $old.Length))
+        throw "instrumentation anchor not found: $label"
+    }
+    return $this.Replace($old, $new)
+}
+
+$bld = Join-Path ([System.IO.Path]::GetTempPath()) "opusoracle"
 New-Item -ItemType Directory -Force $bld | Out-Null
 
-if (-not (Test-Path "$srcDir\celt\bands.c")) {
-    Write-Host "Downloading opus 1.5.2 source..."
-    $tar = "$srcRoot\opus.tar.gz"
-    curl.exe -sL -o $tar https://github.com/xiph/opus/releases/download/v1.5.2/opus-1.5.2.tar.gz
-    tar -xzf $tar -C $srcRoot
+$srcDir = if ($Source -ne "") { (Resolve-Path $Source).Path } else { (Resolve-Path (Join-Path $PSScriptRoot "../../libopus")).Path }
+Write-Host "libopus source: $srcDir"
+if (-not (Test-Path "$srcDir/celt/bands.c")) { throw "not a libopus source tree: $srcDir" }
+$versionFile = "$srcDir/package_version"
+if ((Test-Path $versionFile) -and -not ((Get-Content $versionFile -Raw) -match 'PACKAGE_VERSION="1\.6\.1"')) {
+    throw "the instrumented copies (celt_decoder_instr.c, bands_instr.c, cwrs_instr.c) are libopus 1.6.1; got $((Get-Content $versionFile -Raw).Trim())"
 }
 
 # Use the instrumented copies kept in the repo (this folder) instead of the
 # stock celt_decoder.c / bands.c / cwrs.c.
-Copy-Item "$PSScriptRoot\celt_decoder_instr.c" "$bld\celt_decoder_instr.c" -Force
-Copy-Item "$PSScriptRoot\bands_instr.c"        "$bld\bands_instr.c"        -Force
-Copy-Item "$PSScriptRoot\cwrs_instr.c"         "$bld\cwrs_instr.c"         -Force
-Copy-Item "$PSScriptRoot\oracle.c"             "$bld\oracle.c"             -Force
-Copy-Item "$PSScriptRoot\silk_trace.h"         "$bld\silk_trace.h"         -Force
+Copy-Item "$PSScriptRoot/celt_decoder_instr.c" "$bld/celt_decoder_instr.c" -Force
+Copy-Item "$PSScriptRoot/bands_instr.c"        "$bld/bands_instr.c"        -Force
+Copy-Item "$PSScriptRoot/cwrs_instr.c"         "$bld/cwrs_instr.c"         -Force
+Copy-Item "$PSScriptRoot/oracle.c"             "$bld/oracle.c"             -Force
+Copy-Item "$PSScriptRoot/silk_trace.h"         "$bld/silk_trace.h"         -Force
 
-$celt = "$srcDir\celt"
-$silk = "$srcDir\silk"
-$opusSrc = "$srcDir\src"
+$celt = "$srcDir/celt"
+$silk = "$srcDir/silk"
+$opusSrc = "$srcDir/src"
 
-$mdct = Get-Content "$celt\mdct.c" -Raw
-$mdct = $mdct.Replace("#include <math.h>", "#include <math.h>`r`n#include <stdio.h>`r`nextern int oracle_trace_enabled;")
+$mdct = Get-Content "$celt/mdct.c" -Raw
+$mdct = $mdct.ReplaceChecked("#include <math.h>", "#include <math.h>`r`n#include <stdio.h>`r`nextern int oracle_trace_enabled;")
 $mdctDump = @'
    if (oracle_trace_enabled) {
       int _i;
@@ -50,14 +62,14 @@ $mdctDump = @'
    }
 
 '@
-$mdct = $mdct.Replace("   /* Mirror on both sides for TDAC */", $mdctDump + "   /* Mirror on both sides for TDAC */")
-Set-Content "$bld\mdct_instr.c" $mdct
+$mdct = $mdct.ReplaceChecked("   /* Mirror on both sides for TDAC */", $mdctDump + "   /* Mirror on both sides for TDAC */")
+Set-Content "$bld/mdct_instr.c" $mdct
 
 # Generate instrumented SILK decoder sources from the downloaded libopus source.
-$decodeFrame = Get-Content "$silk\decode_frame.c" -Raw
+$decodeFrame = Get-Content "$silk/decode_frame.c" -Raw
 $decodeFrame = $decodeFrame.Replace("`r`n", "`n")
-$decodeFrame = $decodeFrame.Replace('#include "main.h"', "#include `"main.h`"`r`n#include `"silk_trace.h`"")
-$decodeFrame = $decodeFrame.Replace("        silk_decode_indices( psDec, psRangeDec, psDec->nFramesDecoded, lostFlag, condCoding );",
+$decodeFrame = $decodeFrame.ReplaceChecked('#include "main.h"', "#include `"main.h`"`r`n#include `"silk_trace.h`"")
+$decodeFrame = $decodeFrame.ReplaceChecked("        silk_decode_indices( psDec, psRangeDec, psDec->nFramesDecoded, lostFlag, condCoding );",
 @"
         silk_decode_indices( psDec, psRangeDec, psDec->nFramesDecoded, lostFlag, condCoding );
         if( oracle_trace_enabled ) {
@@ -67,33 +79,33 @@ $decodeFrame = $decodeFrame.Replace("        silk_decode_indices( psDec, psRange
         }
         oracle_silk_range("AFTER_INDICES", psRangeDec);
 "@)
-$decodeFrame = $decodeFrame.Replace("        silk_decode_pulses( psRangeDec, pulses, psDec->indices.signalType,`n                psDec->indices.quantOffsetType, psDec->frame_length );",
+$decodeFrame = $decodeFrame.ReplaceChecked("        silk_decode_pulses( psRangeDec, pulses, psDec->indices.signalType,`n                psDec->indices.quantOffsetType, psDec->frame_length );",
 @"
         silk_decode_pulses( psRangeDec, pulses, psDec->indices.signalType,
                 psDec->indices.quantOffsetType, psDec->frame_length );
         oracle_silk_range("AFTER_PULSES", psRangeDec);
 "@)
-$decodeFrame = $decodeFrame.Replace("        silk_decode_parameters( psDec, psDecCtrl, condCoding );",
+$decodeFrame = $decodeFrame.ReplaceChecked("        silk_decode_parameters( psDec, psDecCtrl, condCoding );",
 @"
         silk_decode_parameters( psDec, psDecCtrl, condCoding );
         oracle_silk_range("AFTER_PARAMS", psRangeDec);
 "@)
-$decodeFrame = $decodeFrame.Replace("        silk_decode_core( psDec, psDecCtrl, pOut, pulses, arch );",
+$decodeFrame = $decodeFrame.ReplaceChecked("        silk_decode_core( psDec, psDecCtrl, pOut, pulses, arch );",
 @"
         silk_decode_core( psDec, psDecCtrl, pOut, pulses, arch );
         oracle_silk_dump_i16("CORE_OUT", pOut, psDec->frame_length);
 "@)
-$decodeFrame = $decodeFrame.Replace("    silk_CNG( psDec, psDecCtrl, pOut, L );",
+$decodeFrame = $decodeFrame.ReplaceChecked("    silk_CNG( psDec, psDecCtrl, pOut, L );",
 @"
     silk_CNG( psDec, psDecCtrl, pOut, L );
     oracle_silk_dump_i16("FRAME_OUT", pOut, L);
 "@)
-Set-Content "$bld\decode_frame_instr.c" $decodeFrame
+Set-Content "$bld/decode_frame_instr.c" $decodeFrame
 
-$decodeIndices = Get-Content "$silk\decode_indices.c" -Raw
+$decodeIndices = Get-Content "$silk/decode_indices.c" -Raw
 $decodeIndices = $decodeIndices.Replace("`r`n", "`n")
-$decodeIndices = $decodeIndices.Replace('#include "main.h"', "#include `"main.h`"`r`n#include `"silk_trace.h`"")
-$decodeIndices = $decodeIndices.Replace("    psDec->indices.Seed = (opus_int8)ec_dec_icdf( psRangeDec, silk_uniform4_iCDF, 8 );`n}",
+$decodeIndices = $decodeIndices.ReplaceChecked('#include "main.h"', "#include `"main.h`"`r`n#include `"silk_trace.h`"")
+$decodeIndices = $decodeIndices.ReplaceChecked("    psDec->indices.Seed = (opus_int8)ec_dec_icdf( psRangeDec, silk_uniform4_iCDF, 8 );`n}",
 @"
     psDec->indices.Seed = (opus_int8)ec_dec_icdf( psRangeDec, silk_uniform4_iCDF, 8 );
     if( oracle_trace_enabled ) {
@@ -110,12 +122,12 @@ $decodeIndices = $decodeIndices.Replace("    psDec->indices.Seed = (opus_int8)ec
     oracle_silk_range("INDICES", psRangeDec);
 }
 "@)
-Set-Content "$bld\decode_indices_instr.c" $decodeIndices
+Set-Content "$bld/decode_indices_instr.c" $decodeIndices
 
-$decodePulses = Get-Content "$silk\decode_pulses.c" -Raw
+$decodePulses = Get-Content "$silk/decode_pulses.c" -Raw
 $decodePulses = $decodePulses.Replace("`r`n", "`n")
-$decodePulses = $decodePulses.Replace('#include "main.h"', "#include `"main.h`"`r`n#include `"silk_trace.h`"")
-$decodePulses = $decodePulses.Replace("    silk_decode_signs( psRangeDec, pulses, frame_length, signalType, quantOffsetType, sum_pulses );`n}",
+$decodePulses = $decodePulses.ReplaceChecked('#include "main.h"', "#include `"main.h`"`r`n#include `"silk_trace.h`"")
+$decodePulses = $decodePulses.ReplaceChecked("    silk_decode_signs( psRangeDec, pulses, frame_length, signalType, quantOffsetType, sum_pulses );`n}",
 @"
     oracle_silk_range("BEFORE_SIGNS", psRangeDec);
     silk_decode_signs( psRangeDec, pulses, frame_length, signalType, quantOffsetType, sum_pulses );
@@ -129,12 +141,12 @@ $decodePulses = $decodePulses.Replace("    silk_decode_signs( psRangeDec, pulses
     oracle_silk_range("PULSES", psRangeDec);
 }
 "@)
-Set-Content "$bld\decode_pulses_instr.c" $decodePulses
+Set-Content "$bld/decode_pulses_instr.c" $decodePulses
 
-$decodeParameters = Get-Content "$silk\decode_parameters.c" -Raw
+$decodeParameters = Get-Content "$silk/decode_parameters.c" -Raw
 $decodeParameters = $decodeParameters.Replace("`r`n", "`n")
-$decodeParameters = $decodeParameters.Replace('#include "main.h"', "#include `"main.h`"`r`n#include `"silk_trace.h`"")
-$decodeParameters = $decodeParameters.Replace("        psDecCtrl->LTP_scale_Q14 = 0;`n    }`n}",
+$decodeParameters = $decodeParameters.ReplaceChecked('#include "main.h"', "#include `"main.h`"`r`n#include `"silk_trace.h`"")
+$decodeParameters = $decodeParameters.ReplaceChecked("        psDecCtrl->LTP_scale_Q14 = 0;`n    }`n}",
 @"
         psDecCtrl->LTP_scale_Q14 = 0;
     }
@@ -150,13 +162,13 @@ $decodeParameters = $decodeParameters.Replace("        psDecCtrl->LTP_scale_Q14 
     }
 }
 "@)
-Set-Content "$bld\decode_parameters_instr.c" $decodeParameters
+Set-Content "$bld/decode_parameters_instr.c" $decodeParameters
 
-$decodeCore = Get-Content "$silk\decode_core.c" -Raw
+$decodeCore = Get-Content "$silk/decode_core.c" -Raw
 $decodeCore = $decodeCore.Replace("`r`n", "`n")
-$decodeCore = $decodeCore.Replace('#include "main.h"', "#include `"main.h`"`r`n#include `"silk_trace.h`"")
-$decodeCore = $decodeCore.Replace("    /* Copy LPC state */", "    oracle_silk_dump_i32(`"EXC_Q14`", psDec->exc_Q14, psDec->frame_length);`r`n`r`n    /* Copy LPC state */")
-$decodeCore = $decodeCore.Replace("        /* Update LPC filter state */`n        silk_memcpy( sLPC_Q14, &sLPC_Q14[ psDec->subfr_length ], MAX_LPC_ORDER * sizeof( opus_int32 ) );",
+$decodeCore = $decodeCore.ReplaceChecked('#include "main.h"', "#include `"main.h`"`r`n#include `"silk_trace.h`"")
+$decodeCore = $decodeCore.ReplaceChecked("    /* Copy LPC state */", "    oracle_silk_dump_i32(`"EXC_Q14`", psDec->exc_Q14, psDec->frame_length);`r`n`r`n    /* Copy LPC state */")
+$decodeCore = $decodeCore.ReplaceChecked("        /* Update LPC filter state */`n        silk_memcpy( sLPC_Q14, &sLPC_Q14[ psDec->subfr_length ], MAX_LPC_ORDER * sizeof( opus_int32 ) );",
 @"
         if( oracle_trace_enabled ) {
             fprintf(stderr, "[SILK_CORE_SUBFR] k=%d signalType=%d gain_Q16=%d gain_Q10=%d inv_gain_Q31=%d lag=%d\n",
@@ -168,15 +180,15 @@ $decodeCore = $decodeCore.Replace("        /* Update LPC filter state */`n      
         /* Update LPC filter state */
         silk_memcpy( sLPC_Q14, &sLPC_Q14[ psDec->subfr_length ], MAX_LPC_ORDER * sizeof( opus_int32 ) );
 "@)
-Set-Content "$bld\decode_core_instr.c" $decodeCore
+Set-Content "$bld/decode_core_instr.c" $decodeCore
 
 # Generate instrumented SILK encoder sources. These are used by
 # `oracle.exe --silk-enc ...` to dump the libopus encoder's per-frame analysis
 # and NSQ inputs for the mono SILK-only AB fixtures.
-$findLPC = Get-Content "$silk\float\find_LPC_FLP.c" -Raw
+$findLPC = Get-Content "$silk/float\find_LPC_FLP.c" -Raw
 $findLPC = $findLPC.Replace("`r`n", "`n")
-$findLPC = $findLPC.Replace('#include "tuning_parameters.h"', "#include `"tuning_parameters.h`"`r`n#include `"silk_trace.h`"")
-$findLPC = $findLPC.Replace("    res_nrg = silk_burg_modified_FLP( a, x, minInvGain, subfr_length, psEncC->nb_subfr, psEncC->predictLPCOrder, arch );",
+$findLPC = $findLPC.ReplaceChecked('#include "tuning_parameters.h"', "#include `"tuning_parameters.h`"`r`n#include `"silk_trace.h`"")
+$findLPC = $findLPC.ReplaceChecked("    res_nrg = silk_burg_modified_FLP( a, x, minInvGain, subfr_length, psEncC->nb_subfr, psEncC->predictLPCOrder, arch );",
 @"
     res_nrg = silk_burg_modified_FLP( a, x, minInvGain, subfr_length, psEncC->nb_subfr, psEncC->predictLPCOrder, arch );
     if( oracle_trace_enabled ) {
@@ -186,12 +198,12 @@ $findLPC = $findLPC.Replace("    res_nrg = silk_burg_modified_FLP( a, x, minInvG
         oracle_silk_dump_float("ENC_FIND_LPC_FULL_AR", a, psEncC->predictLPCOrder);
     }
 "@)
-$findLPC = $findLPC.Replace("        silk_A2NLSF_FLP( NLSF_Q15, a_tmp, psEncC->predictLPCOrder );",
+$findLPC = $findLPC.ReplaceChecked("        silk_A2NLSF_FLP( NLSF_Q15, a_tmp, psEncC->predictLPCOrder );",
 @"
         silk_A2NLSF_FLP( NLSF_Q15, a_tmp, psEncC->predictLPCOrder );
         oracle_silk_dump_i16("ENC_FIND_LPC_LAST_HALF_NLSF_Q15", NLSF_Q15, psEncC->predictLPCOrder);
 "@)
-$findLPC = $findLPC.Replace("            /* Determine whether current interpolated NLSFs are best so far */",
+$findLPC = $findLPC.ReplaceChecked("            /* Determine whether current interpolated NLSFs are best so far */",
 @"
             if( oracle_trace_enabled ) {
                 fprintf(stderr, "[SILK_ENC_NLSF_INTERP_CAND] k=%d res=%.17g best=%.17g second=%.17g\n",
@@ -202,7 +214,7 @@ $findLPC = $findLPC.Replace("            /* Determine whether current interpolat
 
             /* Determine whether current interpolated NLSFs are best so far */
 "@)
-$findLPC = $findLPC.Replace("    celt_assert( psEncC->indices.NLSFInterpCoef_Q2 == 4 ||",
+$findLPC = $findLPC.ReplaceChecked("    celt_assert( psEncC->indices.NLSFInterpCoef_Q2 == 4 ||",
 @"
     if( oracle_trace_enabled ) {
         fprintf(stderr, "[SILK_ENC_NLSF_TARGET] interp=%d\n", psEncC->indices.NLSFInterpCoef_Q2);
@@ -211,12 +223,12 @@ $findLPC = $findLPC.Replace("    celt_assert( psEncC->indices.NLSFInterpCoef_Q2 
 
     celt_assert( psEncC->indices.NLSFInterpCoef_Q2 == 4 ||
 "@)
-Set-Content "$bld\find_LPC_FLP_instr.c" $findLPC
+Set-Content "$bld/find_LPC_FLP_instr.c" $findLPC
 
-$findPred = Get-Content "$silk\float\find_pred_coefs_FLP.c" -Raw
+$findPred = Get-Content "$silk/float\find_pred_coefs_FLP.c" -Raw
 $findPred = $findPred.Replace("`r`n", "`n")
-$findPred = $findPred.Replace('#include "main_FLP.h"', "#include `"main_FLP.h`"`r`n#include `"silk_trace.h`"")
-$findPred = $findPred.Replace("    silk_process_NLSFs_FLP( &psEnc->sCmn, psEncCtrl->PredCoef, NLSF_Q15, psEnc->sCmn.prev_NLSFq_Q15 );",
+$findPred = $findPred.ReplaceChecked('#include "main_FLP.h"', "#include `"main_FLP.h`"`r`n#include `"silk_trace.h`"")
+$findPred = $findPred.ReplaceChecked("    silk_process_NLSFs_FLP( &psEnc->sCmn, psEncCtrl->PredCoef, NLSF_Q15, psEnc->sCmn.prev_NLSFq_Q15 );",
 @"
     silk_process_NLSFs_FLP( &psEnc->sCmn, psEncCtrl->PredCoef, NLSF_Q15, psEnc->sCmn.prev_NLSFq_Q15 );
     if( oracle_trace_enabled ) {
@@ -230,18 +242,18 @@ $findPred = $findPred.Replace("    silk_process_NLSFs_FLP( &psEnc->sCmn, psEncCt
         oracle_silk_dump_int("ENC_PITCHL", psEncCtrl->pitchL, psEnc->sCmn.nb_subfr);
     }
 "@)
-$findPred = $findPred.Replace("    silk_residual_energy_FLP( psEncCtrl->ResNrg, LPC_in_pre, psEncCtrl->PredCoef, psEncCtrl->Gains,`n        psEnc->sCmn.subfr_length, psEnc->sCmn.nb_subfr, psEnc->sCmn.predictLPCOrder );",
+$findPred = $findPred.ReplaceChecked("    silk_residual_energy_FLP( psEncCtrl->ResNrg, LPC_in_pre, psEncCtrl->PredCoef, psEncCtrl->Gains,`n        psEnc->sCmn.subfr_length, psEnc->sCmn.nb_subfr, psEnc->sCmn.predictLPCOrder );",
 @"
     silk_residual_energy_FLP( psEncCtrl->ResNrg, LPC_in_pre, psEncCtrl->PredCoef, psEncCtrl->Gains,
         psEnc->sCmn.subfr_length, psEnc->sCmn.nb_subfr, psEnc->sCmn.predictLPCOrder );
     oracle_silk_dump_float("ENC_RESNRG_FLP", psEncCtrl->ResNrg, psEnc->sCmn.nb_subfr);
 "@)
-Set-Content "$bld\find_pred_coefs_FLP_instr.c" $findPred
+Set-Content "$bld/find_pred_coefs_FLP_instr.c" $findPred
 
-$noiseShape = Get-Content "$silk\float\noise_shape_analysis_FLP.c" -Raw
+$noiseShape = Get-Content "$silk/float\noise_shape_analysis_FLP.c" -Raw
 $noiseShape = $noiseShape.Replace("`r`n", "`n")
-$noiseShape = $noiseShape.Replace('#include "tuning_parameters.h"', "#include `"tuning_parameters.h`"`r`n#include `"silk_trace.h`"")
-$noiseShape = $noiseShape.Replace("        psEncCtrl->Tilt[ k ]           = psShapeSt->Tilt_smth;`n    }`n}",
+$noiseShape = $noiseShape.ReplaceChecked('#include "tuning_parameters.h"', "#include `"tuning_parameters.h`"`r`n#include `"silk_trace.h`"")
+$noiseShape = $noiseShape.ReplaceChecked("        psEncCtrl->Tilt[ k ]           = psShapeSt->Tilt_smth;`n    }`n}",
 @"
         psEncCtrl->Tilt[ k ]           = psShapeSt->Tilt_smth;
     }
@@ -259,12 +271,12 @@ $noiseShape = $noiseShape.Replace("        psEncCtrl->Tilt[ k ]           = psSh
     }
 }
 "@)
-Set-Content "$bld\noise_shape_analysis_FLP_instr.c" $noiseShape
+Set-Content "$bld/noise_shape_analysis_FLP_instr.c" $noiseShape
 
-$processGains = Get-Content "$silk\float\process_gains_FLP.c" -Raw
+$processGains = Get-Content "$silk/float\process_gains_FLP.c" -Raw
 $processGains = $processGains.Replace("`r`n", "`n")
-$processGains = $processGains.Replace('#include "tuning_parameters.h"', "#include `"tuning_parameters.h`"`r`n#include `"silk_trace.h`"")
-$processGains = $processGains.Replace("    silk_assert( psEncCtrl->Lambda > 0.0f );",
+$processGains = $processGains.ReplaceChecked('#include "tuning_parameters.h"', "#include `"tuning_parameters.h`"`r`n#include `"silk_trace.h`"")
+$processGains = $processGains.ReplaceChecked("    silk_assert( psEncCtrl->Lambda > 0.0f );",
 @"
     if( oracle_trace_enabled ) {
         fprintf(stderr, "[SILK_ENC_PROCESS_GAINS] cond=%d signalType=%d quantOffset=%d lastGainPrev=%d Lambda=%.17g\n",
@@ -278,12 +290,12 @@ $processGains = $processGains.Replace("    silk_assert( psEncCtrl->Lambda > 0.0f
 
     silk_assert( psEncCtrl->Lambda > 0.0f );
 "@)
-Set-Content "$bld\process_gains_FLP_instr.c" $processGains
+Set-Content "$bld/process_gains_FLP_instr.c" $processGains
 
-$wrappers = Get-Content "$silk\float\wrappers_FLP.c" -Raw
+$wrappers = Get-Content "$silk/float\wrappers_FLP.c" -Raw
 $wrappers = $wrappers.Replace("`r`n", "`n")
-$wrappers = $wrappers.Replace('#include "main_FLP.h"', "#include `"main_FLP.h`"`r`n#include `"silk_trace.h`"")
-$wrappers = $wrappers.Replace("    /* Call NSQ */",
+$wrappers = $wrappers.ReplaceChecked('#include "main_FLP.h"', "#include `"main_FLP.h`"`r`n#include `"silk_trace.h`"")
+$wrappers = $wrappers.ReplaceChecked("    /* Call NSQ */",
 @"
     if( oracle_trace_enabled ) {
         fprintf(stderr, "[SILK_ENC_NSQ_INPUT] signalType=%d quantOffset=%d seed=%d Lambda_Q10=%d LTP_scale_Q14=%d\n",
@@ -313,7 +325,7 @@ $wrappers = $wrappers.Replace("    /* Call NSQ */",
 
     /* Call NSQ */
 "@)
-$wrappers = $wrappers.Replace("    } else {`n        silk_NSQ( &psEnc->sCmn, psNSQ, psIndices, x16, pulses, PredCoef_Q12[ 0 ], LTPCoef_Q14,`n            AR_Q13, HarmShapeGain_Q14, Tilt_Q14, LF_shp_Q14, Gains_Q16, psEncCtrl->pitchL, Lambda_Q10, LTP_scale_Q14, psEnc->sCmn.arch );`n    }`n}",
+$wrappers = $wrappers.ReplaceChecked("    } else {`n        silk_NSQ( &psEnc->sCmn, psNSQ, psIndices, x16, pulses, PredCoef_Q12[ 0 ], LTPCoef_Q14,`n            AR_Q13, HarmShapeGain_Q14, Tilt_Q14, LF_shp_Q14, Gains_Q16, psEncCtrl->pitchL, Lambda_Q10, LTP_scale_Q14, psEnc->sCmn.arch );`n    }`n}",
 @"
     } else {
         silk_NSQ( &psEnc->sCmn, psNSQ, psIndices, x16, pulses, PredCoef_Q12[ 0 ], LTPCoef_Q14,
@@ -322,24 +334,24 @@ $wrappers = $wrappers.Replace("    } else {`n        silk_NSQ( &psEnc->sCmn, psN
     oracle_silk_dump_i8("ENC_NSQ_PULSES", pulses, psEnc->sCmn.frame_length);
 }
 "@)
-Set-Content "$bld\wrappers_FLP_instr.c" $wrappers
+Set-Content "$bld/wrappers_FLP_instr.c" $wrappers
 
-$nsqDelDec = Get-Content "$silk\NSQ_del_dec.c" -Raw
+$nsqDelDec = Get-Content "$silk/NSQ_del_dec.c" -Raw
 $nsqDelDec = $nsqDelDec.Replace("`r`n", "`n")
-$nsqDelDec = $nsqDelDec.Replace('#include "stack_alloc.h"', "#include `"stack_alloc.h`"`r`n#include `"silk_trace.h`"")
-$nsqDelDec = $nsqDelDec.Replace("    opus_int16          *pxq;",
+$nsqDelDec = $nsqDelDec.ReplaceChecked('#include "stack_alloc.h"', "#include `"stack_alloc.h`"`r`n#include `"silk_trace.h`"")
+$nsqDelDec = $nsqDelDec.ReplaceChecked("    opus_int16          *pxq;",
 @"
     opus_int16          *pxq;
     opus_int8           *pulses_start;
     opus_int16          *pxq_start;
 "@)
-$nsqDelDec = $nsqDelDec.Replace("    pxq                   = &NSQ->xq[ psEncC->ltp_mem_length ];",
+$nsqDelDec = $nsqDelDec.ReplaceChecked("    pxq                   = &NSQ->xq[ psEncC->ltp_mem_length ];",
 @"
     pxq                   = &NSQ->xq[ psEncC->ltp_mem_length ];
     pulses_start          = pulses;
     pxq_start             = pxq;
 "@)
-$nsqDelDec = $nsqDelDec.Replace("    /* Save quantized speech signal */",
+$nsqDelDec = $nsqDelDec.ReplaceChecked("    /* Save quantized speech signal */",
 @"
     if( oracle_trace_enabled ) {
         fprintf(stderr, "[SILK_ENC_NSQ_DEL_DEC_DONE] winner=%d rd=%d seed=%d lagPrev=%d\n",
@@ -350,53 +362,32 @@ $nsqDelDec = $nsqDelDec.Replace("    /* Save quantized speech signal */",
 
     /* Save quantized speech signal */
 "@)
-Set-Content "$bld\NSQ_del_dec_instr.c" $nsqDelDec
+Set-Content "$bld/NSQ_del_dec_instr.c" $nsqDelDec
 
-# Full libopus decoder sources, with the CELT/SILK decoder files replaced by
-# generated instrumented copies.
-$celtStock = @('celt','celt_encoder','celt_lpc','entcode','entdec','entenc','kiss_fft','laplace',
-           'mathops','modes','pitch','quant_bands','rate','vq') |
-         ForEach-Object { "$celt\$_.c" }
-$silkStockNames = @(
-  'CNG','code_signs','init_decoder','decoder_set_fs','dec_API','enc_API',
-  'encode_indices','encode_pulses','gain_quant','interpolate','LP_variable_cutoff',
-  'NLSF_decode','NSQ','PLC','shell_coder','tables_gain','tables_LTP',
-  'tables_NLSF_CB_NB_MB','tables_NLSF_CB_WB','tables_other','tables_pitch_lag',
-  'tables_pulses_per_block','VAD','control_audio_bandwidth','quant_LTP_gains',
-  'VQ_WMat_EC','HP_variable_cutoff','NLSF_encode','NLSF_VQ','NLSF_unpack',
-  'NLSF_del_dec_quant','process_NLSFs','stereo_LR_to_MS','stereo_MS_to_LR',
-  'check_control_input','control_SNR','init_encoder','control_codec','A2NLSF',
-  'ana_filt_bank_1','biquad_alt','bwexpander_32','bwexpander','debug','decode_pitch',
-  'inner_prod_aligned','lin2log','log2lin','LPC_analysis_filter','LPC_inv_pred_gain',
-  'table_LSF_cos','NLSF2A','NLSF_stabilize','NLSF_VQ_weights_laroia','pitch_est_tables',
-  'resampler','resampler_down2_3','resampler_down2','resampler_private_AR2',
-  'resampler_private_down_FIR','resampler_private_IIR_FIR','resampler_private_up2_HQ',
-  'resampler_rom','sigm_Q15','sort','sum_sqr_shift','stereo_decode_pred',
-  'stereo_encode_pred','stereo_find_predictor','stereo_quant_pred','LPC_fit'
-)
-$silkStock = $silkStockNames | ForEach-Object { "$silk\$_.c" }
-$silkFloatNames = @('apply_sine_window_FLP','corrMatrix_FLP','encode_frame_FLP',
-  'find_LTP_FLP','find_pitch_lags_FLP','LPC_analysis_filter_FLP',
-  'LTP_analysis_filter_FLP','LTP_scale_ctrl_FLP',
-  'regularize_correlations_FLP','residual_energy_FLP',
-  'warped_autocorrelation_FLP','autocorrelation_FLP','burg_modified_FLP',
-  'bwexpander_FLP','energy_FLP','inner_product_FLP','k2a_FLP','LPC_inv_pred_gain_FLP',
-  'pitch_analysis_core_FLP','scale_copy_vector_FLP','scale_vector_FLP','schur_FLP','sort_FLP')
-$silkFloat = $silkFloatNames | ForEach-Object { "$silk\float\$_.c" }
+# Full libopus sources, with the instrumented files replaced by the generated
+# copies above.
+$instrCelt = @('mdct.c','bands.c','cwrs.c','celt_decoder.c')
+$instrSilk = @('decode_frame.c','decode_indices.c','decode_pulses.c','decode_parameters.c',
+  'decode_core.c','NSQ_del_dec.c')
+$instrFloat = @('find_LPC_FLP.c','find_pred_coefs_FLP.c','noise_shape_analysis_FLP.c',
+  'process_gains_FLP.c','wrappers_FLP.c')
+$celtStock = Get-ChildItem "$celt/*.c" | Where-Object { $_.Name -notmatch '^(opus_custom_demo|dump_modes|.*_test.*)' -and $instrCelt -notcontains $_.Name } | ForEach-Object { $_.FullName }
+$silkStock = Get-ChildItem "$silk/*.c" | Where-Object { $instrSilk -notcontains $_.Name } | ForEach-Object { $_.FullName }
+$silkFloat = Get-ChildItem "$silk/float/*.c" | Where-Object { $instrFloat -notcontains $_.Name } | ForEach-Object { $_.FullName }
 $opusStock = @('opus','opus_decoder','opus_encoder','extensions','opus_multistream',
   'opus_multistream_encoder','opus_multistream_decoder','repacketizer',
   'opus_projection_encoder','opus_projection_decoder','mapping_matrix',
-  'analysis','mlp','mlp_data') | ForEach-Object { "$opusSrc\$_.c" }
-$srcs = $celtStock + @("$bld\mdct_instr.c","$bld\bands_instr.c","$bld\cwrs_instr.c","$bld\celt_decoder_instr.c") +
+  'analysis','mlp','mlp_data') | ForEach-Object { "$opusSrc/$_.c" }
+$srcs = $celtStock + @("$bld/mdct_instr.c","$bld/bands_instr.c","$bld/cwrs_instr.c","$bld/celt_decoder_instr.c") +
         $silkStock + $silkFloat +
-        @("$bld\decode_frame_instr.c","$bld\decode_indices_instr.c","$bld\decode_pulses_instr.c",
-          "$bld\decode_parameters_instr.c","$bld\decode_core_instr.c",
-          "$bld\find_LPC_FLP_instr.c","$bld\find_pred_coefs_FLP_instr.c",
-          "$bld\noise_shape_analysis_FLP_instr.c","$bld\process_gains_FLP_instr.c",
-          "$bld\wrappers_FLP_instr.c","$bld\NSQ_del_dec_instr.c") +
-        $opusStock + @("$bld\oracle.c")
-$inc  = @("-I$bld","-I$celt","-I$srcDir\include","-I$srcDir","-I$srcDir\silk","-I$srcDir\silk\float","-I$srcDir\src")
+        @("$bld/decode_frame_instr.c","$bld/decode_indices_instr.c","$bld/decode_pulses_instr.c",
+          "$bld/decode_parameters_instr.c","$bld/decode_core_instr.c",
+          "$bld/find_LPC_FLP_instr.c","$bld/find_pred_coefs_FLP_instr.c",
+          "$bld/noise_shape_analysis_FLP_instr.c","$bld/process_gains_FLP_instr.c",
+          "$bld/wrappers_FLP_instr.c","$bld/NSQ_del_dec_instr.c") +
+        $opusStock + @("$bld/oracle.c")
+$inc  = @("-I$bld","-I$celt","-I$srcDir/include","-I$srcDir","-I$silk","-I$silk/float","-I$opusSrc")
 
 # NOTE: build WITHOUT -DCUSTOM_MODES so the exact static 48000/960 mode (shipped tables) is used.
-& gcc -O1 -DOPUS_BUILD -DVAR_ARRAYS @inc @srcs -lm -o "$bld\oracle.exe"
-if ($LASTEXITCODE -eq 0) { Write-Host "OK: $bld\oracle.exe" } else { Write-Host "BUILD FAILED" }
+& gcc -O1 -ffp-contract=off -DOPUS_BUILD -DVAR_ARRAYS -DHAVE_LRINTF @inc @srcs -lm -o "$bld/oracle.exe"
+if ($LASTEXITCODE -eq 0) { Write-Host "OK: $bld/oracle.exe" } else { Write-Host "BUILD FAILED"; exit 1 }

@@ -27,6 +27,8 @@ type Encoder struct {
 	nsqScratch nsqWorkBuffers
 	// pitchBuf is silkFindPitchLags' analysis buffer.
 	pitchBuf []float64
+	// pitchScratch holds the pitch analysis working buffers.
+	pitchScratch pitchAnalysisScratch
 
 	sampleRate       int // Sample rate (8000, 12000, 16000, 24000)
 	frameSize        int // Frame size in samples

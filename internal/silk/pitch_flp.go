@@ -387,13 +387,14 @@ func (e *Encoder) silkFindPitchLags(signal []float64, speechActivity float64, va
 	// estimator only when this is not the first frame after a reset; that
 	// first frame is always coded unvoiced.
 	runCore := !e.firstFrameAfterReset && vadActive
-	r := silkFindPitchLagsFLP32(buf, laPitch, winLen, order, fsKHz, nbSubfr, peComplexity,
+	r := silkFindPitchLagsFLP32Scratch(&e.pitchScratch, buf, laPitch, winLen, order, fsKHz, nbSubfr, peComplexity,
 		e.speechActivityQ8, e.prevSignalType, e.inputTiltQ15, e.pitchEstimationThresholdQ16(),
 		e.prevLagForPitch, e.ltpCorrState, runCore)
 	// silk_find_pred_coefs_FLP correlates this residual (res_pitch) for the
 	// LTP quantizer; the la_pitch tail covers the LTP_ORDER samples it reads
 	// past the frame.
-	// r.res is freshly allocated for this call and nothing else holds it.
+	// r.res lives in e.pitchScratch until the next frame's pitch analysis;
+	// every reader of pitchResidual runs within this frame.
 	e.pitchResidual = r.res
 	e.pitchPredGain = r.predGain
 	if !runCore {

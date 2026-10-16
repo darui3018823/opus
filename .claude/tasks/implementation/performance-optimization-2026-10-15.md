@@ -362,6 +362,14 @@ vacuously.
   equal-length views. In those kernels the cost is the float64 storage
   (load/convert/store per element), which points back to item 11.
 
+- 2026-10-17 06:30 scheduled run (clock checked 06:30:09): item 11 still
+  waits for the user, so the run took more of item 6. The stereo SILK-only
+  path copied its CELT input every frame for the HB-gain / stereo-width
+  fades; the copy now reuses `Encoder.celtFadeBuf` (also used by the rare
+  CELT-only HB fade). Interleaved 2 s x 6: silk/stereo/12k encode -1.63%
+  time, -33.8% bytes; everything else unchanged. Local commit only (PR #32
+  is open; not pushed).
+
 ## Next steps (in order)
 
 From an Opus read-only review on 2026-10-15 (commit `52969ac`; estimates

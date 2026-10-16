@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"math"
 	"testing"
 )
 
@@ -141,5 +142,46 @@ func BenchmarkPerfDefaultDecodeFEC(b *testing.B) {
 				perfRangeSink = dec.FinalRange()
 			}
 		})
+	}
+}
+
+// TestEncodeInt16AllocsMatchFloat guards the int16 Encode path: it must not
+// allocate more per call than EncodeFloat on the same signal (its float64
+// conversion buffer is reused across calls).
+func TestEncodeInt16AllocsMatchFloat(t *testing.T) {
+	wl := perfWorkload{name: "celt/stereo/128k", channels: 2, app: ApplicationAudio, bitrate: 128000, gen: perfMusicFrame}
+	frames := perfInputFrames(wl)
+	frames16 := make([][]int16, len(frames))
+	for i, f := range frames {
+		frames16[i] = make([]int16, len(f))
+		for j, v := range f {
+			frames16[i][j] = int16(math.Round(math.Max(-32768, math.Min(32767, v*32768))))
+		}
+	}
+	encF := newPerfDefaultEncoder(t, wl)
+	enc16 := newPerfDefaultEncoder(t, wl)
+	for i := 0; i < 50; i++ {
+		if _, err := encF.EncodeFloat(frames[i%len(frames)], perfFrameSize); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := enc16.Encode(frames16[i%len(frames16)], perfFrameSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var iF, i16 int
+	floatAllocs := testing.AllocsPerRun(100, func() {
+		if _, err := encF.EncodeFloat(frames[iF%len(frames)], perfFrameSize); err != nil {
+			t.Fatal(err)
+		}
+		iF++
+	})
+	int16Allocs := testing.AllocsPerRun(100, func() {
+		if _, err := enc16.Encode(frames16[i16%len(frames16)], perfFrameSize); err != nil {
+			t.Fatal(err)
+		}
+		i16++
+	})
+	if int16Allocs > floatAllocs {
+		t.Fatalf("Encode(int16) allocates %.1f per call, EncodeFloat %.1f", int16Allocs, floatAllocs)
 	}
 }

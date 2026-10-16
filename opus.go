@@ -175,7 +175,10 @@ type Encoder struct {
 	maxPacketSize int
 	// callerPCM / callerFrameSize are the caller's whole input when an
 	// expert frame duration codes only a prefix (analysis_pcm).
-	callerPCM       []float64
+	callerPCM []float64
+	// inputBuf holds Encode/Encode24's float64 conversion of the caller's
+	// samples; it is only read during that call.
+	inputBuf        []float64
 	callerFrameSize int
 	// reportedBitrate is EffectiveBitrate: the setting bounded by 1275
 	// bytes per coded frame. Under the libopus policy the packet bitrate
@@ -497,14 +500,24 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
 
-	// Convert int16 to float64
-	floatPCM := make([]float64, expectedSize)
+	// Convert int16 to float64 in a reused buffer: the encoder copies
+	// whatever it keeps (EncodeFloat callers may reuse their buffers too).
+	floatPCM := e.inputScratch(expectedSize)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768.0
 	}
 
 	e.inputLSBDepth = 16
 	return e.encodeCallerFrame(floatPCM, frameSize, selectedFrameSize)
+}
+
+// inputScratch returns e.inputBuf resized to n samples. Every element is
+// overwritten by the caller.
+func (e *Encoder) inputScratch(n int) []float64 {
+	if cap(e.inputBuf) < n {
+		e.inputBuf = make([]float64, n)
+	}
+	return e.inputBuf[:n]
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
@@ -520,7 +533,7 @@ func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
 	if len(pcm) < expectedSize {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
-	floatPCM := make([]float64, expectedSize)
+	floatPCM := e.inputScratch(expectedSize)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608.0
 	}

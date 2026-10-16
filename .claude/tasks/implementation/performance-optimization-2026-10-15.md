@@ -347,7 +347,8 @@ vacuously.
     dSNR -0.00..+0.03 dB, rate 0..0.3%, identical packets median 88%,
     modes 100%, decoder max 1 LSB.
   - `4b4acce` adds arm64 Linux/macOS cells to the official-vector CI job so
-    the decode digests run on an FMA architecture (not pushed yet).
+    the decode digests run on an FMA architecture; run 38858997687 on
+    `fc0c4f9` passed all 11 jobs, including both arm64 vector cells.
 
 ## Next steps (in order)
 

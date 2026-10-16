@@ -147,6 +147,13 @@ func runCELTOracleCmdWithStderr(t *testing.T, fixture string, args ...string) ([
 	if err := cmd.Run(); err != nil {
 		t.Fatalf("enc_oracle --celt-enc %s: %v\n%s", fixture, err, stderr.String())
 	}
+	return parseCELTOracleTrace(t, stderr.String(), frames), stderr.String()
+}
+
+// parseCELTOracleTrace parses the oracle's CELT encoder trace lines for
+// frames frames.
+func parseCELTOracleTrace(t *testing.T, text string, frames int) []celtOracleFrame {
+	t.Helper()
 	out := make([]celtOracleFrame, frames)
 	cur := -1
 	parseFloats := func(line string) []float32 {
@@ -161,11 +168,13 @@ func runCELTOracleCmdWithStderr(t *testing.T, fixture string, args ...string) ([
 		}
 		return vals
 	}
-	sc := bufio.NewScanner(strings.NewReader(stderr.String()))
+	sc := bufio.NewScanner(strings.NewReader(text))
 	sc.Buffer(make([]byte, 1<<20), 1<<26)
 	for sc.Scan() {
 		line := sc.Text()
 		switch {
+		case strings.HasPrefix(line, "[CELT_ENC_INPUT_FRAME]") && strings.Contains(line, "frame=-1"):
+			// The script oracle's "t" command announces the trace switch.
 		case strings.HasPrefix(line, "[CELT_ENC_INPUT_FRAME]"):
 			cur++
 			if cur >= frames {
@@ -300,7 +309,7 @@ func runCELTOracleCmdWithStderr(t *testing.T, fixture string, args ...string) ([
 			out[cur].haveRng = true
 		}
 	}
-	return out, stderr.String()
+	return out
 }
 
 // float32Stats returns the maximum absolute difference, the maximum

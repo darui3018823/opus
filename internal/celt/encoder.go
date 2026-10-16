@@ -1348,6 +1348,10 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	pulses, eBits, finePriority, balance, intensity, codedBands, dualStereo :=
 		computeAllocationEncodeScratch(enc, encIntensity, encDualStereo,
 			numBands, start, end, lm, ch, allocTrim, bitsQ3, offsets, e.lastCodedBands, e.signalBandwidth(end, equivRate), &e.alloc)
+	// clt_compute_allocation writes the coded intensity back through
+	// &st->intensity: min(intensity, codedBands), or 0 when no bits are
+	// reserved for it. The next frame's hysteresis starts from that value.
+	e.intensity = intensity
 	// st->lastCodedBands moves by at most one band per frame.
 	if e.lastCodedBands != 0 {
 		v := codedBands

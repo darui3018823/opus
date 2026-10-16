@@ -341,6 +341,16 @@ buffer must be present, and only the selected prefix is consumed. The control
 is propagated by multistream, surround, and projection encoders, survives
 `Reset`, and is cross-checked against libopus 1.6.1 for every fixed duration.
 
+The October 2026 performance pass (branch `perf/decoder-encoder-optimization`)
+roughly halves encode and decode time against v1.6.0 and removes about 97%
+of the bytes allocated, without changing decoded PCM, final ranges or encoded
+bytes; see "Final Comparison With v1.6.0" in `docs/PERF_BASELINE.md`.
+Internal changes callers do not see: encoder frame traces
+(`silk.Encoder.LastFrameTrace`/`PacketFrameTraces`) are recorded only while
+`silk.EnableFrameTraces()` is held, and the CELT decoder's internal `Decode`
+returns a buffer valid until its next call (the public `Decode`/`DecodeFloat`
+results are still caller-owned).
+
 The arbitrary-length FFT path caches immutable Bluestein plans and performs the
 convolution FFTs in place. On the Windows amd64 audit machine this reduced the
 20 ms stereo CELT benchmark from approximately 458 KB/48 allocations to

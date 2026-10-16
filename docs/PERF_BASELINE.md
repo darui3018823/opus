@@ -470,3 +470,38 @@ uses 0% to 1.5% more bits, picks the same mode for every packet and emits
 byte-identical packets for a median 76.7% of frames. Against pion/opus on
 the same machine the decoder now takes 1.06x as long over the 12 vectors.
 Details in the investigation note linked above.
+
+## Final Comparison With v1.6.0 (2026-10-17)
+
+Same machine, same hour, `go test -bench 'BenchmarkDecodeOfficialVectors|BenchmarkPerfDefault' -benchmem -benchtime 2s -count 6`:
+v1.6.0 (`2edb1c2`, with this branch's benchmark files copied in) against
+this branch at `e00a575`. All differences have p = 0.002 (n = 6). Output is
+unchanged: decoded PCM, final range and encoded bytes match v1.6.0 (digest
+tests, the opusref suite and 36 real-audio cells re-encoded byte for byte).
+
+| Benchmark | v1.6.0 | now | time | alloc v1.6.0 | alloc now | allocs v1.6.0 | allocs now |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| tv01 (CELT) | 333.2 ms | 138.9 ms | -58% | 282.9 MiB | 6.1 MiB | 341k | 26k |
+| tv02 (SILK) | 54.4 ms | 34.3 ms | -37% | 84.7 MiB | 1.7 MiB | 78k | 4.5k |
+| tv05 (hybrid) | 182.6 ms | 92.1 ms | -50% | 297.3 MiB | 3.0 MiB | 186k | 11k |
+| tv09 | 347.1 ms | 114.7 ms | -67% | 274.4 MiB | 3.3 MiB | 382k | 12k |
+| tv10 | 385.6 ms | 145.6 ms | -62% | 348.1 MiB | 6.3 MiB | 427k | 25k |
+| tv12 (SILK) | 70.9 ms | 39.8 ms | -44% | 123.1 MiB | 2.6 MiB | 71k | 6.8k |
+| encode celt/mono/96k | 207.7 µs | 104.7 µs | -50% | 63.4 KiB | 1.8 KiB | 193 | 16 |
+| encode celt/stereo/128k | 302.8 µs | 165.1 µs | -45% | 109.4 KiB | 2.8 KiB | 320 | 17 |
+| encode silk/mono/12k | 754.8 µs | 394.5 µs | -48% | 245.0 KiB | 28.4 KiB | 1041 | 141 |
+| encode silk/stereo/12k | 798.9 µs | 422.6 µs | -47% | 273.7 KiB | 47.3 KiB | 1044 | 131 |
+| encode hybrid/mono/24k | 423.8 µs | 235.8 µs | -44% | 179.3 KiB | 13.3 KiB | 405 | 81 |
+| encode hybrid/stereo/36k | 1149.1 µs | 624.1 µs | -46% | 424.0 KiB | 47.9 KiB | 1223 | 196 |
+| decode FEC voip/mono/32k | 107.5 µs | 50.0 µs | -53% | 126.0 KiB | 0.6 KiB | 74 | 4 |
+
+Geometric mean over all 21 benchmarks: time -50.1%, bytes allocated
+-97.6%, allocations -93.1%. All 12 vectors: -37% to -67%.
+
+Against pion/opus (`44637de`) on the same machine (2026-10-16), the decoder
+takes 1.06x as long over the 12 vectors (2.8x before this branch) and is
+faster on tv02 to tv06 and tv12. Against plain-C libopus 1.6.1 (gcc -O2, no
+intrinsics) it takes 1.6x for decode and 1.6x to 1.7x for encode; the
+profile comparison that explains the remaining gap is in
+`.claude/tasks/investigation/plainc-parity-and-profile-2026-10-16.md`
+(branch `fix/encoder-plainc-parity`).

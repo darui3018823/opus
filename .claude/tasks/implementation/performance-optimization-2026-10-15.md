@@ -350,6 +350,18 @@ vacuously.
     the decode digests run on an FMA architecture; run 38858997687 on
     `fc0c4f9` passed all 11 jobs, including both arm64 vector cells.
 
+- 2026-10-16 evening: C/Go profile follow-up (see
+  `.claude/tasks/investigation/plainc-parity-and-profile-2026-10-16.md` on
+  `fix/encoder-plainc-parity`). `13e243f`: the encoder pre-emphasis runs in
+  float32 locals with the loop split by channel count (it converted
+  float64 -> float32 -> float64 per sample; gcc also auto-vectorises the C
+  loop at -O2). 1680 s encode at 64k: 20.28 s -> 19.62 s (-3.2%, three
+  interleaved runs), packets byte-identical, no FMA. Tried and reverted
+  (no measurable change on real audio): accumulating `runPrefilter`'s sums
+  in locals, and removing the bounds checks in `expRotation1` with
+  equal-length views. In those kernels the cost is the float64 storage
+  (load/convert/store per element), which points back to item 11.
+
 ## Next steps (in order)
 
 From an Opus read-only review on 2026-10-15 (commit `52969ac`; estimates

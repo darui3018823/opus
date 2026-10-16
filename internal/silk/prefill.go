@@ -138,6 +138,14 @@ func (e *Encoder) CarryPacketState(src *Encoder) {
 	e.timeSinceSwitchAllowedMs = src.timeSinceSwitchAllowedMs
 	e.allowBandwidthSwitch = src.allowBandwidthSwitch
 	e.lp = src.lp
+	// The Opus layer's VAD decision and the DTX setting are silk_Encode
+	// arguments in libopus (activity, encControl->useDTX), so they survive
+	// the re-initialisation; SetOpusActivity/SetDTX ran on src.
+	e.SetOpusActivity(VADActivity)
+	if src.opusNoActivity {
+		e.SetOpusActivity(VADNoActivity)
+	}
+	e.SetDTX(src.useDTX)
 	if e.channels == 2 && e.streamChannels == 2 && e.side != nil {
 		// prefill 2 restores the mid channel's sLP into every internal
 		// channel.

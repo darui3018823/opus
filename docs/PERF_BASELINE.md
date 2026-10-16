@@ -453,7 +453,7 @@ Full tables, method and caveats:
 | | libopus (ffmpeg) | this codec |
 |---|---:|---:|
 | Decoder agreement with libopus | - | 99.925% identical samples, max 1 LSB |
-| Encoder SNR 32k / 64k / 128k | 10.87 / 14.14 / 22.14 dB | 10.99 / 14.19 / 21.55 dB |
+| Encoder SNR 32k / 64k / 128k (Go in constrained VBR, see note) | 10.87 / 14.14 / 22.14 dB | 10.99 / 14.19 / 21.55 dB |
 | Same mode (TOC) as libopus | - | 100% of packets |
 | Decode, x realtime | 361 | 225 |
 | Encode 64k, x realtime | 164 | 76 |
@@ -461,3 +461,12 @@ Full tables, method and caveats:
 
 Per 20 ms frame the Go decoder takes about 89 µs and the 64k encoder about
 264 µs (0.4% and 1.3% of one core in real time).
+
+Correction (same day): ffmpeg's `-vbr on` is unconstrained VBR and this
+encoder defaults to constrained VBR, so the SNR row above compares
+different modes. With matched unconstrained VBR over nine genres and four
+bitrates (36 cells), the Go encoder is within -0.03 to +0.25 dB of libopus,
+uses 0% to 1.5% more bits, picks the same mode for every packet and emits
+byte-identical packets for a median 76.7% of frames. Against pion/opus on
+the same machine the decoder now takes 1.06x as long over the 12 vectors.
+Details in the investigation note linked above.

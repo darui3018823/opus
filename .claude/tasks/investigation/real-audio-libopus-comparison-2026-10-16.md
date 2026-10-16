@@ -1,6 +1,7 @@
 # Real-Audio Comparison With libopus (2026-10-16)
 
-- Status: complete (measurement snapshot, 2026-10-16)
+- Status: complete; corrected and extended the same afternoon (see
+  "Correction and multi-genre follow-up" at the end)
 - Commit measured: `af80912` on `perf/decoder-encoder-optimization`
 - Related: [performance brief](../implementation/performance-optimization-2026-10-15.md),
   [PERF_BASELINE](../../../docs/PERF_BASELINE.md)
@@ -139,3 +140,40 @@ ffmpeg -f s16le -ar 48000 -ac 2 -i dec_libopus.raw -c:a libopus -b:a 64k -vbr on
 ytcmp pkts enc_libopus_64.opus enc_ours_64.opus "bitstream agreement"
 pwsh tools/measure.ps1   # timing, CPU cycles and peak memory
 ```
+
+## Correction and multi-genre follow-up (2026-10-16 afternoon)
+
+The encoder comparison above compared different rate-control modes. ffmpeg's
+`-vbr on` runs libopus with unconstrained VBR (`OPUS_SET_VBR_CONSTRAINT(0)`),
+while this encoder defaults to constrained VBR, like libopus itself. The
+3% packet agreement and the -0.6 dB at 128 kb/s came mostly from that, not
+from SIMD rounding. With `SetVBRConstraint(false)` on the Go side, the same
+track gives 128 kb/s dSNR +0.01 dB and 65.3% identical packets.
+
+Rerun on nine YouTube sources (J-POP, rock, EDM, classical, jazz, acoustic
+guitar, a TED talk and two ASMR recordings, one of them 1684 s in full), at
+16/32/64/128 kb/s, unconstrained VBR on both sides, HEAD `1bdf41f`:
+
+| Measure | Result |
+|---|---|
+| Decoder agreement (81 pairs) | max diff 1 LSB everywhere; 99.92% to 99.997% identical samples |
+| Encoder dSNR, Go - libopus (36 cells) | min -0.03, median 0.00, max +0.25 dB |
+| Average-rate difference | 0% to +1.5% |
+| Identical packets | min 1.3%, median 76.7%, max 99.7% (remaining divergence: SIMD float rounding entering CELT quantization) |
+| Mode (TOC) agreement | 100% in all 36 cells |
+| Determinism (two encodes) | 36/36 byte-identical |
+| Time vs libopus (median over tracks) | decode 1.70x, encode 2.09x to 2.25x |
+| Peak working set | Go 14.9-18.8 MB, ffmpeg+libopus 19.5-24.0 MB; flat over the 1684 s track |
+
+Same-machine decoder comparison with pion/opus (`44637de`), 12 official
+vectors: 980 ms vs 925 ms in total (1.06x; 2.8x before this branch); Go is
+faster on tv02-tv06 and tv12, 1.1x to 1.27x slower on the CELT vectors.
+
+New follow-up, ahead of the ones above: `Encoder.Encode` and `Encode24`
+allocate a `[]float64` conversion buffer per call (15 KB per 20 ms stereo
+frame). The benchmarks use `EncodeFloat` and miss it; it accounts for most
+of the 300-600 MB per track the harness saw.
+
+The full Japanese report, charts, metrics (including the constrained-VBR
+run) and tools are in
+`D:/ShareFiles/yt-dlp/others/2026-10-16_opus-perf-and-real-audio-report/`.

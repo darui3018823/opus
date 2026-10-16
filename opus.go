@@ -102,6 +102,9 @@ type Encoder struct {
 	delayJoined  []float64
 	// hybridFadeBuf holds a hybrid frame's faded CELT input.
 	hybridFadeBuf []float64
+	// celtFadeBuf holds the faded CELT input of a SILK-only (redundancy) or
+	// CELT-only packet; it is used within the packet only.
+	celtFadeBuf []float64
 
 	// Configuration
 	bitrateSetting      int // requested bitrate or BitrateAuto/BitrateMax
@@ -901,7 +904,8 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 			// rate on a SILK-only packet; the fades still shape the CELT
 			// input a redundant frame is coded from.
 			if e.prevHBGain < 1 || e.channels == 2 {
-				faded := append([]float64(nil), celtPCM...)
+				faded := append(e.celtFadeBuf[:0], celtPCM...)
+				e.celtFadeBuf = faded
 				if e.prevHBGain < 1 {
 					applyGainFade(faded, e.prevHBGain, 1, e.channels, e.sampleRate)
 				}
@@ -1016,7 +1020,8 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 		// prefilled CELT state without prediction. A previous hybrid
 		// packet's high-band attenuation fades out (gain_fade to unity).
 		if e.prevHBGain < 1 {
-			faded := append([]float64(nil), celtPCM...)
+			faded := append(e.celtFadeBuf[:0], celtPCM...)
+			e.celtFadeBuf = faded
 			applyGainFade(faded, e.prevHBGain, 1, e.channels, e.sampleRate)
 			celtPCM = faded
 		}

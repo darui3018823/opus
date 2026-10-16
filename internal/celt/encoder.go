@@ -583,23 +583,28 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	bufs := scratchRows(&e.frame.bufs, CC, frameSize+ov)
 	pes := scratchRows(&e.frame.pe, CC, frameSize)
 	for c := 0; c < CC; c++ {
-		pe := pes[c]
-		mem := e.preemphMem[c]
-		for i := 0; i < frameSize; i++ {
-			var s float64
-			if CC == 1 {
-				s = samples[i]
-			} else {
-				s = samples[i*CC+c]
+		// celt_preemphasis (float build): x = CELT_SIG_SCALE * pcm,
+		// inp = x - m, m = coef0 * x, all in float32 with the 48 kHz mode's
+		// coef0 = 0.8500061035f. The state stays in a float32 local (the
+		// stored float64 holds a float32 value exactly).
+		pe := pes[c][:frameSize]
+		mem := float32(e.preemphMem[c])
+		coef := float32(preemphCoef0)
+		if CC == 1 {
+			for i, s := range samples[:frameSize] {
+				x := float32(float32(s) * 32768)
+				pe[i] = float64(x - mem)
+				mem = float32(coef * x) // explicit rounding: no FMA into the next x - mem
 			}
-			// celt_preemphasis (float build): x = CELT_SIG_SCALE * pcm,
-			// inp = x - m, m = coef0 * x, all in float32 with the 48 kHz
-			// mode's coef0 = 0.8500061035f.
-			xin := float64(float32(s) * 32768)
-			pe[i] = float64(float32(xin - mem))
-			mem = float64(float32(preemphCoef0) * float32(xin))
+		} else {
+			src := samples[c : c+(frameSize-1)*CC+1]
+			for i := range pe {
+				x := float32(float32(src[i*CC]) * 32768)
+				pe[i] = float64(x - mem)
+				mem = float32(coef * x) // explicit rounding: no FMA into the next x - mem
+			}
 		}
-		e.preemphMem[c] = mem
+		e.preemphMem[c] = float64(mem)
 
 		buf := bufs[c]
 		// The analysis (tone / transient detectors) sees the raw pre-emphasised

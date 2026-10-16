@@ -476,8 +476,10 @@ Details in the investigation note linked above.
 Same machine, same hour, `go test -bench 'BenchmarkDecodeOfficialVectors|BenchmarkPerfDefault' -benchmem -benchtime 2s -count 6`:
 v1.6.0 (`2edb1c2`, with this branch's benchmark files copied in) against
 this branch at `e00a575`. All differences have p = 0.002 (n = 6). Output is
-unchanged: decoded PCM, final range and encoded bytes match v1.6.0 (digest
-tests, the opusref suite and 36 real-audio cells re-encoded byte for byte).
+unchanged: decoded PCM, final range and encoded bytes match v1.6.0 (the
+digest tests, which were recorded from v1.6.0, and the opusref suite; real
+audio: five tracks at 16/64/128 kb/s encode to the same bytes with v1.6.0
+and this branch, and a YouTube Opus stream decodes to the same PCM).
 
 | Benchmark | v1.6.0 | now | time | alloc v1.6.0 | alloc now | allocs v1.6.0 | allocs now |
 |---|---:|---:|---:|---:|---:|---:|---:|

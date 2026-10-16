@@ -177,3 +177,9 @@ of the 300-600 MB per track the harness saw.
 The full Japanese report, charts, metrics (including the constrained-VBR
 run) and tools are in
 `D:/ShareFiles/yt-dlp/others/2026-10-16_opus-perf-and-real-audio-report/`.
+
+Follow-ups the same day: the `Encode` allocation is fixed in `9dc3e79`
+(byte-identical on all 36 cells); five lossless FLAC tracks give dSNR
+-0.00..+0.03 dB and a median 88% identical packets; concurrent encoding
+scales at 80% efficiency up to the 8 physical cores. Section 9 of the
+Japanese report has the tables.

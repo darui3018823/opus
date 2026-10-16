@@ -332,6 +332,23 @@ vacuously.
   to -37%, allocations -23% to -31%, hybrid/mono -1.3%, hybrid/stereo
   -2.2%, others within noise; decode unchanged.
 
+- 2026-10-16 afternoon: follow-ups after the real-audio report.
+  - `9dc3e79` `Encode`/`Encode24` reuse their float64 conversion buffer
+    (15 KB per 20 ms stereo frame; the benchmarks use `EncodeFloat` and
+    missed it). Re-encoding 36 real-audio cells is byte-identical;
+    `TestEncodeInt16AllocsMatchFloat` fails before the fix and passes after.
+    Per-frame (QueryPerformanceCounter) on a 280 s track: allocations
+    23-45 KB -> 7-28 KB, GCs 6-12 -> 1-7; p99 unchanged (390-470 µs), max
+    about 2.4 ms at 64k and above, not GC-bound.
+  - Concurrency (64k, int16 Encode, N goroutines): 80% efficiency up to the
+    8 physical cores, 719x real time at N=16; libopus via N ffmpeg
+    processes scales the same way at about 1.7x the throughput.
+  - Lossless sources (five FLAC tracks, soxr to 48 kHz), matched VBR:
+    dSNR -0.00..+0.03 dB, rate 0..0.3%, identical packets median 88%,
+    modes 100%, decoder max 1 LSB.
+  - `4b4acce` adds arm64 Linux/macOS cells to the official-vector CI job so
+    the decode digests run on an FMA architecture (not pushed yet).
+
 ## Next steps (in order)
 
 From an Opus read-only review on 2026-10-15 (commit `52969ac`; estimates

@@ -183,3 +183,16 @@ Follow-ups the same day: the `Encode` allocation is fixed in `9dc3e79`
 -0.00..+0.03 dB and a median 88% identical packets; concurrent encoding
 scales at 80% efficiency up to the 8 physical cores. Section 9 of the
 Japanese report has the tables.
+
+Plain-C comparison (same day): libopus 1.6.1 `opus_demo` built twice with
+gcc 16.1 -O2, plain C (no intrinsics/RTCD) and x86 SIMD (SSE..AVX2 with
+RTCD). Against plain C the Go encoder is byte-identical on 45 of 52 cells
+(19/20 lossless, 26/32 YouTube); the SIMD build agrees on 49% to 99%. The
+seven differing cells are parity-bug candidates, outside this
+output-preserving branch: Endorfin 64k (diverges at packet 10, right after
+a CELT FB -> SWB bandwidth switch at packet 9), jazz 64k (from packet
+145), jazz 32k/128k (1-4 packets from 7259, then identical again), ASMR
+short 16k/32k. Time ratios (median of four sources): Go / plain C is 1.62
+to 1.69 for encode and 1.63 for decode; plain C / SIMD is 1.23 to 1.34
+for encode and 1.05 for decode. So the decode gap is almost all Go vs C,
+and the encode gap vs SIMD libopus is about 1.65 (Go) x 1.3 (SIMD).

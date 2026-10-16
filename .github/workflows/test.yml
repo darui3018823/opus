@@ -111,10 +111,26 @@ jobs:
         run: go test -count=1 ./...
 
   official-vectors:
-    name: official RFC 8251 vectors (12/12)
+    # The decode digests (TestOfficialVectorDecodeDigests) need the vectors,
+    # so the arm64 cells are what check that decoded PCM is bit-identical on
+    # an FMA architecture, not just that no FMA instruction is emitted.
+    name: official RFC 8251 vectors (12/12, ${{ matrix.os }}/${{ matrix.arch }})
     needs: static
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+            runner: ubuntu-latest
+          - os: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          - os: macos
+            arch: arm64
+            runner: macos-15
     steps:
       - uses: actions/checkout@v7
 

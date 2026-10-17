@@ -26,8 +26,8 @@ The `oggopus` subpackage implements Ogg page and Ogg Opus container APIs.
 Constants are in `constants.go` and package-level error values in `errors.go`.
 Public version constants are generated into `version_gen.go` from the
 repository-level `VERSION` file; `go generate ./...` refreshes them and CI
-rejects generated-file drift. The current released baseline is `v1.5.0`;
-`VERSION` holds the `v1.6.0` release candidate.
+rejects generated-file drift. The current released baseline is `v1.6.0`;
+`VERSION` holds the `v1.7.0` release candidate.
 Release preparation follows [`docs/RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
 and compatibility-breaking cleanup is recorded separately in
 [`docs/V2_API_CANDIDATES.md`](V2_API_CANDIDATES.md).
@@ -341,8 +341,7 @@ buffer must be present, and only the selected prefix is consumed. The control
 is propagated by multistream, surround, and projection encoders, survives
 `Reset`, and is cross-checked against libopus 1.6.1 for every fixed duration.
 
-The October 2026 performance pass (branch `perf/decoder-encoder-optimization`)
-roughly halves encode and decode time against v1.6.0 and removes about 97%
+The October 2026 performance pass (v1.7.0, PR #32) roughly halves encode and decode time against v1.6.0 and removes about 97%
 of the bytes allocated, without changing decoded PCM, final ranges or encoded
 bytes; see "Final Comparison With v1.6.0" in `docs/PERF_BASELINE.md`.
 Internal changes callers do not see: encoder frame traces

@@ -158,7 +158,9 @@ scoreboard で回帰を監視しています。測定した 1 秒間の byte tot
 music/mixed worst case が改善しました。surround の channel-role masking は、各
 elementary packet の長さを変えずに、決定的な 5.1 / 7.1 fixture の weighted SNR を
 改善しました。SILK の scratch 再利用は packet/final-range digest で挙動を固定し、
-記録済み Windows amd64 benchmark では allocation を削減しました。これらは回帰用
+記録済み Windows amd64 benchmark では allocation を削減しました。v1.7.0 は v1.6.0
+に比べて encode / decode 時間をおよそ半分にし、確保バイト数を約 97% 減らしました。
+デコード PCM、final range、エンコード byte 列は変わりません。これらは回帰用
 fixture とローカル測定であり、一般的な品質・性能保証ではありません。条件と数値は
 [real-corpus scoreboard](docs/REAL_CORPUS_SCOREBOARD.md) と
 [performance baseline](docs/PERF_BASELINE.md) を参照してください。

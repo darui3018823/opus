@@ -377,6 +377,10 @@ vacuously.
   (`b770eb1`), -15% to -29% (`806ca97`), time within noise for those three.
   Byte identity on real tracks: 20 ms VBR/CBR and 40/60 ms VBR/CBR.
 
+- 2026-10-17 (item 11): band quantiser vectors in float32 (`4674b70`),
+  bit-exact by the digest guards, opusref and real tracks (12 enc + 12 dec
+  cells at 32/64/128 kb/s); arm64 shows no fused multiply-add.
+
 ## Next steps (in order)
 
 From an Opus read-only review on 2026-10-15 (commit `52969ac`; estimates
@@ -430,10 +434,19 @@ reuse); guard each with the digest tests.
     nil and the LPC_in_pre domain config is always built) with the eleven
     helpers only it used. iirFIRInterpol and the postfilter were measured
     and left as they are.
-11. Only after re-profiling: CELT `[]float32` storage. pion's CELT speed
-    comes from float32 buffers, precomputed trig slices and bit reversal
-    applied in the pre-rotation, all compatible with bit-exactness, but the
-    migration needs an audit of every float64 expression. Medium risk.
+11. (done, band quantiser) CELT `[]float32` storage. Re-profile first:
+    quant_all_bands is 44% of tv01 decode and about 27% of CELT encode, but
+    its hot spots (op_pvq_search's inner loop, cwrsi, the PVQ tables)
+    already run on float32 locals or integers. `4674b70` stores X, Y, norm
+    and the fold scratch as float32; with the vectors retyped the compiler
+    flagged every float64 write, and each was `float64(<float32 expr>)`.
+    The one float64 computation, the N=2 stereo sign test (exact float64
+    products; libopus rounds each product to float), is kept as it is.
+    Result: decode -1.5% to -4.3% on CELT vectors, encode within noise
+    (2 s x 6 interleaved). Not done: fusing the decoder's widening copy
+    into band Coeffs with denormalise and AssembleMDCT (Coeffs also feeds
+    the decoder state clone; about one pass per frame), and float32 X in
+    the encoder's analysis stages (they already compute in float32).
 
 Do not: reorder float sums, unroll float32 reductions into partial sums,
 replace `math.Exp2`/`Floor`/`RoundToEven` with approximations, or write

@@ -203,7 +203,9 @@ func (e *Encoder) silkNSQDelDec(
 	signalType, quantOffsetType int,
 	seed int32,
 ) []int16 {
-	pulses := make([]int16, e.frameSize)
+	// The pulses are copied by every caller that keeps them past the next
+	// NSQ run (the rate loop's "lower" snapshot, LBRR, traces).
+	pulses := scratchSlice(&e.frameScratch.nsqPulses, e.frameSize)
 	// NLSF interpolation (silk_NSQ_del_dec, LSF_interpolation_flag==1): subframes
 	// 0,1 use the interpolated LPC set, subframes 2,3 the current set. When
 	// inactive (nil interp set) every subframe uses the current LPC.

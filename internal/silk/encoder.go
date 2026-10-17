@@ -41,6 +41,8 @@ type Encoder struct {
 	// frameScratch holds per-frame analysis buffers that do not outlive
 	// encodeRangeFrame.
 	frameScratch encoderFrameScratch
+	// loopScratch holds encodeFrameLoop's per-frame copies.
+	loopScratch frameLoopScratch
 
 	sampleRate       int // Sample rate (8000, 12000, 16000, 24000)
 	frameSize        int // Frame size in samples
@@ -293,6 +295,7 @@ type encoderFrameScratch struct {
 	nsqX16                         []int16
 	vadX16                         []int16
 	xq32                           []int32
+	nsqPulses                      []int16
 }
 
 type encoderFrameState struct {

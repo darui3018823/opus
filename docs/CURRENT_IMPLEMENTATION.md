@@ -26,8 +26,8 @@ The `oggopus` subpackage implements Ogg page and Ogg Opus container APIs.
 Constants are in `constants.go` and package-level error values in `errors.go`.
 Public version constants are generated into `version_gen.go` from the
 repository-level `VERSION` file; `go generate ./...` refreshes them and CI
-rejects generated-file drift. The current released baseline is `v1.6.0`;
-`VERSION` holds the `v1.7.0` release candidate.
+rejects generated-file drift. The current released baseline is `v1.7.0`;
+`VERSION` holds the `v1.7.1` release candidate.
 Release preparation follows [`docs/RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
 and compatibility-breaking cleanup is recorded separately in
 [`docs/V2_API_CANDIDATES.md`](V2_API_CANDIDATES.md).
@@ -1608,6 +1608,14 @@ Behavior changes from the audit fixes that callers can observe:
   exceeds target": as in libopus, CELT is skipped and the frame is sent as a
   one-byte PLC frame (padded to the CBR size) with a zero final range
   (`TestHybridFECBustOracle`).
+- v1.7.1 (PR #34) fixes four encoder differences from plain-C libopus found
+  on real audio: the CELT intensity band carried into the next frame is the
+  coded one (`clt_compute_allocation`), `stereo_analysis` sums in float32,
+  the N=2 stereo side sign rounds its products to float (`bands.c`), and
+  the Opus VAD decision and DTX survive the SILK prefill reset. Encoded
+  bytes change only on frames that reach these paths; 56 real-audio cells
+  (1,006,840 packets, 16-128 kb/s VBR) are byte-identical to plain-C libopus
+  1.6.1. Decoding is unchanged.
 - `oggopus`: `PacketWriter` keeps the granule of a packet completed on a page
   that ends inside the next packet (it wrote -1, which `Reader` rejected);
   `Writer.Close` before any audio packet returns `ErrInvalidOpusStream`;

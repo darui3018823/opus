@@ -160,7 +160,9 @@ elementary packet の長さを変えずに、決定的な 5.1 / 7.1 fixture の 
 改善しました。SILK の scratch 再利用は packet/final-range digest で挙動を固定し、
 記録済み Windows amd64 benchmark では allocation を削減しました。v1.7.0 は v1.6.0
 に比べて encode / decode 時間をおよそ半分にし、確保バイト数を約 97% 減らしました。
-デコード PCM、final range、エンコード byte 列は変わりません。これらは回帰用
+デコード PCM、final range、エンコード byte 列は変わりません。v1.7.1 は実音声で
+見つかった plain-C libopus とのエンコーダ差分 4 件を修正したため、該当フレームの
+エンコード byte 列が変わります。デコードは変わりません。これらは回帰用
 fixture とローカル測定であり、一般的な品質・性能保証ではありません。条件と数値は
 [real-corpus scoreboard](docs/REAL_CORPUS_SCOREBOARD.md) と
 [performance baseline](docs/PERF_BASELINE.md) を参照してください。

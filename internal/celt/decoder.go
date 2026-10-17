@@ -38,7 +38,7 @@ type Decoder struct {
 	subCoeffs []float64
 	outBuf    []float64
 	mdctBuf   [2][]float64
-	bandX     []float64
+	bandX     []float32
 	collapse  []byte
 	qab       quantAllBandsScratch
 
@@ -801,8 +801,8 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	// quant_all_bands: decode all PVQ bands into the interleaved normalised MDCT X[].
 	M := 1 << uint(lm)
 	frameLen := M * int(EBands48000[numBands])
-	X := zeroedFloat64(&d.bandX, ch*frameLen)
-	var Y []float64
+	X := zeroedFloat32(&d.bandX, ch*frameLen)
+	var Y []float32
 	if ch == 2 {
 		Y = X[frameLen:]
 	}
@@ -851,7 +851,11 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 			b := d.bandProcs[c].bands[i]
 			s := M * int(EBands48000[i])
 			if base+s+b.Size <= len(X) {
-				copy(b.Coeffs, X[base+s:base+s+b.Size])
+				src := X[base+s : base+s+b.Size]
+				dst := b.Coeffs[:len(src)]
+				for j, v := range src {
+					dst[j] = float64(v)
+				}
 			}
 		}
 	}
@@ -859,7 +863,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	return intensity, dualStereo, nil
 }
 
-func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, logE []float64, lm, frameLen int, seed uint32, start, end int) {
+func (d *Decoder) antiCollapse(X []float32, collapse []byte, pulses []int, logE []float64, lm, frameLen int, seed uint32, start, end int) {
 	numBands := d.mode.Bands.NumBands
 	ch := d.codedChannels()
 	M := 1 << uint(lm)
@@ -908,7 +912,7 @@ func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, logE 
 					if seed&0x8000 == 0 {
 						v = -v
 					}
-					X[offset+(j<<uint(lm))+k] = float64(v)
+					X[offset+(j<<uint(lm))+k] = v
 				}
 				renorm = true
 			}

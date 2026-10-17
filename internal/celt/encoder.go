@@ -130,6 +130,7 @@ func (e *Encoder) LastFrameTrace() FrameTrace { return e.lastTrace }
 type frameScratch struct {
 	x, bandE, logE, logE2, coarseError []float64
 	bufs, pe                           [][]float64
+	xq                                 []float32
 	tfRes                              []int
 	collapse                           []byte
 }
@@ -1387,10 +1388,20 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	quantFineEnergy(enc, start, end, quantLogE, coarseError, eBits, ch, numBands, totalBits)
 	e.lastTrace.TellFine = enc.ECTell()
 
-	// PVQ for all bands.
-	var Y []float64
+	// PVQ for all bands, on a float32 copy of X (every value in X is
+	// float32-rounded, so the copy is exact).
+	Xq := e.frame.xq[:0]
+	if cap(Xq) < len(X) {
+		Xq = make([]float32, len(X))
+	}
+	Xq = Xq[:len(X)]
+	e.frame.xq = Xq
+	for j, v := range X {
+		Xq[j] = float32(v)
+	}
+	var Y []float32
 	if ch == 2 {
-		Y = X[frameLen:]
+		Y = Xq[frameLen:]
 	}
 	if cap(e.frame.collapse) < numBands*ch {
 		e.frame.collapse = make([]byte, numBands*ch)
@@ -1401,7 +1412,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 	totalBitsQ3 := totalBits<<3 - antiCollapseRsv
 	bandTells := e.bandTellScratch[:0]
-	e.foldSeed = quantAllBandsEncodeTrace(enc, bandE, start, end, X[:frameLen], Y, collapse,
+	e.foldSeed = quantAllBandsEncodeTrace(enc, bandE, start, end, Xq[:frameLen], Y, collapse,
 		pulses, isTransient, spread, dualStereo, intensity, tfRes,
 		totalBitsQ3, balance, lm, codedBands, e.foldSeed, e.disableInv, e.complexity, &bandTells, &e.qab)
 	e.bandTellScratch = bandTells

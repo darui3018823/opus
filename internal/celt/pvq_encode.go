@@ -91,7 +91,7 @@ func encodePulses(enc *entcode.Encoder, iy []int, n, k int) {
 // quantized direction. Faithful float port of libopus op_pvq_search_c
 // (celt/vq.c). It mutates X (takes absolute values / pre-search scratch) and
 // returns yy = sum(iy[j]^2), which normalise_residual needs as 1/sqrt(yy).
-func opPVQSearch(X []float64, iy []int, k, n int) float64 {
+func opPVQSearch(X []float32, iy []int, k, n int) float64 {
 	// Float32 port of libopus op_pvq_search_c (float build): every sum,
 	// product and comparison rounds to float32 exactly as opus_val16 /
 	// opus_val32 do there.
@@ -191,7 +191,7 @@ func opPVQSearch(X []float64, iy []int, k, n int) float64 {
 		if signx[j] != 0 {
 			iy[j] = -iy[j]
 		}
-		X[j] = float64(x[j])
+		X[j] = x[j]
 	}
 	return float64(yy)
 }
@@ -201,7 +201,7 @@ func opPVQSearch(X []float64, iy []int, k, n int) float64 {
 // vector, range-codes it, then reconstructs X exactly as the decoder will
 // (normalise_residual + inverse rotation) so that subsequent bands fold off the
 // identical normalised spectrum. Returns the band collapse mask.
-func algQuant(X []float64, n, k, spread, b int, enc *entcode.Encoder, gain float64) uint {
+func algQuant(X []float32, n, k, spread, b int, enc *entcode.Encoder, gain float64) uint {
 	expRotation(X, n, 1, b, k, spread)
 	var iyBuf [maxPVQN]int
 	var iy []int

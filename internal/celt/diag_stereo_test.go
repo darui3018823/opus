@@ -143,8 +143,8 @@ func TestOracleTraceStereo(t *testing.T) {
 
 	M := 1 << uint(lm)
 	frameLen := M * int(EBands48000[numBands])
-	X := make([]float64, ch*frameLen)
-	var Y []float64
+	X := make([]float32, ch*frameLen)
+	var Y []float32
 	if ch == 2 {
 		Y = X[frameLen:]
 	}
@@ -191,7 +191,7 @@ func TestOracleTraceStereo(t *testing.T) {
 		diagDec.antiCollapse(X, collapse, pulses, quantLogE, lm, frameLen, seed, 0, numBands)
 	}
 
-	dumpDenormalizedMDCT(denormalizedMDCTViaBandProcessor(frameLen, numBands, ch, lm, X, quantLogE), numBands, lm)
+	dumpDenormalizedMDCT(denormalizedMDCTViaBandProcessor(frameLen, numBands, ch, lm, float32sToFloat64(X), quantLogE), numBands, lm)
 
 	got := dec.GetRng()
 	fmt.Printf("\nFinal rng: got=%08x expected=%08x match=%v\n", got, expectedFinal, got == expectedFinal)

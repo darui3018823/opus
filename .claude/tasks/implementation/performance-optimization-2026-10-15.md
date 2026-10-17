@@ -427,7 +427,7 @@ reuse); guard each with the digest tests.
 10. (done) Smaller: `6efb65c` ILog/Log2Ceiling via math/bits, `ddedb9b`
     silkCLZ32 via bits.LeadingZeros32; `dc7af55`/`d96a17d` remove the
     unreachable selectRateControlPlan path (exactProcessGains never returns
-    nil and the LPC_in_pre domain config is always built) with the twelve
+    nil and the LPC_in_pre domain config is always built) with the eleven
     helpers only it used. iirFIRInterpol and the postfilter were measured
     and left as they are.
 11. Only after re-profiling: CELT `[]float32` storage. pion's CELT speed

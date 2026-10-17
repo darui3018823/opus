@@ -190,6 +190,16 @@ func (enc *Encoder) Clone() *Encoder {
 	return &c
 }
 
+// CloneInto is Clone writing into dst, reusing dst's byte buffers. It
+// returns dst.
+func (enc *Encoder) CloneInto(dst *Encoder) *Encoder {
+	buf, endBytes := dst.buf[:0], dst.endBytes[:0]
+	*dst = *enc
+	dst.buf = append(buf, enc.buf...)
+	dst.endBytes = append(endBytes, enc.endBytes...)
+	return dst
+}
+
 // Restore resets the encoder to a state captured by Clone.
 func (enc *Encoder) Restore(c *Encoder) {
 	buf := append(enc.buf[:0], c.buf...)

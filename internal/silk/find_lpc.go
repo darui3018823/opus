@@ -64,9 +64,17 @@ func silkFindLPCFLP(
 
 		// Search over interpolation indices to find the one with lowest residual energy
 		resNrg2nd := float64(math.MaxFloat32)
-		nlsf0Q15 := make([]int16, order)
-		aInterp := make([]float64, order)
-		lpcRes := make([]float64, 2*subfrLength)
+		var nlsf0Arr [silkMaxLPCOrder]int16
+		var aInterpArr [silkMaxLPCOrder]float64
+		var lpcResArr [256]float64
+		nlsf0Q15, aInterp, lpcRes := nlsf0Arr[:], aInterpArr[:], lpcResArr[:]
+		if order > len(nlsf0Arr) {
+			nlsf0Q15, aInterp = make([]int16, order), make([]float64, order)
+		}
+		if 2*subfrLength > len(lpcResArr) {
+			lpcRes = make([]float64, 2*subfrLength)
+		}
+		nlsf0Q15, aInterp, lpcRes = nlsf0Q15[:order], aInterp[:order], lpcRes[:2*subfrLength]
 
 		for k := 3; k >= 0; k-- {
 			// Interpolate NLSFs for first half
@@ -104,10 +112,28 @@ func silkLPCAnalysisFilterFLP32(r, predCoef, s []float64, length, order int) {
 	for ix := 0; ix < order && ix < length; ix++ {
 		r[ix] = 0
 	}
-	for ix := order; ix < length; ix++ {
+	if order <= 0 || length <= order {
+		return
+	}
+	// Convert the coefficients once, stored reversed so rev[j] multiplies
+	// w[j] = s[ix-order+j]; the descending j loop keeps libopus' tap order
+	// (PredCoef[0]*s[ix-1] first).
+	var revBuf [silkMaxLPCOrder]float32
+	rev := revBuf[:]
+	if order > len(rev) {
+		rev = make([]float32, order)
+	}
+	rev = rev[:order]
+	for k, v := range predCoef[:order] {
+		rev[order-1-k] = float32(v)
+	}
+	r, s = r[:length], s[:length]
+	for ix := order; ix < len(s); ix++ {
+		w := s[ix-order : ix : ix]
+		rw := rev[:len(w)]
 		pred := float32(0)
-		for k := 0; k < order; k++ {
-			pred += float32(float32(s[ix-1-k]) * float32(predCoef[k]))
+		for j := len(w) - 1; j >= 0; j-- {
+			pred += float32(float32(w[j]) * rw[j])
 		}
 		r[ix] = float64(float32(s[ix]) - pred)
 	}

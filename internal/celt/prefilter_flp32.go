@@ -9,13 +9,31 @@ import "math"
 // sequential float32, as in the plain C build of libopus.
 
 // pitchXcorr32 is celt_pitch_xcorr_c: xcorr[i] = Σ_j x[j]*y[i+j] for
-// i < maxPitch, each lag accumulated sequentially.
+// i < maxPitch, each lag accumulated sequentially. Like libopus's
+// xcorr_kernel it computes four lags per pass; every lag still sums its
+// products in j order, so the result is unchanged.
 func pitchXcorr32(x, y []float32, xcorr []float32, length, maxPitch int) {
-	for i := 0; i < maxPitch; i++ {
+	x = x[:length]
+	i := 0
+	for ; i+3 < maxPitch; i += 4 {
+		y0 := y[i : i+length]
+		y1 := y[i+1 : i+1+length]
+		y2 := y[i+2 : i+2+length]
+		y3 := y[i+3 : i+3+length]
+		var s0, s1, s2, s3 float32
+		for j, xj := range x {
+			s0 += float32(xj * y0[j])
+			s1 += float32(xj * y1[j])
+			s2 += float32(xj * y2[j])
+			s3 += float32(xj * y3[j])
+		}
+		xcorr[i], xcorr[i+1], xcorr[i+2], xcorr[i+3] = s0, s1, s2, s3
+	}
+	for ; i < maxPitch; i++ {
+		yi := y[i : i+length]
 		var sum float32
-		yi := y[i:]
-		for j := 0; j < length; j++ {
-			sum += float32(x[j] * yi[j])
+		for j, xj := range x {
+			sum += float32(xj * yi[j])
 		}
 		xcorr[i] = sum
 	}
@@ -179,9 +197,19 @@ func findBestPitch32(xcorr []float32, y []float32, length, maxPitch int, bestPit
 // search at 2x around the two best candidates and a pseudo-interpolation.
 func pitchSearch32(xLP []float32, y []float32, length, maxPitch int) int {
 	lag := length + maxPitch
-	xLP4 := make([]float32, length>>2)
-	yLP4 := make([]float32, lag>>2)
-	xcorr := make([]float32, maxPitch>>1)
+	// Stack buffers cover the encoder (960 + 979) and PLC (1328 + 620) sizes.
+	var xLP4Arr, yLP4Arr, xcorrArr [512]float32
+	xLP4, yLP4, xcorr := xLP4Arr[:], yLP4Arr[:], xcorrArr[:]
+	if length>>2 > len(xLP4Arr) {
+		xLP4 = make([]float32, length>>2)
+	}
+	if lag>>2 > len(yLP4Arr) {
+		yLP4 = make([]float32, lag>>2)
+	}
+	if maxPitch>>1 > len(xcorrArr) {
+		xcorr = make([]float32, maxPitch>>1)
+	}
+	xLP4, yLP4, xcorr = xLP4[:length>>2], yLP4[:lag>>2], xcorr[:maxPitch>>1]
 	// Downsample by 2 again.
 	for j := 0; j < length>>2; j++ {
 		xLP4[j] = xLP[2*j]
@@ -254,7 +282,12 @@ func removeDoubling32(x []float32, maxPeriod, minPeriod, N, T0 int, prevPeriod i
 		T0 = maxPeriod - 1
 	}
 	T := T0
-	yyLookup := make([]float32, maxPeriod+1)
+	var yyLookupArr [combFilterMaxPeriod/2 + 1]float32
+	yyLookup := yyLookupArr[:]
+	if maxPeriod+1 > len(yyLookupArr) {
+		yyLookup = make([]float32, maxPeriod+1)
+	}
+	yyLookup = yyLookup[:maxPeriod+1]
 	xx, xy := dualInnerProd32(xs, xs, x[maxPeriod-T0:], N)
 	yyLookup[0] = xx
 	yy := xx

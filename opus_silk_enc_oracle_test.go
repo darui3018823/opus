@@ -744,6 +744,7 @@ func TestSILKEncoderInputPipelineOracleComplexity8(t *testing.T) {
 }
 
 func runSILKEncoderOracleComplexity(t *testing.T, lossPerc, bitrate int, vbr bool, complexity int) {
+	t.Cleanup(silk.EnableFrameTraces())
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())
 	}
@@ -828,7 +829,8 @@ func runSILKEncoderOracleComplexity(t *testing.T, lossPerc, bitrate int, vbr boo
 					for _, v := range cond {
 						goPCMBuf = append(goPCMBuf, float32(v))
 					}
-					prevCond = cond
+					// lastConditionedInput is reused by the next call.
+					prevCond = append(prevCond[:0], cond...)
 					idx, ok := firstFloat32Mismatch(goPCMBuf, r.pcmBuf)
 					cutoffOK := enc.variableHPSmth2Q15 == r.smth2
 					if !ok || !cutoffOK {
@@ -914,6 +916,7 @@ func runSILKEncoderOracleComplexity(t *testing.T, lossPerc, bitrate int, vbr boo
 // and, at the first differing packet, reports the silk_stereo_LR_to_MS
 // decisions and per-channel entry states of both encoders.
 func TestSILKEncoderStereoOracle(t *testing.T) {
+	t.Cleanup(silk.EnableFrameTraces())
 	t.Parallel()
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())

@@ -650,7 +650,7 @@ func (d *MultistreamDecoder) decodeMapped(data []byte, softClip bool) ([]float64
 	}
 	out := make([]float64, duration*d.channels)
 	for stream, packet := range packets {
-		decode := d.decoders[stream].DecodeFloat
+		decode := d.decoders[stream].decodeFloatShared
 		if softClip {
 			decode = d.decoders[stream].decodeSoftClipped
 		}

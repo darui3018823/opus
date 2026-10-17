@@ -71,11 +71,19 @@ func Float2Int16Sample(v float64) int16 {
 // coder pushes into x_buf. Values stay in [-1,1] (int16 / 32768).
 func (e *Encoder) frontEndFrame(input []float64, mono bool) []float64 {
 	n := len(input)
-	q := make([]float64, n)
+	d := e.frontEndDelay(mono)
+	var q []float64
+	if d == 0 {
+		// q is the result; callers use it within the frame (the SILK
+		// encoder copies whatever it keeps), so it lives in scratch too.
+		q = scratchSlice(&e.frontEndOut, n)
+	} else {
+		// q is consumed below.
+		q = scratchSlice(&e.frontEndScratch, n)
+	}
 	for i, v := range input {
 		q[i] = float64(Float2Int16Sample(v)) / 32768
 	}
-	d := e.frontEndDelay(mono)
 	if d == 0 {
 		return q
 	}
@@ -87,7 +95,10 @@ func (e *Encoder) frontEndFrame(input []float64, mono bool) []float64 {
 		copy(e.encInputDelay, joined[n:])
 		return joined[:n]
 	}
-	out := make([]float64, n)
+	if cap(e.frontEndOut) < n {
+		e.frontEndOut = make([]float64, n)
+	}
+	out := e.frontEndOut[:n] // fully written below
 	copy(out, e.encInputDelay)
 	copy(out[d:], q[:n-d])
 	copy(e.encInputDelay, q[n-d:])
@@ -123,8 +134,17 @@ func (e *Encoder) StreamChannels() int {
 // input combination: L + R summed in float, converted with RES2INT16 and
 // halved with rounding, returned in the [-1,1] int16 grid.
 func DownmixToMono(lr []float64) []float64 {
+	return DownmixToMonoInto(nil, lr)
+}
+
+// DownmixToMonoInto is DownmixToMono writing into dst (grown as needed).
+func DownmixToMonoInto(dst, lr []float64) []float64 {
 	n := len(lr) / 2
-	mono := make([]float64, n)
+	mono := dst[:0]
+	if cap(mono) < n {
+		mono = make([]float64, n)
+	}
+	mono = mono[:n]
 	for i := 0; i < n; i++ {
 		sum := Float2Int16Sample(float64(float32(lr[2*i]) + float32(lr[2*i+1])))
 		mono[i] = float64(silkRShiftRound(int64(sum), 1)) / 32768

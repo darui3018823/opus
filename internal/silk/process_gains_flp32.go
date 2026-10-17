@@ -68,7 +68,12 @@ func silkGainsQuant(gainQ16 []int32, prevInd *int, conditional bool, nbSubfr int
 func silkResidualEnergyFLP32(x []float64, a [2][]float64, gains []float64, subfrLength, nbSubfr, order int) [silkMaxNBSubframes]float64 {
 	var nrgs [silkMaxNBSubframes]float64
 	shift := order + subfrLength
-	res := make([]float64, 2*shift)
+	var resArr [256]float64
+	res := resArr[:]
+	if 2*shift > len(resArr) {
+		res = make([]float64, 2*shift)
+	}
+	res = res[:2*shift]
 	for half := 0; half < 2; half++ {
 		if half == 1 && nbSubfr != silkMaxNBSubframes {
 			break
@@ -145,26 +150,31 @@ func silkProcessGainsFLP32(signalType, quantOffset int, shapeGains []float64, lt
 // LTP coding gain, and the frame's SNR_dB_Q7.
 func (e *Encoder) exactProcessGains(signal []float64, signalType, quantOffset int, nlsf nlsfAnalysis, cfg lpcInPreConfig, conditional bool) *silkProcessGainsResult {
 	subfrLength := e.frameSize / e.nSubframes
-	lpcInPre := buildLPCInPre(cfg.input, cfg.subframeLengths, cfg.invGains, cfg.ltpCoefs, cfg.pitchLags, e.lpcOrder, cfg.voiced)
+	sc := &e.frameScratch
+	lpcInPre := buildLPCInPreInto(&sc.lpcInPre, cfg.input, cfg.subframeLengths, cfg.invGains, cfg.ltpCoefs, cfg.pitchLags, e.lpcOrder, cfg.voiced)
 	// LPC_in_pre is in [-1,1]; the residual energies scale by 2^30 exactly.
-	scaled := make([]float64, len(lpcInPre))
-	e.traceLPCInPre = make([]float32, len(lpcInPre))
+	scaled := scratchSlice(&sc.pgScaled, len(lpcInPre))
 	for i, v := range lpcInPre {
 		scaled[i] = v * 32768
-		e.traceLPCInPre[i] = float32(scaled[i])
 	}
-	e.traceInvGains = make([]float32, len(cfg.invGains))
-	for i, v := range cfg.invGains {
-		e.traceInvGains[i] = float32(v)
+	if frameTracesEnabled() {
+		e.traceLPCInPre = make([]float32, len(lpcInPre))
+		for i, v := range scaled {
+			e.traceLPCInPre[i] = float32(v)
+		}
+		e.traceInvGains = make([]float32, len(cfg.invGains))
+		for i, v := range cfg.invGains {
+			e.traceInvGains[i] = float32(v)
+		}
 	}
 	var a [2][]float64
-	a[1] = make([]float64, e.lpcOrder)
+	a[1] = sc.pgA[1][:e.lpcOrder]
 	for i := 0; i < e.lpcOrder; i++ {
 		a[1][i] = float64(nlsf.lpcQ12[i]) / 4096
 	}
 	a[0] = a[1]
 	if nlsf.lpcQ12Interp != nil {
-		a[0] = make([]float64, e.lpcOrder)
+		a[0] = sc.pgA[0][:e.lpcOrder]
 		for i := 0; i < e.lpcOrder; i++ {
 			a[0][i] = float64(nlsf.lpcQ12Interp[i]) / 4096
 		}

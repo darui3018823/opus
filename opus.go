@@ -94,8 +94,20 @@ type Encoder struct {
 	// lastConditionedInput is the conditioned input of the most recent
 	// packet, the signal the codec actually coded; tests measure quality
 	// against it because the high-pass shifts phase relative to the caller's
-	// samples. Read-only after the call.
+	// samples. Read-only after the call, and reused by the next call.
 	lastConditionedInput []float64
+	// conditionBuf and delayJoined back conditionInput's and
+	// delayedCELTInput's per-packet outputs.
+	conditionBuf []float64
+	delayJoined  []float64
+	// hybridFadeBuf holds a hybrid frame's faded CELT input.
+	hybridFadeBuf []float64
+	// silkInOut and silkDownmix back silkInput's result and its L/R
+	// downmix; the SILK encoder consumes them within the call that asked.
+	silkInOut, silkDownmix []float64
+	// celtFadeBuf holds the faded CELT input of a SILK-only (redundancy) or
+	// CELT-only packet; it is used within the packet only.
+	celtFadeBuf []float64
 
 	// Configuration
 	bitrateSetting      int // requested bitrate or BitrateAuto/BitrateMax
@@ -169,7 +181,10 @@ type Encoder struct {
 	maxPacketSize int
 	// callerPCM / callerFrameSize are the caller's whole input when an
 	// expert frame duration codes only a prefix (analysis_pcm).
-	callerPCM       []float64
+	callerPCM []float64
+	// inputBuf holds Encode/Encode24's float64 conversion of the caller's
+	// samples; it is only read during that call.
+	inputBuf        []float64
 	callerFrameSize int
 	// reportedBitrate is EffectiveBitrate: the setting bounded by 1275
 	// bytes per coded frame. Under the libopus policy the packet bitrate
@@ -254,6 +269,9 @@ type Encoder struct {
 	// libopus policy (-1 otherwise), read by the high-pass cutoff smoother.
 	pendingMode     int
 	celtFadeScratch []float64
+	// silkInScratch and silkResScratch hold silkInput's per-channel int16
+	// resampler input and output; both are consumed before it returns.
+	silkInScratch, silkResScratch [2][]int16
 	// celtPrefillTail is the last 2.5 ms of the previous packet's CELT input
 	// (libopus tmp_prefill from the delay buffer), the prefill of the CELT
 	// encoder after a mode transition.
@@ -488,14 +506,24 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
 
-	// Convert int16 to float64
-	floatPCM := make([]float64, expectedSize)
+	// Convert int16 to float64 in a reused buffer: the encoder copies
+	// whatever it keeps (EncodeFloat callers may reuse their buffers too).
+	floatPCM := e.inputScratch(expectedSize)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768.0
 	}
 
 	e.inputLSBDepth = 16
 	return e.encodeCallerFrame(floatPCM, frameSize, selectedFrameSize)
+}
+
+// inputScratch returns e.inputBuf resized to n samples. Every element is
+// overwritten by the caller.
+func (e *Encoder) inputScratch(n int) []float64 {
+	if cap(e.inputBuf) < n {
+		e.inputBuf = make([]float64, n)
+	}
+	return e.inputBuf[:n]
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
@@ -511,7 +539,7 @@ func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
 	if len(pcm) < expectedSize {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
-	floatPCM := make([]float64, expectedSize)
+	floatPCM := e.inputScratch(expectedSize)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608.0
 	}
@@ -879,7 +907,8 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 			// rate on a SILK-only packet; the fades still shape the CELT
 			// input a redundant frame is coded from.
 			if e.prevHBGain < 1 || e.channels == 2 {
-				faded := append([]float64(nil), celtPCM...)
+				faded := append(e.celtFadeBuf[:0], celtPCM...)
+				e.celtFadeBuf = faded
 				if e.prevHBGain < 1 {
 					applyGainFade(faded, e.prevHBGain, 1, e.channels, e.sampleRate)
 				}
@@ -994,7 +1023,8 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 		// prefilled CELT state without prediction. A previous hybrid
 		// packet's high-band attenuation fades out (gain_fade to unity).
 		if e.prevHBGain < 1 {
-			faded := append([]float64(nil), celtPCM...)
+			faded := append(e.celtFadeBuf[:0], celtPCM...)
+			e.celtFadeBuf = faded
 			applyGainFade(faded, e.prevHBGain, 1, e.channels, e.sampleRate)
 			celtPCM = faded
 		}
@@ -1515,7 +1545,9 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 			hbGain = 1
 		}
 		if e.prevHBGain < 1 || hbGain < 1 {
-			celtChunk = append([]float64(nil), celtChunk...)
+			// Fade a copy: celtPCM stays the unfaded input.
+			e.hybridFadeBuf = append(e.hybridFadeBuf[:0], celtChunk...)
+			celtChunk = e.hybridFadeBuf
 			applyGainFade(celtChunk, e.prevHBGain, hbGain, e.channels, e.sampleRate)
 			celtInput = e.celtInputFrame(celtChunk)
 		}
@@ -1527,7 +1559,10 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 			if e.streamChannelsOrInput() == 2 {
 				widthQ14 = e.silkEncoder.StereoWidthQ14()
 			}
-			celtChunk = append([]float64(nil), celtChunk...)
+			// celtChunk may already be hybridFadeBuf; copying it onto itself
+			// is a no-op.
+			e.hybridFadeBuf = append(e.hybridFadeBuf[:0], celtChunk...)
+			celtChunk = e.hybridFadeBuf
 			e.applyStereoWidthFade(celtChunk, widthQ14)
 			celtInput = e.celtInputFrame(celtChunk)
 		}
@@ -1627,9 +1662,15 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 				return nil, false, err
 			}
 		}
-		chosenBytes, celtErr := e.celtEncoder.EncodeHybrid(
-			celtInput, enc, targetBytes, 17, celtEnd, isSilentPCM(celtChunk),
-		)
+		// "If false, we already busted the budget and we'll end up with a
+		// 'PLC frame'": CELT is not run, so its state stays as it was.
+		chosenBytes := targetBytes
+		var celtErr error
+		if enc.ECTell() <= 8*targetBytes {
+			chosenBytes, celtErr = e.celtEncoder.EncodeHybrid(
+				celtInput, enc, targetBytes, 17, celtEnd, isSilentPCM(celtChunk),
+			)
+		}
 		e.celtEncoder.SetRateMode(e.rateMode)
 		e.celtEncoder.SetBitrate(e.bitrate)
 		if celtErr != nil {
@@ -1639,16 +1680,25 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		// redundant frame appended after it.
 		targetBytes = chosenBytes
 		frameBytes = targetBytes + redundancyBytes
-		rangeFinal ^= enc.GetRng()
+		// opus_encode_frame_native: "in the unlikely case that the SILK
+		// encoder busted its target, tell the decoder to call the PLC". SILK
+		// can overrun silk_mode.maxBits when the LBRR data of the previous
+		// packet already fills the budget; the frame then becomes the TOC and
+		// a zero byte (plus the redundancy bytes) with a zero final range.
+		busted := enc.ECTell() > (maxDataBytes-1)*8
+		frameRng := enc.GetRng()
 		enc.Flush()
 		frame := enc.Bytes()
-		if len(frame) > targetBytes {
-			return nil, false, fmt.Errorf("hybrid frame %d exceeds target: %d > %d bytes", k, len(frame), targetBytes)
-		}
-		if len(frame) < targetBytes {
-			padded := make([]byte, targetBytes)
-			copy(padded, frame)
-			frame = padded
+		if !busted {
+			rangeFinal ^= frameRng
+			if len(frame) > targetBytes {
+				return nil, false, fmt.Errorf("hybrid frame %d exceeds target: %d > %d bytes", k, len(frame), targetBytes)
+			}
+			if len(frame) < targetBytes {
+				padded := make([]byte, targetBytes)
+				copy(padded, frame)
+				frame = padded
+			}
 		}
 
 		// Append the 5 ms redundant CELT frame so the decoder recovers it from
@@ -1670,11 +1720,27 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 				}
 				redFrame, redundantRng = rf, rng
 			}
-			redPadded := make([]byte, redundancyBytes)
-			copy(redPadded, redFrame)
-			frame = append(frame, redPadded...)
 			redundancyEmitted = true
-			rangeFinal ^= redundantRng
+			if !busted {
+				redPadded := make([]byte, redundancyBytes)
+				copy(redPadded, redFrame)
+				frame = append(frame, redPadded...)
+				rangeFinal ^= redundantRng
+			}
+		}
+		if busted {
+			// data[1] = 0, ret = 1: the packet keeps 1 + redundancy_bytes
+			// payload bytes, of which only the first is rewritten.
+			n := 1
+			if frameRedundancy {
+				n += redundancyBytes
+			}
+			plc := make([]byte, n)
+			if n > 1 {
+				copy(plc[1:], frame[min(1, len(frame)):])
+			}
+			frames = append(frames, plc)
+			continue
 		}
 		if len(frame) != frameBytes && frameRedundancy {
 			// Defensive: redundant frame must total exactly maxBytes.
@@ -2191,24 +2257,30 @@ func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
 		// nChannelsAPI == 2, nChannelsInternal == 1: combine L/R before the
 		// mono channel's resampler; on the first mono frame after a stereo
 		// packet both resamplers run and their outputs are averaged.
-		mono := silk.DownmixToMono(pcm)
+		e.silkDownmix = silk.DownmixToMonoInto(e.silkDownmix, pcm)
+		mono := e.silkDownmix
 		if len(e.silkInputResamplers) == 0 {
 			return mono
 		}
-		in := make([]int16, len(mono))
-		for i, v := range mono {
-			in[i] = silk.Float2Int16Sample(v)
+		in := e.silkInScratch[0][:0]
+		for _, v := range mono {
+			in = append(in, silk.Float2Int16Sample(v))
 		}
-		out0 := e.silkInputResamplers[0].Process(in)
+		e.silkInScratch[0] = in
+		out0 := e.silkInputResamplers[0].ProcessAppend(e.silkResScratch[0][:0], in)
+		e.silkResScratch[0] = out0
 		if e.silkPrevChannels == 2 && len(e.silkInputResamplers) > 1 {
-			out1 := e.silkInputResamplers[1].Process(in)
+			out1 := e.silkInputResamplers[1].ProcessAppend(e.silkResScratch[1][:0], in)
+			e.silkResScratch[1] = out1
 			for i := range out0 {
 				if i < len(out1) {
 					out0[i] = int16((int32(out0[i]) + int32(out1[i])) >> 1)
 				}
 			}
 		}
-		out := make([]float64, want)
+		out := growFloat64s(e.silkInOut, want)
+		e.silkInOut = out
+		clear(out)
 		for i := range out {
 			if i < len(out0) {
 				out[i] = float64(out0[i]) / 32768
@@ -2221,14 +2293,25 @@ func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
 	}
 	ch := e.channels
 	n := len(pcm) / ch
-	out := make([]float64, 0, want)
-	perChannel := make([][]int16, ch)
+	out := growFloat64s(e.silkInOut, want)[:0]
+	var perChannelBuf [2][]int16
+	perChannel := perChannelBuf[:0]
+	if ch > len(perChannelBuf) {
+		perChannel = make([][]int16, 0, ch)
+	}
 	for c := 0; c < ch; c++ {
-		in := make([]int16, n)
-		for i := 0; i < n; i++ {
-			in[i] = silk.Float2Int16Sample(pcm[i*ch+c])
+		var in, res []int16
+		if c < len(e.silkInScratch) {
+			in, res = e.silkInScratch[c][:0], e.silkResScratch[c][:0]
 		}
-		perChannel[c] = e.silkInputResamplers[c].Process(in)
+		for i := 0; i < n; i++ {
+			in = append(in, silk.Float2Int16Sample(pcm[i*ch+c]))
+		}
+		res = e.silkInputResamplers[c].ProcessAppend(res, in)
+		if c < len(e.silkInScratch) {
+			e.silkInScratch[c], e.silkResScratch[c] = in, res
+		}
+		perChannel = append(perChannel, res)
 	}
 	m := want / ch
 	for i := 0; i < m; i++ {
@@ -2240,6 +2323,7 @@ func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
 			out = append(out, v)
 		}
 	}
+	e.silkInOut = out
 	return out
 }
 
@@ -2275,7 +2359,8 @@ func (e *Encoder) delayedCELTInput(pcm []float64) []float64 {
 	if len(e.delayBuffer) != d {
 		e.delayBuffer = make([]float64, d)
 	}
-	joined := make([]float64, d+len(pcm))
+	e.delayJoined = growFloat64s(e.delayJoined, d+len(pcm))
+	joined := e.delayJoined
 	copy(joined, e.delayBuffer)
 	copy(joined[d:], pcm)
 	copy(e.delayBuffer, joined[len(pcm):])
@@ -3164,6 +3249,16 @@ type Decoder struct {
 	plcFrameSize int
 	// softclipMem is the soft-clip memory of the int16 decode (softclip_mem).
 	softclipMem [2]float32
+	// pcmScratch backs the PCM a packet decode returns internally, and
+	// softclipScratch the int16 soft clip; both are reused between calls
+	// (DecodeFloat copies its result out).
+	pcmScratch      []float64
+	softclipScratch []float32
+	// SILK resampling scratch: resampleSILK returns silkResampled, valid
+	// until its next call.
+	silkLin, silkRin   []int16
+	silkOutL, silkOutR []int16
+	silkResampled      []float64
 
 	// SILK decoders indexed by [rateIdx 0-2][chIdx 0=mono,1=stereo].
 	// rateIdx: 0=8kHz, 1=12kHz, 2=16kHz
@@ -3362,13 +3457,13 @@ func (d *Decoder) Decode(data []byte, pcm []int16) (int, error) {
 		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
 	}
 
-	floatPCM, err := d.decodeSoftClipped(data)
+	clipped, err := d.decodeSoftClipped32(data)
 	if err != nil {
 		return 0, err
 	}
 
-	n := len(floatPCM)
-	floatToInt16(pcm[:n], floatPCM)
+	n := len(clipped)
+	float32ToInt16(pcm[:n], clipped)
 
 	samplesPerChannel := n / d.channels
 	return samplesPerChannel, nil
@@ -3393,7 +3488,7 @@ func (d *Decoder) Decode24(data []byte, pcm []int32) (int, error) {
 		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
 	}
 
-	floatPCM, err := d.DecodeFloat(data)
+	floatPCM, err := d.decodeFloatShared(data)
 	if err != nil {
 		return 0, err
 	}
@@ -3660,9 +3755,20 @@ func packOpusFramesCode3(frames [][]byte, vbr, padding bool, padBytes int) ([]by
 // based on the count code (RFC 6716 §3.3).
 // countCode: 0=1 frame, 1=2 equal frames, 2=2 unequal frames, 3=arbitrary frames
 func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
+	return splitOpusFramesInto(nil, payload, countCode)
+}
+
+// maxPacketFrames is the RFC 6716 code 3 frame-count limit.
+const maxPacketFrames = 48
+
+// splitOpusFramesInto is splitOpusFrames writing the frame slices into
+// dst[:0]; a caller passing a [maxPacketFrames][]byte array avoids the
+// allocation.
+func splitOpusFramesInto(dst [][]byte, payload []byte, countCode int) ([][]byte, error) {
+	dst = dst[:0]
 	switch countCode {
 	case 0:
-		return [][]byte{payload}, nil
+		return append(dst, payload), nil
 
 	case 1:
 		// Two frames of equal size
@@ -3670,7 +3776,7 @@ func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
 			return nil, fmt.Errorf("code 1: odd payload length %d", len(payload))
 		}
 		half := len(payload) / 2
-		return [][]byte{payload[:half], payload[half:]}, nil
+		return append(dst, payload[:half], payload[half:]), nil
 
 	case 2:
 		// Two frames: first frame length is encoded in first byte (or two bytes)
@@ -3685,7 +3791,7 @@ func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
 		if n1 > len(payload) {
 			return nil, fmt.Errorf("code 2: frame1 length %d > remaining %d", n1, len(payload))
 		}
-		return [][]byte{payload[:n1], payload[n1:]}, nil
+		return append(dst, payload[:n1], payload[n1:]), nil
 
 	case 3:
 		// Multiple frames: see RFC 6716 §3.2.5
@@ -3697,7 +3803,7 @@ func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
 		padding := (payload[0] & 0x40) != 0  // padding flag
 		payload = payload[1:]
 
-		if frameCount == 0 || frameCount > 48 {
+		if frameCount == 0 || frameCount > maxPacketFrames {
 			return nil, fmt.Errorf("code 3: invalid frame count %d", frameCount)
 		}
 
@@ -3728,7 +3834,8 @@ func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
 
 		if vbr {
 			// VBR: the first M-1 frame lengths are stored first, followed by all frame payloads.
-			sizes := make([]int, frameCount)
+			var sizeBuf [maxPacketFrames]int
+			sizes := sizeBuf[:frameCount]
 			lastSize := len(payload)
 			for i := 0; i < frameCount-1; i++ {
 				n, used, err := parseOpusFrameLength(payload)
@@ -3743,27 +3850,25 @@ func splitOpusFrames(payload []byte, countCode int) ([][]byte, error) {
 				}
 			}
 			sizes[frameCount-1] = lastSize
-			frames := make([][]byte, frameCount)
 			offset := 0
 			for i, n := range sizes {
 				if offset+n > len(payload) {
 					return nil, fmt.Errorf("code 3 VBR: frame %d length %d > remaining %d", i, n, len(payload)-offset)
 				}
-				frames[i] = payload[offset : offset+n]
+				dst = append(dst, payload[offset:offset+n])
 				offset += n
 			}
-			return frames, nil
+			return dst, nil
 		}
 		// CBR: all frames equal size
 		if len(payload)%frameCount != 0 {
 			return nil, fmt.Errorf("code 3 CBR: payload %d not divisible by frameCount %d", len(payload), frameCount)
 		}
 		frameSize := len(payload) / frameCount
-		frames := make([][]byte, frameCount)
 		for i := 0; i < frameCount; i++ {
-			frames[i] = payload[i*frameSize : (i+1)*frameSize]
+			dst = append(dst, payload[i*frameSize:(i+1)*frameSize])
 		}
-		return frames, nil
+		return dst, nil
 
 	default:
 		return nil, fmt.Errorf("unknown count code %d", countCode)
@@ -3852,6 +3957,17 @@ func is10msConfig(config int) bool {
 // full-scale input. Positive decoder gain can produce values outside that
 // nominal range.
 func (d *Decoder) DecodeFloat(data []byte) ([]float64, error) {
+	pcm, err := d.decodeFloatShared(data)
+	if err != nil {
+		return nil, err
+	}
+	return append([]float64(nil), pcm...), nil
+}
+
+// decodeFloatShared is DecodeFloat returning the decoder's reusable output
+// buffer, valid until the next decode call, for callers that convert the
+// samples straight away.
+func (d *Decoder) decodeFloatShared(data []byte) ([]float64, error) {
 	pcm, err := d.decodePacketFloat(data)
 	if err != nil {
 		return nil, err
@@ -3868,6 +3984,25 @@ func (d *Decoder) decodeSoftClipped(data []byte) ([]float64, error) {
 	return d.finishOutput(pcm, true), nil
 }
 
+// decodeSoftClipped32 is decodeSoftClipped returning the soft-clipped float32
+// samples (decoder scratch, valid until the next call) without converting
+// them back to float64.
+func (d *Decoder) decodeSoftClipped32(data []byte) ([]float32, error) {
+	pcm, err := d.decodePacketFloat(data)
+	if err != nil {
+		return nil, err
+	}
+	if cap(d.softclipScratch) < len(pcm) {
+		d.softclipScratch = make([]float32, len(pcm))
+	}
+	f := d.softclipScratch[:len(pcm)]
+	for i, v := range pcm {
+		f[i] = float32(v)
+	}
+	_ = SoftClipFloat32(f, d.channels, d.softclipMem[:d.channels])
+	return f, nil
+}
+
 // finishOutput ends a successful opus_decode_native call. The int16 API of a
 // float build soft-clips the output (opus_pcm_soft_clip) with the decoder's
 // clipping memory; the float and 24-bit APIs do not, and restart the memory.
@@ -3876,7 +4011,10 @@ func (d *Decoder) finishOutput(pcm []float64, softClip bool) []float64 {
 		d.softclipMem = [2]float32{}
 		return pcm
 	}
-	f := make([]float32, len(pcm))
+	if cap(d.softclipScratch) < len(pcm) {
+		d.softclipScratch = make([]float32, len(pcm))
+	}
+	f := d.softclipScratch[:len(pcm)]
 	for i, v := range pcm {
 		f[i] = float32(v)
 	}
@@ -3944,7 +4082,8 @@ func (d *Decoder) decodePacketFloat(data []byte) ([]float64, error) {
 	}
 
 	// CELT-only mode: split payload into individual frame payloads and decode each
-	frames, err := splitOpusFrames(payload, countCode)
+	var frameBuf [maxPacketFrames][]byte
+	frames, err := splitOpusFramesInto(frameBuf[:0], payload, countCode)
 	if err != nil {
 		return nil, fmt.Errorf("failed to split frames: %w", err)
 	}
@@ -3969,7 +4108,7 @@ func (d *Decoder) decodePacketFloat(data []byte) ([]float64, error) {
 		return nil, fmt.Errorf("no CELT decoder for config=%d (bw=%d lm=%d ch=%d)", config, bwIdx, lmIdx, pktChannels)
 	}
 
-	var allPCM []float64
+	allPCM := d.pcmScratch[:0]
 	// opus_decode_native overwrites rangeFinal for each constituent frame, so
 	// OPUS_GET_FINAL_RANGE reports the last frame rather than an XOR across the
 	// frames of one single-stream packet.
@@ -4045,6 +4184,7 @@ func (d *Decoder) decodePacketFloat(data []byte) ([]float64, error) {
 		d.prevMode, d.prevRedundancy = framing.ModeCELTOnly, false
 	}
 	d.applyGain(allPCM)
+	d.pcmScratch = allPCM
 	return allPCM, nil
 }
 
@@ -4065,7 +4205,7 @@ func (d *Decoder) applyGain(pcm []float64) {
 // DecodeFloat32 decodes an Opus packet to caller-owned interleaved float32 PCM.
 // Positive decoder gain can produce values outside the nominal [-1, 1] scale.
 func (d *Decoder) DecodeFloat32(data []byte) ([]float32, error) {
-	pcm, err := d.DecodeFloat(data)
+	pcm, err := d.decodeFloatShared(data)
 	if err != nil {
 		return nil, err
 	}
@@ -4154,7 +4294,8 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		info.dec.CopyPrimaryStateFrom(monoPeer.dec)
 	}
 
-	silkStreams, err := splitOpusFrames(payload, countCode)
+	var frameBuf [maxPacketFrames][]byte
+	silkStreams, err := splitOpusFramesInto(frameBuf[:0], payload, countCode)
 	if err != nil {
 		return nil, false, err
 	}
@@ -4187,7 +4328,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 	stereoToMono := pktChannels == 1 && d.prevSilkInternalCh == 2 &&
 		d.silkRS[1] != nil && d.silkRSInKHz[1] == rateKHz
 
-	var allPCM []float64
+	allPCM := d.pcmScratch[:0]
 	// A single-stream packet reports its last constituent frame range. XOR is
 	// reserved for combining elementary streams in the multistream API.
 	var rangeFinal uint32
@@ -4236,7 +4377,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		// the mandatory SILK-only redundancy direction bit can be read when the
 		// packet has enough trailing data for a 5 ms CELT redundancy frame.
 		d.prepareSILKStream(info.dec, pktChannels)
-		pcm, err := info.dec.DecodeMultiWithDecoder(dec, nSilkFramesPerStream)
+		pcm, err := info.dec.DecodeMultiWithDecoderReuse(dec, nSilkFramesPerStream)
 		if err != nil {
 			allPCM = append(allPCM, make([]float64, samplesPerStream)...)
 			continue
@@ -4313,6 +4454,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 	d.lastFinalRange = rangeFinal
 	if !decodedAny {
 		// Only concealed frames: the SILK configuration is unchanged.
+		d.pcmScratch = allPCM
 		return allPCM, trailingRedundancy, nil
 	}
 	d.lastPitch = info.dec.Pitch() * 48 / rateKHz
@@ -4325,6 +4467,7 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 		monoPeer.dec.CopyPrimaryStateFrom(info.dec)
 	}
 
+	d.pcmScratch = allPCM
 	return allPCM, trailingRedundancy, nil
 }
 
@@ -4506,9 +4649,10 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 
 	// One SILK frame per Opus frame in hybrid mode.
 	nSilkFrames := silkSubframesPerOpusFrame(config)
-	silkStreams, err := splitOpusFrames(payload, countCode)
+	var frameBuf [maxPacketFrames][]byte
+	silkStreams, err := splitOpusFramesInto(frameBuf[:0], payload, countCode)
 	if err != nil {
-		silkStreams = [][]byte{payload}
+		silkStreams = append(frameBuf[:0], payload)
 	}
 
 	// Bit-exact SILK resampler setup, identical to the SILK-only path so that
@@ -4527,7 +4671,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 
 	samplesPerFrame := (d.sampleRate * frameDurationMs / 1000) * d.channels
 
-	var allPCM []float64
+	allPCM := d.pcmScratch[:0]
 	// Match opus_decode_native: each packet frame replaces rangeFinal rather
 	// than being XORed with preceding frames from the same stream.
 	var rangeFinal uint32
@@ -4570,7 +4714,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 
 		// SILK low-band layer (front of the stream), at the 16 kHz internal rate.
 		d.prepareSILKStream(info.dec, pktChannels)
-		silkPCM, serr := info.dec.DecodeMultiWithDecoder(dec, nSilkFrames)
+		silkPCM, serr := info.dec.DecodeMultiWithDecoderReuse(dec, nSilkFrames)
 		if serr != nil {
 			silkPCM = make([]float64, info.dec.FrameSize()*pktChannels*nSilkFrames)
 		}
@@ -4708,6 +4852,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 	d.lastFinalRange = rangeFinal
 	if !decodedAny {
 		// Only concealed frames: the SILK configuration is unchanged.
+		d.pcmScratch = allPCM
 		return allPCM, trailingRedundancy, nil
 	}
 	d.lastPitch = info.dec.Pitch() * 48 / rateKHz
@@ -4720,6 +4865,7 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		monoPeer.dec.CopyPrimaryStateFrom(info.dec)
 	}
 
+	d.pcmScratch = allPCM
 	return allPCM, trailingRedundancy, nil
 }
 
@@ -4795,23 +4941,24 @@ func (d *Decoder) resampleSILK(pcm []float64, nFrames, pktChannels int, stereoTo
 		if perChanFrameLen < 1 {
 			return adjustChannels(pcm, pktChannels, d.channels)
 		}
-		lin := make([]int16, perChanFrameLen)
-		rin := make([]int16, perChanFrameLen)
-		estCap := (len(pcm) / 2) * 6
-		outL := make([]int16, 0, estCap)
-		outR := make([]int16, 0, estCap)
+		d.silkLin = growInt16(d.silkLin, perChanFrameLen)
+		d.silkRin = growInt16(d.silkRin, perChanFrameLen)
+		lin, rin := d.silkLin, d.silkRin
+		outL, outR := d.silkOutL[:0], d.silkOutR[:0]
 		for f := 0; f < nFrames; f++ {
 			base := f * perChanFrameLen * 2
 			for i := 0; i < perChanFrameLen; i++ {
 				lin[i] = f64ToI16(pcm[base+i*2])
 				rin[i] = f64ToI16(pcm[base+i*2+1])
 			}
-			outL = append(outL, rs0.Process(lin)...)
+			outL = rs0.ProcessAppend(outL, lin)
 			if rs1 != nil {
-				outR = append(outR, rs1.Process(rin)...)
+				outR = rs1.ProcessAppend(outR, rin)
 			}
 		}
-		return interleaveSILKOut(outL, outR, d.channels)
+		d.silkOutL, d.silkOutR = outL, outR
+		d.silkResampled = interleaveSILKOutInto(d.silkResampled, outL, outR, d.channels)
+		return d.silkResampled
 	}
 
 	// Internal mono: channel 0 carries the sMid 1-sample delay.
@@ -4819,13 +4966,9 @@ func (d *Decoder) resampleSILK(pcm []float64, nFrames, pktChannels int, stereoTo
 	if frameLen < 1 {
 		return adjustChannels(pcm, pktChannels, d.channels)
 	}
-	rin := make([]int16, frameLen)
-	estCap := len(pcm) * 6
-	outL := make([]int16, 0, estCap)
-	var outR []int16
-	if d.channels == 2 {
-		outR = make([]int16, 0, estCap)
-	}
+	d.silkRin = growInt16(d.silkRin, frameLen)
+	rin := d.silkRin
+	outL, outR := d.silkOutL[:0], d.silkOutR[:0]
 	for f := 0; f < nFrames; f++ {
 		chunk := pcm[f*frameLen : (f+1)*frameLen]
 		rin[0] = d.silkSMid[1]
@@ -4836,19 +4979,22 @@ func (d *Decoder) resampleSILK(pcm []float64, nFrames, pktChannels int, stereoTo
 			d.silkSMid[0] = f64ToI16(chunk[frameLen-2])
 		}
 		d.silkSMid[1] = f64ToI16(chunk[frameLen-1])
-		lout := rs0.Process(rin)
-		outL = append(outL, lout...)
+		n0 := len(outL)
+		outL = rs0.ProcessAppend(outL, rin)
+		lout := outL[n0:]
 		if d.channels == 2 {
 			// Only the very first SILK frame after a stereo->mono transition
 			// resamples the right channel separately; otherwise duplicate L.
 			if stereoToMono && f == 0 && rs1 != nil {
-				outR = append(outR, rs1.Process(rin)...)
+				outR = rs1.ProcessAppend(outR, rin)
 			} else {
 				outR = append(outR, lout...)
 			}
 		}
 	}
-	return interleaveSILKOut(outL, outR, d.channels)
+	d.silkOutL, d.silkOutR = outL, outR
+	d.silkResampled = interleaveSILKOutInto(d.silkResampled, outL, outR, d.channels)
+	return d.silkResampled
 }
 
 // celtSilenceFade is opus_decode_frame's hybrid -> SILK fade-out: a 2.5 ms
@@ -4890,7 +5036,8 @@ func (d *Decoder) celtSilenceFade(pcm []float64, pktChannels, endBand int) {
 // returns ok == false, without decoding, when the packet has a frame to
 // decode or cannot be split.
 func (d *Decoder) concealOnlyPacket(payload []byte, countCode, frameSamples int) ([]float64, bool, error) {
-	frames, err := splitOpusFrames(payload, countCode)
+	var frameBuf [maxPacketFrames][]byte
+	frames, err := splitOpusFramesInto(frameBuf[:0], payload, countCode)
 	if err != nil {
 		return nil, false, nil
 	}
@@ -4984,8 +5131,13 @@ func f64ToI16(x float64) int16 {
 // For mono output it returns L only; for stereo it interleaves L/R, duplicating
 // L when R is missing or length-mismatched.
 func interleaveSILKOut(l, r []int16, channels int) []float64 {
+	return interleaveSILKOutInto(nil, l, r, channels)
+}
+
+// interleaveSILKOutInto is interleaveSILKOut reusing dst's capacity.
+func interleaveSILKOutInto(dst []float64, l, r []int16, channels int) []float64 {
 	if channels < 2 {
-		out := make([]float64, len(l))
+		out := growFloat64s(dst, len(l))
 		for i, v := range l {
 			out[i] = float64(v) / 32768.0
 		}
@@ -4994,7 +5146,7 @@ func interleaveSILKOut(l, r []int16, channels int) []float64 {
 	if len(r) != len(l) {
 		r = l
 	}
-	out := make([]float64, len(l)*2)
+	out := growFloat64s(dst, len(l)*2)
 	for i := range l {
 		out[i*2] = float64(l[i]) / 32768.0
 		out[i*2+1] = float64(r[i]) / 32768.0
@@ -5251,6 +5403,27 @@ func floatToInt24(dst []int32, src []float64) {
 	for i, sample := range src {
 		dst[i] = res2Int24(sample)
 	}
+}
+
+// float32ToInt16 is floatToInt16 for float32 samples; float32(float64(v))
+// is exact, so both give the same result.
+func float32ToInt16(dst []int16, src []float32) {
+	dst = dst[:len(src)]
+	for i, v := range src {
+		dst[i] = libopusFloat32ToInt16(v)
+	}
+}
+
+// libopusFloat32ToInt16 is libopusFloatToInt16 for a float32 sample.
+func libopusFloat32ToInt16(sample float32) int16 {
+	scaled := sample * float32(32768)
+	if !(scaled > -32768) {
+		scaled = -32768
+	}
+	if !(scaled < 32767) {
+		scaled = 32767
+	}
+	return int16(math.RoundToEven(float64(scaled)))
 }
 
 func floatToInt16(dst []int16, src []float64) {
@@ -5728,4 +5901,21 @@ func (d *Decoder) SetPhaseInversionDisabled(disabled bool) {
 // PhaseInversionDisabled reports the decoder phase-inversion setting.
 func (d *Decoder) PhaseInversionDisabled() bool {
 	return d.phaseInversionDisabled
+}
+
+// growFloat64s returns buf resized to n elements, reallocating only when its
+// capacity is too small. The contents are not cleared.
+func growFloat64s(buf []float64, n int) []float64 {
+	if cap(buf) < n {
+		return make([]float64, n)
+	}
+	return buf[:n]
+}
+
+// growInt16 is growFloat64s for int16 buffers.
+func growInt16(buf []int16, n int) []int16 {
+	if cap(buf) < n {
+		return make([]int16, n)
+	}
+	return buf[:n]
 }

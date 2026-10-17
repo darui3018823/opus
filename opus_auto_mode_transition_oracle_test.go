@@ -5,6 +5,7 @@ package opus
 import (
 	"bytes"
 	"fmt"
+	"github.com/darui3018823/opus/internal/silk"
 	"math"
 	"os"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 // Every cell is gated on byte identity; OPUS_TRANSITION_VBR_TRACE=1 logs
 // the CELT VBR state of every frame.
 func TestAutoModeTransitionOracle(t *testing.T) {
+	t.Cleanup(silk.EnableFrameTraces())
 	t.Parallel()
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())

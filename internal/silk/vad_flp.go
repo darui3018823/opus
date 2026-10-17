@@ -88,7 +88,7 @@ func (e *Encoder) silkVADGetSAQ8N(signal []float64, n int) silkVADResult {
 	if len(signal) == 0 || n < 8 {
 		return result.withFloats()
 	}
-	x16 := make([]int16, n)
+	x16 := scratchSlice(&e.frameScratch.vadX16, n)
 	for i := 0; i < len(x16) && i < len(signal); i++ {
 		x16[i] = silkSAT16(silkFloat2Int(signal[i] * 32768.0))
 	}
@@ -122,7 +122,13 @@ func (st *silkVADState) getSAQ8(pIn []int16, frameLength, fsKHz int) (saQ8, tilt
 	xOffset[1] = decimatedFramelength + decimatedFramelength2
 	xOffset[2] = xOffset[1] + decimatedFramelength
 	xOffset[3] = xOffset[2] + decimatedFramelength2
-	x := make([]int16, xOffset[3]+decimatedFramelength1)
+	var xArr [512]int16
+	x := xArr[:]
+	if n := xOffset[3] + decimatedFramelength1; n > len(xArr) {
+		x = make([]int16, n)
+	} else {
+		x = x[:n]
+	}
 
 	// 0-8 kHz to 0-4 kHz and 4-8 kHz
 	silkAnaFiltBank1(pIn[:frameLength], &st.anaState, x, x[xOffset[3]:])

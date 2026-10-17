@@ -3,6 +3,7 @@ package silk
 import (
 	"fmt"
 	"math"
+	"math/bits"
 
 	"github.com/darui3018823/opus/internal/entcode"
 )
@@ -18,6 +19,12 @@ const (
 const (
 	shellCodecFrameLength  = 16 // SHELL_CODEC_FRAME_LENGTH
 	log2ShellCodecFrameLen = 4  // LOG2_SHELL_CODEC_FRAME_LENGTH
+	maxPulseBlocks         = 20 // MAX_NB_SHELL_BLOCKS (MAX_FRAME_LENGTH / SHELL_CODEC_FRAME_LENGTH)
+	// maxSILKFrameLength is a 20 ms frame at the highest decoder rate
+	// (24 kHz); maxSILKFramesPerPacket is MAX_FRAMES_PER_PACKET. Both size
+	// stack buffers with a heap fallback.
+	maxSILKFrameLength     = 480
+	maxSILKFramesPerPacket = 3
 	silkMaxPulses          = 16 // SILK_MAX_PULSES
 	nRateLevels            = 10 // N_RATE_LEVELS
 	silkMaxLPCOrder        = 16 // MAX_LPC_ORDER
@@ -193,6 +200,33 @@ var nlsf2AOrdering16 = [16]int{0, 15, 8, 7, 4, 11, 12, 3, 2, 13, 10, 5, 6, 9, 14
 
 // Decoder represents a SILK decoder instance.
 type Decoder struct {
+	// synthesize work buffers, cleared on every use and reused between
+	// frames.
+	synthExc      []int32
+	synthSLTPQ15  []int32
+	synthOutBufQ0 []int32
+	synthSLPCQ14  []int32
+	synthSLTP     []int16
+	synthOut      []int16
+	// Per-frame parameter scratch (decodeNLSF, decodePulses and the LPC
+	// sets); each is consumed within one decodeFrame call.
+	nlsfQ15Buf   [silkMaxLPCOrder]int16
+	nlsfIndexBuf [silkMaxLPCOrder + 1]int
+	lpcSetBuf    [2][silkMaxLPCOrder]int16
+	pulseBuf     []int16
+	// Output scratch: decodeFrame's float frame, the stereo output frame
+	// and the side frame of decodeMultiStereoEC. Callers append them to the
+	// packet output before the next frame.
+	frameOut []float64
+	msOut    []float64
+	sideI16  []int16
+	msX      []int16
+	// packetOut backs DecodeMultiWithDecoderReuse's result.
+	packetOut []float64
+	// Decoders that parse past the LBRR frames of a packet; re-initialised
+	// for every packet (see consumeLBRRFrames).
+	lbrrMid, lbrrSide *Decoder
+
 	sampleRate int // 8000, 12000, 16000, 24000
 	frameSize  int // samples per 20ms frame
 	channels   int // 1 or 2
@@ -287,14 +321,26 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 // NewDecoderWithFrameMs creates a new SILK decoder with the given frame duration in ms.
 // frameMs must be 10 or 20 (40ms and 60ms are handled by calling DecodeMulti with nFrames=2 or 3).
 func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) {
+	d := &Decoder{}
+	if err := d.init(sampleRate, channels, frameMs); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+// init puts d in the state NewDecoderWithFrameMs returns. Every field is
+// overwritten; only the work buffers (cleared on every use) and the memory
+// of the state slices are kept, so a decoder can be re-initialised without
+// allocating.
+func (d *Decoder) init(sampleRate, channels, frameMs int) error {
 	if sampleRate != 8000 && sampleRate != 12000 && sampleRate != 16000 && sampleRate != 24000 {
-		return nil, fmt.Errorf("invalid sample rate: %d (must be 8000, 12000, 16000, or 24000)", sampleRate)
+		return fmt.Errorf("invalid sample rate: %d (must be 8000, 12000, 16000, or 24000)", sampleRate)
 	}
 	if channels != 1 && channels != 2 {
-		return nil, fmt.Errorf("invalid channels: %d (must be 1 or 2)", channels)
+		return fmt.Errorf("invalid channels: %d (must be 1 or 2)", channels)
 	}
 	if frameMs != 10 && frameMs != 20 {
-		return nil, fmt.Errorf("invalid frame duration: %d ms (must be 10 or 20)", frameMs)
+		return fmt.Errorf("invalid frame duration: %d ms (must be 10 or 20)", frameMs)
 	}
 
 	fsKHz := sampleRate / 1000
@@ -314,7 +360,26 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 	subfrmLen := frameSize / nSubframes
 	ltpMemLen := silkLTPMemLengthMs * fsKHz
 
-	d := &Decoder{
+	prevNLSF := reuseInt16(d.prevNLSFQ15, lpcOrder)
+	lpcState := reuseInt32(d.lpcState, silkMaxLPCOrder)
+	ltpState := reuseInt32(d.ltpState, ltpMemLen)
+	side, lbrrMid, lbrrSide := d.side, d.lbrrMid, d.lbrrSide
+	*d = Decoder{
+		synthExc:      d.synthExc,
+		synthSLTPQ15:  d.synthSLTPQ15,
+		synthOutBufQ0: d.synthOutBufQ0,
+		synthSLPCQ14:  d.synthSLPCQ14,
+		synthSLTP:     d.synthSLTP,
+		synthOut:      d.synthOut,
+		pulseBuf:      d.pulseBuf,
+		frameOut:      d.frameOut,
+		msOut:         d.msOut,
+		sideI16:       d.sideI16,
+		msX:           d.msX,
+		packetOut:     d.packetOut,
+		lbrrMid:       lbrrMid,
+		lbrrSide:      lbrrSide,
+
 		sampleRate:     sampleRate,
 		frameSize:      frameSize,
 		channels:       channels,
@@ -322,15 +387,15 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 		fsKHz:          fsKHz,
 		nSubframes:     nSubframes,
 		subfrmLen:      subfrmLen,
-		prevNLSFQ15:    make([]int16, lpcOrder),
+		prevNLSFQ15:    prevNLSF,
 		lagPrev:        100,
 		prevLagIndex:   0,
 		prevGainQ16:    65536,
 		prevGainIndex:  10,
 		prevSignalType: SignalTypeUnvoiced,
 		firstFrame:     true,
-		lpcState:       make([]int32, silkMaxLPCOrder),
-		ltpState:       make([]int32, ltpMemLen),
+		lpcState:       lpcState,
+		ltpState:       ltpState,
 		randSeed:       7818,
 	}
 	d.plcReset()
@@ -344,14 +409,33 @@ func NewDecoderWithFrameMs(sampleRate, channels, frameMs int) (*Decoder, error) 
 	}
 
 	if channels == 2 {
-		side, err := NewDecoderWithFrameMs(sampleRate, 1, frameMs)
-		if err != nil {
-			return nil, err
+		if side == nil {
+			side = &Decoder{}
+		}
+		if err := side.init(sampleRate, 1, frameMs); err != nil {
+			return err
 		}
 		d.side = side
 	}
+	return nil
+}
 
-	return d, nil
+func reuseInt16(buf []int16, n int) []int16 {
+	if cap(buf) < n {
+		return make([]int16, n)
+	}
+	buf = buf[:n]
+	clear(buf)
+	return buf
+}
+
+func reuseInt32(buf []int32, n int) []int32 {
+	if cap(buf) < n {
+		return make([]int32, n)
+	}
+	buf = buf[:n]
+	clear(buf)
+	return buf
 }
 
 // SetFrameMs reconfigures the decoder's Opus frame duration (10 or 20 ms)
@@ -427,7 +511,7 @@ func (d *Decoder) DecodeMulti(packet []byte, nFrames int) ([]float64, error) {
 	if dec.Error() != nil {
 		return d.concealPacketLoss()
 	}
-	pcm, err := d.decodeMultiMonoEC(dec, nFrames)
+	pcm, err := d.decodeMultiMonoEC(dec, nFrames, nil)
 	d.lastFinalRange = dec.GetRng()
 	return pcm, err
 }
@@ -438,15 +522,25 @@ func (d *Decoder) DecodeMulti(packet []byte, nFrames int) ([]float64, error) {
 // not create or finalise it. The result is interleaved SILK PCM at the internal
 // rate (one frame's worth per SILK frame).
 func (d *Decoder) DecodeMultiWithDecoder(dec *entcode.Decoder, nFrames int) ([]float64, error) {
+	return d.decodeMultiWithDecoder(dec, nFrames, nil)
+}
+
+// DecodeMultiWithDecoderReuse is DecodeMultiWithDecoder writing into a
+// decoder-owned buffer: the result is valid until the next call.
+func (d *Decoder) DecodeMultiWithDecoderReuse(dec *entcode.Decoder, nFrames int) ([]float64, error) {
+	return d.decodeMultiWithDecoder(dec, nFrames, &d.packetOut)
+}
+
+func (d *Decoder) decodeMultiWithDecoder(dec *entcode.Decoder, nFrames int, out *[]float64) ([]float64, error) {
 	if nFrames < 1 {
 		nFrames = 1
 	}
 	var pcm []float64
 	var err error
 	if d.channels == 2 {
-		pcm, err = d.decodeMultiStereoEC(dec, nFrames)
+		pcm, err = d.decodeMultiStereoEC(dec, nFrames, out)
 	} else {
-		pcm, err = d.decodeMultiMonoEC(dec, nFrames)
+		pcm, err = d.decodeMultiMonoEC(dec, nFrames, out)
 	}
 	d.lastFinalRange = dec.GetRng()
 	return pcm, err
@@ -682,9 +776,27 @@ func (d *Decoder) concealLostFrames(nFrames int) ([]float64, error) {
 }
 
 // decodeMultiMonoEC decodes the mono SILK frames from a shared range decoder.
-func (d *Decoder) decodeMultiMonoEC(dec *entcode.Decoder, nFrames int) ([]float64, error) {
+// packetOutput returns an empty slice with room for n samples: (*out)[:0]
+// grown as needed, or a new slice when out is nil.
+func packetOutput(out *[]float64, n int) []float64 {
+	if out == nil {
+		return make([]float64, 0, n)
+	}
+	if cap(*out) < n {
+		*out = make([]float64, 0, n)
+	}
+	return (*out)[:0]
+}
+
+func (d *Decoder) decodeMultiMonoEC(dec *entcode.Decoder, nFrames int, out *[]float64) ([]float64, error) {
 	// Per libopus dec_API.c: decode VAD flags for all frames first, then LBRR flag
-	vadFlags := make([]uint32, nFrames)
+	var vadBuf [maxSILKFramesPerPacket]uint32
+	vadFlags := vadBuf[:0]
+	if nFrames <= len(vadBuf) {
+		vadFlags = vadBuf[:nFrames]
+	} else {
+		vadFlags = make([]uint32, nFrames)
+	}
 	for i := 0; i < nFrames; i++ {
 		if dec.DecodeBitLogp(1) {
 			vadFlags[i] = 1
@@ -718,7 +830,7 @@ func (d *Decoder) decodeMultiMonoEC(dec *entcode.Decoder, nFrames int) ([]float6
 	}
 
 	// Decode each frame sequentially
-	var allPCM []float64
+	allPCM := packetOutput(out, nFrames*d.frameSize*max(d.channels, 1))
 	for i := 0; i < nFrames; i++ {
 		pcm, err := d.decodeFrame(dec, vadFlags[i], i > 0)
 		if err != nil {
@@ -738,7 +850,7 @@ func (d *Decoder) decodeMultiMonoEC(dec *entcode.Decoder, nFrames int) ([]float6
 // regular decoder's synthesis and predictor state remains untouched.
 func (d *Decoder) consumeLBRRFrames(dec *entcode.Decoder, nFrames, mask int) error {
 	frameMs := d.frameSize * 1000 / d.sampleRate
-	tmp, err := NewDecoderWithFrameMs(d.sampleRate, 1, frameMs)
+	tmp, err := d.freshLBRRDecoder(&d.lbrrMid, frameMs)
 	if err != nil {
 		return err
 	}
@@ -757,6 +869,19 @@ func (d *Decoder) consumeLBRRFrames(dec *entcode.Decoder, nFrames, mask int) err
 	return nil
 }
 
+// freshLBRRDecoder returns *slot re-initialised as a new mono decoder at
+// d's rate, creating it on first use.
+func (d *Decoder) freshLBRRDecoder(slot **Decoder, frameMs int) (*Decoder, error) {
+	if *slot == nil {
+		*slot = &Decoder{}
+	}
+	if err := (*slot).init(d.sampleRate, 1, frameMs); err != nil {
+		*slot = nil
+		return nil, err
+	}
+	return *slot, nil
+}
+
 func (d *Decoder) decodeMultiStereo(packet []byte, nFrames int) ([]float64, error) {
 	if d.side == nil {
 		return nil, fmt.Errorf("missing SILK side-channel decoder")
@@ -771,18 +896,21 @@ func (d *Decoder) decodeMultiStereo(packet []byte, nFrames int) ([]float64, erro
 	if dec.Error() != nil {
 		return d.concealPacketLoss()
 	}
-	return d.decodeMultiStereoEC(dec, nFrames)
+	return d.decodeMultiStereoEC(dec, nFrames, nil)
 }
 
 // decodeMultiStereoEC decodes the stereo SILK frames from a shared range decoder.
-func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]float64, error) {
+func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int, out *[]float64) ([]float64, error) {
 	if d.side == nil {
 		return nil, fmt.Errorf("missing SILK side-channel decoder")
 	}
 
-	vadFlags := [2][]uint32{
-		make([]uint32, nFrames),
-		make([]uint32, nFrames),
+	var vadBuf [2][maxSILKFramesPerPacket]uint32
+	var vadFlags [2][]uint32
+	if nFrames <= maxSILKFramesPerPacket {
+		vadFlags = [2][]uint32{vadBuf[0][:nFrames], vadBuf[1][:nFrames]}
+	} else {
+		vadFlags = [2][]uint32{make([]uint32, nFrames), make([]uint32, nFrames)}
 	}
 	lbrrFlags := [2]uint32{}
 	for ch := 0; ch < 2; ch++ {
@@ -822,7 +950,11 @@ func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]floa
 		}
 	}
 
-	var allPCM []float64
+	outCh := 2
+	if d.apiMono {
+		outCh = 1
+	}
+	allPCM := packetOutput(out, nFrames*d.frameSize*outCh)
 	for i := 0; i < nFrames; i++ {
 		predQ13 := decodeStereoPredQ13(dec)
 		decodeOnlyMiddle := false
@@ -830,19 +962,29 @@ func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]floa
 			decodeOnlyMiddle = dec.DecodeIcdf(silkStereoOnlyCodeMidICDF[:], 8) != 0
 		}
 
-		mid, err := d.decodeFrameMono(dec, vadFlags[0][i], i > 0)
+		// The mid and side frames stay int16 into silk_stereo_MS_to_LR; only
+		// a concealed mid frame goes through the float path.
+		var midF []float64
+		channels := d.channels
+		d.channels = 1
+		mid16, err := d.decodeFrameI16(dec, vadFlags[0][i], i > 0)
+		d.channels = channels
 		if err != nil {
-			mid, _ = d.concealPacketLoss()
-			if len(mid) == d.frameSize*2 {
+			midF, _ = d.concealPacketLoss()
+			if len(midF) == d.frameSize*2 {
 				tmp := make([]float64, d.frameSize)
 				for j := range tmp {
-					tmp[j] = mid[j*2]
+					tmp[j] = midF[j*2]
 				}
-				mid = tmp
+				midF = tmp
 			}
 		}
 
-		side := make([]float64, d.frameSize)
+		if cap(d.sideI16) < d.frameSize {
+			d.sideI16 = make([]int16, d.frameSize)
+		}
+		side16 := d.sideI16[:d.frameSize]
+		clear(side16)
 		if !decodeOnlyMiddle {
 			if d.prevDecodeOnlyMiddle {
 				// The first frame with side coding clears the side
@@ -854,14 +996,22 @@ func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]floa
 			// independently without LTP scaling
 			// (CODE_INDEPENDENTLY_NO_LTP_SCALING).
 			d.side.noLTPScaling = i > 0 && d.prevDecodeOnlyMiddle
-			pcm, err := d.side.decodeFrame(dec, vadFlags[1][i], sideConditional)
+			pcm, err := d.side.decodeFrameI16(dec, vadFlags[1][i], sideConditional)
 			d.side.noLTPScaling = false
 			if err == nil {
-				copy(side, pcm)
+				copy(side16, pcm)
 			}
 		}
 
-		allPCM = append(allPCM, d.stereoOutput(mid, side, predQ13)...)
+		if midF != nil {
+			side := make([]float64, d.frameSize)
+			for j, v := range side16 {
+				side[j] = float64(v) / 32768.0
+			}
+			allPCM = append(allPCM, d.stereoOutput(midF, side, predQ13)...)
+		} else {
+			allPCM = append(allPCM, d.stereoOutputI16(mid16, side16, predQ13)...)
+		}
 		d.prevDecodeOnlyMiddle = decodeOnlyMiddle
 	}
 	return allPCM, nil
@@ -869,11 +1019,11 @@ func (d *Decoder) decodeMultiStereoEC(dec *entcode.Decoder, nFrames int) ([]floa
 
 func (d *Decoder) consumeStereoLBRRFrames(dec *entcode.Decoder, nFrames int, masks [2]int) error {
 	frameMs := d.frameSize * 1000 / d.sampleRate
-	mid, err := NewDecoderWithFrameMs(d.sampleRate, 1, frameMs)
+	mid, err := d.freshLBRRDecoder(&d.lbrrMid, frameMs)
 	if err != nil {
 		return err
 	}
-	side, err := NewDecoderWithFrameMs(d.sampleRate, 1, frameMs)
+	side, err := d.freshLBRRDecoder(&d.lbrrSide, frameMs)
 	if err != nil {
 		return err
 	}
@@ -1003,12 +1153,47 @@ func (d *Decoder) stereoOutput(mid, side []float64, predQ13 [2]int32) []float64 
 	return d.stereoMSToLR(mid, side, predQ13)
 }
 
-func (d *Decoder) stereoMSToLR(mid, side []float64, predQ13 [2]int32) []float64 {
+// stereoOutputI16 is stereoOutput on int16 mid and side frames (the float
+// frames are these divided by 32768, so the result is the same).
+func (d *Decoder) stereoOutputI16(mid, side []int16, predQ13 [2]int32) []float64 {
 	n := d.frameSize
-	x1 := make([]int16, n+2)
-	x2 := make([]int16, n+2)
+	if d.apiMono {
+		out := d.msOutBuf(n)
+		for i := range out {
+			out[i] = float64(mid[i]) / 32768.0
+		}
+		return out
+	}
+	x1, x2 := d.stereoMSInput(n)
+	copy(x1[2:], mid[:min(n, len(mid))])
+	copy(x2[2:], side[:min(n, len(side))])
+	return d.stereoMSToLRCore(x1, x2, predQ13)
+}
+
+func (d *Decoder) msOutBuf(n int) []float64 {
+	if cap(d.msOut) < n {
+		d.msOut = make([]float64, n)
+	}
+	return d.msOut[:n]
+}
+
+// stereoMSInput returns zeroed x1/x2 buffers of n+2 samples whose first two
+// samples are the carried mid/side history.
+func (d *Decoder) stereoMSInput(n int) (x1, x2 []int16) {
+	if cap(d.msX) < 2*(n+2) {
+		d.msX = make([]int16, 2*(n+2))
+	}
+	x := d.msX[:2*(n+2)]
+	clear(x)
+	x1, x2 = x[:n+2], x[n+2:]
 	copy(x1[:2], d.stereoMid[:])
 	copy(x2[:2], d.stereoSide[:])
+	return x1, x2
+}
+
+func (d *Decoder) stereoMSToLR(mid, side []float64, predQ13 [2]int32) []float64 {
+	n := d.frameSize
+	x1, x2 := d.stereoMSInput(n)
 	for i := 0; i < n; i++ {
 		if i < len(mid) {
 			x1[i+2] = floatToInt16Sample(mid[i])
@@ -1017,6 +1202,13 @@ func (d *Decoder) stereoMSToLR(mid, side []float64, predQ13 [2]int32) []float64 
 			x2[i+2] = floatToInt16Sample(side[i])
 		}
 	}
+	return d.stereoMSToLRCore(x1, x2, predQ13)
+}
+
+// stereoMSToLRCore is silk_stereo_MS_to_LR on x1/x2 from stereoMSInput; the
+// returned interleaved frame is d.msOut.
+func (d *Decoder) stereoMSToLRCore(x1, x2 []int16, predQ13 [2]int32) []float64 {
+	n := d.frameSize
 	d.stereoMid[0], d.stereoMid[1] = x1[n], x1[n+1]
 	d.stereoSide[0], d.stereoSide[1] = x2[n], x2[n+1]
 
@@ -1047,7 +1239,7 @@ func (d *Decoder) stereoMSToLR(mid, side []float64, predQ13 [2]int32) []float64 
 	}
 	d.stereoPredPrevQ13 = predQ13
 
-	out := make([]float64, n*2)
+	out := d.msOutBuf(n * 2)
 	for i := 0; i < n; i++ {
 		l := clamp16(int32(x1[i+1]) + int32(x2[i+1]))
 		r := clamp16(int32(x1[i+1]) - int32(x2[i+1]))
@@ -1061,6 +1253,33 @@ func (d *Decoder) stereoMSToLR(mid, side []float64, predQ13 [2]int32) []float64 
 // vadFlag: 1 if frame is voice-active, 0 if not (pre-decoded from packet header).
 // conditionalGain is true for the second and later SILK frames in the same range stream.
 func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalGain bool) ([]float64, error) {
+	outputI16, err := d.decodeFrameI16(dec, vadFlag, conditionalGain)
+	if err != nil {
+		return nil, err
+	}
+	// Convert int16 PCM → float64 normalized to [-1, 1]
+	if d.channels == 2 {
+		stereo := make([]float64, d.frameSize*2)
+		for i, s := range outputI16 {
+			v := float64(s) / 32768.0
+			stereo[i*2] = v
+			stereo[i*2+1] = v
+		}
+		return stereo, nil
+	}
+	if cap(d.frameOut) < d.frameSize {
+		d.frameOut = make([]float64, d.frameSize)
+	}
+	result := d.frameOut[:d.frameSize]
+	for i, s := range outputI16 {
+		result[i] = float64(s) / 32768.0
+	}
+	return result, nil
+}
+
+// decodeFrameI16 decodes one frame to int16 PCM. The result is the
+// decoder's synthesis buffer: it is valid until the next frame decoded by d.
+func (d *Decoder) decodeFrameI16(dec *entcode.Decoder, vadFlag uint32, conditionalGain bool) ([]int16, error) {
 
 	// ── 2. Signal type + quantization offset type ────────────────────────────
 	// From decode_indices.c: use VAD flag to select table
@@ -1079,9 +1298,11 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 	// ── 3. Decode gains ──────────────────────────────────────────────────────
 	// silk_gains_dequant from libopus silk/gain_quant.c
 	// First subframe: MSBs from gain_iCDF[signalType], then 3 LSBs from uniform8.
-	gainsQ16 := make([]int32, d.nSubframes)
-	rawGainIndices := make([]int, d.nSubframes)
-	absGainIndices := make([]int, d.nSubframes)
+	var gainsBuf [silkMaxNbSubfr]int32
+	var rawGainBuf, absGainBuf [silkMaxNbSubfr]int
+	gainsQ16 := gainsBuf[:d.nSubframes]
+	rawGainIndices := rawGainBuf[:d.nSubframes]
+	absGainIndices := absGainBuf[:d.nSubframes]
 	// libopus indexes silk_gain_iCDF by signalType directly:
 	// 0=inactive, 1=unvoiced, 2=voiced.
 	stIdx := signalType
@@ -1179,17 +1400,18 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 	//   PredCoef_Q12[1] = nlsfToLPC(current NLSF)       → subframes 2,3
 	// NLSFInterpCoef_Q2 (interpFactor) range 0..4; 4 = no interpolation.
 	var lpcSets [2][]int16
-	lpcSets[1] = nlsfToLPCLibopus(nlsfQ15, d.lpcOrder)
+	lpcSets[1] = nlsfToLPCLibopusInto(d.lpcSetBuf[1][:d.lpcOrder], nlsfQ15, d.lpcOrder)
 
 	if interpFactor < 4 {
-		interpNLSF := make([]int16, d.lpcOrder)
+		var interpBuf [silkMaxLPCOrder]int16
+		interpNLSF := interpBuf[:d.lpcOrder]
 		for i := 0; i < d.lpcOrder; i++ {
 			prev := int32(d.prevNLSFQ15[i])
 			curr := int32(nlsfQ15[i])
 			interpNLSF[i] = int16(prev + ((int32(interpFactor) * (curr - prev)) >> 2))
 		}
 		silkNLSFStabilize(interpNLSF, cb.deltaMinQ15, d.lpcOrder)
-		lpcSets[0] = nlsfToLPCLibopus(interpNLSF, d.lpcOrder)
+		lpcSets[0] = nlsfToLPCLibopusInto(d.lpcSetBuf[0][:d.lpcOrder], interpNLSF, d.lpcOrder)
 	} else {
 		lpcSets[0] = lpcSets[1]
 	}
@@ -1204,7 +1426,8 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 		}
 	}
 
-	lpcCoeffsQ12 := make([][]int16, d.nSubframes)
+	var lpcCoeffsBuf [silkMaxNbSubfr][]int16
+	lpcCoeffsQ12 := lpcCoeffsBuf[:d.nSubframes]
 	for sf := 0; sf < d.nSubframes; sf++ {
 		lpcCoeffsQ12[sf] = lpcSets[sf>>1]
 	}
@@ -1220,8 +1443,10 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 	// ── 5. Decode pitch parameters (voiced only) ─────────────────────────────
 	// silk_decode_parameters zeroes pitch lags, LTP coefficients, and the
 	// LTP scale for non-voiced frames; the PLC state update relies on that.
-	pitchLags := make([]int, d.nSubframes)
-	ltpCoeffsQ14 := make([][5]int16, d.nSubframes)
+	var pitchLagBuf [silkMaxNbSubfr]int
+	var ltpCoeffsBuf [silkMaxNbSubfr][5]int16
+	pitchLags := pitchLagBuf[:d.nSubframes]
+	ltpCoeffsQ14 := ltpCoeffsBuf[:d.nSubframes]
 	ltpScaleQ14 := int16(0)
 
 	if signalType == SignalTypeVoiced {
@@ -1350,22 +1575,7 @@ func (d *Decoder) decodeFrame(dec *entcode.Decoder, vadFlag uint32, conditionalG
 	d.cngProcess(ctrl, outputI16)
 	d.plcGlueFrames(outputI16)
 	d.lagPrev = pitchLags[d.nSubframes-1]
-
-	// Convert int16 PCM → float64 normalized to [-1, 1]
-	result := make([]float64, d.frameSize)
-	for i, s := range outputI16 {
-		result[i] = float64(s) / 32768.0
-	}
-
-	if d.channels == 2 {
-		stereo := make([]float64, d.frameSize*2)
-		for i, s := range result {
-			stereo[i*2] = s
-			stereo[i*2+1] = s
-		}
-		return stereo, nil
-	}
-	return result, nil
+	return outputI16, nil
 }
 
 // decodePitchLagLowBits decodes the pitch lag low bits, matching libopus
@@ -1459,7 +1669,8 @@ func (d *Decoder) decodeNLSF(dec *entcode.Decoder, cb *nlsfCBParams, signalType 
 	if cb1Idx >= cb.nEntries {
 		cb1Idx = cb.nEntries - 1
 	}
-	nlsfIndices := make([]int, order+1)
+	nlsfIndices := d.nlsfIndexBuf[:order+1]
+	clear(nlsfIndices)
 	nlsfIndices[0] = cb1Idx
 
 	// Step 2: Unpack ec_ix[] and pred_Q8[] from cb2Select table
@@ -1471,8 +1682,10 @@ func (d *Decoder) decodeNLSF(dec *entcode.Decoder, cb *nlsfCBParams, signalType 
 	// ec_ix[i+1] = smulbb((entry>>5)&7, 2*NLSF_QUANT_MAX_AMPLITUDE+1)
 	// pred_Q8[i+1] = pred_Q8_table[i + ((entry>>4)&1) * (order-1) + 1]
 
-	ecIx := make([]int, order)
-	predQ8 := make([]uint8, order)
+	var ecIxBuf [silkMaxLPCOrder]int
+	var predQ8Buf [silkMaxLPCOrder]uint8
+	ecIx := ecIxBuf[:order]
+	predQ8 := predQ8Buf[:order]
 	ecSelBase := cb1Idx * (order / 2)
 
 	for i := 0; i < order; i += 2 {
@@ -1495,7 +1708,8 @@ func (d *Decoder) decodeNLSF(dec *entcode.Decoder, cb *nlsfCBParams, signalType 
 	//   x_Q10[i] = out_Q10
 
 	// First decode the raw indices from the bitstream (NLSFIndices[1..order])
-	nlsfRawIdx := make([]int8, order)
+	var nlsfRawBuf [silkMaxLPCOrder]int8
+	nlsfRawIdx := nlsfRawBuf[:order]
 	for i := 0; i < order; i++ {
 		// ec_ix[i] is the offset into cb2ICDF, table has (2*NLSF_QUANT_MAX_AMPLITUDE+1)=9 entries
 		ix := dec.DecodeIcdf(cb.cb2ICDF[ecIx[i]:ecIx[i]+2*nlsfQuantMaxAmp+1], 8)
@@ -1522,7 +1736,8 @@ func (d *Decoder) decodeNLSF(dec *entcode.Decoder, cb *nlsfCBParams, signalType 
 		quantStepSizeQ16 = 11796 // SILK_FIX_CONST(0.18, 16)
 	}
 
-	resQ10 := make([]int32, order)
+	var resQ10Buf [silkMaxLPCOrder]int32
+	resQ10 := resQ10Buf[:order]
 	outQ10 := int32(0)
 	for i := order - 1; i >= 0; i-- {
 		predQ10 := (outQ10 * int32(predQ8[i])) >> 8
@@ -1547,7 +1762,7 @@ func (d *Decoder) decodeNLSF(dec *entcode.Decoder, cb *nlsfCBParams, signalType 
 	// ADD_LSHIFT32(a, b, 7) = a + (b << 7)
 	// DIV32_16(a, b) = a / b
 
-	nlsfQ15 := make([]int16, order)
+	nlsfQ15 := d.nlsfQ15Buf[:order]
 	for i := 0; i < order; i++ {
 		cb1Val := int32(cb.cb1Q8[cb1Idx*order+i])     // Q8
 		wghtQ9 := int32(cb.cb1WghtQ9[cb1Idx*order+i]) // Q9
@@ -1884,8 +2099,8 @@ func silkSMULWW(a, b int32) int32 {
 }
 
 // silkPitchContourOffsets returns per-subframe pitch lag offsets from contour index.
-func silkPitchContourOffsets(contourIdx, nSubframes, fsKHz int) []int {
-	offsets := make([]int, nSubframes)
+func silkPitchContourOffsets(contourIdx, nSubframes, fsKHz int) [silkMaxNbSubfr]int {
+	var offsets [silkMaxNbSubfr]int
 	if fsKHz == 8 && nSubframes == 4 {
 		patterns := [4][11]int{
 			{0, 2, -1, -1, -1, 0, 0, 1, 1, 0, 1},
@@ -1955,10 +2170,20 @@ func (d *Decoder) decodePulses(dec *entcode.Decoder, signalType, quantOffset, fr
 		iter++
 	}
 	alignedLen := iter * shellCodecFrameLength
-	pulses := make([]int16, alignedLen)
+	if cap(d.pulseBuf) < alignedLen {
+		d.pulseBuf = make([]int16, alignedLen)
+	}
+	pulses := d.pulseBuf[:alignedLen]
+	clear(pulses)
 
-	sumPulses := make([]int, iter)
-	nLShifts := make([]int, iter)
+	var sumPulsesBuf, nLShiftsBuf [maxPulseBlocks]int
+	sumPulses := sumPulsesBuf[:0]
+	nLShifts := nLShiftsBuf[:0]
+	if iter <= maxPulseBlocks {
+		sumPulses, nLShifts = sumPulsesBuf[:iter], nLShiftsBuf[:iter]
+	} else {
+		sumPulses, nLShifts = make([]int, iter), make([]int, iter)
+	}
 
 	for i := 0; i < iter; i++ {
 		nLShifts[i] = 0
@@ -2157,16 +2382,7 @@ func silkAbs32(a int32) int32 {
 }
 
 func silkCLZ32(a int32) int {
-	u := uint32(a)
-	if u == 0 {
-		return 32
-	}
-	n := 0
-	for (u & 0x80000000) == 0 {
-		n++
-		u <<= 1
-	}
-	return n
+	return bits.LeadingZeros32(uint32(a))
 }
 
 func silkDIV32VarQ(a32, b32 int32, qres int) int32 {
@@ -2224,6 +2440,52 @@ func silkLPCAnalysisFilter(out []int16, in []int32, b []int16, length, order int
 // Implements silk_decode_core from libopus silk/decode_core.c.
 // synthesize implements libopus silk/decode_core.c, producing int32 Q14 output samples.
 // The output is the unscaled LPC synthesis; caller applies gain and converts to float.
+// silkLPCPredictQ10 is the short-term prediction of silk_decode_core:
+// order>>1 plus sum_j SMULWB(hist[15-j], a[j]), accumulated in j order.
+// hist holds the last silkMaxLPCOrder sLPC_Q14 samples, newest last.
+func silkLPCPredictQ10(hist *[silkMaxLPCOrder]int32, a []int16, order int) int32 {
+	acc := int32(order >> 1)
+	switch {
+	case order == 16 && len(a) >= 16:
+		c := (*[16]int16)(a[:16])
+		acc = silkSMLAWB(acc, hist[15], c[0])
+		acc = silkSMLAWB(acc, hist[14], c[1])
+		acc = silkSMLAWB(acc, hist[13], c[2])
+		acc = silkSMLAWB(acc, hist[12], c[3])
+		acc = silkSMLAWB(acc, hist[11], c[4])
+		acc = silkSMLAWB(acc, hist[10], c[5])
+		acc = silkSMLAWB(acc, hist[9], c[6])
+		acc = silkSMLAWB(acc, hist[8], c[7])
+		acc = silkSMLAWB(acc, hist[7], c[8])
+		acc = silkSMLAWB(acc, hist[6], c[9])
+		acc = silkSMLAWB(acc, hist[5], c[10])
+		acc = silkSMLAWB(acc, hist[4], c[11])
+		acc = silkSMLAWB(acc, hist[3], c[12])
+		acc = silkSMLAWB(acc, hist[2], c[13])
+		acc = silkSMLAWB(acc, hist[1], c[14])
+		acc = silkSMLAWB(acc, hist[0], c[15])
+	case order == 10 && len(a) >= 10:
+		c := (*[10]int16)(a[:10])
+		acc = silkSMLAWB(acc, hist[15], c[0])
+		acc = silkSMLAWB(acc, hist[14], c[1])
+		acc = silkSMLAWB(acc, hist[13], c[2])
+		acc = silkSMLAWB(acc, hist[12], c[3])
+		acc = silkSMLAWB(acc, hist[11], c[4])
+		acc = silkSMLAWB(acc, hist[10], c[5])
+		acc = silkSMLAWB(acc, hist[9], c[6])
+		acc = silkSMLAWB(acc, hist[8], c[7])
+		acc = silkSMLAWB(acc, hist[7], c[8])
+		acc = silkSMLAWB(acc, hist[6], c[9])
+	default:
+		for j := 0; j < order; j++ {
+			acc = silkSMLAWB(acc, hist[silkMaxLPCOrder-1-j], a[j])
+		}
+	}
+	return acc
+}
+
+// synthesize runs silk_decode_core for one frame. The returned slice is
+// decoder scratch, valid until the next synthesize call.
 func (d *Decoder) synthesize(
 	pulses []int16,
 	gainsQ16 []int32,
@@ -2250,7 +2512,7 @@ func (d *Decoder) synthesize(
 	// exc += offset_Q10 << 4   (unconditional)
 	// if rand_seed < 0: exc = -exc
 	// rand_seed += pulses[i]   (silk_ADD32_ovflw)
-	excQ14 := make([]int32, d.frameSize)
+	excQ14 := zeroedInt32(&d.synthExc, d.frameSize)
 	for i := 0; i < d.frameSize; i++ {
 		seed = 196314165*seed + 907633515 // silk_RAND: LCG first
 		excQ14[i] = int32(pulses[i]) << 14
@@ -2273,14 +2535,18 @@ func (d *Decoder) synthesize(
 	copy(d.excQ14[:d.frameSize], excQ14)
 
 	ltpMemLen := len(d.ltpState)
-	sLTPQ15 := make([]int32, ltpMemLen+d.frameSize)
-	outBufQ0 := make([]int32, ltpMemLen+d.frameSize)
+	sLTPQ15 := zeroedInt32(&d.synthSLTPQ15, ltpMemLen+d.frameSize)
+	outBufQ0 := zeroedInt32(&d.synthOutBufQ0, ltpMemLen+d.frameSize)
 	copy(outBufQ0, d.ltpState)
 	sLTPBufIdx := ltpMemLen
 
-	sLPCQ14 := make([]int32, silkMaxLPCOrder+d.subfrmLen)
+	sLPCQ14 := zeroedInt32(&d.synthSLPCQ14, silkMaxLPCOrder+d.subfrmLen)
 	copy(sLPCQ14[:silkMaxLPCOrder], d.lpcState)
-	output := make([]int16, d.frameSize)
+	if cap(d.synthOut) < d.frameSize {
+		d.synthOut = make([]int16, d.frameSize)
+	}
+	output := d.synthOut[:d.frameSize]
+	clear(output)
 	nlsfInterpolation := false
 	if d.nSubframes == 4 && len(lpcCoeffsQ12[0]) > 0 && len(lpcCoeffsQ12[d.nSubframes-1]) > 0 {
 		nlsfInterpolation = &lpcCoeffsQ12[0][0] != &lpcCoeffsQ12[d.nSubframes-1][0]
@@ -2331,7 +2597,11 @@ func (d *Decoder) synthesize(
 					}
 				}
 				filterLen := sLTPBufIdx - startIdx
-				sLTP := make([]int16, filterLen)
+				if cap(d.synthSLTP) < filterLen {
+					d.synthSLTP = make([]int16, filterLen)
+				}
+				sLTP := d.synthSLTP[:filterLen]
+				clear(sLTP)
 				silkLPCAnalysisFilter(sLTP, outBufQ0[startIdx:startIdx+filterLen], lpc, filterLen, d.lpcOrder)
 				if sf == 0 {
 					invGainQ31 = silkSMULWB(invGainQ31, ltpScaleQ14) << 2
@@ -2348,29 +2618,41 @@ func (d *Decoder) synthesize(
 		}
 
 		presQ14 := excQ14[start : start+d.subfrmLen]
-		for i := 0; i < d.subfrmLen; i++ {
-			if sfSignalType == SignalTypeVoiced {
+		out := output[start : start+d.subfrmLen]
+		voiced := sfSignalType == SignalTypeVoiced
+		for i := range presQ14 {
+			if voiced {
 				ltpPredQ13 := int32(2) // rounding bias (matches libopus)
-				for k := 0; k < 5; k++ {
-					ltpIdx := sLTPBufIdx - lag + 2 - k
-					if ltpIdx >= 0 && ltpIdx < len(sLTPQ15) {
-						ltpPredQ13 = silkSMLAWB(ltpPredQ13, sLTPQ15[ltpIdx], bQ14[k])
+				// Taps k = 0..4 read sLTPQ15[ltpBase-k]; taps outside the
+				// buffer contribute nothing.
+				ltpBase := sLTPBufIdx - lag + 2
+				if ltpBase >= 4 && ltpBase < len(sLTPQ15) {
+					w := sLTPQ15[ltpBase-4 : ltpBase+1]
+					ltpPredQ13 = silkSMLAWB(ltpPredQ13, w[4], bQ14[0])
+					ltpPredQ13 = silkSMLAWB(ltpPredQ13, w[3], bQ14[1])
+					ltpPredQ13 = silkSMLAWB(ltpPredQ13, w[2], bQ14[2])
+					ltpPredQ13 = silkSMLAWB(ltpPredQ13, w[1], bQ14[3])
+					ltpPredQ13 = silkSMLAWB(ltpPredQ13, w[0], bQ14[4])
+				} else {
+					for k := 0; k < 5; k++ {
+						ltpIdx := ltpBase - k
+						if ltpIdx >= 0 && ltpIdx < len(sLTPQ15) {
+							ltpPredQ13 = silkSMLAWB(ltpPredQ13, sLTPQ15[ltpIdx], bQ14[k])
+						}
 					}
 				}
-				presQ14[i] = excQ14[start+i] + (ltpPredQ13 << 1)
+				presQ14[i] += ltpPredQ13 << 1
 				sLTPQ15[sLTPBufIdx] = presQ14[i] << 1
 				sLTPBufIdx++
 			}
 
-			lpcPredQ10 := int32(d.lpcOrder >> 1)
-			for j := 0; j < d.lpcOrder; j++ {
-				lpcPredQ10 = silkSMLAWB(lpcPredQ10, sLPCQ14[silkMaxLPCOrder+i-j-1], lpc[j])
-			}
+			hist := (*[silkMaxLPCOrder]int32)(sLPCQ14[i : i+silkMaxLPCOrder])
+			lpcPredQ10 := silkLPCPredictQ10(hist, lpc, d.lpcOrder)
 			predQ14 := silkLShiftSat32(lpcPredQ10, 4)
 			v := silkAddSat32(presQ14[i], predQ14)
 			sLPCQ14[silkMaxLPCOrder+i] = v
 			pxq := silkRShiftRound(int64(silkSMULWW(v, gainQ10)), 8)
-			output[start+i] = clamp16(pxq)
+			out[i] = clamp16(pxq)
 		}
 
 		copy(sLPCQ14[:silkMaxLPCOrder], sLPCQ14[d.subfrmLen:d.subfrmLen+silkMaxLPCOrder])
@@ -2547,6 +2829,10 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 	}
 	dstSide := d.side
 	*d = *src
+	// Work buffers must not be shared with src.
+	d.synthExc, d.synthSLTPQ15, d.synthOutBufQ0, d.synthSLPCQ14, d.synthSLTP, d.synthOut, d.pulseBuf = nil, nil, nil, nil, nil, nil, nil
+	d.frameOut, d.msOut, d.sideI16, d.msX, d.packetOut = nil, nil, nil, nil, nil
+	d.lbrrMid, d.lbrrSide = nil, nil
 	d.prevNLSFQ15 = append([]int16(nil), src.prevNLSFQ15...)
 	d.lpcState = append([]int32(nil), src.lpcState...)
 	d.ltpState = append([]int32(nil), src.ltpState...)
@@ -2583,4 +2869,16 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 		}
 		d.trace = trace
 	}
+}
+
+// zeroedInt32 returns *buf resized to n zeroed elements, keeping the backing
+// array for the next call.
+func zeroedInt32(buf *[]int32, n int) []int32 {
+	if cap(*buf) < n {
+		*buf = make([]int32, n)
+	} else {
+		*buf = (*buf)[:n]
+		clear(*buf)
+	}
+	return *buf
 }

@@ -5,6 +5,7 @@ package opus
 import (
 	"bytes"
 	"fmt"
+	"github.com/darui3018823/opus/internal/silk"
 	"math"
 	"os"
 	"strconv"
@@ -17,6 +18,7 @@ import (
 // hints, 48 kHz mono and stereo over a bitrate sweep. It checks the TOC
 // (mode, bandwidth, channels) of every packet and the packet bytes.
 func TestAutoModeOracle(t *testing.T) {
+	t.Cleanup(silk.EnableFrameTraces())
 	t.Parallel()
 	if _, err := os.Stat(encOraclePath()); err != nil {
 		t.Skipf("encoder oracle not built (%s): run pwsh scripts/oracle/build_encoder.ps1", encOraclePath())

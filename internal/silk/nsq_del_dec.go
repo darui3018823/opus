@@ -57,6 +57,14 @@ func (s silkNSQState) clone() silkNSQState {
 	return c
 }
 
+// cloneInto stores a clone of s in dst, reusing dst's slices.
+func (s *silkNSQState) cloneInto(dst *silkNSQState) {
+	xq, sLTPShpQ14 := dst.xq, dst.sLTPShpQ14
+	*dst = *s
+	dst.xq = append(xq[:0], s.xq...)
+	dst.sLTPShpQ14 = append(sLTPShpQ14[:0], s.sLTPShpQ14...)
+}
+
 func (s *silkNSQState) copyFrom(src silkNSQState) {
 	xq := s.xq
 	sLTPShpQ14 := s.sLTPShpQ14
@@ -128,6 +136,50 @@ func silkSMLAWT(a, b, c int32) int32 {
 }
 
 func silkNoiseShapeQuantizerShortPrediction(buf []int32, ptr int, aQ12 []int16, order int) int32 {
+	// Fast path: the whole window buf[ptr-order+1 : ptr+1] is in range, so
+	// no tap is skipped. The taps are accumulated in the same order.
+	if order > 0 && ptr-order+1 >= 0 && ptr < len(buf) && order <= len(aQ12) {
+		w := buf[ptr-order+1 : ptr+1] // w[order-1-i] is buf[ptr-i]
+		a := aQ12[:order]
+		out := int32(order >> 1)
+		switch order {
+		case 16:
+			w, a := w[:16:16], a[:16:16]
+			out = silkSMLAWB(out, w[15], a[0])
+			out = silkSMLAWB(out, w[14], a[1])
+			out = silkSMLAWB(out, w[13], a[2])
+			out = silkSMLAWB(out, w[12], a[3])
+			out = silkSMLAWB(out, w[11], a[4])
+			out = silkSMLAWB(out, w[10], a[5])
+			out = silkSMLAWB(out, w[9], a[6])
+			out = silkSMLAWB(out, w[8], a[7])
+			out = silkSMLAWB(out, w[7], a[8])
+			out = silkSMLAWB(out, w[6], a[9])
+			out = silkSMLAWB(out, w[5], a[10])
+			out = silkSMLAWB(out, w[4], a[11])
+			out = silkSMLAWB(out, w[3], a[12])
+			out = silkSMLAWB(out, w[2], a[13])
+			out = silkSMLAWB(out, w[1], a[14])
+			out = silkSMLAWB(out, w[0], a[15])
+		case 10:
+			w, a := w[:10:10], a[:10:10]
+			out = silkSMLAWB(out, w[9], a[0])
+			out = silkSMLAWB(out, w[8], a[1])
+			out = silkSMLAWB(out, w[7], a[2])
+			out = silkSMLAWB(out, w[6], a[3])
+			out = silkSMLAWB(out, w[5], a[4])
+			out = silkSMLAWB(out, w[4], a[5])
+			out = silkSMLAWB(out, w[3], a[6])
+			out = silkSMLAWB(out, w[2], a[7])
+			out = silkSMLAWB(out, w[1], a[8])
+			out = silkSMLAWB(out, w[0], a[9])
+		default:
+			for i := range a {
+				out = silkSMLAWB(out, w[order-1-i], a[i])
+			}
+		}
+		return out
+	}
 	out := int32(order >> 1)
 	for i := 0; i < order; i++ {
 		idx := ptr - i
@@ -151,7 +203,9 @@ func (e *Encoder) silkNSQDelDec(
 	signalType, quantOffsetType int,
 	seed int32,
 ) []int16 {
-	pulses := make([]int16, e.frameSize)
+	// The pulses are copied by every caller that keeps them past the next
+	// NSQ run (the rate loop's "lower" snapshot, LBRR, traces).
+	pulses := scratchSlice(&e.frameScratch.nsqPulses, e.frameSize)
 	// NLSF interpolation (silk_NSQ_del_dec, LSF_interpolation_flag==1): subframes
 	// 0,1 use the interpolated LPC set, subframes 2,3 the current set. When
 	// inactive (nil interp set) every subframe uses the current LPC.
@@ -220,10 +274,10 @@ func (e *Encoder) silkNSQDelDec(
 	if len(e.nsq.xq) != ltpMemLen+e.frameSize {
 		e.nsq = newSilkNSQState(e.frameSize, ltpMemLen)
 	}
-	sLTPQ15 := make([]int32, ltpMemLen+e.frameSize)
-	sLTP := make([]int16, ltpMemLen+e.frameSize)
-	xScQ10 := make([]int32, subframeLen)
-	delayedGainQ10 := make([]int32, silkDecisionDelay)
+	sLTPQ15 := zeroedInt32(&e.nsqScratch.sLTPQ15, ltpMemLen+e.frameSize)
+	sLTP := zeroedInt16(&e.nsqScratch.sLTP, ltpMemLen+e.frameSize)
+	xScQ10 := zeroedInt32(&e.nsqScratch.xScQ10, subframeLen)
+	delayedGainQ10 := zeroedInt32(&e.nsqScratch.delayedGainQ10, silkDecisionDelay)
 
 	e.nsq.sLTPShpBufIdx = ltpMemLen
 	e.nsq.sLTPBufIdx = ltpMemLen
@@ -297,7 +351,7 @@ func (e *Encoder) silkNSQDelDec(
 				filterLen := ltpMemLen - startIdx
 				if filterLen > 0 {
 					xqOff := sf * subframeLen
-					silkLPCAnalysisFilter(sLTP[startIdx:startIdx+filterLen], int16SliceToInt32(e.nsq.xq[startIdx+xqOff:startIdx+xqOff+filterLen]), aQ12, filterLen, e.lpcOrder)
+					silkLPCAnalysisFilter(sLTP[startIdx:startIdx+filterLen], int16SliceToInt32Into(&e.frameScratch.xq32, e.nsq.xq[startIdx+xqOff:startIdx+xqOff+filterLen]), aQ12, filterLen, e.lpcOrder)
 				}
 				e.nsq.sLTPBufIdx = ltpMemLen
 				e.nsq.rewhiteFlag = true
@@ -387,18 +441,34 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 	smplBufIdx *int,
 	decisionDelay int,
 ) {
-	sampleState := make([][2]nsqSampleState, nStatesDelayedDecision)
+	var sampleStateArr [4][2]nsqSampleState
+	sampleState := sampleStateArr[:]
+	if nStatesDelayedDecision > len(sampleStateArr) {
+		sampleState = make([][2]nsqSampleState, nStatesDelayedDecision)
+	}
+	sampleState = sampleState[:nStatesDelayedDecision]
 	shpLagBase := e.nsq.sLTPShpBufIdx - lag + silkHarmShapeFIRTaps/2
 	predLagBase := e.nsq.sLTPBufIdx - lag + 5/2
 	gainQ10 := silkRSHIFT32(gainQ16, 6)
+	warp := int16(warpingQ16)
+	sIdx := *smplBufIdx
 	for i := 0; i < length; i++ {
 		ltpPredQ14 := int32(0)
 		if signalType == SignalTypeVoiced {
 			ltpPredQ14 = 2
-			for k := 0; k < 5; k++ {
-				idx := predLagBase + i - k
-				if idx >= 0 && idx < len(sLTPQ15) {
-					ltpPredQ14 = silkSMLAWB(ltpPredQ14, sLTPQ15[idx], bQ14[k])
+			if p := predLagBase + i; p-4 >= 0 && p < len(sLTPQ15) && len(bQ14) >= 5 {
+				w, b := sLTPQ15[p-4:p+1:p+1], bQ14[:5:5]
+				ltpPredQ14 = silkSMLAWB(ltpPredQ14, w[4], b[0])
+				ltpPredQ14 = silkSMLAWB(ltpPredQ14, w[3], b[1])
+				ltpPredQ14 = silkSMLAWB(ltpPredQ14, w[2], b[2])
+				ltpPredQ14 = silkSMLAWB(ltpPredQ14, w[1], b[3])
+				ltpPredQ14 = silkSMLAWB(ltpPredQ14, w[0], b[4])
+			} else {
+				for k := 0; k < 5; k++ {
+					idx := predLagBase + i - k
+					if idx >= 0 && idx < len(sLTPQ15) {
+						ltpPredQ14 = silkSMLAWB(ltpPredQ14, sLTPQ15[idx], bQ14[k])
+					}
 				}
 			}
 			ltpPredQ14 = silkLSHIFT32(ltpPredQ14, 1)
@@ -407,14 +477,19 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 		if lag > 0 {
 			idx := shpLagBase + i
 			s0, s1, s2 := int32(0), int32(0), int32(0)
-			if idx >= 0 && idx < len(e.nsq.sLTPShpQ14) {
-				s0 = e.nsq.sLTPShpQ14[idx]
-			}
-			if idx-1 >= 0 && idx-1 < len(e.nsq.sLTPShpQ14) {
-				s1 = e.nsq.sLTPShpQ14[idx-1]
-			}
-			if idx-2 >= 0 && idx-2 < len(e.nsq.sLTPShpQ14) {
-				s2 = e.nsq.sLTPShpQ14[idx-2]
+			if shp := e.nsq.sLTPShpQ14; idx-2 >= 0 && idx < len(shp) {
+				w := shp[idx-2 : idx+1 : idx+1]
+				s0, s1, s2 = w[2], w[1], w[0]
+			} else {
+				if idx >= 0 && idx < len(shp) {
+					s0 = shp[idx]
+				}
+				if idx-1 >= 0 && idx-1 < len(shp) {
+					s1 = shp[idx-1]
+				}
+				if idx-2 >= 0 && idx-2 < len(shp) {
+					s2 = shp[idx-2]
+				}
 			}
 			nLTPQ14 = silkSMULWB(silkADDSAT32(s0, s2), int16(harmShapeFIRPackedQ14))
 			nLTPQ14 = silkSMLAWT(nLTPQ14, s1, harmShapeFIRPackedQ14)
@@ -425,29 +500,33 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 			dd := &delDec[k]
 			ss := &sampleState[k]
 			dd.seed = silkRAND(dd.seed)
-			lpcPredQ14 := silkNoiseShapeQuantizerShortPrediction(dd.sLPCQ14[:], silkMaxLPCOrder-1+i, aQ12, predictLPCOrder)
+			// The window ending at sLPC_Q14[NSQ_LPC_BUF_LENGTH-1+i] is always
+			// in range (i < length <= 120).
+			lpcPredQ14 := silkLPCPredictQ10((*[silkMaxLPCOrder]int32)(dd.sLPCQ14[i:i+silkMaxLPCOrder]), aQ12, predictLPCOrder)
 			lpcPredQ14 = silkLSHIFT32(lpcPredQ14, 4)
 
-			tmp2 := silkSMLAWB(dd.diffQ14, dd.sAR2Q14[0], int16(warpingQ16))
-			tmp1 := silkSMLAWB(dd.sAR2Q14[0], silkSUB32Ovflw(dd.sAR2Q14[1], tmp2), int16(warpingQ16))
-			dd.sAR2Q14[0] = tmp2
+			sAR2 := dd.sAR2Q14[:shapingLPCOrder]
+			ar := arShpQ13[:len(sAR2)]
+			tmp2 := silkSMLAWB(dd.diffQ14, sAR2[0], warp)
+			tmp1 := silkSMLAWB(sAR2[0], silkSUB32Ovflw(sAR2[1], tmp2), warp)
+			sAR2[0] = tmp2
 			nARQ14 := int32(shapingLPCOrder >> 1)
-			nARQ14 = silkSMLAWB(nARQ14, tmp2, arShpQ13[0])
-			for j := 2; j < shapingLPCOrder; j += 2 {
-				tmp2 = silkSMLAWB(dd.sAR2Q14[j-1], silkSUB32Ovflw(dd.sAR2Q14[j], tmp1), int16(warpingQ16))
-				dd.sAR2Q14[j-1] = tmp1
-				nARQ14 = silkSMLAWB(nARQ14, tmp1, arShpQ13[j-1])
-				tmp1 = silkSMLAWB(dd.sAR2Q14[j], silkSUB32Ovflw(dd.sAR2Q14[j+1], tmp2), int16(warpingQ16))
-				dd.sAR2Q14[j] = tmp2
-				nARQ14 = silkSMLAWB(nARQ14, tmp2, arShpQ13[j])
+			nARQ14 = silkSMLAWB(nARQ14, tmp2, ar[0])
+			for j := 2; j+1 < len(sAR2); j += 2 {
+				tmp2 = silkSMLAWB(sAR2[j-1], silkSUB32Ovflw(sAR2[j], tmp1), warp)
+				sAR2[j-1] = tmp1
+				nARQ14 = silkSMLAWB(nARQ14, tmp1, ar[j-1])
+				tmp1 = silkSMLAWB(sAR2[j], silkSUB32Ovflw(sAR2[j+1], tmp2), warp)
+				sAR2[j] = tmp2
+				nARQ14 = silkSMLAWB(nARQ14, tmp2, ar[j])
 			}
-			dd.sAR2Q14[shapingLPCOrder-1] = tmp1
-			nARQ14 = silkSMLAWB(nARQ14, tmp1, arShpQ13[shapingLPCOrder-1])
+			sAR2[len(sAR2)-1] = tmp1
+			nARQ14 = silkSMLAWB(nARQ14, tmp1, ar[len(ar)-1])
 			nARQ14 = silkLSHIFT32(nARQ14, 1)
 			nARQ14 = silkSMLAWB(nARQ14, dd.lfARQ14, int16(tiltQ14))
 			nARQ14 = silkLSHIFT32(nARQ14, 2)
 
-			nLFQ14 := silkSMULWB(dd.shapeQ14[*smplBufIdx], int16(lfShpQ14))
+			nLFQ14 := silkSMULWB(dd.shapeQ14[sIdx], int16(lfShpQ14))
 			nLFQ14 = silkSMLAWT(nLFQ14, dd.lfARQ14, lfShpQ14)
 			nLFQ14 = silkLSHIFT32(nLFQ14, 2)
 
@@ -486,11 +565,11 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 			}
 		}
 
-		*smplBufIdx = (*smplBufIdx - 1) % silkDecisionDelay
-		if *smplBufIdx < 0 {
-			*smplBufIdx += silkDecisionDelay
+		sIdx = (sIdx - 1) % silkDecisionDelay
+		if sIdx < 0 {
+			sIdx += silkDecisionDelay
 		}
-		lastIdx := (*smplBufIdx + decisionDelay) % silkDecisionDelay
+		lastIdx := (sIdx + decisionDelay) % silkDecisionDelay
 
 		winner := 0
 		rdMin := sampleState[0][0].rdQ10
@@ -552,16 +631,17 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 			dd.lfARQ14 = ss.lfARQ14
 			dd.diffQ14 = ss.diffQ14
 			dd.sLPCQ14[silkMaxLPCOrder+i] = ss.xqQ14
-			dd.xqQ14[*smplBufIdx] = ss.xqQ14
-			dd.qQ10[*smplBufIdx] = ss.qQ10
-			dd.predQ15[*smplBufIdx] = silkLSHIFT32(ss.lpcExcQ14, 1)
-			dd.shapeQ14[*smplBufIdx] = ss.sLTPShpQ14
+			dd.xqQ14[sIdx] = ss.xqQ14
+			dd.qQ10[sIdx] = ss.qQ10
+			dd.predQ15[sIdx] = silkLSHIFT32(ss.lpcExcQ14, 1)
+			dd.shapeQ14[sIdx] = ss.sLTPShpQ14
 			dd.seed = silkADD32Ovflw(dd.seed, silkRShiftRound(int64(ss.qQ10), 10))
-			dd.randState[*smplBufIdx] = dd.seed
+			dd.randState[sIdx] = dd.seed
 			dd.rdQ10 = ss.rdQ10
 		}
-		delayedGainQ10[*smplBufIdx] = gainQ10
+		delayedGainQ10[sIdx] = gainQ10
 	}
+	*smplBufIdx = sIdx
 	for k := 0; k < nStatesDelayedDecision; k++ {
 		copy(delDec[k].sLPCQ14[:silkMaxLPCOrder], delDec[k].sLPCQ14[length:length+silkMaxLPCOrder])
 	}
@@ -616,7 +696,10 @@ func nsqQuantCandidates(rQ10, offsetQ10, lambdaQ10 int32) (q1Q10, q2Q10, rd1Q10,
 }
 
 func copyDelayedDecisionSuffix(dst, src *nsqDelayedDecision, sample int) {
-	copy(dst.sLPCQ14[sample:], src.sLPCQ14[sample:])
+	// libopus copies the whole struct tail from sLPC_Q14[sample]. Only the
+	// short-term prediction window sLPC_Q14[sample : sample+order] is live:
+	// every later entry is written at its own sample before it is read.
+	copy(dst.sLPCQ14[sample:sample+silkMaxLPCOrder], src.sLPCQ14[sample:sample+silkMaxLPCOrder])
 	dst.randState = src.randState
 	dst.qQ10 = src.qQ10
 	dst.xqQ14 = src.xqQ14
@@ -698,7 +781,21 @@ func (e *Encoder) silkNSQDelDecScaleStates(
 }
 
 func int16SliceToInt32(in []int16) []int32 {
-	out := make([]int32, len(in))
+	return int16SliceToInt32Into(nil, in)
+}
+
+// int16SliceToInt32Into is int16SliceToInt32 writing into *dst (grown as
+// needed); the result aliases *dst. A nil dst allocates.
+func int16SliceToInt32Into(dst *[]int32, in []int16) []int32 {
+	var out []int32
+	if dst == nil {
+		out = make([]int32, len(in))
+	} else {
+		if cap(*dst) < len(in) {
+			*dst = make([]int32, len(in))
+		}
+		out = (*dst)[:len(in)]
+	}
 	for i, v := range in {
 		out[i] = int32(v)
 	}
@@ -758,4 +855,24 @@ func (e *Encoder) syncTrellisNSQState() {
 	e.nsq.sLTPShpBufIdx = ltpMemLen
 	e.nsq.prevGainQ16 = e.prevGainQ16
 	e.nsq.rewhiteFlag = false
+}
+
+// nsqWorkBuffers are the delayed-decision NSQ's per-call buffers, cleared on
+// every use and reused between calls.
+type nsqWorkBuffers struct {
+	sLTPQ15        []int32
+	sLTP           []int16
+	xScQ10         []int32
+	delayedGainQ10 []int32
+}
+
+// zeroedInt16 is zeroedInt32 for int16 buffers.
+func zeroedInt16(buf *[]int16, n int) []int16 {
+	if cap(*buf) < n {
+		*buf = make([]int16, n)
+	} else {
+		*buf = (*buf)[:n]
+		clear(*buf)
+	}
+	return *buf
 }

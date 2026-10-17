@@ -351,11 +351,22 @@ func PVQDecode(dec *entcode.Decoder, n, k int) []float64 {
 // U(n,k)=U(n-1,k)+U(n,k-1)+U(n-1,k-1). Values outside libopus's supported
 // uint32 codebooks saturate, while every supported table entry stays exact.
 func celtPVQU(n, k int) uint64 {
-	if n < 0 || k < 0 {
-		return 0
-	}
+	// Table path; negative arguments and pairs outside the table take
+	// celtPVQUSlow. The table also holds U(0,k) (1 for k == 0, else 0).
 	if n > k {
 		n, k = k, n
+	}
+	if uint(n) < pvqUTableSmall && uint(k) < pvqUTableLarge {
+		return uint64(pvqUTable[n][k])
+	}
+	return celtPVQUSlow(n, k)
+}
+
+// celtPVQUSlow is celtPVQU for negative arguments and for pairs outside
+// pvqUTable, memoised in uCache. It expects n <= k.
+func celtPVQUSlow(n, k int) uint64 {
+	if n < 0 || k < 0 {
+		return 0
 	}
 	if n == 0 {
 		if k == 0 {
@@ -378,12 +389,57 @@ func celtPVQU(n, k int) uint64 {
 	return value
 }
 
+// pvqUTable holds U(n,k) for n < pvqUTableSmall and k < pvqUTableLarge with
+// n <= k, saturated at cwrsMax like celtPVQU. It is the dense counterpart of
+// libopus's CELT_PVQ_U_ROW table and covers every (min(n,k), max(n,k)) pair
+// CELT codes, so celtPVQU only falls back to uCache for out-of-range calls.
+const (
+	pvqUTableSmall = 64
+	pvqUTableLarge = 320
+)
+
+var pvqUTable = *buildPVQUTable()
+
+func buildPVQUTable() *[pvqUTableSmall][pvqUTableLarge]uint32 {
+	t := new([pvqUTableSmall][pvqUTableLarge]uint32)
+	at := func(n, k int) uint64 {
+		if n > k {
+			n, k = k, n
+		}
+		return uint64(t[n][k])
+	}
+	t[0][0] = 1
+	for n := 1; n < pvqUTableSmall; n++ {
+		for k := n; k < pvqUTableLarge; k++ {
+			a := at(n-1, k)
+			b := at(n, k-1)
+			c := at(n-1, k-1)
+			value := cwrsMax
+			if a <= cwrsMax-b && a+b <= cwrsMax-c {
+				value = a + b + c
+			}
+			t[n][k] = uint32(value)
+		}
+	}
+	return t
+}
+
 // cwrsiLibopus decodes a CWRS index into a pulse vector matching libopus
 // celt/cwrs.c cwrsi(). Unlike the older direct V-based implementation, the
 // libopus codebook order is defined in terms of U(N,K), so the exact same
 // branch structure is used here.
 func cwrsiLibopus(n, k int, index uint32) []int {
-	y := make([]int, n)
+	return cwrsiLibopusInto(make([]int, n), n, k, index)
+}
+
+// maxPVQN is the widest CELT band (eBands[21]-eBands[20] bins at LM=3), the
+// largest vector cwrsi and the Hadamard reorders handle in practice.
+const maxPVQN = 176
+
+// cwrsiLibopusInto is cwrsiLibopus writing the n-entry pulse vector into y.
+func cwrsiLibopusInto(y []int, n, k int, index uint32) []int {
+	y = y[:n]
+	clear(y)
 	i := uint64(index)
 	pos := 0
 	for n > 2 {

@@ -254,7 +254,7 @@ func (e *Encoder) generateLBRRFrame(
 
 	// Re-quantize the excitation from the pre-frame NSQ state, then restore
 	// the post-frame state the regular path produced.
-	saved := e.snapshotFrameState()
+	saved := e.snapshotFrameStateInto(&e.frameSnapLBRR)
 	savedSeed := e.nsqSeed
 	e.restoreFrameState(preFrame)
 	e.nsqSeed = frameSeed

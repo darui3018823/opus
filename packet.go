@@ -138,27 +138,28 @@ func PacketGetNumSamples(data []byte, sampleRate int) (int, error) {
 	return info.totalSamples, nil
 }
 
-func inspectPacket(data []byte, sampleRate int) (*packetMetadata, error) {
+func inspectPacket(data []byte, sampleRate int) (packetMetadata, error) {
 	if len(data) == 0 {
-		return nil, fmt.Errorf("%w: empty packet", ErrInvalidPacket)
+		return packetMetadata{}, fmt.Errorf("%w: empty packet", ErrInvalidPacket)
 	}
 	if sampleRate != 0 && !isValidOpusRate(sampleRate) {
-		return nil, fmt.Errorf("%w: %w: %d", ErrBadArg, ErrUnsupportedSampleRate, sampleRate)
+		return packetMetadata{}, fmt.Errorf("%w: %w: %d", ErrBadArg, ErrUnsupportedSampleRate, sampleRate)
 	}
 
 	config, stereo, countCode := framing.ParseTOC(data[0])
-	frames, err := splitOpusFrames(data[1:], countCode)
+	var frameBuf [maxPacketFrames][]byte
+	frames, err := splitOpusFramesInto(frameBuf[:0], data[1:], countCode)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidPacket, err)
+		return packetMetadata{}, fmt.Errorf("%w: %v", ErrInvalidPacket, err)
 	}
 	for i, frame := range frames {
 		if len(frame) > MaxFrameBytes {
-			return nil, fmt.Errorf("%w: frame %d has %d bytes, maximum is %d", ErrInvalidPacket, i, len(frame), MaxFrameBytes)
+			return packetMetadata{}, fmt.Errorf("%w: frame %d has %d bytes, maximum is %d", ErrInvalidPacket, i, len(frame), MaxFrameBytes)
 		}
 	}
 
 	internalMode, internalBandwidth, frameSize48 := framing.ParseTOCConfig(config)
-	info := &packetMetadata{
+	info := packetMetadata{
 		config:     config,
 		mode:       publicPacketMode(internalMode),
 		bandwidth:  publicPacketBandwidth(internalBandwidth),
@@ -172,7 +173,7 @@ func inspectPacket(data []byte, sampleRate int) (*packetMetadata, error) {
 		info.samplesPerFrame = frameSize48 * sampleRate / SampleRate48kHz
 		info.totalSamples, err = packetDurationSamples(config, info.frameCount, sampleRate)
 		if err != nil {
-			return nil, err
+			return packetMetadata{}, err
 		}
 	}
 	return info, nil

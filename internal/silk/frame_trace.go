@@ -1,5 +1,26 @@
 package silk
 
+import (
+	"sync"
+	"sync/atomic"
+)
+
+// frameTraceUsers counts the EnableFrameTraces holders; FrameTrace recording
+// copies the NSQ inputs every frame, so it is off unless someone asks.
+var frameTraceUsers atomic.Int32
+
+// EnableFrameTraces turns on FrameTrace recording (LastFrameTrace and
+// PacketFrameTraces) for every encoder until the returned release function
+// is called. Oracle tests call it before encoding. Recording does not change
+// the encoded output.
+func EnableFrameTraces() (release func()) {
+	frameTraceUsers.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { frameTraceUsers.Add(-1) }) }
+}
+
+func frameTracesEnabled() bool { return frameTraceUsers.Load() > 0 }
+
 // FrameTrace records the values the encoder handed to the noise-shaping
 // quantizer for the most recently coded (non-LBRR) frame, in the same
 // domains the instrumented libopus encoder dumps (`[SILK_ENC_NSQ_*]`), so the
@@ -106,13 +127,15 @@ func (t FrameTrace) Shape32Values(nbSubfr, order int) (ar [][]float32, gains, lf
 	return ar, gains, lfMA, lfAR, tilt, harm, float32(s.inputQuality), float32(s.codingQuality)
 }
 
-// LastFrameTrace returns the trace of the most recently coded frame.
+// LastFrameTrace returns the trace of the most recently coded frame. It is
+// only filled while EnableFrameTraces is in effect.
 func (e *Encoder) LastFrameTrace() FrameTrace {
 	return e.lastTrace
 }
 
 // PacketFrameTraces returns the traces of every frame of the last packet
-// (the mid channel of a stereo packet).
+// (the mid channel of a stereo packet). It is only filled while
+// EnableFrameTraces is in effect.
 func (e *Encoder) PacketFrameTraces() []FrameTrace {
 	return append([]FrameTrace(nil), e.packetTraces...)
 }

@@ -22,7 +22,9 @@ func (e *Encoder) silkNSQPlain(
 	signalType, quantOffsetType int,
 	seed int32,
 ) []int16 {
-	pulses := make([]int16, e.frameSize)
+	// The pulses are copied by every caller that keeps them past the next
+	// NSQ run (the rate loop's "lower" snapshot, LBRR, traces).
+	pulses := scratchSlice(&e.frameScratch.nsqPulses, e.frameSize)
 	interpActive := len(lpcQ12Interp) >= e.lpcOrder
 	lpcForSubframe := func(sf int) []int16 {
 		if interpActive && sf < 2 {
@@ -77,7 +79,7 @@ func (e *Encoder) silkNSQPlain(
 				filterLen := ltpMemLen - startIdx
 				if filterLen > 0 {
 					xqOff := sf * subframeLen
-					silkLPCAnalysisFilter(sLTP[startIdx:startIdx+filterLen], int16SliceToInt32(e.nsq.xq[startIdx+xqOff:startIdx+xqOff+filterLen]), aQ12, filterLen, e.lpcOrder)
+					silkLPCAnalysisFilter(sLTP[startIdx:startIdx+filterLen], int16SliceToInt32Into(&e.frameScratch.xq32, e.nsq.xq[startIdx+xqOff:startIdx+xqOff+filterLen]), aQ12, filterLen, e.lpcOrder)
 				}
 				e.nsq.rewhiteFlag = true
 				e.nsq.sLTPBufIdx = ltpMemLen

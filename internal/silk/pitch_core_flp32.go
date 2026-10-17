@@ -234,7 +234,42 @@ func silkPitchAnalysisCoreFLP32(
 	searchThres1, searchThres2 float64,
 	fsKHz, complexity, nbSubfr int,
 ) (pitchOut []int, lagIndex, contourIndex int, voiced bool) {
-	pitchOut = make([]int, nbSubfr)
+	return silkPitchAnalysisCoreFLP32Scratch(new(pitchAnalysisScratch), frame, ltpCorr, prevLag,
+		searchThres1, searchThres2, fsKHz, complexity, nbSubfr)
+}
+
+// pitchAnalysisScratch holds the working buffers of silkFindPitchLagsFLP32
+// and silkPitchAnalysisCoreFLP32 so an encoder reuses them across frames.
+// Every buffer is cleared when it is handed out, matching a fresh make.
+type pitchAnalysisScratch struct {
+	wsig, autoCorr, reflCoef, a, res []float64
+	pitchL, pitchOut                 []int
+	frame8kHz, frame4kHz             []float64
+	frame8FIX, frame4FIX, frameFIX   []int16
+	c0, xcorr, ccArr                 []float64
+	dSrch, dComp, dCompOut           []int
+	cc                               [peMaxNbSubfr][peCBufLen]float64
+}
+
+// scratchSlice returns (*buf)[:n] cleared, growing *buf when needed.
+func scratchSlice[T any](buf *[]T, n int) []T {
+	if cap(*buf) < n {
+		*buf = make([]T, n)
+	}
+	s := (*buf)[:n]
+	clear(s)
+	return s
+}
+
+func silkPitchAnalysisCoreFLP32Scratch(
+	s *pitchAnalysisScratch,
+	frame []float64,
+	ltpCorr *float64,
+	prevLag int,
+	searchThres1, searchThres2 float64,
+	fsKHz, complexity, nbSubfr int,
+) (pitchOut []int, lagIndex, contourIndex int, voiced bool) {
+	pitchOut = scratchSlice(&s.pitchOut, nbSubfr)
 
 	frameLength := (peLtpMemLengthMs + nbSubfr*peSubfrLengthMs) * fsKHz
 	frameLength4kHz := (peLtpMemLengthMs + nbSubfr*peSubfrLengthMs) * 4
@@ -249,20 +284,21 @@ func silkPitchAnalysisCoreFLP32(
 	maxLag4kHz := peMaxLagMs * 4
 	maxLag8kHz := peMaxLagMs*8 - 1
 
-	frame8kHz := make([]float64, frameLength8kHz)
-	frame4kHz := make([]float64, frameLength4kHz)
-	frame8FIX := make([]int16, frameLength8kHz)
-	frame4FIX := make([]int16, frameLength4kHz)
-	filtState := make([]int32, 6)
+	frame8kHz := scratchSlice(&s.frame8kHz, frameLength8kHz)
+	frame4kHz := scratchSlice(&s.frame4kHz, frameLength4kHz)
+	frame8FIX := scratchSlice(&s.frame8FIX, frameLength8kHz)
+	frame4FIX := scratchSlice(&s.frame4FIX, frameLength4kHz)
+	var filtStateArr [6]int32
+	filtState := filtStateArr[:]
 
 	switch fsKHz {
 	case 16:
-		frame16FIX := make([]int16, frameLength)
+		frame16FIX := scratchSlice(&s.frameFIX, frameLength)
 		silkFloat2ShortArray32(frame16FIX, frame[:frameLength])
 		silkResamplerDown2(filtState[:2], frame8FIX, frame16FIX)
 		silkShort2FloatArray(frame8kHz, frame8FIX)
 	case 12:
-		frame12FIX := make([]int16, frameLength)
+		frame12FIX := scratchSlice(&s.frameFIX, frameLength)
 		silkFloat2ShortArray32(frame12FIX, frame[:frameLength])
 		silkResamplerDown2_3(filtState[:6], frame8FIX, frame12FIX)
 		silkShort2FloatArray(frame8kHz, frame8FIX)
@@ -282,8 +318,8 @@ func silkPitchAnalysisCoreFLP32(
 	}
 
 	// ── FIRST STAGE, operating in 4 kHz ──────────────────────────────────
-	c0 := make([]float64, peCBufLen)
-	xcorr := make([]float64, peMaxLagMs*4-peMinLagMs*4+1)
+	c0 := scratchSlice(&s.c0, peCBufLen)
+	xcorr := scratchSlice(&s.xcorr, peMaxLagMs*4-peMinLagMs*4+1)
 	target := sfLength4kHz << 2
 	for k := 0; k < nbSubfr>>1; k++ {
 		basis := target - minLag4kHz
@@ -311,7 +347,7 @@ func silkPitchAnalysisCoreFLP32(
 	}
 
 	lengthDSrch := 4 + 2*complexity
-	dSrch := make([]int, peDSrchLength)
+	dSrch := scratchSlice(&s.dSrch, peDSrchLength)
 	silkInsertionSortDecreasingFLP32(c0[minLag4kHz:maxLag4kHz+1], dSrch, maxLag4kHz-minLag4kHz+1, lengthDSrch)
 
 	cmax := c0[minLag4kHz]
@@ -330,7 +366,7 @@ func silkPitchAnalysisCoreFLP32(
 		}
 	}
 
-	dComp := make([]int, peCBufLen)
+	dComp := scratchSlice(&s.dComp, peCBufLen)
 	for i := 0; i < lengthDSrch; i++ {
 		dComp[dSrch[i]] = 1
 	}
@@ -348,7 +384,7 @@ func silkPitchAnalysisCoreFLP32(
 		dComp[i] += dComp[i-1] + dComp[i-2] + dComp[i-3]
 	}
 	lengthDComp := 0
-	dCompOut := make([]int, peCBufLen)
+	dCompOut := scratchSlice(&s.dCompOut, peCBufLen)
 	for i := minLag8kHz; i < maxLag8kHz+4; i++ {
 		if dComp[i] > 0 {
 			dCompOut[lengthDComp] = i - 2
@@ -357,10 +393,8 @@ func silkPitchAnalysisCoreFLP32(
 	}
 
 	// ── SECOND STAGE, operating at 8 kHz ─────────────────────────────────
-	cc := make([][]float64, peMaxNbSubfr)
-	for i := range cc {
-		cc[i] = make([]float64, peCBufLen)
-	}
+	cc := &s.cc
+	clear(cc[:])
 	stage2 := frame8kHz
 	if fsKHz == 8 {
 		stage2 = frame
@@ -410,7 +444,7 @@ func silkPitchAnalysisCoreFLP32(
 		nbCbkSearch = peNbCbksStage2_10
 	}
 
-	ccArr := make([]float64, peNbCbksStage2Ext)
+	ccArr := scratchSlice(&s.ccArr, peNbCbksStage2Ext)
 	nbSubfrF := float64(nbSubfr)
 	shortlagBias := f32(f32(peShortlagBias) * nbSubfrF)
 	prevlagBias := f32(f32(pePrevlagBias) * nbSubfrF)
@@ -540,7 +574,8 @@ func silkPAnaCalcCorrSt3FLP32(frame []float64, startLag, sfLength, nbSubfr, comp
 
 	const scratchSize = 22
 	var scratch [scratchSize]float64
-	xcorr := make([]float64, scratchSize)
+	var xcorrArr [scratchSize]float64
+	xcorr := xcorrArr[:]
 	target := sfLength << 2
 	for k := 0; k < nbSubfr; k++ {
 		lagCounter := 0
@@ -632,21 +667,30 @@ type findPitchLagsResult struct {
 // libopus inactive/first-frame branch).
 func silkFindPitchLagsFLP32(xBuf []float64, laPitch, winLen, order, fsKHz, nbSubfr, peComplexity int,
 	speechActivityQ8, prevSignalType, inputTiltQ15, pitchEstThresholdQ16, prevLag int, ltpCorrIn float64, runCore bool) findPitchLagsResult {
+	return silkFindPitchLagsFLP32Scratch(new(pitchAnalysisScratch), xBuf, laPitch, winLen, order, fsKHz, nbSubfr, peComplexity,
+		speechActivityQ8, prevSignalType, inputTiltQ15, pitchEstThresholdQ16, prevLag, ltpCorrIn, runCore)
+}
+
+// silkFindPitchLagsFLP32Scratch is silkFindPitchLagsFLP32 on reused
+// buffers: the slices in the result alias s and stay valid until the next
+// call with the same s.
+func silkFindPitchLagsFLP32Scratch(s *pitchAnalysisScratch, xBuf []float64, laPitch, winLen, order, fsKHz, nbSubfr, peComplexity int,
+	speechActivityQ8, prevSignalType, inputTiltQ15, pitchEstThresholdQ16, prevLag int, ltpCorrIn float64, runCore bool) findPitchLagsResult {
 	bufLen := len(xBuf)
 	var r findPitchLagsResult
 
-	wsig := make([]float64, winLen)
+	wsig := scratchSlice(&s.wsig, winLen)
 	xStart := bufLen - winLen
 	silkApplySineWindowFLP32(wsig[:laPitch], xBuf[xStart:], 1, laPitch)
 	copy(wsig[laPitch:winLen-laPitch], xBuf[xStart+laPitch:xStart+winLen-laPitch])
 	silkApplySineWindowFLP32(wsig[winLen-laPitch:], xBuf[xStart+winLen-laPitch:], 2, laPitch)
 
-	r.autoCorr = make([]float64, order+1)
+	r.autoCorr = scratchSlice(&s.autoCorr, order+1)
 	silkAutocorrelationFLP32(r.autoCorr, wsig, winLen, order+1)
 	// auto_corr[0] += auto_corr[0] * FIND_PITCH_WHITE_NOISE_FRACTION + 1
 	r.autoCorr[0] = f32(r.autoCorr[0] + f32(f32(r.autoCorr[0]*f32(findPitchWhiteNoiseFraction))+1))
 
-	r.reflCoef = make([]float64, order)
+	r.reflCoef = scratchSlice(&s.reflCoef, order)
 	r.resNrg = silkSchurFLP32(r.reflCoef, r.autoCorr, order)
 	denom := r.resNrg
 	if denom < 1.0 {
@@ -654,14 +698,14 @@ func silkFindPitchLagsFLP32(xBuf []float64, laPitch, winLen, order, fsKHz, nbSub
 	}
 	r.predGain = f32(r.autoCorr[0] / denom)
 
-	r.a = make([]float64, order)
+	r.a = scratchSlice(&s.a, order)
 	silkK2aFLP32(r.a, r.reflCoef, order)
 	silkBwexpanderFLP32(r.a, order, f32(findPitchBandwidthExpansion))
 
-	r.res = make([]float64, bufLen)
+	r.res = scratchSlice(&s.res, bufLen)
 	silkLPCAnalysisFilterFLP32(r.res, r.a, xBuf, bufLen, order)
 
-	r.pitchL = make([]int, nbSubfr)
+	r.pitchL = scratchSlice(&s.pitchL, nbSubfr)
 	if !runCore {
 		return r
 	}
@@ -674,7 +718,7 @@ func silkFindPitchLagsFLP32(xBuf []float64, laPitch, winLen, order, fsKHz, nbSub
 	thres1 := f32(float64(pitchEstThresholdQ16) / 65536.0)
 
 	ltpCorr := ltpCorrIn
-	pitchL, lagIndex, contourIndex, voiced := silkPitchAnalysisCoreFLP32(r.res, &ltpCorr, prevLag, thres1, thrhld, fsKHz, peComplexity, nbSubfr)
+	pitchL, lagIndex, contourIndex, voiced := silkPitchAnalysisCoreFLP32Scratch(s, r.res, &ltpCorr, prevLag, thres1, thrhld, fsKHz, peComplexity, nbSubfr)
 	r.pitchL = pitchL
 	r.lagIndex = lagIndex
 	r.contourIndex = contourIndex

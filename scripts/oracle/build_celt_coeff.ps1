@@ -1,11 +1,11 @@
 param(
-    [string]$Output = (Join-Path $env:TEMP 'opus_celt_coeff_oracle.exe')
+    [string]$Output = (Join-Path ([System.IO.Path]::GetTempPath()) 'opus_celt_coeff_oracle.exe')
 )
 
 $ErrorActionPreference = 'Stop'
-$repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$celt = Join-Path $repo 'libopus\celt'
-$generated = Join-Path $env:TEMP 'opus_celt_decoder_coeff_instr.c'
+$repo = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
+$celt = Join-Path $repo 'libopus/celt'
+$generated = Join-Path ([System.IO.Path]::GetTempPath()) 'opus_celt_decoder_coeff_instr.c'
 $source = Get-Content (Join-Path $celt 'celt_decoder.c') -Raw
 
 $helper = @'
@@ -132,9 +132,14 @@ static void oracle_dump_pcm(const opus_res *pcm, int channels, int frame_size)
 
 '@
 
-$marker = 'void celt_synthesis('
-if (-not $source.Contains($marker)) { throw "celt_synthesis marker not found" }
-$source = $source.Replace($marker, $helper + $marker)
+# Insert the helper ahead of celt_synthesis together with its optional
+# `#ifndef RESYNTH static #endif` prefix; inserting between the `static` and
+# the function would make the helper's first declaration static (glibc's
+# stdio.h is not yet included at that point and fails to compile).
+$markerPattern = '(?m)^(?:#ifndef RESYNTH\r?\nstatic\r?\n#endif\r?\n)?void celt_synthesis\('
+$markerMatch = [regex]::Match($source, $markerPattern)
+if (-not $markerMatch.Success) { throw "celt_synthesis marker not found" }
+$source = $source.Insert($markerMatch.Index, $helper)
 $callPattern = '(?s)(denormalise_bands\(mode, X\+c\*N, freq, oldBandE\+c\*nbEBands, start, effEnd, M,\s*downsample, silence\);)'
 if (-not [regex]::IsMatch($source, $callPattern)) { throw "normal stereo denormalise call not found" }
 $source = [regex]::Replace($source, $callPattern, '$1' + "`r`n         oracle_dump_denorm(mode, freq, c, start, effEnd, M);", 1)
@@ -160,7 +165,7 @@ $source = [regex]::Replace($source, $deemphasisPattern,
     '$1' + "`r`n   " + 'oracle_dump_pcm(pcm, CC, N);', 1)
 Set-Content -LiteralPath $generated -Value $source
 
-$generatedBands = Join-Path $env:TEMP 'opus_celt_bands_coeff_instr.c'
+$generatedBands = Join-Path ([System.IO.Path]::GetTempPath()) 'opus_celt_bands_coeff_instr.c'
 $bandsSource = Get-Content (Join-Path $celt 'bands.c') -Raw
 $bandsHelper = @'
 
@@ -223,7 +228,7 @@ $bandsSource = $bandsSource.Replace($denormGainMarker,
     $denormGainMarker + "`r`n" + $denormGainTrace)
 Set-Content -LiteralPath $generatedBands -Value $bandsSource
 
-$generatedVQ = Join-Path $env:TEMP 'opus_celt_vq_coeff_instr.c'
+$generatedVQ = Join-Path ([System.IO.Path]::GetTempPath()) 'opus_celt_vq_coeff_instr.c'
 $vqSource = Get-Content (Join-Path $celt 'vq.c') -Raw
 $vqHelper = @'
 
@@ -304,7 +309,7 @@ $vqSuffix = $vqSuffix.Replace($rotationMarker, $rotationMarker + "`r`n" +
 $vqSource = $vqPrefix + $vqSuffix
 Set-Content -LiteralPath $generatedVQ -Value $vqSource
 
-$generatedCWRS = Join-Path $env:TEMP 'opus_celt_cwrs_coeff_instr.c'
+$generatedCWRS = Join-Path ([System.IO.Path]::GetTempPath()) 'opus_celt_cwrs_coeff_instr.c'
 $cwrsSource = Get-Content (Join-Path $celt 'cwrs.c') -Raw
 $cwrsInclude = '#include "os_support.h"'
 if (-not $cwrsSource.Contains($cwrsInclude)) { throw "cwrs include marker not found" }
@@ -337,8 +342,8 @@ $sources = @(
     'celt_lpc.c', 'quant_bands.c', 'rate.c'
 ) | ForEach-Object { Join-Path $celt $_ }
 
-& gcc -O1 -DOPUS_BUILD -DVAR_ARRAYS "-I$celt" "-I$(Join-Path $repo 'libopus\include')" `
-    "-I$(Join-Path $repo 'libopus')" "-I$(Join-Path $repo 'libopus\silk')" `
+& gcc -O1 -DOPUS_BUILD -DVAR_ARRAYS "-I$celt" "-I$(Join-Path $repo 'libopus/include')" `
+    "-I$(Join-Path $repo 'libopus')" "-I$(Join-Path $repo 'libopus/silk')" `
     (Join-Path $PSScriptRoot 'celt_coeff_oracle.c') `
     $generated $generatedBands $generatedVQ $generatedCWRS @sources -lm -o $Output
 if ($LASTEXITCODE -ne 0) { throw "gcc failed with exit code $LASTEXITCODE" }

@@ -22,6 +22,17 @@ func SoftClipFloat32(pcm []float32, channels int, mem []float32) error {
 	if n == 0 {
 		return nil
 	}
+	if softClipIsIdentity(pcm, mem[:channels]) {
+		// The full path would end with every memory at +0.
+		clear(mem[:channels])
+		return nil
+	}
+	softClipFull(pcm, channels, n, mem)
+	return nil
+}
+
+// softClipFull is opus_pcm_soft_clip on validated arguments.
+func softClipFull(pcm []float32, channels, n int, mem []float32) {
 	// Clamp to [-2, 2], the domain of the non-linearity. Its derivative is
 	// zero at ±2, so no discontinuity is introduced.
 	for i, v := range pcm {
@@ -110,7 +121,26 @@ func SoftClipFloat32(pcm []float32, channels int, mem []float32) error {
 		}
 		mem[c] = a
 	}
-	return nil
+}
+
+// softClipIsIdentity reports whether the soft clip would leave pcm and mem
+// unchanged: with every memory at zero the carried non-linearity stops at
+// the first sample, and with no sample outside [-1, 1] no region is clipped,
+// so each channel ends with a = 0 again. This is the common case for SILK
+// output and for most CELT frames.
+func softClipIsIdentity(pcm, mem []float32) bool {
+	for _, a := range mem {
+		if a != 0 {
+			return false
+		}
+	}
+	for _, v := range pcm {
+		// NaN fails this test too and takes the full path.
+		if !(v >= -1 && v <= 1) {
+			return false
+		}
+	}
+	return true
 }
 
 func abs32(v float32) float32 {

@@ -46,6 +46,7 @@ type aCfg struct {
 	noFloat  bool
 	profile  bool // NewEncoderWithProfile(EncoderProfileLibopus)
 	onPacket func(pkt int, g auditGoEncoder, goPkt, cPkt []byte)
+	oracle   string // executable to run; auditOraclePath() when empty
 }
 
 type aRes struct {
@@ -110,7 +111,11 @@ func runAuditOracle(t *testing.T, c aCfg) []cEvent {
 	} else {
 		args = []string{"--script-enc", strconv.Itoa(c.rate), strconv.Itoa(c.ch), c.app, pcmPath, scrPath}
 	}
-	cmd := exec.Command(auditOraclePath(), args...)
+	oracle := c.oracle
+	if oracle == "" {
+		oracle = auditOraclePath()
+	}
+	cmd := exec.Command(oracle, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {

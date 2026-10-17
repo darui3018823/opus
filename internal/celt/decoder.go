@@ -30,6 +30,17 @@ type Decoder struct {
 	shortCeltMode *dsp.CELTMode     // short-block (NBase-point) IMDCT mode for transient frames
 	bandProcs     [2]*BandProcessor // band processors per channel (index 0 = L/M, index 1 = R/S)
 	overlap       [][]float64       // Overlap buffer per channel (NBase samples each)
+	// Synthesis scratch reused between frames. outBuf is the slice returned
+	// by Decode and DecodeHybrid, valid until the next decode call.
+	synthBuf  []float64
+	synthCopy []float64
+	subTail   []float64
+	subCoeffs []float64
+	outBuf    []float64
+	mdctBuf   [2][]float64
+	bandX     []float32
+	collapse  []byte
+	qab       quantAllBandsScratch
 
 	// Decoder energy state in libopus' mean-subtracted log2-amplitude domain.
 	// prevEnergies is oldBandE (used by coarse-energy prediction); prevLogE and
@@ -169,7 +180,8 @@ func NewDecoderEx(frameSize, sampleRate, numBands, channels int) (*Decoder, erro
 	return d, nil
 }
 
-// Decode decodes a CELT frame to PCM samples
+// Decode decodes a CELT frame to PCM samples. The returned slice is owned by
+// the decoder and valid until the next decode call.
 func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	if len(frameData) == 0 {
 		d.lastFinalRange = 0x01000000
@@ -179,12 +191,22 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 	return d.decodeCELTRange(dec, len(frameData), 0, d.mode.Bands.NumBands)
 }
 
+// growFloat64 returns buf resized to n elements, reallocating only when its
+// capacity is too small. The contents are not cleared.
+func growFloat64(buf []float64, n int) []float64 {
+	if cap(buf) < n {
+		return make([]float64, n)
+	}
+	return buf[:n]
+}
+
 // DecodeHybrid decodes the CELT high-band layer of a hybrid Opus frame,
 // continuing from a range decoder that the SILK layer has already partially
 // consumed. start/end select the active CELT band range (hybrid uses start=17;
 // end=19 for SWB, 21 for FB). totalBytes is the full Opus frame byte length,
 // shared as the bit budget. Bands below `start` produce zero output, so the
-// result is the high-frequency signal to be summed with the SILK layer.
+// result is the high-frequency signal to be summed with the SILK layer. Like
+// Decode, the returned slice is reused by the next decode call.
 func (d *Decoder) DecodeHybrid(dec *entcode.Decoder, totalBytes, start, end int) ([]float64, error) {
 	return d.decodeCELTRange(dec, totalBytes, start, end)
 }
@@ -368,15 +390,18 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 
 	// Apply energy denormalization per channel
 	frameSize := d.mode.FrameSize
-	mdctCoeffsPerCh := make([][]float64, ch)
+	var mdctCoeffsArr [2][]float64
+	mdctCoeffsPerCh := mdctCoeffsArr[:ch]
 	for c := 0; c < ch; c++ {
 		d.bandProcs[c].DenormalizeBands()
-		coeffs := d.bandProcs[c].AssembleMDCT()
+		d.mdctBuf[c] = d.bandProcs[c].AssembleMDCTInto(d.mdctBuf[c])
+		coeffs := d.mdctBuf[c]
 		if len(coeffs) > frameSize {
 			coeffs = coeffs[:frameSize]
 		} else if len(coeffs) < frameSize {
 			ext := make([]float64, frameSize)
 			copy(ext, coeffs)
+			d.mdctBuf[c] = ext
 			coeffs = ext
 		}
 		if d.coefficientStageHook != nil {
@@ -397,15 +422,20 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	// celt_synthesis: a mono stream feeds both output channels, a stereo
 	// stream on a mono output is averaged before the IMDCT.
 	synth := mdctCoeffsPerCh
+	var synthArr [2][]float64
 	switch {
 	case ch == 1 && cc == 2:
-		synth = [][]float64{mdctCoeffsPerCh[0], append([]float64(nil), mdctCoeffsPerCh[0]...)}
+		d.synthCopy = append(d.synthCopy[:0], mdctCoeffsPerCh[0]...)
+		synthArr[0], synthArr[1] = mdctCoeffsPerCh[0], d.synthCopy
+		synth = synthArr[:2]
 	case ch == 2 && cc == 1:
-		mixed := make([]float64, len(mdctCoeffsPerCh[0]))
+		d.synthCopy = growFloat64(d.synthCopy, len(mdctCoeffsPerCh[0]))
+		mixed := d.synthCopy
 		for i := range mixed {
 			mixed[i] = float64(float32(float32(0.5)*float32(mdctCoeffsPerCh[0][i])) + float32(float32(0.5)*float32(mdctCoeffsPerCh[1][i])))
 		}
-		synth = [][]float64{mixed}
+		synthArr[0] = mixed
+		synth = synthArr[:1]
 	}
 
 	// Note: stereo M/S→L/R merge is handled inside quant_all_bands (quant_band_stereo).
@@ -413,7 +443,9 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	// Perform IMDCT per channel.
 	// Transient frames (isTransient=true, lm>0) use M=2^lm separate NBase-point IMDCTs
 	// (libopus "shortMdct" path). Non-transient frames use a single N-point IMDCT.
-	output := make([]float64, frameSize/d.downsample*cc)
+	// output is decoder-owned and valid until the next decode call.
+	d.outBuf = growFloat64(d.outBuf, frameSize/d.downsample*cc)
+	output := d.outBuf
 	nBase := d.mode.NBase // = NBase (e.g. 120 for 48kHz)
 	M := 1 << uint(lm)    // number of sub-frames for transient
 
@@ -426,25 +458,30 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 
 		if isTransient && lm > 0 {
 			// Transient synthesis: M separate NBase-point IMDCTs.
-			subTail := make([]float64, nBase)
+			d.subTail = growFloat64(d.subTail, nBase)
+			subTail := d.subTail
 			copy(subTail, d.overlap[c])
 
-			samplesOut = make([]float64, frameSize)
+			d.synthBuf = growFloat64(d.synthBuf, frameSize)
+			samplesOut = d.synthBuf
+			d.subCoeffs = growFloat64(d.subCoeffs, nBase)
+			subCoeffs := d.subCoeffs
 			for k := 0; k < M; k++ {
-				subCoeffs := make([]float64, nBase)
 				for i := range subCoeffs {
+					subCoeffs[i] = 0
 					idx := k + i*M
 					if idx < len(coeffs) {
 						subCoeffs[i] = coeffs[idx]
 					}
 				}
-				subOut := d.shortCeltMode.CLTMDCTBackward(subCoeffs, subTail)
-				copy(samplesOut[k*nBase:], subOut)
+				d.shortCeltMode.CLTMDCTBackwardInto(subCoeffs, subTail, samplesOut[k*nBase:(k+1)*nBase])
 			}
 			copy(d.overlap[c], subTail)
 		} else {
-			// Non-transient: single N-point IMDCT.
-			samplesOut = d.celtMode.CLTMDCTBackward(coeffs, d.overlap[c])
+			// Non-transient: single N-point IMDCT. samplesOut is consumed
+			// into output before the next channel reuses synthBuf.
+			d.synthBuf = growFloat64(d.synthBuf, frameSize)
+			samplesOut = d.celtMode.CLTMDCTBackwardInto(coeffs, d.overlap[c], d.synthBuf)
 		}
 		if d.synthesisStageHook != nil {
 			d.synthesisStageHook("synthesis", c, samplesOut)
@@ -467,8 +504,10 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			d.synthesisStageHook("pcm", c, samplesOut)
 		}
 
-		for i := 0; i < frameSize/d.downsample; i++ {
-			output[i*cc+c] = samplesOut[i*d.downsample] * celtFloatScale
+		ds := d.downsample
+		outLen := frameSize / ds
+		for i := 0; i < outLen; i++ {
+			output[i*cc+c] = samplesOut[i*ds] * celtFloatScale
 		}
 	}
 
@@ -632,6 +671,11 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 		return
 	}
 	*d = *src
+	// Scratch buffers must not be shared with src.
+	d.synthBuf, d.synthCopy, d.subTail, d.subCoeffs, d.outBuf = nil, nil, nil, nil, nil
+	d.mdctBuf = [2][]float64{}
+	d.bandX, d.collapse = nil, nil
+	d.qab = quantAllBandsScratch{}
 	for ch, proc := range src.bandProcs {
 		if proc == nil {
 			d.bandProcs[ch] = nil
@@ -748,7 +792,6 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 		}
 		for c := 0; c < ch; c++ {
 			q2 := int(dec.DecodeBits(uint(fb)))
-			d.bandProcs[c].ApplyFineEnergy(i, q2, fb)
 			offset := float32(float32((float32(q2)+0.5)*float32(int(1)<<uint(14-fb)))*(1.0/16384.0)) - 0.5
 			idx := c*numBands + i
 			quantLogE[idx] = float64(float32(quantLogE[idx]) + offset)
@@ -758,16 +801,20 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	// quant_all_bands: decode all PVQ bands into the interleaved normalised MDCT X[].
 	M := 1 << uint(lm)
 	frameLen := M * int(EBands48000[numBands])
-	X := make([]float64, ch*frameLen)
-	var Y []float64
+	X := zeroedFloat32(&d.bandX, ch*frameLen)
+	var Y []float32
 	if ch == 2 {
 		Y = X[frameLen:]
 	}
-	collapse := make([]byte, numBands*ch)
+	if cap(d.collapse) < numBands*ch {
+		d.collapse = make([]byte, numBands*ch)
+	}
+	collapse := d.collapse[:numBands*ch]
+	clear(collapse)
 	totalBitsQ3 := lenBytes*8<<3 - antiCollapseRsv
-	seed := QuantAllBands(dec, start, end, X[:frameLen], Y, collapse, pulses, isTransient,
-		spread, dualStereo, intensity, tfRes, totalBitsQ3, balance, lm, codedBands,
-		d.lastFinalRange, d.disableInv)
+	seed := quantAllBandsImpl(false, nil, dec, nil, start, end, X[:frameLen], Y,
+		collapse, pulses, isTransient, spread, dualStereo, intensity, tfRes,
+		totalBitsQ3, balance, lm, codedBands, d.lastFinalRange, d.disableInv, 0, nil, &d.qab)
 
 	// Anti-collapse bit — RAW bit (ec_dec_bits), read AFTER PVQ. Does not affect rng.
 	antiCollapseOn := false
@@ -785,7 +832,6 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 			}
 			for c := 0; c < ch; c++ {
 				q2 := int(dec.DecodeBits(1))
-				d.bandProcs[c].ApplyFinalFineEnergy(i, q2, eBits[i])
 				offset := float32(float32((float32(q2)-0.5)*float32(int(1)<<uint(14-eBits[i]-1))) * (1.0 / 16384.0))
 				idx := c*numBands + i
 				quantLogE[idx] = float64(float32(quantLogE[idx]) + offset)
@@ -805,7 +851,11 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 			b := d.bandProcs[c].bands[i]
 			s := M * int(EBands48000[i])
 			if base+s+b.Size <= len(X) {
-				copy(b.Coeffs, X[base+s:base+s+b.Size])
+				src := X[base+s : base+s+b.Size]
+				dst := b.Coeffs[:len(src)]
+				for j, v := range src {
+					dst[j] = float64(v)
+				}
 			}
 		}
 	}
@@ -813,7 +863,7 @@ func (d *Decoder) decodeBandCoeffs(dec *entcode.Decoder, lenBytes, allocTrim int
 	return intensity, dualStereo, nil
 }
 
-func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, logE []float64, lm, frameLen int, seed uint32, start, end int) {
+func (d *Decoder) antiCollapse(X []float32, collapse []byte, pulses []int, logE []float64, lm, frameLen int, seed uint32, start, end int) {
 	numBands := d.mode.Bands.NumBands
 	ch := d.codedChannels()
 	M := 1 << uint(lm)
@@ -862,7 +912,7 @@ func (d *Decoder) antiCollapse(X []float64, collapse []byte, pulses []int, logE 
 					if seed&0x8000 == 0 {
 						v = -v
 					}
-					X[offset+(j<<uint(lm))+k] = float64(v)
+					X[offset+(j<<uint(lm))+k] = v
 				}
 				renorm = true
 			}

@@ -121,7 +121,7 @@ func TestOracleTrace(t *testing.T) {
 	// PVQ via faithful quant_all_bands port
 	M := 1 << uint(lm)
 	frameLen := M * int(EBands48000[numBands])
-	X := make([]float64, frameLen)
+	X := make([]float32, frameLen)
 	collapse := make([]byte, numBands*ch)
 	totalBitsQ3 := len(frameData)*8<<3 - antiRsv
 	qabDebug = true
@@ -165,7 +165,7 @@ func TestOracleTrace(t *testing.T) {
 		diagDec.antiCollapse(X, collapse, pulses, quantLogE, lm, frameLen, seed, 0, numBands)
 	}
 
-	dumpDenormalizedMDCT(denormalizedMDCTViaBandProcessor(frameLen, numBands, ch, lm, X, quantLogE), numBands, lm)
+	dumpDenormalizedMDCT(denormalizedMDCTViaBandProcessor(frameLen, numBands, ch, lm, float32sToFloat64(X), quantLogE), numBands, lm)
 
 	got := dec.GetRng()
 	fmt.Printf("\nFinal rng: got=%08x expected=%08x match=%v\n", got, expectedFinal, got == expectedFinal)
@@ -177,4 +177,12 @@ func TestOracleTrace(t *testing.T) {
 	if got != expectedFinal {
 		t.Errorf("final range mismatch: got %08x want %08x", got, expectedFinal)
 	}
+}
+
+func float32sToFloat64(x []float32) []float64 {
+	out := make([]float64, len(x))
+	for i, v := range x {
+		out[i] = float64(v)
+	}
+	return out
 }

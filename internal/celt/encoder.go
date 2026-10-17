@@ -130,6 +130,7 @@ func (e *Encoder) LastFrameTrace() FrameTrace { return e.lastTrace }
 type frameScratch struct {
 	x, bandE, logE, logE2, coarseError []float64
 	bufs, pe                           [][]float64
+	xq                                 []float32
 	tfRes                              []int
 	collapse                           []byte
 }
@@ -185,6 +186,14 @@ func appendTraceRows(dst [][]float64, rows [][]float64) [][]float64 {
 }
 
 type Encoder struct {
+	// Forward MDCT outputs reused between frames: mdctOut/mdctCoeffs hold
+	// compute_mdcts' result for the frame, mdctLong the logE2 long block.
+	mdctOut    [2][]float64
+	mdctCoeffs [2][]float64
+	mdctShort  []float64
+	mdctLong   [2][]float64
+	// qab is the quant_all_bands scratch reused between frames.
+	qab         quantAllBandsScratch
 	lastTrace   FrameTrace
 	traceCoeffs [][]float64
 	// frame is the per-frame work storage of encodeRange, reused between
@@ -575,23 +584,28 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	bufs := scratchRows(&e.frame.bufs, CC, frameSize+ov)
 	pes := scratchRows(&e.frame.pe, CC, frameSize)
 	for c := 0; c < CC; c++ {
-		pe := pes[c]
-		mem := e.preemphMem[c]
-		for i := 0; i < frameSize; i++ {
-			var s float64
-			if CC == 1 {
-				s = samples[i]
-			} else {
-				s = samples[i*CC+c]
+		// celt_preemphasis (float build): x = CELT_SIG_SCALE * pcm,
+		// inp = x - m, m = coef0 * x, all in float32 with the 48 kHz mode's
+		// coef0 = 0.8500061035f. The state stays in a float32 local (the
+		// stored float64 holds a float32 value exactly).
+		pe := pes[c][:frameSize]
+		mem := float32(e.preemphMem[c])
+		coef := float32(preemphCoef0)
+		if CC == 1 {
+			for i, s := range samples[:frameSize] {
+				x := float32(float32(s) * 32768)
+				pe[i] = float64(x - mem)
+				mem = float32(coef * x) // explicit rounding: no FMA into the next x - mem
 			}
-			// celt_preemphasis (float build): x = CELT_SIG_SCALE * pcm,
-			// inp = x - m, m = coef0 * x, all in float32 with the 48 kHz
-			// mode's coef0 = 0.8500061035f.
-			xin := float64(float32(s) * 32768)
-			pe[i] = float64(float32(xin - mem))
-			mem = float64(float32(preemphCoef0) * float32(xin))
+		} else {
+			src := samples[c : c+(frameSize-1)*CC+1]
+			for i := range pe {
+				x := float32(float32(src[i*CC]) * 32768)
+				pe[i] = float64(x - mem)
+				mem = float32(coef * x) // explicit rounding: no FMA into the next x - mem
+			}
 		}
-		e.preemphMem[c] = mem
+		e.preemphMem[c] = float64(mem)
 
 		buf := bufs[c]
 		// The analysis (tone / transient detectors) sees the raw pre-emphasised
@@ -776,23 +790,24 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// and for a stereo input coded as a mono stream the average of the two
 	// channels' coefficients. The result holds C channels.
 	computeMDCTs := func(transient bool) [][]float64 {
-		out := make([][]float64, CC)
+		out := e.mdctOut[:CC]
 		for c := 0; c < CC; c++ {
 			buf := bufs[c]
-			var coeffs []float64
+			e.mdctCoeffs[c] = growFloat64(e.mdctCoeffs[c], frameSize)
+			coeffs := e.mdctCoeffs[c]
 			if transient {
 				// M short MDCTs over overlapping NBase windows, interleaved into the
 				// layout the decoder's transient synthesis expects (coeff k+i*M).
-				coeffs = make([]float64, frameSize)
+				e.mdctShort = growFloat64(e.mdctShort, nBase)
 				for b := 0; b < M; b++ {
 					sub := buf[b*nBase : b*nBase+nBase+ov]
-					sc := e.shortCeltMode.CLTMDCTForward(sub)
+					sc := e.shortCeltMode.CLTMDCTForwardInto(sub, e.mdctShort)
 					for i := 0; i < nBase; i++ {
 						coeffs[b+i*M] = sc[i]
 					}
 				}
 			} else {
-				coeffs = e.celtMode.CLTMDCTForward(buf)
+				coeffs = e.celtMode.CLTMDCTForwardInto(buf, coeffs)
 			}
 			copy(e.overlap[c], buf[frameSize:frameSize+ov])
 			out[c] = coeffs
@@ -856,16 +871,16 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// overlap state already advanced by computeSpectrum.
 	computeLogE2Long := func(corr float64) {
 		for c := 0; c < ch; c++ {
-			longCoeffs := e.celtMode.CLTMDCTForward(bufs[c])
+			e.mdctLong[0] = growFloat64(e.mdctLong[0], frameSize)
+			longCoeffs := e.celtMode.CLTMDCTForwardInto(bufs[c], e.mdctLong[0])
 			if CC == 2 && ch == 1 {
-				other := e.celtMode.CLTMDCTForward(bufs[1])
-				longCoeffs = append([]float64(nil), longCoeffs...)
+				e.mdctLong[1] = growFloat64(e.mdctLong[1], frameSize)
+				other := e.celtMode.CLTMDCTForwardInto(bufs[1], e.mdctLong[1])
 				for i := range longCoeffs {
 					longCoeffs[i] = float64(float32(float32(0.5)*float32(longCoeffs[i])) + float32(float32(0.5)*float32(other[i])))
 				}
 			}
 			if e.upsample > 1 {
-				longCoeffs = append([]float64(nil), longCoeffs...)
 				bound := frameSize / e.upsample
 				for i := 0; i < bound; i++ {
 					longCoeffs[i] = float64(float32(longCoeffs[i]) * float32(e.upsample))
@@ -1373,10 +1388,20 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	quantFineEnergy(enc, start, end, quantLogE, coarseError, eBits, ch, numBands, totalBits)
 	e.lastTrace.TellFine = enc.ECTell()
 
-	// PVQ for all bands.
-	var Y []float64
+	// PVQ for all bands, on a float32 copy of X (every value in X is
+	// float32-rounded, so the copy is exact).
+	Xq := e.frame.xq[:0]
+	if cap(Xq) < len(X) {
+		Xq = make([]float32, len(X))
+	}
+	Xq = Xq[:len(X)]
+	e.frame.xq = Xq
+	for j, v := range X {
+		Xq[j] = float32(v)
+	}
+	var Y []float32
 	if ch == 2 {
-		Y = X[frameLen:]
+		Y = Xq[frameLen:]
 	}
 	if cap(e.frame.collapse) < numBands*ch {
 		e.frame.collapse = make([]byte, numBands*ch)
@@ -1387,9 +1412,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	}
 	totalBitsQ3 := totalBits<<3 - antiCollapseRsv
 	bandTells := e.bandTellScratch[:0]
-	e.foldSeed = quantAllBandsEncodeTrace(enc, bandE, start, end, X[:frameLen], Y, collapse,
+	e.foldSeed = quantAllBandsEncodeTrace(enc, bandE, start, end, Xq[:frameLen], Y, collapse,
 		pulses, isTransient, spread, dualStereo, intensity, tfRes,
-		totalBitsQ3, balance, lm, codedBands, e.foldSeed, e.disableInv, e.complexity, &bandTells)
+		totalBitsQ3, balance, lm, codedBands, e.foldSeed, e.disableInv, e.complexity, &bandTells, &e.qab)
 	e.bandTellScratch = bandTells
 	e.lastTrace.BandTellFrac = bandTells
 

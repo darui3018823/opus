@@ -28,6 +28,15 @@ type frameLoopResult struct {
 // frameLoopSnapshot is the state of a completed iteration that the loop may
 // have to return to (the "lower" bracket in libopus: sRangeEnc_copy2 +
 // ec_buf_copy, sNSQ_copy[1], LastGainIndex_copy2).
+// frameLoopScratch holds encodeFrameLoop's range coder copies and its
+// "lower" snapshot; all of it lives within one frame.
+type frameLoopScratch struct {
+	encCopy, lowerEnc entcode.Encoder
+	lower             frameLoopSnapshot
+	lowerGains        []int
+	lowerPulses       []int16
+}
+
 type frameLoopSnapshot struct {
 	enc    *entcode.Encoder
 	state  encoderFrameState
@@ -78,7 +87,7 @@ func (e *Encoder) encodeFrameLoop(
 	e.frameCounter++
 
 	// Copy part of the input state.
-	encCopy := enc.Clone()
+	encCopy := enc.CloneInto(&e.loopScratch.encCopy)
 	prevSignalType := e.prevSignalType // ec_prevSignalType
 	lastGainIndexPrev := e.prevGainIdx // sEncCtrl.lastGainIndexPrev
 	// The frame's Lambda is captured by the first NSQ run; remember it once
@@ -104,7 +113,11 @@ func (e *Encoder) encodeFrameLoop(
 	res.quantOffset = quantOffset
 	var nBits int32
 	var loopTrace []LoopIteration
+	tracing := frameTracesEnabled()
 	record := func(iter int, damage bool) {
+		if !tracing {
+			return
+		}
 		loopTrace = append(loopTrace, LoopIteration{
 			Iter: iter, NBits: int(nBits), MaxBits: maxBits, UseCBR: useCBR, GainMultQ8: gainMultQ8, GainsID: gainsID,
 			FoundLower: foundLower, FoundUpper: foundUpper, Lambda: float32(e.lambda32), QuantOffset: quantOffset,
@@ -186,8 +199,10 @@ func (e *Encoder) encodeFrameLoop(
 				// indices.Seed still holds the last NSQ run's winning seed.
 				enc.EncodeIcdf(int(e.nsqSeed), silkUniform4ICDF[:], 8)
 				e.encodePulses(enc, res.pulses, signalType, quantOffset)
-				e.pendingTrace.Pulses = append([]int16(nil), res.pulses...)
-				e.pendingTrace.GainsIndices = append([]int(nil), absIdx...)
+				if tracing {
+					e.pendingTrace.Pulses = append([]int16(nil), res.pulses...)
+					e.pendingTrace.GainsIndices = append([]int(nil), absIdx...)
+				}
 				nBits = int32(enc.ECTell())
 				record(iter, true)
 			}
@@ -242,14 +257,20 @@ func (e *Encoder) encodeFrameLoop(
 			if gainsID != gainsIDLower {
 				gainsIDLower = gainsID
 				// Copy part of the output state.
-				lower = &frameLoopSnapshot{
-					enc:    enc.Clone(),
-					state:  e.snapshotFrameState(),
+				// A newer "lower" result replaces the previous one, so the
+				// snapshot lives in encoder scratch.
+				ls := &e.loopScratch
+				ls.lower = frameLoopSnapshot{
+					enc:    enc.CloneInto(&ls.lowerEnc),
+					state:  e.snapshotFrameStateInto(&e.frameSnapLower),
 					trace:  e.pendingTrace,
 					result: res,
 				}
-				lower.result.gainIndices = append([]int(nil), res.gainIndices...)
-				lower.result.pulses = append([]int16(nil), res.pulses...)
+				ls.lowerGains = append(ls.lowerGains[:0], res.gainIndices...)
+				ls.lowerPulses = append(ls.lowerPulses[:0], res.pulses...)
+				ls.lower.result.gainIndices = ls.lowerGains
+				ls.lower.result.pulses = ls.lowerPulses
+				lower = &ls.lower
 			}
 		} else {
 			// Close enough.

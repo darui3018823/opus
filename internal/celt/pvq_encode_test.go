@@ -73,11 +73,11 @@ func TestAlgQuantUnquantRoundtrip(t *testing.T) {
 		}
 		for trial := 0; trial < 20; trial++ {
 			// Random unit-norm target vector.
-			Xenc := make([]float64, c.n)
+			Xenc := make([]float32, c.n)
 			var nrm float64
 			for i := range Xenc {
-				Xenc[i] = rng.NormFloat64()
-				nrm += Xenc[i] * Xenc[i]
+				Xenc[i] = float32(rng.NormFloat64())
+				nrm += float64(Xenc[i]) * float64(Xenc[i])
 			}
 			if nrm < 1e-12 {
 				continue
@@ -90,7 +90,7 @@ func TestAlgQuantUnquantRoundtrip(t *testing.T) {
 			enc.Flush()
 			data := enc.Bytes()
 
-			Xdec := make([]float64, c.n)
+			Xdec := make([]float32, c.n)
 			dec := entcode.NewDecoder(data)
 			maskDec := algUnquant(Xdec, c.n, c.k, c.spread, c.b, dec, gain)
 
@@ -99,7 +99,7 @@ func TestAlgQuantUnquantRoundtrip(t *testing.T) {
 					ci, trial, c.n, c.k, c.b, maskEnc, maskDec)
 			}
 			for i := 0; i < c.n; i++ {
-				if math.Abs(Xenc[i]-Xdec[i]) > 1e-9 {
+				if math.Abs(float64(Xenc[i]-Xdec[i])) > 1e-9 {
 					t.Fatalf("cfg%d trial%d (n=%d k=%d B=%d): X[%d] enc=%.12g dec=%.12g",
 						ci, trial, c.n, c.k, c.b, i, Xenc[i], Xdec[i])
 				}
@@ -107,7 +107,7 @@ func TestAlgQuantUnquantRoundtrip(t *testing.T) {
 			// Reconstructed band must be (approximately) unit norm.
 			var e float64
 			for _, v := range Xdec {
-				e += v * v
+				e += float64(v) * float64(v)
 			}
 			if math.Abs(e-1.0) > 1e-6 {
 				t.Fatalf("cfg%d trial%d: reconstructed energy=%.9g (want ~1)", ci, trial, e)
@@ -124,9 +124,9 @@ func TestOpPVQSearchPulseCount(t *testing.T) {
 			if k <= 0 {
 				continue
 			}
-			X := make([]float64, n)
+			X := make([]float32, n)
 			for i := range X {
-				X[i] = rng.NormFloat64()
+				X[i] = float32(rng.NormFloat64())
 			}
 			iy := make([]int, n)
 			opPVQSearch(X, iy, k, n)

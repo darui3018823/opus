@@ -1,0 +1,11 @@
+# Keep every text file LF in the repository and in working copies, whatever
+# core.autocrlf says (Go tooling writes LF).
+* text=auto eol=lf
+
+# Binary test data and media.
+*.bit binary
+*.dec binary
+*.opus binary
+*.ogg binary
+*.wav binary
+*.png binary

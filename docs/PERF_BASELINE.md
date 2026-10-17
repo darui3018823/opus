@@ -358,3 +358,152 @@ cross-architecture determinism), and libopus uses SSE/AVX kernels, so it is
 2.5 to 3.7 times slower to encode and 3.5 to 6.7 times slower to decode. Even
 the slowest case is about 6 % of real time (1.2 ms per 20 ms frame). The CELT
 decoder has the largest gap and is the first optimisation target.
+
+## Allocation and Hot-Path Pass (2026-10-15)
+
+Branch `perf/decoder-encoder-optimization`, from v1.6.0 (`2edb1c2`). Every
+change keeps decoded PCM, final range and encoded packets bit-identical:
+`TestOfficialVectorDecodeDigests` pins the decode of all 12 RFC 8251 vectors
+at six output configurations against v1.6.0, and
+`TestPerfPredictivePacketRegression` / `TestPerfDefaultPolicyPacketRegression`
+pin the encoder under both mode policies. The full `opusref` suite passes.
+
+New harnesses:
+
+- `BenchmarkDecodeOfficialVectors` decodes each official vector from a fresh
+  decoder at 48 kHz stereo int16 and reports `x-realtime`.
+- `BenchmarkPerfDefault` runs the default `ModePolicyLibopus` encoder;
+  `BenchmarkPerf` keeps pinning `ModePolicyLegacy`.
+
+```text
+go test -run '^$' -bench 'BenchmarkDecodeOfficialVectors|BenchmarkPerfDefault' -benchmem -benchtime 2s -count 6 .
+```
+
+Main changes:
+
+- CELT `U(n,k)` from a dense precomputed table instead of a `sync.Map`
+  lookup (17 % of decode CPU).
+- Decoder-owned buffers for the backward MDCT and FFT, CELT synthesis and
+  band decoding, the packet PCM, the int16 soft clip and SILK resampling and
+  synthesis. `celt.Decoder.Decode` and the internal decode paths return
+  buffers valid until the next call; the public `DecodeFloat` still returns
+  a new slice.
+- The SILK encoder no longer runs the float64 noise-shape analysis whose
+  results the float32 libopus port overrides.
+- `pitchXcorr32` computes four lags per pass, each still summed in order.
+- Encoder input conditioning, forward MDCT, SILK pulse blocks, NSQ and
+  pitch-analysis buffers are reused.
+
+Official vectors, 48 kHz stereo int16, medians of six 2 s runs:
+
+| Vector | v1.6.0 | now | change | alloc v1.6.0 | alloc now |
+|---|---:|---:|---:|---:|---:|
+| tv01 | 328.2 ms | 174.9 ms | -47 % | 282.9 MiB | 6.8 MiB |
+| tv02 | 53.9 ms | 42.4 ms | -21 % | 84.7 MiB | 12.2 MiB |
+| tv03 | 53.4 ms | 42.8 ms | -20 % | 82.8 MiB | 15.4 MiB |
+| tv04 | 77.7 ms | 63.4 ms | -18 % | 113.2 MiB | 23.1 MiB |
+| tv05 | 180.9 ms | 123.3 ms | -32 % | 297.3 MiB | 23.3 MiB |
+| tv06 | 181.4 ms | 121.7 ms | -33 % | 278.1 MiB | 21.5 MiB |
+| tv07 | 155.8 ms | 95.3 ms | -39 % | 182.5 MiB | 5.5 MiB |
+| tv08 | 166.2 ms | 94.8 ms | -43 % | 261.5 MiB | 3.8 MiB |
+| tv09 | 342.7 ms | 143.6 ms | -58 % | 274.4 MiB | 3.7 MiB |
+| tv10 | 383.9 ms | 185.1 ms | -52 % | 348.1 MiB | 14.3 MiB |
+| tv11 | 271.5 ms | 127.4 ms | -53 % | 283.3 MiB | 3.2 MiB |
+| tv12 | 70.3 ms | 51.5 ms | -27 % | 123.1 MiB | 10.8 MiB |
+
+Default-policy encoder, per 20 ms frame:
+
+| Workload | v1.6.0 | now | change | alloc v1.6.0 | alloc now |
+|---|---:|---:|---:|---:|---:|
+| `celt/mono/96k` | 202 µs | 128 µs | -37 % | 63 KiB | 23 KiB |
+| `celt/stereo/128k` | 312 µs | 206 µs | -34 % | 109 KiB | 35 KiB |
+| `silk/mono/12k` | 738 µs | 496 µs | -33 % | 245 KiB | 118 KiB |
+| `silk/stereo/12k` | 793 µs | 532 µs | -33 % | 274 KiB | 129 KiB |
+| `hybrid/mono/24k` | 426 µs | 300 µs | -30 % | 179 KiB | 89 KiB |
+| `hybrid/stereo/36k` | 1151 µs | 801 µs | -30 % | 424 KiB | 212 KiB |
+
+For reference, pion/opus (commit `44637de`) decodes the 12 vectors in 0.90 s
+on the same machine, against 1.30 s now and 2.54 s for v1.6.0; both decoders
+match the reference output to within 1 LSB.
+
+Against libopus (`BenchmarkPerfVsLibopus`, same command and machine as the
+2026-09-30 table, medians of three 300 ms runs):
+
+| Workload | Go Legacy enc | Go Libopus enc | libopus enc | ratio | Go dec | libopus dec | ratio |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `celt/mono/48k/20ms` | 237 µs | 130 µs | 64 µs | 2.0x | 49 µs | 19 µs | 2.5x |
+| `celt/stereo/48k/20ms` | 320 µs | 212 µs | 88 µs | 2.4x | 82 µs | 34 µs | 2.4x |
+| `hybrid/mono/48k/20ms` | 404 µs | 292 µs | 153 µs | 1.9x | 61 µs | 25 µs | 2.5x |
+| `hybrid/stereo/48k/20ms` | 707 µs | 212 µs | 104 µs | 2.0x | 73 µs | 31 µs | 2.4x |
+| `silk/mono/48k/20ms` | 526 µs | 304 µs | 159 µs | 1.9x | 58 µs | 24 µs | 2.5x |
+| `silk/stereo/48k/20ms` | 821 µs | 792 µs | 294 µs | 2.7x | 117 µs | 45 µs | 2.6x |
+
+The encode ratio fell from 2.5-3.7x to 1.9-2.7x and the decode ratio from
+3.5-6.7x to 2.4-2.6x. Remaining candidates are recorded in
+`.claude/tasks/implementation/performance-optimization-2026-10-15.md`.
+
+## Real-Audio Comparison With ffmpeg's libopus (2026-10-16)
+
+A 280 s stereo music track from YouTube (its own Opus stream, ~130 kb/s)
+was decoded and re-encoded at 32/64/128 kb/s (VBR, complexity 10) by this
+codec and by the SIMD libopus inside ffmpeg 8.1.2, on commit `af80912`.
+Full tables, method and caveats:
+[real-audio comparison](../.claude/tasks/investigation/real-audio-libopus-comparison-2026-10-16.md).
+
+| | libopus (ffmpeg) | this codec |
+|---|---:|---:|
+| Decoder agreement with libopus | - | 99.925% identical samples, max 1 LSB |
+| Encoder SNR 32k / 64k / 128k (Go in constrained VBR, see note) | 10.87 / 14.14 / 22.14 dB | 10.99 / 14.19 / 21.55 dB |
+| Same mode (TOC) as libopus | - | 100% of packets |
+| Decode, x realtime | 361 | 225 |
+| Encode 64k, x realtime | 164 | 76 |
+| Peak working set | ~20 MB (incl. ffmpeg) | 15-17 MB |
+
+Per 20 ms frame the Go decoder takes about 89 µs and the 64k encoder about
+264 µs (0.4% and 1.3% of one core in real time).
+
+Correction (same day): ffmpeg's `-vbr on` is unconstrained VBR and this
+encoder defaults to constrained VBR, so the SNR row above compares
+different modes. With matched unconstrained VBR over nine genres and four
+bitrates (36 cells), the Go encoder is within -0.03 to +0.25 dB of libopus,
+uses 0% to 1.5% more bits, picks the same mode for every packet and emits
+byte-identical packets for a median 76.7% of frames. Against pion/opus on
+the same machine the decoder now takes 1.06x as long over the 12 vectors.
+Details in the investigation note linked above.
+
+## Final Comparison With v1.6.0 (2026-10-17)
+
+Same machine, same hour, `go test -bench 'BenchmarkDecodeOfficialVectors|BenchmarkPerfDefault' -benchmem -benchtime 2s -count 6`:
+v1.6.0 (`2edb1c2`, with this branch's benchmark files copied in) against
+this branch at `e00a575`. All differences have p = 0.002 (n = 6). Output is
+unchanged: decoded PCM, final range and encoded bytes match v1.6.0 (the
+digest tests, which were recorded from v1.6.0, and the opusref suite; real
+audio: five tracks at 16/64/128 kb/s encode to the same bytes with v1.6.0
+and this branch, and a YouTube Opus stream decodes to the same PCM).
+
+| Benchmark | v1.6.0 | now | time | alloc v1.6.0 | alloc now | allocs v1.6.0 | allocs now |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| tv01 (CELT) | 333.2 ms | 138.9 ms | -58% | 282.9 MiB | 6.1 MiB | 341k | 26k |
+| tv02 (SILK) | 54.4 ms | 34.3 ms | -37% | 84.7 MiB | 1.7 MiB | 78k | 4.5k |
+| tv05 (hybrid) | 182.6 ms | 92.1 ms | -50% | 297.3 MiB | 3.0 MiB | 186k | 11k |
+| tv09 | 347.1 ms | 114.7 ms | -67% | 274.4 MiB | 3.3 MiB | 382k | 12k |
+| tv10 | 385.6 ms | 145.6 ms | -62% | 348.1 MiB | 6.3 MiB | 427k | 25k |
+| tv12 (SILK) | 70.9 ms | 39.8 ms | -44% | 123.1 MiB | 2.6 MiB | 71k | 6.8k |
+| encode celt/mono/96k | 207.7 µs | 104.7 µs | -50% | 63.4 KiB | 1.8 KiB | 193 | 16 |
+| encode celt/stereo/128k | 302.8 µs | 165.1 µs | -45% | 109.4 KiB | 2.8 KiB | 320 | 17 |
+| encode silk/mono/12k | 754.8 µs | 394.5 µs | -48% | 245.0 KiB | 28.4 KiB | 1041 | 141 |
+| encode silk/stereo/12k | 798.9 µs | 422.6 µs | -47% | 273.7 KiB | 47.3 KiB | 1044 | 131 |
+| encode hybrid/mono/24k | 423.8 µs | 235.8 µs | -44% | 179.3 KiB | 13.3 KiB | 405 | 81 |
+| encode hybrid/stereo/36k | 1149.1 µs | 624.1 µs | -46% | 424.0 KiB | 47.9 KiB | 1223 | 196 |
+| decode FEC voip/mono/32k | 107.5 µs | 50.0 µs | -53% | 126.0 KiB | 0.6 KiB | 74 | 4 |
+
+Geometric mean over all 21 benchmarks: time -50.1%, bytes allocated
+-97.6%, allocations -93.1%. All 12 vectors: -37% to -67%.
+
+Against pion/opus (`44637de`) on the same machine (2026-10-16), the decoder
+takes 1.06x as long over the 12 vectors (2.8x before this branch) and is
+faster on tv02 to tv06 and tv12. Against plain-C libopus 1.6.1 (gcc -O2, no
+intrinsics) it takes 1.6x for decode and 1.6x to 1.7x for encode; the
+profile comparison that explains the remaining gap is in
+`.claude/tasks/investigation/plainc-parity-and-profile-2026-10-16.md`
+(branch `fix/encoder-plainc-parity`).

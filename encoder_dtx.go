@@ -36,17 +36,19 @@ func (silkDTXPacket) Error() string { return "SILK DTX packet" }
 // isDigitalSilence is is_digital_silence: the peak sample is at most one LSB
 // of the effective input depth.
 func isDigitalSilence(pcm []float64, lsbDepth int) bool {
-	var sampleMax float32
+	// sampleMax <= threshold fails as soon as one sample exceeds it, so stop
+	// at the first such sample (a NaN never compares greater, as before).
+	threshold := float32(1) / float32(int32(1)<<uint(lsbDepth))
 	for _, v := range pcm {
 		a := float32(v)
 		if a < 0 {
 			a = -a
 		}
-		if a > sampleMax {
-			sampleMax = a
+		if a > threshold {
+			return false
 		}
 	}
-	return sampleMax <= float32(1)/float32(int32(1)<<uint(lsbDepth))
+	return true
 }
 
 // frameEnergy is compute_frame_energy (float build): the mean square of the

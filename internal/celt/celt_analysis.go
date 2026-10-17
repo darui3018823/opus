@@ -205,27 +205,30 @@ func patchTransientDecision(newE, oldE []float64, stride, start, end, C int, thr
 // returns true when coding the channels independently (dual stereo) is expected
 // to be cheaper than mid/side.
 func stereoAnalysis(X []float64, frameLen, lm int) bool {
-	const epsilon = 1e-15
+	// opus_val32 is float in the float build: every sum, the 0.707107
+	// scaling and both products are float32 operations, in libopus order.
+	const epsilon = float32(1e-15)
 	sumLR := epsilon
 	sumMS := epsilon
+	abs32 := func(v float32) float32 { return float32(math.Abs(float64(v))) }
 	for i := 0; i < 13; i++ {
 		for j := int(EBands48000[i]) << uint(lm); j < int(EBands48000[i+1])<<uint(lm); j++ {
-			l := X[j]
-			r := X[frameLen+j]
+			l := float32(X[j])
+			r := float32(X[frameLen+j])
 			m := l + r
 			s := l - r
-			sumLR += math.Abs(l) + math.Abs(r)
-			sumMS += math.Abs(m) + math.Abs(s)
+			sumLR += abs32(l) + abs32(r)
+			sumMS += abs32(m) + abs32(s)
 		}
 	}
-	sumMS *= 0.707107 // 1/sqrt(2): M/S are scaled by this in the codec
+	sumMS = float32(0.707107) * sumMS // MULT16_32_Q15(QCONST16(0.707107f, 15), sumMS)
 	thetas := 13
 	// We don't need thetas for the lower bands with LM<=1.
 	if lm <= 1 {
 		thetas -= 8
 	}
 	w := int(EBands48000[13]) << uint(lm+1)
-	return float64(w+thetas)*sumMS > float64(w)*sumLR
+	return float32(w+thetas)*sumMS > float32(w)*sumLR
 }
 
 // intensityThresholds and intensityHysteresis drive the intensity-stereo band

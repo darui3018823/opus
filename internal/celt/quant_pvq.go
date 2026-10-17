@@ -925,6 +925,17 @@ func quantBand(ctx *bandCtx, X []float32, n, b, B int, lowband []float32, lm int
 	return cm
 }
 
+// stereoN2Sign is the encoder's side sign for an N=2 stereo band
+// (bands.c, quant_band_stereo). In the float build MULT32_32_Q31 is a float
+// multiply, so each product is rounded to float before the subtraction; the
+// conversions keep arm64 from fusing them.
+func stereoN2Sign(x2, y2 []float32) int {
+	if float32(x2[0]*y2[1])-float32(x2[1]*y2[0]) < 0 {
+		return 1
+	}
+	return 0
+}
+
 // quantBandStereo — decoder-only stereo band (bands.c).
 func quantBandStereo(ctx *bandCtx, X, Y []float32, n, b, B int, lowband []float32, lm int, lowbandOut, lowbandScratch []float32, fill int) uint {
 	var cm uint
@@ -965,12 +976,7 @@ func quantBandStereo(ctx *bandCtx, X, Y []float32, n, b, B int, lowband []float3
 		sign := 0
 		if sbits != 0 {
 			if ctx.encode {
-				// The products are exact in float64 (the float build rounds
-				// each to float); kept as float64 to leave the decision as it
-				// was when the coefficients were stored as float64.
-				if float64(float64(x2[0])*float64(y2[1]))-float64(float64(x2[1])*float64(y2[0])) < 0 {
-					sign = 1
-				}
+				sign = stereoN2Sign(x2, y2)
 				ctx.enc.EncodeBits(uint32(sign), 1)
 			} else {
 				sign = int(ctx.dec.DecodeBits(1))

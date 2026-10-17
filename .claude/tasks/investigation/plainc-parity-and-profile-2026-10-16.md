@@ -112,11 +112,12 @@ and was reverted; per-line attribution inside that function looks skewed.
 3. Reduce GC work further (encoder still allocates about 14 KB per frame at
    64k; the conversion buffer fix removed 15 KB).
 
-## Open parity finding: N=2 stereo sign (2026-10-17)
+## Parity finding: N=2 stereo sign (2026-10-17, fixed)
 
 Found while moving the band quantiser to float32 storage (item 11 of the
-performance brief, `4674b70` on the perf branch). Not fixed; it changes
-encoded bytes when it matters, so it belongs on this branch.
+performance brief, `4674b70` on the perf branch). Fixed on this branch by
+`stereoN2Sign` in `internal/celt/quant_pvq.go`; it changes encoded bytes when
+it matters, so it was kept out of the output-identical v1.7.0.
 
 - libopus 1.6.1 `celt/bands.c:1476` (`quant_band_stereo`, N == 2, encode):
   `sign = MULT32_32_Q31(x2[0],y2[1]) - MULT32_32_Q31(x2[1],y2[0]) < 0;`.
@@ -133,11 +134,15 @@ encoded bytes when it matters, so it belongs on this branch.
   reads the bit).
 - Expected frequency: rare (needs two products equal to float precision);
   none of the 56 real-audio cells hit it, or they would not match.
-- Fix: round each product to float32,
-  `float32(x2[0]*y2[1]) - float32(x2[1]*y2[0]) < 0` with float32 operands,
-  keeping the explicit conversions so arm64 does not fuse them. Add a unit
-  test with a constructed pair whose products differ below float precision,
-  and check it against the oracle (an N=2 stereo band with sbits != 0).
+- Fix: each product is rounded to float32,
+  `float32(x2[0]*y2[1]) - float32(x2[1]*y2[0]) < 0` with float32 operands;
+  the explicit conversions keep arm64 from fusing them (the CI FMA check
+  finds no fused site).
+- Test: `TestStereoN2SignRoundsProducts` uses x2 = {1+2^-11, 1+2^-12},
+  y2 = {1+2^-12, 1}. The exact difference is -2^-24 and both products round
+  to 1+2^-11, so the sign is 0. The same expression compiled from the
+  `bands.c` macro with gcc -O2 also gives 0. No encoder fixture reaches such
+  a band, so the existing digests and oracle tests are unchanged.
 
 ## Verification commands
 
@@ -147,4 +152,5 @@ OPUS_PARITY_PCM=track.raw OPUS_PARITY_FRAMES=7262 OPUS_PARITY_KBPS=32 \
   OPUS_PARITY_FROM=7255 go test -tags opusref -run TestRealAudioCELTParity -v .
 go test -tags opusref -run TestCELTBandwidthSwitchVBROracle .
 go test ./internal/silk -run TestCarryPacketStateKeepsCallArguments
+go test ./internal/celt -run TestStereoN2SignRoundsProducts
 ```

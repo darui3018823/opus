@@ -112,6 +112,33 @@ and was reverted; per-line attribution inside that function looks skewed.
 3. Reduce GC work further (encoder still allocates about 14 KB per frame at
    64k; the conversion buffer fix removed 15 KB).
 
+## Open parity finding: N=2 stereo sign (2026-10-17)
+
+Found while moving the band quantiser to float32 storage (item 11 of the
+performance brief, `4674b70` on the perf branch). Not fixed; it changes
+encoded bytes when it matters, so it belongs on this branch.
+
+- libopus 1.6.1 `celt/bands.c:1476` (`quant_band_stereo`, N == 2, encode):
+  `sign = MULT32_32_Q31(x2[0],y2[1]) - MULT32_32_Q31(x2[1],y2[0]) < 0;`.
+  In the float build `MULT32_32_Q31(a,b)` is `(a)*(b)` on `celt_norm`
+  (float), so each product is rounded to float and so is the difference.
+- Go (`internal/celt/quant_pvq.go`, `quantBandStereo`): the products are
+  taken in float64, exactly, and the difference is a float64 subtraction.
+- Effect: float rounding is monotonic, so the two cannot give opposite
+  signs. They differ only when the exact difference is negative but both
+  products round to the same float: libopus then gets 0 (`sign = 0`) and Go
+  gets a negative value (`sign = 1`). The sign is coded as one raw bit and
+  decides the reconstructed side, so the packet and the encoder's state
+  diverge from that band on. Only the encoder is affected (the decoder
+  reads the bit).
+- Expected frequency: rare (needs two products equal to float precision);
+  none of the 56 real-audio cells hit it, or they would not match.
+- Fix: round each product to float32,
+  `float32(x2[0]*y2[1]) - float32(x2[1]*y2[0]) < 0` with float32 operands,
+  keeping the explicit conversions so arm64 does not fuse them. Add a unit
+  test with a constructed pair whose products differ below float precision,
+  and check it against the oracle (an N=2 stereo band with sbits != 0).
+
 ## Verification commands
 
 ```sh

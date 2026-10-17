@@ -349,7 +349,7 @@ func (e *Encoder) silkNSQDelDec(
 				filterLen := ltpMemLen - startIdx
 				if filterLen > 0 {
 					xqOff := sf * subframeLen
-					silkLPCAnalysisFilter(sLTP[startIdx:startIdx+filterLen], int16SliceToInt32(e.nsq.xq[startIdx+xqOff:startIdx+xqOff+filterLen]), aQ12, filterLen, e.lpcOrder)
+					silkLPCAnalysisFilter(sLTP[startIdx:startIdx+filterLen], int16SliceToInt32Into(&e.frameScratch.xq32, e.nsq.xq[startIdx+xqOff:startIdx+xqOff+filterLen]), aQ12, filterLen, e.lpcOrder)
 				}
 				e.nsq.sLTPBufIdx = ltpMemLen
 				e.nsq.rewhiteFlag = true
@@ -779,7 +779,21 @@ func (e *Encoder) silkNSQDelDecScaleStates(
 }
 
 func int16SliceToInt32(in []int16) []int32 {
-	out := make([]int32, len(in))
+	return int16SliceToInt32Into(nil, in)
+}
+
+// int16SliceToInt32Into is int16SliceToInt32 writing into *dst (grown as
+// needed); the result aliases *dst. A nil dst allocates.
+func int16SliceToInt32Into(dst *[]int32, in []int16) []int32 {
+	var out []int32
+	if dst == nil {
+		out = make([]int32, len(in))
+	} else {
+		if cap(*dst) < len(in) {
+			*dst = make([]int32, len(in))
+		}
+		out = (*dst)[:len(in)]
+	}
 	for i, v := range in {
 		out[i] = int32(v)
 	}

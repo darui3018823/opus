@@ -130,8 +130,17 @@ func (e *Encoder) StreamChannels() int {
 // input combination: L + R summed in float, converted with RES2INT16 and
 // halved with rounding, returned in the [-1,1] int16 grid.
 func DownmixToMono(lr []float64) []float64 {
+	return DownmixToMonoInto(nil, lr)
+}
+
+// DownmixToMonoInto is DownmixToMono writing into dst (grown as needed).
+func DownmixToMonoInto(dst, lr []float64) []float64 {
 	n := len(lr) / 2
-	mono := make([]float64, n)
+	mono := dst[:0]
+	if cap(mono) < n {
+		mono = make([]float64, n)
+	}
+	mono = mono[:n]
 	for i := 0; i < n; i++ {
 		sum := Float2Int16Sample(float64(float32(lr[2*i]) + float32(lr[2*i+1])))
 		mono[i] = float64(silkRShiftRound(int64(sum), 1)) / 32768

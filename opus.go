@@ -102,6 +102,9 @@ type Encoder struct {
 	delayJoined  []float64
 	// hybridFadeBuf holds a hybrid frame's faded CELT input.
 	hybridFadeBuf []float64
+	// silkInOut and silkDownmix back silkInput's result and its L/R
+	// downmix; the SILK encoder consumes them within the call that asked.
+	silkInOut, silkDownmix []float64
 	// celtFadeBuf holds the faded CELT input of a SILK-only (redundancy) or
 	// CELT-only packet; it is used within the packet only.
 	celtFadeBuf []float64
@@ -2254,7 +2257,8 @@ func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
 		// nChannelsAPI == 2, nChannelsInternal == 1: combine L/R before the
 		// mono channel's resampler; on the first mono frame after a stereo
 		// packet both resamplers run and their outputs are averaged.
-		mono := silk.DownmixToMono(pcm)
+		e.silkDownmix = silk.DownmixToMonoInto(e.silkDownmix, pcm)
+		mono := e.silkDownmix
 		if len(e.silkInputResamplers) == 0 {
 			return mono
 		}
@@ -2274,7 +2278,9 @@ func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
 				}
 			}
 		}
-		out := make([]float64, want)
+		out := growFloat64s(e.silkInOut, want)
+		e.silkInOut = out
+		clear(out)
 		for i := range out {
 			if i < len(out0) {
 				out[i] = float64(out0[i]) / 32768
@@ -2287,7 +2293,7 @@ func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
 	}
 	ch := e.channels
 	n := len(pcm) / ch
-	out := make([]float64, 0, want)
+	out := growFloat64s(e.silkInOut, want)[:0]
 	var perChannelBuf [2][]int16
 	perChannel := perChannelBuf[:0]
 	if ch > len(perChannelBuf) {
@@ -2317,6 +2323,7 @@ func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
 			out = append(out, v)
 		}
 	}
+	e.silkInOut = out
 	return out
 }
 

@@ -291,6 +291,8 @@ type encoderFrameScratch struct {
 	lpcInPreIn, lpcInPre, pgScaled []float64
 	pgA                            [2][silkMaxLPCOrder]float64
 	nsqX16                         []int16
+	vadX16                         []int16
+	xq32                           []int32
 }
 
 type encoderFrameState struct {

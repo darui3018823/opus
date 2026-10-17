@@ -77,7 +77,7 @@ func (e *Encoder) silkNSQPlain(
 				filterLen := ltpMemLen - startIdx
 				if filterLen > 0 {
 					xqOff := sf * subframeLen
-					silkLPCAnalysisFilter(sLTP[startIdx:startIdx+filterLen], int16SliceToInt32(e.nsq.xq[startIdx+xqOff:startIdx+xqOff+filterLen]), aQ12, filterLen, e.lpcOrder)
+					silkLPCAnalysisFilter(sLTP[startIdx:startIdx+filterLen], int16SliceToInt32Into(&e.frameScratch.xq32, e.nsq.xq[startIdx+xqOff:startIdx+xqOff+filterLen]), aQ12, filterLen, e.lpcOrder)
 				}
 				e.nsq.rewhiteFlag = true
 				e.nsq.sLTPBufIdx = ltpMemLen

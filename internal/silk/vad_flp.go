@@ -88,7 +88,7 @@ func (e *Encoder) silkVADGetSAQ8N(signal []float64, n int) silkVADResult {
 	if len(signal) == 0 || n < 8 {
 		return result.withFloats()
 	}
-	x16 := make([]int16, n)
+	x16 := scratchSlice(&e.frameScratch.vadX16, n)
 	for i := 0; i < len(x16) && i < len(signal); i++ {
 		x16[i] = silkSAT16(silkFloat2Int(signal[i] * 32768.0))
 	}

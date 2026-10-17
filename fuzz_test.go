@@ -2,6 +2,7 @@ package opus
 
 import (
 	"bytes"
+	"errors"
 	"reflect"
 	"sort"
 	"testing"
@@ -138,6 +139,9 @@ func FuzzRepacketizer(f *testing.F) {
 	}
 	f.Add(packet, uint8(32))
 	f.Add([]byte{}, uint8(0))
+	// Code-3 packets whose padding holds a valid and a truncated extension.
+	f.Add([]byte("ÏÁR8À"), uint8(0x14))
+	f.Add([]byte("÷CC8"), uint8('w'))
 
 	f.Fuzz(func(t *testing.T, data []byte, extra uint8) {
 		rp := NewRepacketizer()
@@ -146,14 +150,25 @@ func FuzzRepacketizer(f *testing.F) {
 		}
 		out, err := rp.Out()
 		if err != nil {
+			// As in libopus, Cat does not parse the padding extensions; Out
+			// fails with an internal error when they are malformed.
+			if errors.Is(err, ErrInternalError) {
+				return
+			}
 			t.Fatalf("Out after successful Cat: %v", err)
+		}
+		// Out keeps the padding extensions and unpad drops them, so compare
+		// the unpadded forms of the input and the output.
+		want, err := PacketUnpad(data)
+		if err != nil {
+			t.Fatalf("PacketUnpad input: %v", err)
 		}
 		canonical, err := PacketUnpad(out)
 		if err != nil {
 			t.Fatalf("PacketUnpad output: %v", err)
 		}
-		if !bytes.Equal(canonical, out) {
-			t.Fatalf("repacketizer output is not canonical")
+		if !bytes.Equal(canonical, want) {
+			t.Fatalf("repacketizer output does not unpad to the unpadded input")
 		}
 		padded, err := PacketPad(out, len(out)+int(extra%64))
 		if err != nil {
@@ -163,7 +178,7 @@ func FuzzRepacketizer(f *testing.F) {
 		if err != nil {
 			t.Fatalf("PacketUnpad padded output: %v", err)
 		}
-		if !bytes.Equal(unpadded, out) {
+		if !bytes.Equal(unpadded, canonical) {
 			t.Fatalf("pad/unpad changed repacketizer output")
 		}
 	})

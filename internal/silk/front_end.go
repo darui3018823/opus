@@ -74,8 +74,9 @@ func (e *Encoder) frontEndFrame(input []float64, mono bool) []float64 {
 	d := e.frontEndDelay(mono)
 	var q []float64
 	if d == 0 {
-		// q is the result.
-		q = make([]float64, n)
+		// q is the result; callers use it within the frame (the SILK
+		// encoder copies whatever it keeps), so it lives in scratch too.
+		q = scratchSlice(&e.frontEndOut, n)
 	} else {
 		// q is consumed below.
 		q = scratchSlice(&e.frontEndScratch, n)
@@ -94,7 +95,10 @@ func (e *Encoder) frontEndFrame(input []float64, mono bool) []float64 {
 		copy(e.encInputDelay, joined[n:])
 		return joined[:n]
 	}
-	out := make([]float64, n)
+	if cap(e.frontEndOut) < n {
+		e.frontEndOut = make([]float64, n)
+	}
+	out := e.frontEndOut[:n] // fully written below
 	copy(out, e.encInputDelay)
 	copy(out[d:], q[:n-d])
 	copy(e.encInputDelay, q[n-d:])

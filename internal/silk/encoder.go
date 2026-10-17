@@ -28,8 +28,11 @@ type Encoder struct {
 	// lpcInPreScratch and lpcInScaled are analyzeNLSF's LPC_in_pre buffers,
 	// fully rewritten on each use.
 	lpcInPreScratch, lpcInScaled []float64
-	// frontEndScratch is frontEndFrame's quantised input before the delay.
-	frontEndScratch []float64
+	// frontEndScratch is frontEndFrame's quantised input before the delay,
+	// frontEndOut its result (valid until the next frontEndFrame call) and
+	// monoFrameRows the per-frame copies of a mono packet.
+	frontEndScratch, frontEndOut []float64
+	monoFrameRows                [][]float64
 	// pitchBuf is silkFindPitchLags' analysis buffer.
 	pitchBuf []float64
 	// pitchScratch holds the pitch analysis working buffers.
@@ -561,14 +564,19 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 		e.packetFrames = prevPacketFrames
 	}()
 
-	frames := make([][]float64, nFrames)
+	// The packet's frames are all quantised before the first one is coded,
+	// so each keeps its own row (frontEndFrame reuses one output buffer).
+	if cap(e.monoFrameRows) < nFrames {
+		e.monoFrameRows = make([][]float64, nFrames)
+	}
+	frames := e.monoFrameRows[:nFrames]
 	vadFlags := make([]bool, nFrames)
 	for frame := 0; frame < nFrames; frame++ {
 		start := frame * e.frameSize
 		// int16 quantisation and the resampler/inputBuf delay come first,
 		// so the VAD and the coder see the same frame as silk_Encode.
 		framePCM := e.frontEndFrame(pcm[start:start+e.frameSize], true)
-		frames[frame] = framePCM
+		frames[frame] = append(frames[frame][:0], framePCM...)
 		vadFlags[frame] = e.runFrameVAD(frame, framePCM)
 		if e.channels == 2 {
 			e.trackMonoStreamHistory(framePCM)

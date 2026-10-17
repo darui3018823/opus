@@ -174,7 +174,9 @@ channel-role masking improved the weighted SNR of the deterministic 5.1 and
 guarded by packet/final-range digests and reduced allocations in the recorded
 Windows amd64 benchmarks. v1.7.0 roughly halves encode and decode time
 against v1.6.0 and removes about 97% of the bytes allocated, without changing
-decoded PCM, final ranges or encoded bytes. These are regression fixtures and local measurements,
+decoded PCM, final ranges or encoded bytes. v1.7.1 fixes four encoder
+differences from plain-C libopus found on real audio, so encoded bytes
+change on the frames they affect; decoding is unchanged. These are regression fixtures and local measurements,
 not universal quality or performance guarantees; see
 [the real-corpus scoreboard](docs/REAL_CORPUS_SCOREBOARD.md) and
 [the performance baseline](docs/PERF_BASELINE.md) for conditions and values.

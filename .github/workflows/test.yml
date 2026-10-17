@@ -161,3 +161,14 @@ jobs:
 
       - name: Run all official decoder vectors (verbose)
         run: go test -count=1 -v -run '^TestOfficialVectors$' .
+
+  official-vectors-summary:
+    # The ruleset requires this context; it passes only when every platform
+    # cell of official-vectors passed.
+    name: official RFC 8251 vectors (12/12)
+    needs: official-vectors
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check every platform cell
+        run: test "${{ needs.official-vectors.result }}" = success

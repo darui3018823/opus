@@ -370,6 +370,13 @@ vacuously.
   time, -33.8% bytes; everything else unchanged. Local commit only (PR #32
   is open; not pushed).
 
+- 2026-10-17 (user: finish the open items, then item 11): items 6, 8, 9
+  and 10 closed as described in Next steps. Interleaved 2 s x 6 results:
+  soft clip fast path decode -2.7% geomean (SILK vectors -4% to -5%);
+  SILK/hybrid encode bytes -19% to -44% (`da77e53`), -47% to -57% for SILK
+  (`b770eb1`), -15% to -29% (`806ca97`), time within noise for those three.
+  Byte identity on real tracks: 20 ms VBR/CBR and 40/60 ms VBR/CBR.
+
 ## Next steps (in order)
 
 From an Opus read-only review on 2026-10-15 (commit `52969ac`; estimates
@@ -395,41 +402,34 @@ reuse); guard each with the digest tests.
 5. (done) `ApplyFineEnergy`/`ApplyFinalFineEnergy` (`internal/celt/bands.go`) write
    `band.Energy` that `decodeCELTRange` overwrites before any read
    (verified); drop the `math.Exp2` work if PLC and the digests agree.
-6. (done) Encoder allocations: `opPVQSearch`/`algQuant`, hybrid `celtChunk`,
-   pitch analysis, frame state snapshots, noise-shape/LPC_in_pre/
-   process_gains buffers, CELT pitch search/remove_doubling/tfAnalysis.
-   `21b779c` (cloud) moved `analyzeNLSF`/`frontEndFrame`/`silkInput`
-   temporaries to scratch; `e79a02d` moved Burg's work rows, find_LPC's
-   interpolation buffers, the residual-energy output, NLSF unpack tables,
-   the VAD filter-bank buffer and the NSQ input frame off the heap.
-   Remaining per-frame allocations: the rate loop's `frameLoopSnapshot`
-   (`encode_frame_loop.go`), NSQ `pulses` (returned and kept as the
-   "lower" result), `silkNLSFDelDecQuant`'s `raw` (kept as `bestRaw`),
-   `DownmixToMono`, `int16SliceToInt32`, `entcode.NewEncoder`; each needs a
-   lifetime check because the result outlives the call.
+6. (done) Encoder allocations: everything listed earlier plus, on
+   2026-10-17, the SILK input/downmix/VAD/NSQ history buffers (`da77e53`),
+   the NSQ pulses and the rate loop's coder copies and lower snapshot
+   (`b770eb1`, `entcode.Encoder.CloneInto`), the front-end output frame
+   with per-frame rows for multi-frame mono packets (`806ca97`) and the
+   faded CELT input (`aaf2577`). SILK encode now allocates about 7 KB per
+   20 ms frame (245 KB in v1.6.0). What is left is small (NLSF quantiser
+   tables, LTP VQ, stereo MS buffers).
 7. (done) FrameTrace recording is gated by `silk.EnableFrameTraces()`.
 8. (done) SILK decode: kernels and parameter buffers (`1f6e3ba`), LBRR
-   decoders (`b04dd8d`), stereo mid/side stay int16 into MS-to-LR and the
-   frame/packet outputs live in decoder scratch (`bed2914`, `6a9cb8c`).
-   Not done: skipping the float round trip after the resampler. A CPU
-   profile of tv02-tv04 puts `SoftClipFloat32` plus the int16 conversion at
-   about 13%, but bypassing the soft clip needs proof that its per-channel
-   memory stays unchanged for SILK-only output; left for later.
-9. (done, partly) NSQ: `14aaea8` short-term prediction takes a fast path
-   when its whole window is in range (no tap can be skipped, so no
-   assertion is needed) with orders 16 and 10 unrolled; `sampleState` is on
-   the stack. SILK encode about -5%. Windowing the LTP and harmonic-shaping
-   lag taps the same way measured no change and was dropped. The warped AR
-   loop (`sAR2Q14`) is the remaining NSQ hot spot; its bounds checks depend
-   on the runtime `shapingLPCOrder`.
-10. (done, partly) Smaller: `6efb65c` `entcode.ILog`/`Log2Ceiling` use
-    `math/bits` (CELT decode -8% to -12%); `ddedb9b` `silkCLZ32` uses
-    `bits.LeadingZeros32` (-1.4%). Not worth it: `iirFIRInterpol` already
-    does libopus's per-sample work with sliced rows (19% of SILK decode
-    is the filter itself); the postfilter's `getHistorySample` is inlined
-    and its branch predictable (`combFilterConst` is 2.6% of CELT decode).
-    Not done: the unreachable `selectRateControlPlan` branch (cleanup, no
-    speed effect).
+   decoders (`b04dd8d`), int16 into MS-to-LR and decoder-scratch outputs
+   (`bed2914`, `6a9cb8c`), and `6f9263c`: SoftClipFloat32 returns early when
+   every memory is zero and every sample is in [-1, 1] (proved identical
+   by TestSoftClipIdentityFastPath against the full path), which always
+   holds for SILK output: decode -2.7% geomean, SILK vectors -4% to -5%.
+   Skipping the float round trip after the resampler altogether would need
+   an int16 output path through the decoder; the remaining conversion cost
+   is small and it was not done.
+9. (done) NSQ: `14aaea8` short-term prediction fast path; the warped AR
+   loop already uses equal-length views (`21b779c`); taking a three-element
+   window per pair to drop its last index checks measured no change and was
+   not kept. Bounds checks are not what limits the NSQ.
+10. (done) Smaller: `6efb65c` ILog/Log2Ceiling via math/bits, `ddedb9b`
+    silkCLZ32 via bits.LeadingZeros32; `dc7af55`/`d96a17d` remove the
+    unreachable selectRateControlPlan path (exactProcessGains never returns
+    nil and the LPC_in_pre domain config is always built) with the twelve
+    helpers only it used. iirFIRInterpol and the postfilter were measured
+    and left as they are.
 11. Only after re-profiling: CELT `[]float32` storage. pion's CELT speed
     comes from float32 buffers, precomputed trig slices and bit reversal
     applied in the pre-rotation, all compatible with bit-exactness, but the

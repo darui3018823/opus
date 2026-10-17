@@ -511,7 +511,7 @@ profile comparison that explains the remaining gap is in
 ## v1.7.0 Release Measurement (2026-10-17)
 
 One session on the machine above (Intel Core i7-11700, Windows 11, Go
-1.24), each tool run in turn so they do not compete for the CPU: v1.6.0
+1.26.5), each tool run in turn so they do not compete for the CPU: v1.6.0
 (`2edb1c2`) and v1.7.0 (`ea88c1b`, the merge of PR #32). Output is identical
 between the two: a 600-cell random matrix (2.5 to 60 ms frames, CBR, CVBR
 and VBR, in-band FEC with loss, PLC, DTX, complexity 0 to 10, 8 to 48 kHz,

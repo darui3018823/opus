@@ -507,3 +507,76 @@ intrinsics) it takes 1.6x for decode and 1.6x to 1.7x for encode; the
 profile comparison that explains the remaining gap is in
 `.claude/tasks/investigation/plainc-parity-and-profile-2026-10-16.md`
 (branch `fix/encoder-plainc-parity`).
+
+## v1.7.0 Release Measurement (2026-10-17)
+
+One session on the machine above (Intel Core i7-11700, Windows 11, Go
+1.26.5), each tool run in turn so they do not compete for the CPU: v1.6.0
+(`2edb1c2`) and v1.7.0 (`ea88c1b`, the merge of PR #32). Output is identical
+between the two: a 600-cell random matrix (2.5 to 60 ms frames, CBR, CVBR
+and VBR, in-band FEC with loss, PLC, DTX, complexity 0 to 10, 8 to 48 kHz,
+mono and stereo, both encoder profiles) gives the same packets, final ranges
+and decoded PCM for about 330,000 packets.
+
+![RFC 8251 vector decode time](images/perf-v1.7.0-vectors.png)
+
+RFC 8251 vectors, int16 `Decode` into a new decoder per run, against
+pion/opus (`44637de`) in the same benchmark (medians of five 1 s runs):
+
+| Vector | v1.6.0 | v1.7.0 | pion/opus | v1.7.0 / pion | alloc v1.6.0 | alloc v1.7.0 | alloc pion |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| tv01 | 416.7 ms | 130.7 ms | 114.5 ms | 1.14x | 282.9 MiB | 6.1 MiB | 307.3 KiB |
+| tv02 | 83.7 ms | 32.8 ms | 40.4 ms | 0.81x | 84.7 MiB | 1.7 MiB | 153.5 KiB |
+| tv03 | 72.8 ms | 31.8 ms | 40.2 ms | 0.79x | 82.8 MiB | 1.7 MiB | 162.1 KiB |
+| tv04 | 101.4 ms | 44.5 ms | 58.7 ms | 0.76x | 113.1 MiB | 1.7 MiB | 170.4 KiB |
+| tv05 | 230.1 ms | 89.4 ms | 99.3 ms | 0.90x | 297.3 MiB | 3.0 MiB | 290.5 KiB |
+| tv06 | 219.4 ms | 88.2 ms | 97.0 ms | 0.91x | 278.1 MiB | 2.9 MiB | 302.7 KiB |
+| tv07 | 168.8 ms | 71.9 ms | 60.3 ms | 1.19x | 182.5 MiB | 4.6 MiB | 251.8 KiB |
+| tv08 | 192.0 ms | 71.8 ms | 62.9 ms | 1.14x | 261.5 MiB | 3.4 MiB | 333.5 KiB |
+| tv09 | 356.3 ms | 109.4 ms | 101.9 ms | 1.07x | 274.4 MiB | 3.3 MiB | 315.2 KiB |
+| tv10 | 392.2 ms | 139.1 ms | 132.3 ms | 1.05x | 348.1 MiB | 6.2 MiB | 741.0 KiB |
+| tv11 | 283.8 ms | 95.8 ms | 89.6 ms | 1.07x | 283.3 MiB | 3.0 MiB | 354.6 KiB |
+| tv12 | 82.2 ms | 38.0 ms | 44.6 ms | 0.85x | 123.1 MiB | 2.6 MiB | 289.3 KiB |
+
+All twelve: 2599 ms (v1.6.0), 943 ms (v1.7.0), 942 ms (pion/opus). The
+allocations counted here include creating the decoder, so v1.7.0's are
+mostly its preallocated scratch; pion/opus allocates less.
+
+![Encoder time and allocation](images/perf-v1.7.0-encode.png)
+
+`BenchmarkPerfDefault` and `BenchmarkPerfDefaultDecodeFEC` (default
+profile, per 20 ms frame, `-benchtime 2s -count 6`, interleaved; every
+difference has p = 0.002):
+
+| Benchmark | v1.6.0 | v1.7.0 | time | alloc v1.6.0 | alloc v1.7.0 | allocs v1.6.0 | allocs v1.7.0 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| encode celt/mono/96k | 206.9 µs | 103.5 µs | -50% | 63.4 KiB | 1.8 KiB | 193 | 16 |
+| encode celt/stereo/128k | 312.7 µs | 163.9 µs | -48% | 109.4 KiB | 2.8 KiB | 320 | 17 |
+| encode silk/mono/12k | 746.3 µs | 379.9 µs | -49% | 245.1 KiB | 6.8 KiB | 1042 | 111 |
+| encode silk/stereo/12k | 795.6 µs | 401.5 µs | -50% | 273.7 KiB | 6.6 KiB | 1044 | 107 |
+| encode hybrid/mono/24k | 424.7 µs | 228.9 µs | -46% | 179.2 KiB | 6.3 KiB | 405 | 75 |
+| encode hybrid/stereo/36k | 1132.0 µs | 613.1 µs | -46% | 424.2 KiB | 29.8 KiB | 1224 | 178 |
+| decode FEC voip/mono/20k | 49.0 µs | 24.2 µs | -51% | 50.7 KiB | 1.4 KiB | 62 | 4 |
+| decode FEC voip/stereo/24k | 77.0 µs | 38.4 µs | -50% | 100.6 KiB | 2.4 KiB | 84 | 1 |
+| decode FEC voip/mono/32k | 108.3 µs | 48.8 µs | -55% | 126.0 KiB | 0.6 KiB | 74 | 4 |
+
+Geometric mean over these nine: time -49%, bytes allocated -97%.
+
+![Real audio against libopus](images/perf-v1.7.0-libopus.png)
+
+Real audio: four 48 kHz stereo tracks (J-POP, speech, two lossless music
+tracks; 19 minutes in all) encoded at complexity 10 and decoded at 64 kb/s,
+whole process including file I/O, median of three runs. libopus 1.6.1 is
+`opus_demo` built with gcc 16.1 -O2, once without intrinsics (plain C, the
+build the oracle tests compare against) and once with its SSE/AVX kernels:
+
+| Task (times real time) | v1.6.0 | v1.7.0 | libopus plain-C | libopus SIMD |
+|---|---:|---:|---:|---:|
+| encode 16 kb/s | 54x | 85x | 138x | 179x |
+| encode 64 kb/s | 54x | 84x | 130x | 165x |
+| encode 128 kb/s | 43x | 68x | 104x | 135x |
+| decode 64 kb/s | 130x | 308x | 489x | 508x |
+
+v1.7.0 takes 1.5x to 1.6x plain-C libopus's time for both encode and
+decode (2.5x to 3.8x for v1.6.0). A 20 ms frame costs it about 0.2 to 0.3 ms
+to encode and 0.07 ms to decode.

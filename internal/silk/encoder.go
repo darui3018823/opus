@@ -305,13 +305,6 @@ type encoderFrameState struct {
 	ltpSumLogGainQ7 int32
 }
 
-type rateControlPlan struct {
-	gainTargets []int
-	gainIndices []int
-	rateScale   float64
-	snrVBR      bool
-}
-
 type silkShapeSubframe struct {
 	feedback float64
 	tilt     float64
@@ -897,7 +890,6 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	// libopus codes TYPE_NO_VOICE_ACTIVITY frames through the same analysis
 	// and quantizer as unvoiced frames; only the coded type differs.
 	cb := getNLSFCB(e.lpcOrder)
-	var domainGainTargets []int
 	var domainConfig []lpcInPreConfig
 	{
 		bootstrap := e.analyzeNLSF(signal, cb, signalType)
@@ -966,7 +958,6 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	var ltpCoeffsQ14 [][5]int16
 	var ltpScaleQ14 int16
 	var frameSeed int32
-	var pulses []int16
 	rateScale := 1.0
 	if exactGains != nil {
 		// silk_encode_frame_FLP: code the frame from the process_gains gains
@@ -977,43 +968,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		r := e.encodeFrameLoop(enc, initialState, signal, vadActive, signalType, quantOffset, conditionalGain,
 			nlsf, cb, pitchLag, pitchGain, exactGains, e.frameMaxBits, e.frameUseCBR)
 		gainIndices, pitchLags, ltpCoeffsQ14, ltpScaleQ14 = r.gainIndices, r.pitchLags, r.ltpCoeffsQ14, r.ltpScaleQ14
-		frameSeed, pulses, quantOffset = r.frameSeed, r.pulses, r.quantOffset
-	} else {
-		plan := e.selectRateControlPlan(initialState, signal, vadActive, signalType, quantOffset, conditionalGain, nlsf, pitchLag, pitchGain, domainGainTargets)
-		e.lastSNRVBRFrame = plan.snrVBR
-		rateScale = plan.rateScale
-
-		e.restoreFrameState(initialState)
-		e.encodeTypeOffset(enc, vadActive, signalType, quantOffset)
-		gainIndices = e.encodeGains(enc, signalType, plan.gainTargets, conditionalGain)
-		e.encodeNLSF(enc, cb, signalType, nlsf)
-		if e.nSubframes == 4 {
-			enc.EncodeIcdf(nlsf.interpFactor, silkNLSFInterpFactorICDF[:], 8)
-		}
-
-		ltpCoeffsQ14 = make([][5]int16, e.nSubframes)
-		ltpScaleQ14 = silkLTPScalesTable[0]
-		pitchLags = make([]int, e.nSubframes)
-		for sf := range pitchLags {
-			pitchLags[sf] = pitchLag
-		}
-		if signalType == SignalTypeVoiced {
-			ltpCoeffsQ14, ltpScaleQ14, pitchLags = e.encodePitchAndLTP(enc, signal, nlsf.lpcQ12, pitchGain, conditionalGain)
-		}
-
-		if len(plan.gainIndices) == len(gainIndices) {
-			gainIndices = plan.gainIndices
-		}
-		// silk_encode_frame_FLP: indices.Seed = frameCounter++ & 3 seeds the
-		// delayed-decision states; the winner's initial seed is what gets coded.
-		frameSeed = int32(e.frameCounter & 3)
-		e.frameCounter++
-		e.nsqSeed = frameSeed
-		e.traceNLSFQ15 = nlsf.nlsfQ15
-		pulses = e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, nlsf.lpcQ12Interp, gainIndices,
-			signalType, quantOffset, frameSeed, pitchLags, ltpCoeffsQ14, ltpScaleQ14, plan.rateScale)
-		enc.EncodeIcdf(int(e.nsqSeed), silkUniform4ICDF[:], 8)
-		e.encodePulses(enc, pulses, signalType, quantOffset)
+		frameSeed, quantOffset = r.frameSeed, r.quantOffset
 	}
 	if frameTracesEnabled() {
 		e.pendingTrace.Shape32 = e.pendingShape32
@@ -1176,255 +1131,6 @@ func (e *Encoder) restoreFrameState(st encoderFrameState) {
 	e.ltpSumLogGainQ7 = st.ltpSumLogGainQ7
 }
 
-func (e *Encoder) selectRateControlPlan(
-	initial encoderFrameState,
-	signal []float64,
-	vadActive bool,
-	signalType, quantOffset int,
-	conditionalGain bool,
-	nlsf nlsfAnalysis,
-	pitchLag int,
-	pitchGain float64,
-	domainGainTargets []int,
-) rateControlPlan {
-	baseTargets := e.analysisGainIndices(signal)
-	if len(domainGainTargets) == e.nSubframes {
-		baseTargets = append([]int(nil), domainGainTargets...)
-	}
-	baseIndices := e.resolveGainIndices(baseTargets, conditionalGain)
-	if signalType == SignalTypeInactive {
-		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
-	}
-	// When trellis is explicitly disabled, voiced SILK-only frames keep the
-	// proven no-rate-control heuristic-gain path. Hybrid frames still run the
-	// budget search so their homebrew NSQ cannot consume the shared SILK+CELT
-	// packet budget.
-	if signalType == SignalTypeVoiced && !e.voicedUsesTrellis() && !e.hybridMode {
-		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
-	}
-
-	// Seed the rate-control search from excitation-normalized gains rather than
-	// the mis-scaled dB heuristic. Unvoiced frames have no LTP prediction so the
-	// gain normalizes the signal directly (Q5d); voiced frames take the
-	// noise-shape + process_gains pipeline so the gain matches the spectral
-	// envelope and bounds the residual, instead of the heuristic that flooded the
-	// shell coder with pulses (Step 4).
-	if len(domainGainTargets) == e.nSubframes {
-		// Mono SILK-only find_LPC_FLP-domain migration: these gains were already
-		// computed before NLSF analysis so Burg could run in the gain-scaled
-		// domain. Keep the same targets for the coded gain plan.
-	} else if signalType == SignalTypeVoiced {
-		pitchLags := e.reconstructCurrentPitchLags()
-		_, _, ltpCoeffsQ14 := e.selectLTPGainsVQ(signal, nlsf.lpcQ12, pitchLags)
-		baseTargets = e.shapeGainIndices(signal, nlsf.lpcQ12, nlsf.lpcQ12Interp, signalType, quantOffset, pitchLags, ltpCoeffsQ14, pitchGain)
-	} else {
-		// Unvoiced keeps the Q5d excitation-normalised gains whether it runs the
-		// homebrew or the trellis NSQ. The trellis is used with *neutral* shaping
-		// for unvoiced (see closedLoopNSQWithRateScale), so its objective is
-		// broadband error like homebrew's; the excitation-RMS gain (RMS ≈ 2
-		// pulse-units) is the operating point tuned for that — it sets the right
-		// pulse density to spend the rate budget on broadband SNR. The
-		// spectral-envelope shape gains would normalise the excitation sparser and
-		// leave the budget search under-spending the noise frame.
-		baseTargets = e.excitationGainIndicesResidual(signal, nlsf.lpcQ12)
-	}
-	baseIndices = e.resolveGainIndices(baseTargets, conditionalGain)
-
-	targetBits := e.silkFrameTargetBits()
-	if targetBits <= 0 {
-		return rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
-	}
-
-	if signalType == SignalTypeVoiced && e.useSNRTargetVBR && !e.stereoComponent {
-		e.restoreFrameState(initial)
-		snrRateScale := 1.0
-		totalBits, gainIndices := e.estimateFrameCandidateBits(
-			signal, vadActive, signalType, quantOffset, conditionalGain,
-			baseTargets, nlsf, pitchLag, pitchGain, snrRateScale)
-		if totalBits <= targetBits {
-			e.restoreFrameState(initial)
-			return rateControlPlan{gainTargets: baseTargets, gainIndices: gainIndices, rateScale: snrRateScale, snrVBR: true}
-		}
-	}
-
-	return e.selectBudgetRateControlPlan(initial, signal, vadActive, signalType, quantOffset, conditionalGain, nlsf, pitchLag, pitchGain, baseTargets, baseIndices, targetBits)
-}
-
-func (e *Encoder) selectBudgetRateControlPlan(
-	initial encoderFrameState,
-	signal []float64,
-	vadActive bool,
-	signalType, quantOffset int,
-	conditionalGain bool,
-	nlsf nlsfAnalysis,
-	pitchLag int,
-	pitchGain float64,
-	baseTargets []int,
-	baseIndices []int,
-	targetBits int,
-) rateControlPlan {
-
-	gainBoosts := []int{0, 2, 4, 6, 8, 10, 12}
-	rateScales := []float64{1, 2, 4, 8, 16, 32, 64, 128, 512}
-	if e.complexity < 4 {
-		gainBoosts = []int{0, 4, 8, 12}
-		rateScales = []float64{1, 4, 16, 64, 512}
-	}
-	if e.hybridMode {
-		// The low band shares a hard packet ceiling with CELT. Some sustained
-		// voiced frames need a much stronger pulse penalty than SILK-only quality
-		// control permits, so keep searching until a compact fallback is found.
-		gainBoosts = []int{0, 4, 8, 12, 16, 20, 24, 32, 40, 48}
-		rateScales = []float64{1, 4, 16, 64, 256, 1024, 4096}
-	} else if e.lbrrBitsPerFrame > 0 {
-		// LBRR is part of the configured SILK packet budget, not additive
-		// overhead. Search beyond the ordinary quality-control range when the
-		// redundant copy leaves a small regular-frame budget.
-		gainBoosts = []int{0, 2, 4, 6, 8, 10, 12, 16, 20, 24}
-		rateScales = []float64{1, 2, 4, 8, 16, 32, 64, 128, 512, 1024, 4096}
-	}
-
-	best := rateControlPlan{gainTargets: baseTargets, gainIndices: baseIndices, rateScale: 1}
-	maxInt := int(^uint(0) >> 1)
-	bestOver := maxInt
-	bestTotal := maxInt
-	inputRMS := math.Sqrt(computeEnergy(signal))
-	minOutputRMS := inputRMS / 20
-	if minOutputRMS < 0.006 {
-		minOutputRMS = 0.006
-	}
-
-	bestBudget := rateControlPlan{}
-	hasBudget := false
-	bestBudgetBits := -1
-
-	for _, boost := range gainBoosts {
-		targets := boostedGainTargets(baseTargets, boost)
-		e.restoreFrameState(initial)
-		headerBits, gainIndices, pitchLags, ltpCoeffsQ14, ltpScaleQ14 := e.estimateFrameHeaderBits(
-			signal, vadActive, signalType, quantOffset, conditionalGain, targets, nlsf, pitchLag, pitchGain)
-		for _, scale := range rateScales {
-			e.restoreFrameState(initial)
-			pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, nlsf.lpcQ12Interp, gainIndices,
-				signalType, quantOffset, 0, pitchLags, ltpCoeffsQ14, ltpScaleQ14, scale)
-			// Prefer preserving SILK-layer activity, especially for SILK-only and
-			// unvoiced hybrid frames where CELT cannot replace the low band. If no
-			// such candidate fits, strict CBR falls back to the fullest candidate
-			// within budget below rather than violating the packet-size contract.
-			floorOK := pulsesMeetActivityFloor(pulses, e.frameSize)
-			rmsOK := e.currentFrameOutputRMS() >= minOutputRMS
-			pulseBits := e.estimatePulseBits(pulses, signalType, quantOffset)
-			totalBits := headerBits + pulseBits + 8
-			if rmsOK && totalBits <= targetBits {
-				if !hasBudget || totalBits > bestBudgetBits {
-					bestBudget = rateControlPlan{gainTargets: targets, gainIndices: gainIndices, rateScale: scale}
-					bestBudgetBits = totalBits
-					hasBudget = true
-				}
-			}
-			preserveLowBand := !e.hybridMode || signalType != SignalTypeVoiced
-			if preserveLowBand && (!floorOK || !rmsOK) {
-				continue
-			}
-			over := totalBits - targetBits
-			if over <= 0 {
-				e.restoreFrameState(initial)
-				return rateControlPlan{gainTargets: targets, gainIndices: gainIndices, rateScale: scale}
-			}
-			if over < bestOver || (over == bestOver && totalBits < bestTotal) {
-				bestOver = over
-				bestTotal = totalBits
-				best = rateControlPlan{gainTargets: targets, gainIndices: gainIndices, rateScale: scale}
-			}
-		}
-	}
-
-	if hasBudget && e.rateMode == RateModeCBR {
-		e.restoreFrameState(initial)
-		return bestBudget
-	}
-
-	e.restoreFrameState(initial)
-	return best
-}
-
-func (e *Encoder) estimateFrameCandidateBits(
-	signal []float64,
-	vadActive bool,
-	signalType, quantOffset int,
-	conditionalGain bool,
-	gainTargets []int,
-	nlsf nlsfAnalysis,
-	pitchLag int,
-	pitchGain float64,
-	rateScale float64,
-) (bits int, gainIndices []int) {
-	enc := entcode.NewEncoder((e.silkFrameTargetBits() + 7) / 8)
-	e.encodeTypeOffset(enc, vadActive, signalType, quantOffset)
-	gainIndices = e.encodeGains(enc, signalType, gainTargets, conditionalGain)
-	cb := getNLSFCB(e.lpcOrder)
-	e.encodeNLSF(enc, cb, signalType, nlsf)
-	if e.nSubframes == 4 {
-		enc.EncodeIcdf(nlsf.interpFactor, silkNLSFInterpFactorICDF[:], 8)
-	}
-
-	ltpCoeffsQ14 := make([][5]int16, e.nSubframes)
-	ltpScaleQ14 := silkLTPScalesTable[0]
-	pitchLags := make([]int, e.nSubframes)
-	for sf := range pitchLags {
-		pitchLags[sf] = pitchLag
-	}
-	if signalType == SignalTypeVoiced {
-		ltpCoeffsQ14, ltpScaleQ14, pitchLags = e.encodePitchAndLTP(enc, signal, nlsf.lpcQ12, pitchGain, conditionalGain)
-	}
-
-	e.nsqSeed = 0
-	pulses := e.closedLoopNSQWithRateScale(signal, nlsf.lpcQ12, nlsf.lpcQ12Interp, gainIndices,
-		signalType, quantOffset, 0, pitchLags, ltpCoeffsQ14, ltpScaleQ14, rateScale)
-	enc.EncodeIcdf(int(e.nsqSeed), silkUniform4ICDF[:], 8)
-	e.encodePulses(enc, pulses, signalType, quantOffset)
-	enc.Flush()
-	return len(enc.Bytes()) * 8, gainIndices
-}
-
-func pulsesMeetActivityFloor(pulses []int16, frameSize int) bool {
-	nonZero := 0
-	absSum := 0
-	for _, p := range pulses {
-		if p == 0 {
-			continue
-		}
-		nonZero++
-		if p < 0 {
-			absSum += int(-p)
-		} else {
-			absSum += int(p)
-		}
-	}
-	minNonZero := frameSize / 8
-	if minNonZero < 16 {
-		minNonZero = 16
-	}
-	minAbsSum := frameSize
-	if minAbsSum < 64 {
-		minAbsSum = 64
-	}
-	return nonZero >= minNonZero && absSum >= minAbsSum
-}
-
-func (e *Encoder) currentFrameOutputRMS() float64 {
-	if e.frameSize <= 0 || len(e.ltpState) < e.frameSize {
-		return 0
-	}
-	start := len(e.ltpState) - e.frameSize
-	sum := 0.0
-	for _, s := range e.ltpState[start:] {
-		v := float64(s) / 32768.0
-		sum += float64(v * v)
-	}
-	return math.Sqrt(sum / float64(e.frameSize))
-}
-
 func (e *Encoder) silkFrameTargetBits() int {
 	bits := e.bitrate * e.frameMs / 1000
 	if e.channels == 2 || e.stereoComponent {
@@ -1439,53 +1145,6 @@ func (e *Encoder) silkFrameTargetBits() int {
 
 func isShortLagVoiced(fsKHz, pitchLag int) bool {
 	return pitchLag > 0 && pitchLag < 5*fsKHz
-}
-
-func boostedGainTargets(base []int, boost int) []int {
-	out := make([]int, len(base))
-	for i, v := range base {
-		out[i] = clampInt(v+boost, 0, NLevelsQGain-1)
-	}
-	return out
-}
-
-func (e *Encoder) estimateFrameHeaderBits(
-	signal []float64,
-	vadActive bool,
-	signalType, quantOffset int,
-	conditionalGain bool,
-	gainTargets []int,
-	nlsf nlsfAnalysis,
-	pitchLag int,
-	pitchGain float64,
-) (bits int, gainIndices []int, pitchLags []int, ltpCoeffsQ14 [][5]int16, ltpScaleQ14 int16) {
-	enc := entcode.NewEncoder((e.silkFrameTargetBits() + 7) / 8)
-	e.encodeTypeOffset(enc, vadActive, signalType, quantOffset)
-	gainIndices = e.encodeGains(enc, signalType, gainTargets, conditionalGain)
-	cb := getNLSFCB(e.lpcOrder)
-	e.encodeNLSF(enc, cb, signalType, nlsf)
-	if e.nSubframes == 4 {
-		enc.EncodeIcdf(nlsf.interpFactor, silkNLSFInterpFactorICDF[:], 8)
-	}
-	ltpCoeffsQ14 = make([][5]int16, e.nSubframes)
-	ltpScaleQ14 = silkLTPScalesTable[0]
-	pitchLags = make([]int, e.nSubframes)
-	for sf := range pitchLags {
-		pitchLags[sf] = pitchLag
-	}
-	if signalType == SignalTypeVoiced {
-		ltpCoeffsQ14, ltpScaleQ14, pitchLags = e.encodePitchAndLTP(enc, signal, nlsf.lpcQ12, pitchGain, conditionalGain)
-	}
-	enc.EncodeIcdf(0, silkUniform4ICDF[:], 8)
-	enc.Flush()
-	return len(enc.Bytes()) * 8, gainIndices, pitchLags, ltpCoeffsQ14, ltpScaleQ14
-}
-
-func (e *Encoder) estimatePulseBits(pulses []int16, signalType, quantOffset int) int {
-	enc := entcode.NewEncoder((e.silkFrameTargetBits() + 7) / 8)
-	e.encodePulses(enc, pulses, signalType, quantOffset)
-	enc.Flush()
-	return len(enc.Bytes()) * 8
 }
 
 func (e *Encoder) analyzePitch(signal []float64) (int, float64) {
@@ -1895,37 +1554,6 @@ func (e *Encoder) analysisGainIndices(signal []float64) []int {
 	return e.gainIndicesFromEnergy(signal, analysisGainIndexFromEnergy)
 }
 
-// excitationGainIndicesResidual normalises the unvoiced excitation gain to the
-// short-term LPC *residual* energy rather than the raw signal energy. The gain
-// targets the quantized excitation level (RMS ≈ 2 pulse-units; the legacy dB
-// heuristic in analysisGainIndices is ~1000× too low and floods the shell coder).
-// For noise-like input the LPC predictor is nearly flat, so the residual matches
-// the signal energy and unvoiced-noise quality is preserved. For a harmonic frame
-// that the pitch analyser misclassifies as
-// unvoiced (e.g. the first frame after reset, where the zero-history pitch search
-// is unreliable), the LPC residual is far smaller than the signal: gating the
-// gain on the signal energy would set it for the full tonal amplitude while the
-// sharp LPC synthesis resonance amplifies further, producing a runaway (clipping)
-// output that then poisons every subsequent voiced frame's LTP state. Using the
-// residual energy keeps the synthesised level bounded.
-func (e *Encoder) excitationGainIndicesResidual(signal []float64, lpcQ12 []int16) []int {
-	targets := make([]int, e.nSubframes)
-	if e.nSubframes == 0 {
-		return targets
-	}
-	subLen := e.frameSize / e.nSubframes
-	resNrg := e.ltpResidualEnergyPerSubframe(signal, lpcQ12, SignalTypeUnvoiced, nil, nil)
-	const int16Scale = 32768.0 * 32768.0
-	for sf := 0; sf < e.nSubframes; sf++ {
-		energy := 0.0
-		if subLen > 0 {
-			energy = resNrg[sf] / (int16Scale * float64(subLen))
-		}
-		targets[sf] = excitationGainIndexFromEnergy(energy)
-	}
-	return targets
-}
-
 // shapeGainIndices derives per-subframe target gain indices from the libopus
 // gain pipeline (silk_noise_shape_analysis_FLP gains + silk_process_gains_FLP
 // soft limit), with the voiced SNR-target VBR backoff applied before gain_mult.
@@ -2204,32 +1832,6 @@ func (e *Encoder) encodeGains(enc *entcode.Encoder, signalType int, targetIndice
 
 	for sf := 1; sf < e.nSubframes; sf++ {
 		targetIdx, e.lastGainSymbols[sf] = e.encodeGainDelta(enc, targetIdx, gainTargetAt(targetIndices, sf))
-		absIndices[sf] = targetIdx
-	}
-	return absIndices
-}
-
-func (e *Encoder) resolveGainIndices(targetIndices []int, conditional bool) []int {
-	absIndices := make([]int, e.nSubframes)
-	prevIdx := e.prevGainIdx
-	targetIdx := gainTargetAt(targetIndices, 0)
-	if conditional {
-		targetIdx = quantizedGainDelta(prevIdx, targetIdx)
-	} else {
-		if targetIdx < prevIdx-16 {
-			targetIdx = prevIdx - 16
-		}
-		if targetIdx >= NLevelsQGain {
-			targetIdx = NLevelsQGain - 1
-		}
-		if targetIdx < 0 {
-			targetIdx = 0
-		}
-	}
-	absIndices[0] = targetIdx
-
-	for sf := 1; sf < e.nSubframes; sf++ {
-		targetIdx = quantizedGainDelta(targetIdx, gainTargetAt(targetIndices, sf))
 		absIndices[sf] = targetIdx
 	}
 	return absIndices

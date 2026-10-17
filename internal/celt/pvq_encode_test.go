@@ -140,3 +140,31 @@ func TestOpPVQSearchPulseCount(t *testing.T) {
 		}
 	}
 }
+
+// TestStereoN2SignRoundsProducts checks the N=2 stereo side sign against the
+// float build of bands.c: each product is rounded to float, so a pair whose
+// exact difference is negative but whose rounded products are equal gives 0.
+func TestStereoN2SignRoundsProducts(t *testing.T) {
+	a := float32(1 + 1.0/(1<<11))
+	b := float32(1 + 1.0/(1<<12))
+	cases := []struct {
+		name   string
+		x2, y2 []float32
+		want   int
+	}{
+		// a*1 = 1+2^-11; b*b = 1+2^-11+2^-24 rounds to 1+2^-11 (tie to even).
+		// The exact difference is -2^-24, the float difference is 0.
+		{"equal after rounding", []float32{a, b}, []float32{b, 1}, 0},
+		{"negative", []float32{0.25, 0.75}, []float32{0.5, 0.5}, 1},
+		{"positive", []float32{0.75, 0.25}, []float32{0.5, 0.5}, 0},
+	}
+	for _, tc := range cases {
+		if got := stereoN2Sign(tc.x2, tc.y2); got != tc.want {
+			t.Errorf("%s: stereoN2Sign = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+	exact := float64(a)*float64(1) - float64(b)*float64(b)
+	if !(exact < 0) {
+		t.Fatalf("fixture: exact difference %g is not negative", exact)
+	}
+}

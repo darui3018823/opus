@@ -1756,18 +1756,6 @@ func analysisGainIndexFromEnergy(energy float64) int {
 	return idx
 }
 
-func excitationGainIndexFromEnergy(energy float64) int {
-	if energy <= 1e-12 {
-		return 10
-	}
-	// gainQ16 ≈ rms · 2^30 keeps the excitation RMS near 2 pulse-units, matching
-	// libopus's operating point: small pulses the shell coder represents cheaply,
-	// landing the per-frame size near the 24 kbps budget so rate control does not
-	// have to throttle (legacy idx≈10 saturated the ±1024 clamp and blew budget).
-	targetQ16 := math.Sqrt(energy) * float64(int64(1)<<30)
-	return silkQuantizeGainIndex(targetQ16)
-}
-
 // silkQuantizeGainIndex returns the gain index whose dequantized Q16 gain is
 // closest (in the log domain) to targetQ16, over the full SILK gain range.
 func silkQuantizeGainIndex(targetQ16 float64) int {
@@ -1862,17 +1850,6 @@ func (e *Encoder) encodeGainDelta(enc *entcode.Encoder, prevIdx, targetIdx int) 
 	}
 	enc.EncodeIcdf(delta-MinDeltaGainQuant, silkDeltaGainICDF[:], 8)
 	return applyQuantizedGainDelta(prevIdx, delta), delta - MinDeltaGainQuant
-}
-
-func quantizedGainDelta(prevIdx, targetIdx int) int {
-	delta := targetIdx - prevIdx
-	if delta < MinDeltaGainQuant {
-		delta = MinDeltaGainQuant
-	}
-	if delta > MaxDeltaGainQuant {
-		delta = MaxDeltaGainQuant
-	}
-	return applyQuantizedGainDelta(prevIdx, delta)
 }
 
 func applyQuantizedGainDelta(prevIdx, delta int) int {

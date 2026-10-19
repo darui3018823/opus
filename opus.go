@@ -645,6 +645,12 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 	// from both channels), which is also what a 40/60 ms packet coded during
 	// the stereo->mono delay leaves behind: it sets force_channels = 1 for
 	// good.
+	if e.libopusModePolicy && e.outBufferBytes() == 1 && e.sampleRate == frameSize*10 {
+		// opus_encode_native: "Cannot encode 100 ms in 1 byte" (after
+		// clearing rangeFinal, before any state moves).
+		e.lastFinalRange = 0
+		return nil, fmt.Errorf("%w: 100 ms packet in a 1-byte buffer", ErrBufferTooSmall)
+	}
 	e.streamStarted = true
 	if !e.libopusModePolicy && e.forceChannels == ChannelsMono && e.channels == ChannelsStereo {
 		mono := make([]float64, frameSize)

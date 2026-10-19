@@ -143,6 +143,12 @@ type Encoder struct {
 	// silkStaleSideBuf is the side channel's inputBuf during a stereo ->
 	// mono prefill at a new SILK rate (see silkInternalRateControl).
 	silkStaleSideBuf []int16
+	// silkMinInternalRate / silkMaxInternalRate are the packet's
+	// silk_mode.minInternalSampleRate / maxInternalSampleRate.
+	silkMinInternalRate, silkMaxInternalRate int
+	// silkOpusCanSwitch is st->silk_mode.opusCanSwitch: switchReady &&
+	// !nonfinal_frame of the last SILK call, read by the next one.
+	silkOpusCanSwitch bool
 	// silkBwSwitch is st->silk_bw_switch: SILK signalled switchReady, the
 	// next packet switches its internal rate (leading redundancy, prefill 2).
 	silkBwSwitch bool
@@ -1486,10 +1492,13 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 	// prefill of a re-initialised encoder; switchReady arms a SILK bandwidth
 	// switch with a trailing redundant frame.
 	if e.libopusModePolicy {
+		// Hybrid: no bandwidth reduction at the lowest bitrates.
+		e.silkMinInternalRate, e.silkMaxInternalRate = 16000, 16000
 		switchReady, err := e.silkInternalRateControl(unit, 16000, silkPrefill, prefill2, silkRate, silkMaxBits, streamChannels)
 		if err != nil {
 			return nil, false, err
 		}
+		e.silkOpusCanSwitch = switchReady && !e.nonfinalFrame
 		if switchReady && nFrames == 1 && !e.nonfinalFrame {
 			// For the first frame at a new SILK bandwidth: a trailing
 			// redundant frame now, the switch on the next packet.
@@ -3166,6 +3175,7 @@ func (e *Encoder) Reset() error {
 	e.streamChannels = e.channels
 	e.prevStreamChannels = 0
 	e.silkBwSwitch = false
+	e.silkOpusCanSwitch = false
 	e.nonfinalFrame = false
 	e.silkPrevChannels = 0
 	clear(e.celtPrefillTail)

@@ -206,3 +206,19 @@ func TestHuntMonoToStereoSideInit(t *testing.T) {
 		huntSweepCell("stspeech", "audio", 1, 1000),
 	})
 }
+
+// TestHuntSILKRateSwitchWithoutPrefill: opusCanSwitch persists to the next
+// SILK call, so when the redundant frame of a prepared bandwidth switch did
+// not fit (no prefill) silk_control_encoder switches the internal rate
+// itself, resampling x_buf through the new input resampler
+// (silk_setup_resamplers) and resetting part of the state (silk_setup_fs);
+// a small packet budget also caps the rate (maxInternalSampleRate).
+func TestHuntSILKRateSwitchWithoutPrefill(t *testing.T) {
+	runHuntCells(t, []huntCell{
+		huntSweepCell("tv02", "audio", 0, 500),
+		huntSweepCell("tv12", "voip", 0, 250),
+		huntSweepCell("tv08", "audio", 0, 1000),
+		huntSweepCell("mix", "voip", 0, 1000),
+		huntSweepCell("tv11", "voip", 0, 500),
+	})
+}

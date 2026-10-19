@@ -129,6 +129,9 @@ type Encoder struct {
 	shapeTiltSmooth float64
 	noiseShapeBuf   []float64
 	side            *Encoder // side-channel encoder for stereo packets
+	// minInternalFsHz / maxInternalFsHz are encControl's internal sample
+	// rate limits (0: 8000 / 16000).
+	minInternalFsHz, maxInternalFsHz int
 	// inputBuf mirrors the side channel's sCmn.inputBuf (MAX_FRAME_LENGTH
 	// + 2 samples) as silk_Encode leaves it; see recordInputBuf.
 	inputBuf []int16
@@ -1110,12 +1113,13 @@ func (e *Encoder) codedFrameLookahead() []float64 {
 // advanceInputBuffer shifts xBuf by one frame once the frame is coded, so the
 // history ends at the coded frame and the old look-ahead heads the next frame
 // (silk_encode_frame_FLP: silk_memmove(x_buf, &x_buf[frame_length], ...)).
+// Like libopus it leaves the last frame's input in the tail, which a
+// mid-stream rate switch resamples with the history (silk_setup_resamplers).
 func (e *Encoder) advanceInputBuffer() {
 	if len(e.xBuf) < e.frameSize {
 		return
 	}
 	copy(e.xBuf, e.xBuf[e.frameSize:])
-	clear(e.xBuf[len(e.xBuf)-e.frameSize:])
 }
 
 // snapshotFrameStateInto stores the same state as snapshotFrameState in

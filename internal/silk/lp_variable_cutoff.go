@@ -203,7 +203,13 @@ func (e *Encoder) controlAudioBandwidthState(desiredFsHz int, opusCanSwitch bool
 	if apiFsHz == 0 {
 		apiFsHz = e.sampleRate
 	}
-	const maxInternalFsHz, minInternalFsHz = 16000, 8000
+	maxInternalFsHz, minInternalFsHz := 16000, 8000
+	if e.maxInternalFsHz > 0 {
+		maxInternalFsHz = e.maxInternalFsHz
+	}
+	if e.minInternalFsHz > 0 {
+		minInternalFsHz = e.minInternalFsHz
+	}
 	switch {
 	case fsHz > apiFsHz || fsHz > maxInternalFsHz || fsHz < minInternalFsHz:
 		// Make sure internal rate is not higher than external rate or
@@ -276,6 +282,16 @@ func (e *Encoder) controlAudioBandwidthState(desiredFsHz int, opusCanSwitch bool
 		}
 	}
 	return fsKHz, switchReady
+}
+
+// SetInternalRateLimits sets encControl->minInternalSampleRate and
+// maxInternalSampleRate (Hz) for the next control pass of every internal
+// channel; 0 keeps the default (8000 / 16000).
+func (e *Encoder) SetInternalRateLimits(minHz, maxHz int) {
+	e.minInternalFsHz, e.maxInternalFsHz = minHz, maxHz
+	if e.side != nil {
+		e.side.minInternalFsHz, e.side.maxInternalFsHz = minHz, maxHz
+	}
 }
 
 // InWBModeWithoutVariableLP is encControl->inWBmodeWithoutVariableLP: the

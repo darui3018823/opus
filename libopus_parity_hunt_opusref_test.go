@@ -68,11 +68,13 @@ func TestHuntProbe(t *testing.T) {
 		t.Skip("OPUS_HUNT_PROBE not set")
 	}
 	var cells []huntCell
-	for _, src := range []string{"speech24s", "stspeech", "tv05", "tv08"} {
-		for _, app := range []string{"lowdelay", "rcelt", "audio"} {
-			for _, br := range []int{12000, 16000, 20000, 24000} {
-				cells = append(cells, huntCell{src: src, rate: 48000, ch: 2, app: app, frames: 4000, frameSize: 120,
-					ctl: []aStep{cs("bitrate", br)}})
+	for _, src := range []string{"speech24s", "stspeech", "tv02", "tv05", "tv08", "tv11"} {
+		for _, ch := range []int{1, 2} {
+			for _, fs := range []int{960, 1920, 2880} {
+				for _, br := range []int{12000, 16000, 20000} {
+					cells = append(cells, huntCell{src: src, rate: 48000, ch: ch, app: "audio", frames: 600 * 960 / fs, frameSize: fs,
+						ctl: []aStep{cs("bitrate", br), cs("vbr", 0)}})
+				}
 			}
 		}
 	}
@@ -99,6 +101,20 @@ func TestHuntNegativeEquivRate(t *testing.T) {
 	for _, app := range []string{"lowdelay", "rcelt", "audio"} {
 		cells = append(cells, huntCell{src: "tv08", rate: 48000, ch: 2, app: app, frames: 4000, frameSize: 120,
 			ctl: []aStep{cs("bitrate", 20000)}})
+	}
+	runHuntCells(t, cells)
+}
+
+// TestHuntToCELTPrevMode: a hybrid packet that defers a switch to CELT
+// (to_celt) makes CELT-only the next packet's prev_mode even when the
+// redundant frame does not fit the low CBR budget.
+func TestHuntToCELTPrevMode(t *testing.T) {
+	var cells []huntCell
+	for _, ch := range []int{1, 2} {
+		for _, fs := range []int{960, 1920, 2880} {
+			cells = append(cells, huntCell{src: "tv11", rate: 48000, ch: ch, app: "audio", frames: 600 * 960 / fs, frameSize: fs,
+				ctl: []aStep{cs("bitrate", 16000), cs("vbr", 0)}})
+		}
 	}
 	runHuntCells(t, cells)
 }

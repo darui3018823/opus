@@ -1003,8 +1003,9 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 		out, redundancyEmitted, err := e.encodeHybridPacket(pcm, celtPCM, nFrames, bw, redundancy, celtToSilk, redundancyBytes, silkPrefill, decision.silkPrefill2, maxDataBytes, decision.bitrate)
 		if err == nil {
 			// to_celt: after the deferred frame the real switch happens, so the
-			// next packet's predecessor is CELT-only (opus_encode_native).
-			if redundancyEmitted && !celtToSilk {
+			// next packet's predecessor is CELT-only (opus_encode_native),
+			// whether or not the redundant frame fit.
+			if (e.libopusModePolicy && decision.toCelt) || (!e.libopusModePolicy && redundancyEmitted && !celtToSilk) {
 				e.prevMode = framing.ModeCELTOnly
 			} else {
 				e.prevMode = framing.ModeHybrid

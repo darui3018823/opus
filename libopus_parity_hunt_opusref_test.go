@@ -68,10 +68,12 @@ func TestHuntProbe(t *testing.T) {
 		t.Skip("OPUS_HUNT_PROBE not set")
 	}
 	var cells []huntCell
-	for _, src := range []string{"speech24s", "noisy", "mix", "chords", "stspeech", "tv02", "tv05", "tv06", "tv08", "tv11", "tv12"} {
-		for _, br := range []int{160000, 192000, 256000} {
-			cells = append(cells, huntCell{src: src, rate: 48000, ch: 2, app: "audio", frames: 600, frameSize: 960,
-				ctl: []aStep{cs("bitrate", br), cs("complexity", 10)}})
+	for _, src := range []string{"speech24s", "stspeech", "tv05", "tv08"} {
+		for _, app := range []string{"lowdelay", "rcelt", "audio"} {
+			for _, br := range []int{12000, 16000, 20000, 24000} {
+				cells = append(cells, huntCell{src: src, rate: 48000, ch: 2, app: app, frames: 4000, frameSize: 120,
+					ctl: []aStep{cs("bitrate", br)}})
+			}
 		}
 	}
 	runHuntCells(t, cells)
@@ -85,6 +87,18 @@ func TestHuntThetaRDOLastBand(t *testing.T) {
 	for _, src := range []string{"tv06", "tv08", "stspeech"} {
 		cells = append(cells, huntCell{src: src, rate: 48000, ch: 2, app: "audio", frames: 600, frameSize: 960,
 			ctl: []aStep{cs("bitrate", 160000), cs("complexity", 10)}})
+	}
+	runHuntCells(t, cells)
+}
+
+// TestHuntNegativeEquivRate: 2.5 ms stereo frames at 20 kb/s give a negative
+// equiv_rate, which libopus still uses (stereo width 0) instead of
+// recomputing it.
+func TestHuntNegativeEquivRate(t *testing.T) {
+	var cells []huntCell
+	for _, app := range []string{"lowdelay", "rcelt", "audio"} {
+		cells = append(cells, huntCell{src: "tv08", rate: 48000, ch: 2, app: app, frames: 4000, frameSize: 120,
+			ctl: []aStep{cs("bitrate", 20000)}})
 	}
 	runHuntCells(t, cells)
 }

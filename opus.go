@@ -164,8 +164,10 @@ type Encoder struct {
 	// coded under the libopus policy: 10 for a 10 ms packet, 20 otherwise.
 	silkFrameMs int
 	// packetEquivRate is the libopus policy's equiv_rate for the packet
-	// being coded (0 outside it).
-	packetEquivRate int
+	// being coded, valid while packetEquivRateSet. It can be zero or
+	// negative (2.5 ms frames at low rates).
+	packetEquivRate    int
+	packetEquivRateSet bool
 	// analysisReadPos / analysisReadSubframe are analysis_read_pos_bak and
 	// analysis_read_subframe_bak: the analysis read position before this
 	// packet's run_analysis (-1 when the analysis did not run).
@@ -730,7 +732,7 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 			e.silkEncoder.SetReducedDependency(e.predictionDisabled)
 		}
 		e.frameIsSilence, e.frameAnalysis, e.packetLSBDepth = isSilence, analysisInfo, lsbDepth
-		defer func() { e.packetEquivRate = 0 }()
+		defer func() { e.packetEquivRate, e.packetEquivRateSet = 0, false }()
 		e.decideStreamChannelsLibopus(frameSize, maxDataBytes, analysisInfo)
 		decision = e.decideLibopusMode(raw, frameSize, maxDataBytes, analysisInfo)
 		if decision.mode == framing.ModeCELTOnly && e.toMono {
@@ -738,7 +740,7 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 			e.streamChannels = 1
 		}
 		e.pendingMode = decision.mode
-		e.packetEquivRate = decision.equivRate
+		e.packetEquivRate, e.packetEquivRateSet = decision.equivRate, true
 	} else {
 		e.pendingMode = -1
 	}

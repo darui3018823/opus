@@ -24,9 +24,9 @@ func celtOnlyStereoWidthQ14(equivRate int) int {
 // packet bitrate (rounded to the CBR packet size in CBR) adjusted for VBR,
 // complexity and loss.
 func (e *Encoder) celtEquivRate(streamChannels int) int {
-	if e.libopusModePolicy && e.packetEquivRate > 0 {
+	if e.libopusModePolicy && e.packetEquivRateSet {
 		// opus_encode_frame_native uses the packet's equiv_rate, computed
-		// with the packet's frame rate and mode.
+		// with the packet's frame rate and mode, even when it is negative.
 		return e.packetEquivRate
 	}
 	bitrate := e.bitrate

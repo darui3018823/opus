@@ -3688,28 +3688,47 @@ func packOpusFramesToPacketSize(frames [][]byte, vbr bool, targetBytes int) ([]b
 		return code3, 3, nil
 	}
 
-	// A padded code-3 packet adds padBytes data bytes plus the padding-count
-	// run. Each continuation byte represents 254 padding bytes, so the run
-	// length is max(1, ceil(padBytes/254)). Invert that relationship in O(1)
-	// and validate the candidate because sizes immediately after each
-	// continuation boundary are not representable exactly.
-	requiredPadding := targetBytes - 1 - len(code3)
-	if requiredPadding >= 1 {
-		padBytes := requiredPadding - (requiredPadding+254)/255
-		if padBytes >= 0 && padBytes+len(encodePaddingCount(padBytes)) == requiredPadding {
-			padded, err := packOpusFramesCode3(frames, vbr, true, padBytes)
-			if err != nil {
-				return nil, 0, err
-			}
-			if 1+len(padded) == targetBytes {
-				return padded, 3, nil
-			}
+	// A padded code-3 packet: opus_repacketizer_out_range_impl spends
+	// pad_amount = P bytes on the padding-count run and the padding data,
+	// writing nb_255s = (P-1)/255 bytes of 255 and then P-255*nb_255s-1, so
+	// every P >= 1 is representable (the run ends in 0 when P = 255k+1).
+	if requiredPadding := targetBytes - 1 - len(code3); requiredPadding >= 1 {
+		run, padBytes := libopusPaddingRun(requiredPadding)
+		padded, err := packOpusFramesCode3Run(frames, vbr, run, padBytes)
+		if err != nil {
+			return nil, 0, err
+		}
+		if 1+len(padded) == targetBytes {
+			return padded, 3, nil
 		}
 	}
 	return compact, code, nil
 }
 
+// libopusPaddingRun returns the padding-count run and the padding data size
+// opus_repacketizer_out_range_impl writes for pad_amount bytes of padding.
+func libopusPaddingRun(padAmount int) (run []byte, padBytes int) {
+	nb255s := (padAmount - 1) / 255
+	run = make([]byte, nb255s+1)
+	for i := 0; i < nb255s; i++ {
+		run[i] = 255
+	}
+	run[nb255s] = byte(padAmount - 255*nb255s - 1)
+	return run, padAmount - len(run)
+}
+
 func packOpusFramesCode3(frames [][]byte, vbr, padding bool, padBytes int) ([]byte, error) {
+	var run []byte
+	if padding && padBytes >= 0 {
+		run = encodePaddingCount(padBytes)
+	}
+	return packOpusFramesCode3Run(frames, vbr, run, padBytes)
+}
+
+// packOpusFramesCode3Run is packOpusFramesCode3 with an explicit
+// padding-count run (nil for no padding) covering padBytes data bytes.
+func packOpusFramesCode3Run(frames [][]byte, vbr bool, run []byte, padBytes int) ([]byte, error) {
+	padding := run != nil
 	n := len(frames)
 	if n == 0 {
 		return nil, fmt.Errorf("no frames to pack")
@@ -3732,10 +3751,7 @@ func packOpusFramesCode3(frames [][]byte, vbr, padding bool, padBytes int) ([]by
 	// explicit per-frame lengths (VBR layout) are required.
 	useVBR := vbr || !allEqual
 
-	capacity := 1 + 2*n + padBytes
-	if padding {
-		capacity += len(encodePaddingCount(padBytes))
-	}
+	capacity := 1 + 2*n + padBytes + len(run)
 	out := make([]byte, 0, capacity)
 	flags := byte(n)
 	if useVBR {
@@ -3745,9 +3761,7 @@ func packOpusFramesCode3(frames [][]byte, vbr, padding bool, padBytes int) ([]by
 		flags |= 0x40
 	}
 	out = append(out, flags)
-	if padding {
-		out = append(out, encodePaddingCount(padBytes)...)
-	}
+	out = append(out, run...)
 	if useVBR {
 		// First n-1 frame lengths, then all payloads.
 		for i := 0; i < n-1; i++ {

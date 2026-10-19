@@ -67,40 +67,20 @@ func TestHuntProbe(t *testing.T) {
 	if os.Getenv("OPUS_HUNT_PROBE") == "" {
 		t.Skip("OPUS_HUNT_PROBE not set")
 	}
-	huntSkip(t)
-	srcs := map[string]auditSrc{}
-	for _, s := range auditLoadSources(t) {
-		srcs[s.name] = s
-	}
-	for _, pw := range []struct {
-		l, r string
-		w    float32
-	}{{"tv02", "tv05", 0.02}, {"tv02", "tv05", 0.1}, {"tv08", "tv11", 0.05}, {"tv06", "tv12", 0.2}, {"speech24s", "tv02", 0.05}} {
-		l, r := srcs[pw.l], srcs[pw.r]
-		n := min(len(l.pcm)/l.ch, len(r.pcm)/r.ch)
-		mixed := auditSrc{name: fmt.Sprintf("%s+%s*%g", pw.l, pw.r, pw.w), ch: 2, pcm: make([]float32, 2*n)}
-		for i := 0; i < n; i++ {
-			mixed.pcm[2*i] = l.pcm[i*l.ch]
-			mixed.pcm[2*i+1] = (1-pw.w)*l.pcm[i*l.ch] + pw.w*r.pcm[i*r.ch]
-		}
-		for _, br := range []int{16000, 20000, 24000} {
-			for _, sw := range []int{20, 60} {
-				name := fmt.Sprintf("%s/%dk/sw%d", mixed.name, br/1000, sw)
-				c := aCfg{name: name, rate: 48000, ch: 2, app: "audio", profile: true}
-				c.pcm = auditInput(mixed, 48000, 2, (sw*960+1000*480)/480, 480)
-				c.steps = []aStep{cs("bitrate", 64000), cs("fec", 1), cs("loss", 10), cs("maxbw", 1101), cs("signal", 3001)}
-				for f := 0; f < sw; f++ {
-					c.steps = append(c.steps, aStep{op: 'e', val: 960})
+	var cells []huntCell
+	for _, src := range []string{"speech24s", "stspeech", "noisy", "mix", "chords", "tv02", "tv05", "tv06", "tv08", "tv11", "tv12"} {
+		for _, ch := range []int{1, 2} {
+			for _, rate := range []int{8000, 16000, 48000} {
+				for _, ms := range []int{40, 60, 80, 100, 120} {
+					for _, br := range []int{64000, 128000, 256000, 510000} {
+						fs := rate * ms / 1000
+						cells = append(cells, huntCell{src: src, rate: rate, ch: ch, app: "rsilk", frames: 30000 / ms, frameSize: fs,
+							ctl: []aStep{cs("bitrate", br), cs("vbr", 0)}})
+					}
 				}
-				c.steps = append(c.steps, cs("maxbw", 1105), cs("bitrate", br))
-				for f := 0; f < 1000 && (sw*960+(f+1)*480)*2 <= len(c.pcm); f++ {
-					c.steps = append(c.steps, aStep{op: 'e', val: 480})
-				}
-				auditReport(t, c)
 			}
 		}
 	}
-	var cells []huntCell
 	runHuntCells(t, cells)
 }
 
@@ -180,6 +160,21 @@ func TestHuntStereoToMonoPrefill(t *testing.T) {
 	for _, src := range []string{"tv08", "tv11", "mix", "chords"} {
 		cells = append(cells, huntCell{src: src, rate: 48000, ch: 2, app: "audio", frames: 1200, frameSize: 480,
 			ctl: []aStep{cs("bitrate", 24000), cs("fec", 1), cs("loss", 10)}})
+	}
+	runHuntCells(t, cells)
+}
+
+// TestHuntCBRMultiFramePadding: a CBR packet of several frames is padded to
+// cbr_bytes with the repacketizer's padding-count run, also when the
+// padding amount is 255k+1.
+func TestHuntCBRMultiFramePadding(t *testing.T) {
+	cells := []huntCell{
+		{src: "tv08", rate: 8000, ch: 1, app: "rsilk", frames: 250, frameSize: 960},
+		{src: "tv11", rate: 16000, ch: 2, app: "rsilk", frames: 250, frameSize: 1920},
+		{src: "tv11", rate: 48000, ch: 1, app: "rsilk", frames: 375, frameSize: 3840},
+	}
+	for i := range cells {
+		cells[i].ctl = []aStep{cs("bitrate", 256000), cs("vbr", 0)}
 	}
 	runHuntCells(t, cells)
 }

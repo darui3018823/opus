@@ -68,13 +68,13 @@ func TestHuntProbe(t *testing.T) {
 		t.Skip("OPUS_HUNT_PROBE not set")
 	}
 	var cells []huntCell
-	for _, src := range []string{"speech24s", "noisy", "mix", "chords", "stspeech", "tv02", "tv05", "tv06", "tv08", "tv11", "tv12"} {
+	for _, src := range []string{"speech24s", "stspeech", "noisy", "tv02", "tv05", "tv11"} {
 		for _, ch := range []int{1, 2} {
-			for _, br := range []int{20000, 28000, 36000, 48000} {
-				for _, cpx := range []int{3, 5, 7, 9} {
-					for _, vbr := range []int{0, 1} {
-						cells = append(cells, huntCell{src: src, rate: 48000, ch: ch, app: "audio", frames: 1200, frameSize: 480,
-							ctl: []aStep{cs("bitrate", br), cs("complexity", cpx), cs("vbr", vbr)}})
+			for _, fs := range []int{960, 1920, 2880} {
+				for _, app := range []string{"voip", "audio"} {
+					for _, br := range []int{16000, 24000, 32000} {
+						cells = append(cells, huntCell{src: src, rate: 48000, ch: ch, app: app, frames: 600 * 960 / fs, frameSize: fs,
+							ctl: []aStep{cs("bitrate", br), cs("fec", 1), cs("loss", 10)}})
 					}
 				}
 			}
@@ -117,6 +117,21 @@ func TestHuntToCELTPrevMode(t *testing.T) {
 			cells = append(cells, huntCell{src: "tv11", rate: 48000, ch: ch, app: "audio", frames: 600 * 960 / fs, frameSize: fs,
 				ctl: []aStep{cs("bitrate", 16000), cs("vbr", 0)}})
 		}
+	}
+	runHuntCells(t, cells)
+}
+
+// TestHuntFECMultiFrame: the SILK prefill runs silk_setup_LBRR, and the LBRR
+// bit usage is reset for every later frame of a 40/60 ms packet.
+func TestHuntFECMultiFrame(t *testing.T) {
+	cells := []huntCell{
+		{src: "tv05", rate: 48000, ch: 1, app: "voip", frames: 300, frameSize: 1920},
+		{src: "tv02", rate: 48000, ch: 2, app: "audio", frames: 200, frameSize: 2880},
+		{src: "speech24s", rate: 48000, ch: 1, app: "audio", frames: 300, frameSize: 1920},
+		{src: "noisy", rate: 48000, ch: 1, app: "voip", frames: 300, frameSize: 1920},
+	}
+	for i := range cells {
+		cells[i].ctl = []aStep{cs("bitrate", 24000), cs("fec", 1), cs("loss", 10)}
 	}
 	runHuntCells(t, cells)
 }

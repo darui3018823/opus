@@ -607,6 +607,12 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 	for i, signal := range frames {
 		e.curFrame = i
 		tell := enc.ECTell()
+		if i > 0 {
+			// silk_Encode declares curr_nBitsUsedLBRR = 0 inside its frame
+			// loop, so every later frame of a 40/60 ms packet resets
+			// nBitsUsedLBRR before its target rate.
+			e.updateLBRRUsage(0)
+		}
 		e.targetRateBps = e.frameTargetRate(nFrames, i, tell)
 		e.frameMaxBits, e.frameUseCBR = e.frameBitBudget(nFrames, i)
 		e.encodeRangeFrame(enc, signal, vadFlags[i], i > 0)
@@ -731,6 +737,10 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 	e.lastStereoTrace = e.lastStereoTrace[:0]
 	for i := 0; i < nFrames; i++ {
 		tell := enc.ECTell()
+		if i > 0 {
+			// curr_nBitsUsedLBRR is per frame (see EncodeMultiWithEncoder).
+			e.updateLBRRUsage(0)
+		}
 		total := e.frameTargetRate(nFrames, i, tell)
 		e.targetRateBps = total
 		e.side.targetRateBps = total

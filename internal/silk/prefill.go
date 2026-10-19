@@ -7,8 +7,8 @@ package silk
 // first coded frame has an input history. Like libopus it advances the
 // front-end delay line, runs the VAD (and the mid/side analysis of a stereo
 // stream), places the samples at the end of the x_buf history and counts
-// the frame for the NSQ seed; the rate control, LBRR and coding state are
-// untouched. bitrate is the frame's SILK bitrate (the stereo analysis
+// the frame for the NSQ seed. The rate control and coding state are
+// untouched; the LBRR setup runs (see below). bitrate is the frame's SILK bitrate (the stereo analysis
 // reads it as the prefill's target rate).
 func (e *Encoder) Prefill(pcm []float64) {
 	// silk_Encode's prefill always runs one 10 ms frame (payloadSize_ms =
@@ -22,6 +22,15 @@ func (e *Encoder) Prefill(pcm []float64) {
 	e.allowBandwidthSwitch = false
 	e.beginDTXPacket()
 	stereo := e.channels == 2 && e.streamChannels == 2 && e.side != nil
+	// The prefill silk_Encode call runs silk_control_encoder (its
+	// controlled_since_last_payload was cleared by silk_init_encoder), and
+	// with it silk_setup_LBRR on every internal channel: LBRR_enabled
+	// becomes LBRR_coded, so the next coded packet sees
+	// LBRR_in_previous_packet set.
+	e.setupLBRR()
+	if stereo {
+		e.side.setupLBRR()
+	}
 	if stereo {
 		if len(pcm) < 2*n {
 			return

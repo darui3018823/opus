@@ -393,6 +393,11 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			if i < numBands {
 				e = float32(d.prevEnergies[c*numBands+i])
 			}
+			if silence {
+				// A silence frame sets oldBandE of every band, not only
+				// start..end, to -28 before this update.
+				e = -28
+			}
 			d.backgroundLogE[bi] = float64(min(float32(d.backgroundLogE[bi])+maxBackgroundIncrease, e))
 		}
 	}

@@ -5,6 +5,8 @@ import (
 	"math"
 	"math/rand"
 	"testing"
+
+	opus "github.com/darui3018823/opus"
 )
 
 // Regression cells for the decoder differences found by the 2026-10 libopus
@@ -69,5 +71,31 @@ func TestHuntCELTBackgroundAcrossBandwidth(t *testing.T) {
 				})
 			}
 		}
+	}
+}
+
+// TestHuntCELTSilenceBackground: a CELT silence frame sets the energy of
+// every band, including those outside start..end, to -28 before the
+// background energy update. testvector08 (CELT with silence frames and
+// bandwidth changes) with 30% random loss exposes it in the noise PLC.
+func TestHuntCELTSilenceBackground(t *testing.T) {
+	pk := loadBit(t, 8)
+	for _, o := range []struct{ rate, ch int }{{48000, 1}, {48000, 2}, {24000, 2}} {
+		t.Run(fmt.Sprintf("tv08/%d/%dch", o.rate, o.ch), func(t *testing.T) {
+			t.Parallel()
+			rng := rand.New(rand.NewSource(8001))
+			var ops []op
+			last := o.rate / 50
+			for _, p := range pk {
+				if len(p.data) == 0 || rng.Float64() < 0.3 {
+					ops = append(ops, op{code: 1, fmt: fmtF32, frameSize: last})
+					continue
+				}
+				last, _ = opus.PacketGetNumSamples(p.data, o.rate)
+				ops = append(ops, op{code: 1, fmt: fmtF32, frameSize: 5760 * o.rate / 48000, data: p.data})
+			}
+			cfg, g := newSingle(t, o.rate, o.ch)
+			requireExact(t, cfg, ops, g)
+		})
 	}
 }

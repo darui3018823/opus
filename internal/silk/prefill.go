@@ -64,6 +64,7 @@ func (e *Encoder) Prefill(pcm []float64) {
 			}
 			e.side.prefillFrame(side)
 		}
+		e.side.recordInputBuf(right, side)
 		e.prefillFrame(mid)
 		e.prevOnlyMiddle = ms.midOnly
 		e.prevStreamChannels = 2
@@ -71,6 +72,11 @@ func (e *Encoder) Prefill(pcm []float64) {
 	}
 	if len(pcm) < n {
 		return
+	}
+	if e.channels == 2 && e.prevStreamChannels == 2 {
+		// A stereo -> mono switch on the prefill call: the mono line starts
+		// with the buffered sMid[1] sample, as for a coded first mono frame.
+		e.enterMonoStream()
 	}
 	framePCM := e.frontEndFrame(pcm[:n], true)
 	if e.channels == 2 {

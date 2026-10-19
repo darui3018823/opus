@@ -67,19 +67,40 @@ func TestHuntProbe(t *testing.T) {
 	if os.Getenv("OPUS_HUNT_PROBE") == "" {
 		t.Skip("OPUS_HUNT_PROBE not set")
 	}
-	var cells []huntCell
-	for _, src := range []string{"speech24s", "stspeech", "noisy", "tv02", "tv05", "tv11"} {
-		for _, ch := range []int{1, 2} {
-			for _, fs := range []int{480, 960, 1920, 2880} {
-				for _, app := range []string{"voip", "audio"} {
-					for _, br := range []int{12000, 16000, 24000, 32000, 48000} {
-						cells = append(cells, huntCell{src: src, rate: 48000, ch: ch, app: app, frames: 600 * 960 / fs, frameSize: fs,
-							ctl: []aStep{cs("bitrate", br), cs("fec", 1), cs("loss", 10)}})
-					}
+	huntSkip(t)
+	srcs := map[string]auditSrc{}
+	for _, s := range auditLoadSources(t) {
+		srcs[s.name] = s
+	}
+	for _, pw := range []struct {
+		l, r string
+		w    float32
+	}{{"tv02", "tv05", 0.02}, {"tv02", "tv05", 0.1}, {"tv08", "tv11", 0.05}, {"tv06", "tv12", 0.2}, {"speech24s", "tv02", 0.05}} {
+		l, r := srcs[pw.l], srcs[pw.r]
+		n := min(len(l.pcm)/l.ch, len(r.pcm)/r.ch)
+		mixed := auditSrc{name: fmt.Sprintf("%s+%s*%g", pw.l, pw.r, pw.w), ch: 2, pcm: make([]float32, 2*n)}
+		for i := 0; i < n; i++ {
+			mixed.pcm[2*i] = l.pcm[i*l.ch]
+			mixed.pcm[2*i+1] = (1-pw.w)*l.pcm[i*l.ch] + pw.w*r.pcm[i*r.ch]
+		}
+		for _, br := range []int{16000, 20000, 24000} {
+			for _, sw := range []int{20, 60} {
+				name := fmt.Sprintf("%s/%dk/sw%d", mixed.name, br/1000, sw)
+				c := aCfg{name: name, rate: 48000, ch: 2, app: "audio", profile: true}
+				c.pcm = auditInput(mixed, 48000, 2, (sw*960+1000*480)/480, 480)
+				c.steps = []aStep{cs("bitrate", 64000), cs("fec", 1), cs("loss", 10), cs("maxbw", 1101), cs("signal", 3001)}
+				for f := 0; f < sw; f++ {
+					c.steps = append(c.steps, aStep{op: 'e', val: 960})
 				}
+				c.steps = append(c.steps, cs("maxbw", 1105), cs("bitrate", br))
+				for f := 0; f < 1000 && (sw*960+(f+1)*480)*2 <= len(c.pcm); f++ {
+					c.steps = append(c.steps, aStep{op: 'e', val: 480})
+				}
+				auditReport(t, c)
 			}
 		}
 	}
+	var cells []huntCell
 	runHuntCells(t, cells)
 }
 
@@ -147,5 +168,18 @@ func TestHuntLBRRQuantOffset(t *testing.T) {
 	}
 	cells = append(cells, huntCell{src: "speech24s", rate: 48000, ch: 2, app: "voip", frames: 300, frameSize: 1920,
 		ctl: []aStep{cs("bitrate", 32000), cs("fec", 1), cs("loss", 10)}})
+	runHuntCells(t, cells)
+}
+
+// TestHuntStereoToMonoPrefill: a stereo -> mono switch that lands on a SILK
+// bandwidth-switch prefill averages the new-rate mono frame with the side
+// channel's old-rate resampler and inputBuf, and the prefill itself ends
+// with nPrevChannelsInternal = 1.
+func TestHuntStereoToMonoPrefill(t *testing.T) {
+	var cells []huntCell
+	for _, src := range []string{"tv08", "tv11", "mix", "chords"} {
+		cells = append(cells, huntCell{src: src, rate: 48000, ch: 2, app: "audio", frames: 1200, frameSize: 480,
+			ctl: []aStep{cs("bitrate", 24000), cs("fec", 1), cs("loss", 10)}})
+	}
 	runHuntCells(t, cells)
 }

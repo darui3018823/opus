@@ -129,6 +129,9 @@ type Encoder struct {
 	shapeTiltSmooth float64
 	noiseShapeBuf   []float64
 	side            *Encoder // side-channel encoder for stereo packets
+	// inputBuf mirrors the side channel's sCmn.inputBuf (MAX_FRAME_LENGTH
+	// + 2 samples) as silk_Encode leaves it; see recordInputBuf.
+	inputBuf []int16
 	// reducedDependency is encControl->reducedDependency: every packet
 	// is coded as the first frame after a reset (no inter-packet
 	// prediction).
@@ -805,6 +808,7 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		} else {
 			e.side.appendMissingLBRRFrame()
 		}
+		e.side.recordInputBuf(right[i], side)
 		e.prevOnlyMiddle = ms.midOnly
 		e.lastStereoTrace = append(e.lastStereoTrace, st)
 	}
@@ -3129,6 +3133,7 @@ func (e *Encoder) resetForSideReactivation() {
 
 func (e *Encoder) Reset() {
 	e.frameVAD = nil
+	e.inputBuf = nil
 	e.curFrame = 0
 	e.noSpeechCounter = 0
 	e.inDTX = false

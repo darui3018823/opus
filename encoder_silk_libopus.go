@@ -50,6 +50,19 @@ func (e *Encoder) silkInternalRateControl(frameSize, desiredRate int, silkPrefil
 		}
 		old := e.silkEncoder
 		oldPrevChannels := e.silkPrevChannels
+		// The prefill re-initialises only the nChannelsInternal channel
+		// states: on a stereo -> mono switch the side channel keeps its
+		// resampler and inputBuf at the old rate, and the first mono frame
+		// averages with them.
+		var oldSideRes *silk.Resampler
+		var oldSideBuf []int16
+		if streamChannels == 1 && oldPrevChannels == 2 && len(e.silkInputResamplers) > 1 {
+			oldSideRes = e.silkInputResamplers[1]
+			oldSideBuf = old.SideInputBuf()
+			if oldSideBuf == nil {
+				oldSideBuf = []int16{} // never written: zeros
+			}
+		}
 		if err := e.rebuildSILKEncoder(rate); err != nil {
 			return false, err
 		}
@@ -61,7 +74,15 @@ func (e *Encoder) silkInternalRateControl(frameSize, desiredRate int, silkPrefil
 			e.silkEncoder.SetLPState(silk.LPState{})
 		}
 		e.silkPrevChannels = oldPrevChannels
+		if oldSideRes != nil && len(e.silkInputResamplers) > 1 {
+			e.silkInputResamplers[1] = oldSideRes
+			e.silkStaleSideBuf = oldSideBuf
+		}
 		e.silkEncoder.Prefill(e.silkInput(silkPrefill, e.silkSampleRate/100*streamChannels))
+		e.silkStaleSideBuf = nil
+		// silk_Encode ends every call, the prefill included, with
+		// nPrevChannelsInternal = nChannelsInternal.
+		e.silkPrevChannels = streamChannels
 	}
 	// The main call's control pass (opusCanSwitch was cleared after the
 	// prefill); the rate cannot change here.

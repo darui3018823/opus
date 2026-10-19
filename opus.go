@@ -140,6 +140,9 @@ type Encoder struct {
 	// count of the last SILK-coded packet (0 after a SILK re-init), which
 	// drives the resampler hand-over on mono<->stereo transitions.
 	silkPrevChannels int
+	// silkStaleSideBuf is the side channel's inputBuf during a stereo ->
+	// mono prefill at a new SILK rate (see silkInternalRateControl).
+	silkStaleSideBuf []int16
 	// silkBwSwitch is st->silk_bw_switch: SILK signalled switchReady, the
 	// next packet switches its internal rate (leading redundancy, prefill 2).
 	silkBwSwitch bool
@@ -2276,8 +2279,17 @@ func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
 			out1 := e.silkInputResamplers[1].ProcessAppend(e.silkResScratch[1][:0], in)
 			e.silkResScratch[1] = out1
 			for i := range out0 {
-				if i < len(out1) {
+				switch {
+				case i < len(out1):
 					out0[i] = int16((int32(out0[i]) + int32(out1[i])) >> 1)
+				case e.silkStaleSideBuf != nil:
+					// The side channel ran at a lower rate: past its own
+					// output, its inputBuf holds what earlier frames left.
+					var stale int32
+					if 2+i < len(e.silkStaleSideBuf) {
+						stale = int32(e.silkStaleSideBuf[2+i])
+					}
+					out0[i] = int16((int32(out0[i]) + stale) >> 1)
 				}
 			}
 		}

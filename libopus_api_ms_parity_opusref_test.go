@@ -5,6 +5,7 @@ package opus
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"testing"
 
 	"github.com/darui3018823/opus/internal/cgoref"
@@ -58,6 +59,95 @@ func TestParityMaxPacketSizeOneByte(t *testing.T) {
 					}
 				}
 			}
+		}
+	}
+}
+
+// parityPackets encodes a few libopus packets of the given application and
+// bandwidth (SILK-only for WB voice, hybrid for FB voice, CELT for
+// restricted low delay), with in-band FEC.
+func parityPackets(t *testing.T, fs, ch, app, bw, n, frames int) [][]byte {
+	t.Helper()
+	le, lerr := cgoref.NewAudEncoder(fs, ch, app)
+	if le == nil {
+		t.Fatalf("libopus create %d", lerr)
+	}
+	defer le.Close()
+	le.Set(SetBandwidthRequest, bw)
+	le.Set(SetInbandFECRequest, 1)
+	le.Set(SetPacketLossPercRequest, 20)
+	le.Set(SetBitrateRequest, 32000)
+	var out [][]byte
+	for f := 0; f < frames; f++ {
+		p, r := le.EncodeFloat(sineF32(n, ch, fs, 300, 0.3, f*n), n, 1500)
+		if r <= 0 {
+			t.Fatalf("libopus encode %d", r)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// TestParityDecodeFECEmptyPacket: opus_decode with no packet and
+// decode_fec=1 conceals frame_size samples (opus_decoder.c:763) instead of
+// failing. The FEC decode of a carrier whose first frame has at most one
+// byte runs the PLC and leaves rangeFinal 0 (opus_decoder.c:313, 698).
+func TestParityDecodeFECEmptyPacket(t *testing.T) {
+	type cfg struct {
+		name    string
+		app, bw int
+	}
+	for _, c := range []cfg{
+		{"silk", ApplicationVOIP, BandwidthWideband},
+		{"hybrid", ApplicationVOIP, BandwidthFullband},
+		{"celt", ApplicationRestrictedLowDelay, BandwidthFullband},
+	} {
+		for _, ch := range []int{1, 2} {
+			name := fmt.Sprintf("%s/ch%d", c.name, ch)
+			const fs, n = 48000, 960
+			pkts := parityPackets(t, fs, ch, c.app, c.bw, n, 6)
+			ld, _ := cgoref.NewAudDecoder(fs, ch)
+			gd, err := NewDecoder(fs, ch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range pkts[:4] {
+				ld.Decode(p, n, ch, false)
+				if _, err := gd.DecodeFloat32(p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Empty packet with FEC: concealment of n samples.
+			lp, lr := ld.Decode(nil, n, ch, true)
+			gp, gerr := gd.DecodeFECFloat32(nil, n)
+			if lr != n || gerr != nil || len(gp) != len(lp) {
+				t.Fatalf("%s empty FEC: lib=%d go=%d,%v", name, lr, len(gp)/ch, gerr)
+			}
+			// CELT concealment differs from libopus by a few float LSBs (a
+			// decoder PLC residual outside this API fix): compare SILK and
+			// hybrid concealment only.
+			for i := range lp {
+				if c.name != "celt" && math.Abs(float64(lp[i]-gp[i])) > 1e-6 {
+					t.Fatalf("%s empty FEC sample %d: lib=%g go=%g", name, i, lp[i], gp[i])
+				}
+			}
+			i16 := make([]int16, n*ch)
+			if got, err := gd.DecodeFEC(nil, i16); err != nil || got != n {
+				t.Fatalf("%s DecodeFEC(nil) = %d, %v", name, got, err)
+			}
+			ld.Decode(nil, n, ch, true)
+			// FEC from a carrier holding the next packet's TOC only.
+			carrier := []byte{pkts[4][0] &^ 3}
+			lp, lr = ld.Decode(carrier, n, ch, true)
+			gp, gerr = gd.DecodeFECFloat32(carrier, n)
+			if lr != n || gerr != nil || len(gp) != len(lp) {
+				t.Fatalf("%s 1-byte FEC: lib=%d go=%d,%v", name, lr, len(gp)/ch, gerr)
+			}
+			lv, _ := ld.Get(4031)
+			if uint32(lv) != gd.FinalRange() {
+				t.Fatalf("%s 1-byte FEC final range lib=%d go=%d", name, uint32(lv), gd.FinalRange())
+			}
+			ld.Close()
 		}
 	}
 }

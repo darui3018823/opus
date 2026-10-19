@@ -5534,7 +5534,13 @@ func lossDecodeChunk(remaining, sampleRate, mode int) int {
 // DecodeFEC decodes in-band forward-error-correction data from the packet
 // following a loss. For v1 compatibility, the lost duration is inferred from
 // the packet's total duration. Use DecodeFECWithDuration when it differs.
+//
+// An empty packet conceals len(pcm)/Channels() samples, like opus_decode
+// with no packet and decode_fec set.
 func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
+	if len(data) == 0 {
+		return d.DecodePLC(pcm, len(pcm)/d.channels)
+	}
 	info, err := inspectPacket(data, d.sampleRate)
 	if err != nil {
 		return 0, err
@@ -5586,8 +5592,13 @@ func (d *Decoder) DecodeFEC24(data []byte, pcm []int32, frameSize int) (int, err
 // DecodeFECFloat decodes recovery data for exactly frameSize lost samples per
 // channel and returns interleaved float64 PCM.
 // Like opus_decode_native, FEC output is never soft-clipped and leaves the
-// soft-clip memory of the int16 API untouched.
+// soft-clip memory of the int16 API untouched. An empty packet conceals
+// frameSize samples (opus_decode_native runs the PLC for len == 0 whatever
+// decode_fec says).
 func (d *Decoder) DecodeFECFloat(data []byte, frameSize int) ([]float64, error) {
+	if len(data) == 0 {
+		return d.DecodePLCFloat(frameSize)
+	}
 	if err := d.validateFECState(data, frameSize); err != nil {
 		return nil, err
 	}
@@ -5758,6 +5769,11 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	}
 	if trans != nil {
 		d.applyTransition(silkPCM, trans)
+	}
+	if len(frames[0]) <= 1 {
+		// opus_decode_frame: a payload of 0 or 1 byte runs the PLC and
+		// leaves rangeFinal at 0.
+		finalRange = 0
 	}
 	out = append(out, silkPCM...)
 

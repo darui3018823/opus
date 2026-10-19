@@ -58,8 +58,8 @@ func sumFloats(xs []float64) float64 {
 
 // lbrrSpeechActivityThresQ8 is SILK_FIX_CONST(LBRR_SPEECH_ACTIVITY_THRES, 8)
 // (tuning_parameters.h: 0.3): LBRR is only coded for frames whose
-// speech_activity_Q8 exceeds it.
-const lbrrSpeechActivityThresQ8 = 76
+// speech_activity_Q8 exceeds it (0.3*256 + 0.5 truncates to 77).
+const lbrrSpeechActivityThresQ8 = 77
 
 // lbrrFrameData is the buffered side information + excitation of one LBRR frame
 // (libopus indices_LBRR[i] / pulses_LBRR[i]), captured from the regular encode

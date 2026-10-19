@@ -63,6 +63,42 @@ func TestParityMaxPacketSizeOneByte(t *testing.T) {
 	}
 }
 
+// TestParityRestrictedApplicationCTLs: OPUS_SET_APPLICATION fails on a
+// RESTRICTED_SILK / RESTRICTED_CELT encoder even with its own value
+// (opus_encoder.c:2789), and a RESTRICTED_SILK encoder ignores
+// OPUS_SET_PHASE_INVERSION_DISABLED and reads it back as 0
+// (opus_encoder.c:3181, 3192).
+func TestParityRestrictedApplicationCTLs(t *testing.T) {
+	for _, app := range auditApps {
+		for _, v := range []int{ApplicationVOIP, ApplicationAudio, ApplicationRestrictedLowDelay, ApplicationRestrictedSILK, ApplicationRestrictedCELT} {
+			le, _ := cgoref.NewAudEncoder(48000, 2, app)
+			ge, err := NewEncoder(48000, 2, Application(app))
+			if err != nil {
+				t.Fatal(err)
+			}
+			lr := le.Set(SetApplicationRequest, v)
+			gerr := ge.SetApplication(Application(v))
+			if (lr == 0) != (gerr == nil) {
+				t.Fatalf("app=%d SetApplication(%d): lib=%d go=%v", app, v, lr, gerr)
+			}
+			if la, _ := le.Get(GetApplicationRequest); la != int(ge.Application()) {
+				t.Fatalf("app=%d SetApplication(%d): application lib=%d go=%d", app, v, la, ge.Application())
+			}
+			le.Close()
+		}
+		for _, v := range []bool{true, false, true} {
+			le, _ := cgoref.NewAudEncoder(48000, 2, app)
+			ge, _ := NewEncoder(48000, 2, Application(app))
+			le.Set(SetPhaseInversionDisabledRequest, b2i(v))
+			ge.SetPhaseInversionDisabled(v)
+			if lv, _ := le.Get(GetPhaseInversionDisabledRequest); lv != b2i(ge.PhaseInversionDisabled()) {
+				t.Fatalf("app=%d phase inversion %v: lib=%d go=%v", app, v, lv, ge.PhaseInversionDisabled())
+			}
+			le.Close()
+		}
+	}
+}
+
 // parityPackets encodes a few libopus packets of the given application and
 // bandwidth (SILK-only for WB voice, hybrid for FB voice, CELT for
 // restricted low delay), with in-band FEC.

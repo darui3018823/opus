@@ -2570,7 +2570,13 @@ func (e *Encoder) PredictionDisabled() bool { return e.predictionDisabled }
 // SetPhaseInversionDisabled disables CELT intensity-stereo phase inversion.
 // This is intended for compatibility with downmixing pipelines; disabling it
 // is not compliant with the Opus specification.
+//
+// A RESTRICTED_SILK encoder has no CELT layer: like libopus it ignores the
+// setting and PhaseInversionDisabled reports false.
 func (e *Encoder) SetPhaseInversionDisabled(disabled bool) {
+	if e.application == ApplicationRestrictedSILK {
+		return
+	}
 	e.phaseInversionDisabled = disabled
 	for _, enc := range e.celtEncoders {
 		if enc != nil {
@@ -2937,12 +2943,14 @@ func (e *Encoder) SetApplication(application Application) error {
 	if !isValidApplication(application) {
 		return fmt.Errorf("%w: unsupported application %d", ErrBadArg, application)
 	}
-	// libopus fixes the restricted SILK / CELT applications at creation.
-	if isRestrictedCodecApplication(e.application) || isRestrictedCodecApplication(application) {
-		if application == e.application {
-			return nil
-		}
+	// libopus fixes the restricted SILK / CELT applications at creation:
+	// OPUS_SET_APPLICATION fails on such an encoder even with its own
+	// value, and cannot select them.
+	if isRestrictedCodecApplication(e.application) {
 		return fmt.Errorf("%w: application %d is fixed at creation", ErrBadArg, e.application)
+	}
+	if isRestrictedCodecApplication(application) {
+		return fmt.Errorf("%w: application %d can only be set at creation", ErrBadArg, application)
 	}
 	e.application = application
 	e.syncSignalType()

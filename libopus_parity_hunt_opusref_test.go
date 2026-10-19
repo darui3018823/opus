@@ -69,14 +69,10 @@ func TestHuntProbe(t *testing.T) {
 	}
 	var cells []huntCell
 	for _, src := range []string{"speech24s", "stspeech", "noisy", "mix", "chords", "tv02", "tv05", "tv06", "tv08", "tv11", "tv12"} {
-		for _, ch := range []int{1, 2} {
-			for _, rate := range []int{8000, 16000, 48000} {
-				for _, ms := range []int{40, 60, 80, 100, 120} {
-					for _, br := range []int{64000, 128000, 256000, 510000} {
-						fs := rate * ms / 1000
-						cells = append(cells, huntCell{src: src, rate: rate, ch: ch, app: "rsilk", frames: 30000 / ms, frameSize: fs,
-							ctl: []aStep{cs("bitrate", br), cs("vbr", 0)}})
-					}
+		for _, step := range []int{250, 500, 1000} {
+			for _, vbr := range []int{0, 1} {
+				for _, app := range []string{"audio", "voip"} {
+					cells = append(cells, huntSweepCell(src, app, vbr, step))
 				}
 			}
 		}
@@ -177,4 +173,36 @@ func TestHuntCBRMultiFramePadding(t *testing.T) {
 		cells[i].ctl = []aStep{cs("bitrate", 256000), cs("vbr", 0)}
 	}
 	runHuntCells(t, cells)
+}
+
+// huntSweepCell is a stereo 20 ms stream whose bitrate bounces between 6 and
+// 48 kb/s by step every frame (opus_demo -sweep), coded at complexity
+// step/250.
+func huntSweepCell(src, app string, vbr, step int) huntCell {
+	at := map[int][]aStep{}
+	br, dir := 6000, 1
+	for f := 0; f < 1500; f++ {
+		at[f] = []aStep{cs("bitrate", br)}
+		br += dir * step
+		if br > 48000 || br < 6000 {
+			dir = -dir
+			br += 2 * dir * step
+		}
+	}
+	return huntCell{src: src, rate: 48000, ch: 2, app: app, frames: 1500, frameSize: 960,
+		ctl: []aStep{cs("vbr", vbr), cs("complexity", step/250)}, at: at}
+}
+
+// TestHuntMonoToStereoSideInit: on a mono -> stereo switch silk_Encode
+// re-initialises the side channel before the control pass, so the side
+// takes the "just initialized" branch of silk_control_audio_bandwidth and
+// cannot report switchReady or cut maxBits.
+func TestHuntMonoToStereoSideInit(t *testing.T) {
+	runHuntCells(t, []huntCell{
+		huntSweepCell("tv02", "audio", 1, 500),
+		huntSweepCell("tv06", "audio", 1, 250),
+		huntSweepCell("speech24s", "audio", 1, 1000),
+		huntSweepCell("speech24s", "voip", 1, 250),
+		huntSweepCell("stspeech", "audio", 1, 1000),
+	})
 }

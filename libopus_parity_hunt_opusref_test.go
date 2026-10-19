@@ -70,9 +70,9 @@ func TestHuntProbe(t *testing.T) {
 	var cells []huntCell
 	for _, src := range []string{"speech24s", "stspeech", "noisy", "tv02", "tv05", "tv11"} {
 		for _, ch := range []int{1, 2} {
-			for _, fs := range []int{960, 1920, 2880} {
+			for _, fs := range []int{480, 960, 1920, 2880} {
 				for _, app := range []string{"voip", "audio"} {
-					for _, br := range []int{16000, 24000, 32000} {
+					for _, br := range []int{12000, 16000, 24000, 32000, 48000} {
 						cells = append(cells, huntCell{src: src, rate: 48000, ch: ch, app: app, frames: 600 * 960 / fs, frameSize: fs,
 							ctl: []aStep{cs("bitrate", br), cs("fec", 1), cs("loss", 10)}})
 					}
@@ -133,5 +133,19 @@ func TestHuntFECMultiFrame(t *testing.T) {
 	for i := range cells {
 		cells[i].ctl = []aStep{cs("bitrate", 24000), cs("fec", 1), cs("loss", 10)}
 	}
+	runHuntCells(t, cells)
+}
+
+// TestHuntLBRRQuantOffset: silk_LBRR_encode_FLP copies the indices before the
+// rate loop, so the redundant frame keeps process_gains' quantOffsetType
+// when the loop lowers it for the regular frame.
+func TestHuntLBRRQuantOffset(t *testing.T) {
+	var cells []huntCell
+	for _, fs := range []int{1920, 2880} {
+		cells = append(cells, huntCell{src: "tv11", rate: 48000, ch: 2, app: "audio", frames: 600 * 960 / fs, frameSize: fs,
+			ctl: []aStep{cs("bitrate", 32000), cs("fec", 1), cs("loss", 10)}})
+	}
+	cells = append(cells, huntCell{src: "speech24s", rate: 48000, ch: 2, app: "voip", frames: 300, frameSize: 1920,
+		ctl: []aStep{cs("bitrate", 32000), cs("fec", 1), cs("loss", 10)}})
 	runHuntCells(t, cells)
 }

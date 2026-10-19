@@ -982,10 +982,15 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	var ltpScaleQ14 int16
 	var frameSeed int32
 	rateScale := 1.0
+	// silk_LBRR_encode_FLP copies the indices before the quantiser loop, so
+	// the redundant frame keeps process_gains' quantOffsetType even when
+	// the loop lowers it to 0 for the regular frame.
+	lbrrQuantOffset := quantOffset
 	if exactGains != nil {
 		// silk_encode_frame_FLP: code the frame from the process_gains gains
 		// and, when the packet has a bit budget, iterate the quantiser loop.
 		quantOffset = exactGains.quantOffset
+		lbrrQuantOffset = quantOffset
 		e.lastSNRVBRFrame = false
 		e.restoreFrameState(initialState)
 		r := e.encodeFrameLoop(enc, initialState, signal, vadActive, signalType, quantOffset, conditionalGain,
@@ -1022,7 +1027,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		lbrrGainSymbols = exactGains.symbols
 		lastGainIndex = exactGains.absIndices[e.nSubframes-1]
 	}
-	e.generateLBRRFrame(signal, signalType, quantOffset, lbrrGainSymbols, lastGainIndex, conditionalGain, nlsf,
+	e.generateLBRRFrame(signal, signalType, lbrrQuantOffset, lbrrGainSymbols, lastGainIndex, conditionalGain, nlsf,
 		pitchLags, ltpCoeffsQ14, ltpScaleQ14, frameSeed, rateScale, initialState)
 	if lbrrDebug {
 		if after := e.leakFingerprint(); after != leakBefore {

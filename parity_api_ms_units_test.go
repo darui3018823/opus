@@ -48,3 +48,29 @@ func TestFrameSizeErrorsAreBadArg(t *testing.T) {
 	_, err = ms.DecodePLC(make([]int16, 1000), 100)
 	check("multistream DecodePLC", err)
 }
+
+// TestPacketLossPercRejectsOutOfRange: OPUS_SET_PACKET_LOSS_PERC returns
+// OPUS_BAD_ARG for values outside 0..100 and keeps the previous value
+// (opus_encoder.c:2982); the multistream CTL forwards it to every stream.
+func TestPacketLossPercRejectsOutOfRange(t *testing.T) {
+	enc, err := NewEncoder(48000, 1, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc.SetPacketLossPerc(30)
+	for _, v := range []int{-1, 101, 1000} {
+		enc.SetPacketLossPerc(v)
+		if got := enc.PacketLossPerc(); got != 30 {
+			t.Fatalf("SetPacketLossPerc(%d) changed the setting to %d", v, got)
+		}
+	}
+	ms, err := NewMultistreamEncoder(48000, 2, 2, 0, []byte{0, 1}, ApplicationVOIP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms.SetPacketLossPerc(100)
+	ms.SetPacketLossPerc(101)
+	if got := ms.PacketLossPerc(); got != 100 {
+		t.Fatalf("multistream loss = %d, want 100", got)
+	}
+}

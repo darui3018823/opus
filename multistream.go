@@ -262,7 +262,8 @@ func (e *MultistreamEncoder) SetInbandFECMode(mode int) error {
 func (e *MultistreamEncoder) InbandFECMode() int { return e.encoders[0].InbandFECMode() }
 
 // SetPacketLossPerc applies the expected packet-loss percentage to every
-// elementary stream. Values retain the single-stream clamping semantics.
+// elementary stream. Values outside 0 through 100 are ignored, as in the
+// single-stream encoder.
 func (e *MultistreamEncoder) SetPacketLossPerc(perc int) {
 	for _, enc := range e.encoders {
 		enc.SetPacketLossPerc(perc)

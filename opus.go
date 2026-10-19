@@ -2896,14 +2896,13 @@ func (e *Encoder) SetInbandFECMode(mode int) error {
 func (e *Encoder) InbandFECMode() int { return e.fecConfig }
 
 // SetPacketLossPerc sets the expected packet-loss percentage used to tune FEC
-// redundancy (higher loss → smaller, more frequent LBRR frames). Values are
-// clamped to 0 through 100. With FEC enabled, zero disables LBRR emission.
+// redundancy (higher loss → smaller, more frequent LBRR frames). Like
+// OPUS_SET_PACKET_LOSS_PERC, which rejects them with OPUS_BAD_ARG, values
+// outside 0 through 100 are ignored and leave the setting unchanged. With
+// FEC enabled, zero disables LBRR emission.
 func (e *Encoder) SetPacketLossPerc(perc int) {
-	if perc < 0 {
-		perc = 0
-	}
-	if perc > 100 {
-		perc = 100
+	if perc < 0 || perc > 100 {
+		return
 	}
 	e.packetLossPerc = perc
 	e.syncSILKFEC()

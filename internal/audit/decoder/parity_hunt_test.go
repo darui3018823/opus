@@ -20,6 +20,10 @@ const (
 	bwFB = 1105
 )
 
+// speechSrc is the full-level speech seed of the real corpus (the derived
+// clips are nearly silent).
+const speechSrc = "source/cc_speech_test01_20s.wav"
+
 func requireExact(t *testing.T, cfg decCfg, ops []op, g goDecoder) {
 	t.Helper()
 	st := compare(t, cfg, ops, g, cmpOpts{checkDur: true})
@@ -68,6 +72,44 @@ func TestHuntCELTBackgroundAcrossBandwidth(t *testing.T) {
 					}
 					cfg, g := newSingle(t, rate, ch)
 					requireExact(t, cfg, ops, g)
+				})
+			}
+		}
+	}
+}
+
+// TestHuntSILKStereoFECSide: in the LBRR frames of a stereo SILK packet the
+// side channel is decoded or concealed only when the previous frame coded
+// it or the side LBRR flag is set (has_side), and the side prediction
+// memory is reset on the first frame without the mid-only flag after a
+// mid-only frame. Alternating mono and wide stereo input produces mid-only
+// frames next to coded side frames.
+func TestHuntSILKStereoFECSide(t *testing.T) {
+	for _, rate := range []int{16000, 48000} {
+		for _, br := range []int{24000, 32000, 48000} {
+			for _, us := range []int{20000, 40000, 60000} {
+				t.Run(fmt.Sprintf("%d/%dk/%dms", rate, br/1000, us/1000), func(t *testing.T) {
+					t.Parallel()
+					src := audio(t, speechSrc, rate, 1, 12, 1)
+					n := rate * 8
+					pcm := make([]float32, 2*n)
+					seg := rate * 2 / 3
+					for i := range n {
+						pcm[2*i] = src[i]
+						if (i/seg)%2 == 0 {
+							pcm[2*i+1] = src[i]
+						} else {
+							pcm[2*i+1] = src[i+rate*3]
+						}
+					}
+					fs := rate * us / 1000000
+					enc := oracleEncode(t, encCfg{rate: rate, ch: 2, app: appVOIP, bitrate: br, complexity: 9,
+						fec: 1, loss: 30, vbr: 1, forcech: 2, signal: sigVoice, frameSize: fs}, pcm)
+					for _, outCh := range []int{1, 2} {
+						ops := fecOps(enc.packets, rate, fmtF32, 0.3, int64(rate+br+us), 1, true)
+						cfg, g := newSingle(t, rate, outCh)
+						requireExact(t, cfg, ops, g)
+					}
 				})
 			}
 		}

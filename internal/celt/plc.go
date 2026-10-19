@@ -187,7 +187,8 @@ func (d *Decoder) decodeLoss() []float64 {
 		for c := 0; c < C; c++ {
 			for i := start; i < end; i++ {
 				idx := c*nb + i
-				d.prevEnergies[idx] = float64(max(float32(d.backgroundLogE[idx]), float32(d.prevEnergies[idx])-decay))
+				bg := float32(d.backgroundLogE[c*NumBands48000+i])
+				d.prevEnergies[idx] = float64(max(bg, float32(d.prevEnergies[idx])-decay))
 			}
 		}
 		seed := d.lastFinalRange

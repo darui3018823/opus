@@ -1673,6 +1673,9 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		// reset CELT state prefilled with the 2.5 ms before the frame, without
 		// prediction (the analysis and SILK info set above are cleared too).
 		if e.libopusModePolicy && k == 0 && e.prevMode >= 0 && e.prevMode != framing.ModeHybrid {
+			// CELT_SET_END_BAND comes first in opus_encode_frame_native, so
+			// the prefill codes the packet's bands.
+			e.celtEncoder.SetEndBand(celtEnd)
 			if err := e.celtModeTransition(17); err != nil {
 				return nil, false, err
 			}

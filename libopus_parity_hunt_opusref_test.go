@@ -222,3 +222,15 @@ func TestHuntSILKRateSwitchWithoutPrefill(t *testing.T) {
 		huntSweepCell("tv11", "voip", 0, 500),
 	})
 }
+
+// TestHuntHybridPrefillEndBand: opus_encode_frame_native sets
+// CELT_SET_END_BAND before the mode-switch reset and prefill, so the
+// 2.5 ms hybrid prefill codes the packet's bands, not the previous ones.
+func TestHuntHybridPrefillEndBand(t *testing.T) {
+	runHuntCells(t, []huntCell{
+		huntSweepCell("tv12", "voip", 1, 500),
+		huntSweepCell("tv08", "voip", 1, 250),
+		huntSweepCell("tv06", "voip", 1, 1000),
+		huntSweepCell("tv05", "voip", 1, 250),
+	})
+}

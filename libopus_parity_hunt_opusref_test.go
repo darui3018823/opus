@@ -68,12 +68,14 @@ func TestHuntProbe(t *testing.T) {
 		t.Skip("OPUS_HUNT_PROBE not set")
 	}
 	var cells []huntCell
-	for _, src := range []string{"speech24s", "stspeech", "tv02", "tv05", "tv08", "tv11"} {
+	for _, src := range []string{"speech24s", "noisy", "mix", "chords", "stspeech", "tv02", "tv05", "tv06", "tv08", "tv11", "tv12"} {
 		for _, ch := range []int{1, 2} {
-			for _, fs := range []int{960, 1920, 2880} {
-				for _, br := range []int{12000, 16000, 20000} {
-					cells = append(cells, huntCell{src: src, rate: 48000, ch: ch, app: "audio", frames: 600 * 960 / fs, frameSize: fs,
-						ctl: []aStep{cs("bitrate", br), cs("vbr", 0)}})
+			for _, br := range []int{20000, 28000, 36000, 48000} {
+				for _, cpx := range []int{3, 5, 7, 9} {
+					for _, vbr := range []int{0, 1} {
+						cells = append(cells, huntCell{src: src, rate: 48000, ch: ch, app: "audio", frames: 1200, frameSize: 480,
+							ctl: []aStep{cs("bitrate", br), cs("complexity", cpx), cs("vbr", vbr)}})
+					}
 				}
 			}
 		}

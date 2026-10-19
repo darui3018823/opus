@@ -573,7 +573,7 @@ func (d *ProjectionDecoder) checkOutput(have, duration int) error {
 
 func (d *ProjectionDecoder) checkLossOutput(have, frameSize int) error {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	return d.checkOutput(have, frameSize)
 }

@@ -2152,7 +2152,7 @@ func (e *Encoder) selectEncodeFrameSize(frameSize int) (int, error) {
 		return 0, err
 	}
 	if e.application == ApplicationRestrictedSILK && selected*100 < e.sampleRate {
-		return 0, fmt.Errorf("%w: restricted SILK needs 10 ms frames or longer", ErrUnsupportedFrameSize)
+		return 0, fmt.Errorf("%w: %w: restricted SILK needs 10 ms frames or longer", ErrBadArg, ErrUnsupportedFrameSize)
 	}
 	return selected, nil
 }
@@ -2160,7 +2160,7 @@ func (e *Encoder) selectEncodeFrameSize(frameSize int) (int, error) {
 func (e *Encoder) validateFrameSize(frameSize int) (int, error) {
 	base := e.frameSize
 	if base <= 0 || frameSize <= 0 {
-		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, e.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, e.sampleRate)
 	}
 	for _, divisor := range []int{8, 4, 2} {
 		if frameSize*divisor == base {
@@ -2168,11 +2168,11 @@ func (e *Encoder) validateFrameSize(frameSize int) (int, error) {
 		}
 	}
 	if frameSize%base != 0 {
-		return 0, fmt.Errorf("%w: frameSize %d is not a valid Opus duration at %d Hz", ErrUnsupportedFrameSize, frameSize, e.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d is not a valid Opus duration at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, e.sampleRate)
 	}
 	nFrames := frameSize / base
 	if nFrames < 1 || nFrames > 6 {
-		return 0, fmt.Errorf("%w: packet duration %d ms exceeds Opus maximum 120 ms", ErrUnsupportedFrameSize, nFrames*20)
+		return 0, fmt.Errorf("%w: %w: packet duration %d ms exceeds Opus maximum 120 ms", ErrBadArg, ErrUnsupportedFrameSize, nFrames*20)
 	}
 	return nFrames, nil
 }
@@ -5227,7 +5227,7 @@ func interleaveSILKOutInto(dst []float64, l, r []int16, channels int) []float64 
 // concealment returns zero samples.
 func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	required := frameSize * d.channels
 	if len(pcm) < required {
@@ -5245,7 +5245,7 @@ func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
 // PCM stored in int32 values. frameSize follows DecodePLC semantics.
 func (d *Decoder) DecodePLC24(pcm []int32, frameSize int) (int, error) {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	required := frameSize * d.channels
 	if len(pcm) < required {
@@ -5296,7 +5296,7 @@ func (d *Decoder) DecodePLCFloat32(frameSize int) ([]float32, error) {
 // advancing entropy, synthesis, or resampler state.
 func (d *Decoder) validatePLCState(frameSize int) error {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	lossMode := d.previousLossMode()
 	if lossMode == -1 {
@@ -5556,7 +5556,7 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 // packet cannot carry LBRR, concealment is used as in libopus.
 func (d *Decoder) DecodeFECWithDuration(data []byte, pcm []int16, frameSize int) (int, error) {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	required := frameSize * d.channels
 	if len(pcm) < required {
@@ -5575,7 +5575,7 @@ func (d *Decoder) DecodeFECWithDuration(data []byte, pcm []int16, frameSize int)
 // DecodeFECWithDuration.
 func (d *Decoder) DecodeFEC24(data []byte, pcm []int32, frameSize int) (int, error) {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	required := frameSize * d.channels
 	if len(pcm) < required {
@@ -5798,7 +5798,7 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 
 func (d *Decoder) validateFECState(data []byte, frameSize int) error {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	info, err := inspectPacket(data, d.sampleRate)
 	if err != nil {

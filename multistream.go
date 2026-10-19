@@ -716,7 +716,7 @@ func (d *MultistreamDecoder) Decode(data []byte, pcm []int16) (int, error) {
 func (d *MultistreamDecoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
 	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	required := frameSize * d.channels
 	if len(pcm) < required {
@@ -736,7 +736,7 @@ func (d *MultistreamDecoder) DecodePLC(pcm []int16, frameSize int) (int, error) 
 func (d *MultistreamDecoder) DecodePLCFloat(frameSize int) ([]float64, error) {
 	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return nil, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return nil, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	for stream, dec := range d.decoders {
 		if err := dec.validatePLCState(frameSize); err != nil {
@@ -772,7 +772,7 @@ func (d *MultistreamDecoder) DecodePLCFloat32(frameSize int) ([]float32, error) 
 func (d *MultistreamDecoder) DecodePLC24(pcm []int32, frameSize int) (int, error) {
 	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	required := frameSize * d.channels
 	if len(pcm) < required {
@@ -803,7 +803,7 @@ func (d *MultistreamDecoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 func (d *MultistreamDecoder) DecodeFECWithDuration(data []byte, pcm []int16, frameSize int) (int, error) {
 	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	required := frameSize * d.channels
 	if len(pcm) < required {
@@ -822,7 +822,7 @@ func (d *MultistreamDecoder) DecodeFECWithDuration(data []byte, pcm []int16, fra
 func (d *MultistreamDecoder) DecodeFECFloat(data []byte, frameSize int) ([]float64, error) {
 	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return nil, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return nil, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	packets, _, err := splitMultistreamPackets(data, d.streams, d.sampleRate)
 	if err != nil {
@@ -873,7 +873,7 @@ func (d *MultistreamDecoder) DecodeFECFloat32(data []byte, frameSize int) ([]flo
 func (d *MultistreamDecoder) DecodeFEC24(data []byte, pcm []int32, frameSize int) (int, error) {
 	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	required := frameSize * d.channels
 	if len(pcm) < required {

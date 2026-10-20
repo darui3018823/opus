@@ -246,3 +246,14 @@ func TestHuntStereoPrefillLPState(t *testing.T) {
 		huntSweepCell("noisy", "voip", 1, 1000),
 	})
 }
+
+// TestHuntRestrictedSILKBandwidthSwitch: RESTRICTED_SILK has no CELT
+// redundancy, so a prepared SILK bandwidth switch never prefills and
+// silk_control_encoder switches the rate on the next packet.
+func TestHuntRestrictedSILKBandwidthSwitch(t *testing.T) {
+	runHuntCells(t, []huntCell{
+		huntSweepCell("tv02", "rsilk", 1, 500),
+		huntSweepCell("tv05", "rsilk", 0, 1000),
+		huntSweepCell("speech24s", "rsilk", 1, 250),
+	})
+}

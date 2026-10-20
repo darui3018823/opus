@@ -236,8 +236,12 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 	if switchReady && !e.nonfinalFrame {
 		// For the first frame at a new SILK bandwidth: a trailing redundant
 		// frame now, the switch (with prefill) on the next packet.
-		redBytes = computeRedundancyBytes(maxDataBytes, d.bitrate, frameRate, streamChannels)
-		redundancy = redBytes != 0
+		// RESTRICTED_SILK has no CELT, so no redundant frame: the switch
+		// then happens without a prefill (silk_bw_switch is cleared below).
+		if e.application != ApplicationRestrictedSILK {
+			redBytes = computeRedundancyBytes(maxDataBytes, d.bitrate, frameRate, streamChannels)
+			redundancy = redBytes != 0
+		}
 		celtToSilk = false
 		e.silkBwSwitch = true
 	}

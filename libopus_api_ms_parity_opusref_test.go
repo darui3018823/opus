@@ -4,6 +4,7 @@ package opus
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"math"
 	"testing"
@@ -57,6 +58,32 @@ func TestParityMaxPacketSizeOneByte(t *testing.T) {
 						}
 						le.Close()
 					}
+				}
+			}
+		}
+	}
+}
+
+// TestParityProjectionCreateErrors: opus_projection_ambisonics_encoder_create
+// reports OPUS_ALLOC_FAIL when its size query fails (a family other than 3
+// or a channel count without a matrix, opus_projection_encoder.c:373) and
+// the init error otherwise (OPUS_BAD_ARG for a bad sample rate). Family 2
+// is a Go extension that libopus's projection API does not offer.
+func TestParityProjectionCreateErrors(t *testing.T) {
+	for _, fs := range []int{16000, 44100, 48000} {
+		for _, family := range []int{0, 1, 2, 3, 4, 255} {
+			for ch := 0; ch <= 230; ch++ {
+				_, _, _, _, lerr := cgoref.AudAmbisonics(fs, ch, family, ApplicationAudio)
+				_, gerr := NewProjectionEncoder(fs, ch, family, ApplicationAudio)
+				if family == MappingFamilyAmbisonics {
+					if lerr != -7 {
+						t.Fatalf("fs=%d family 2 ch=%d: libopus %d, want ALLOC_FAIL", fs, ch, lerr)
+					}
+					continue
+				}
+				got := goErrCode(gerr)
+				if lerr == -7 && !errors.Is(gerr, ErrAllocFail) || lerr != -7 && got != lerr {
+					t.Fatalf("fs=%d family=%d ch=%d: libopus %d, go %v", fs, family, ch, lerr, gerr)
 				}
 			}
 		}

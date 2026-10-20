@@ -32,7 +32,21 @@ type ProjectionEncoder struct {
 // NewProjectionEncoder creates an Ambisonics encoder for RFC 8486 mapping
 // family 2 or 3. Family 2 supports orders 0 through 14; family 3 uses the
 // first- through fifth-order matrices provided by libopus 1.6.1.
+//
+// As opus_projection_ambisonics_encoder_create, whose size query fails
+// before anything else, a family or channel count without a family-3
+// matrix returns an error wrapping ErrAllocFail (OPUS_ALLOC_FAIL) as well
+// as ErrBadArg; family 2 is a Go extension and only wraps ErrBadArg.
 func NewProjectionEncoder(sampleRate, channels, mappingFamily int, application Application) (*ProjectionEncoder, error) {
+	if mappingFamily != MappingFamilyAmbisonics {
+		// opus_projection_ambisonics_encoder_get_size returns 0.
+		if mappingFamily != MappingFamilyProjection {
+			return nil, fmt.Errorf("%w: %w: projection supports mapping family 2 or 3", ErrBadArg, ErrAllocFail)
+		}
+		if _, err := predefinedAmbisonicsMatrices(channels); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrAllocFail, err)
+		}
+	}
 	_, nondiegetic, err := ambisonicsOrder(channels)
 	if err != nil {
 		return nil, err

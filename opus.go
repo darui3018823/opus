@@ -4469,27 +4469,37 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 				d.applyTransition(pcm, trans)
 			}
 		}
+		// opus_decode_frame decodes a CELT->SILK redundant frame first, from
+		// (and advancing) the persistent CELT state, before the hybrid ->
+		// SILK silence fade-out decodes from that state.
+		var redundantRange uint32
+		var leadingRedundancy []float64
+		if redundancy && celtToSilk && redundancyBytes >= 2 {
+			redPCM, redRange, redDec := d.decodeRedundancy(
+				stream[len(stream)-redundancyBytes:], pktChannels, redundancyEndBand, true,
+			)
+			if redDec != nil {
+				redundantRange = redRange
+				d.lastCeltDec = redDec
+				leadingRedundancy = redPCM
+			}
+		}
 		// For hybrid -> SILK transitions the CELT MDCT fades out through a
 		// decoded silence frame.
 		if frameMode == framing.ModeHybrid && !(redundancy && celtToSilk && frameRedundancy) {
 			d.celtSilenceFade(pcm, pktChannels, redundancyEndBand)
 		}
-		var redundantRange uint32
-		if redundancy && redundancyBytes >= 2 {
-			carryState := celtToSilk
+		if leadingRedundancy != nil && prevModeRedundancy {
+			d.crossfadeLeadingRedundancy(pcm, leadingRedundancy)
+		}
+		if redundancy && !celtToSilk && redundancyBytes >= 2 {
 			redPCM, redRange, redDec := d.decodeRedundancy(
-				stream[len(stream)-redundancyBytes:], pktChannels, redundancyEndBand, carryState,
+				stream[len(stream)-redundancyBytes:], pktChannels, redundancyEndBand, false,
 			)
 			if redDec != nil {
 				redundantRange = redRange
 				d.lastCeltDec = redDec
-				if celtToSilk {
-					if prevModeRedundancy {
-						d.crossfadeLeadingRedundancy(pcm, redPCM)
-					}
-				} else {
-					d.crossfadeRedundancy(pcm, redPCM, samplesPerStream)
-				}
+				d.crossfadeRedundancy(pcm, redPCM, samplesPerStream)
 			}
 		}
 		d.lastFrameConcealed = false

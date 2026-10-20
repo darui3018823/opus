@@ -260,3 +260,43 @@ func TestHuntFECShortFirstFrame(t *testing.T) {
 		}
 	}
 }
+
+// TestHuntHybridToSILKLeadingRedundancy: on a SILK frame with a CELT->SILK
+// redundant frame right after a hybrid frame, opus_decode_frame decodes the
+// redundant frame from the CELT state before the silence frame that fades
+// the hybrid CELT layer out. Runs of hybrid-vector packets (testvectors 05,
+// 06, 12) spliced with losses produce that sequence.
+func TestHuntHybridToSILKLeadingRedundancy(t *testing.T) {
+	byVec := map[int][][]byte{}
+	for _, v := range []int{5, 6, 12} {
+		for _, p := range loadBit(t, v) {
+			if len(p.data) > 0 {
+				byVec[v] = append(byVec[v], p.data)
+			}
+		}
+	}
+	pool := []int{5, 6, 12}
+	for _, o := range []struct{ rate, ch int }{{48000, 2}, {48000, 1}, {16000, 1}, {24000, 2}} {
+		t.Run(fmt.Sprintf("%d/%dch", o.rate, o.ch), func(t *testing.T) {
+			t.Parallel()
+			rng := rand.New(rand.NewSource(3))
+			var ops []op
+			last := o.rate / 50
+			for len(ops) < 1500 {
+				src := byVec[pool[rng.Intn(len(pool))]]
+				start := rng.Intn(len(src))
+				for k := 0; k < 4 && start+k < len(src); k++ {
+					p := src[start+k]
+					if rng.Float64() < 0.15 {
+						ops = append(ops, op{code: 1, fmt: fmtI16, frameSize: last})
+						continue
+					}
+					last, _ = opus.PacketGetNumSamples(p, o.rate)
+					ops = append(ops, op{code: 1, fmt: fmtI16, frameSize: 5760 * o.rate / 48000, data: p})
+				}
+			}
+			cfg, g := newSingle(t, o.rate, o.ch)
+			requireExact(t, cfg, ops, g)
+		})
+	}
+}

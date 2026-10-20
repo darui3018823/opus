@@ -5708,6 +5708,10 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 		} else {
 			finalRange = 0
 		}
+	} else if d.prevMode == framing.ModeHybrid {
+		// For hybrid -> SILK the CELT MDCT fades out through a decoded
+		// silence frame.
+		d.celtSilenceFade(silkPCM, info.channels, celtEndBandForFramingBW(config/4))
 	}
 	out = append(out, silkPCM...)
 

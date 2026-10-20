@@ -149,6 +149,7 @@ type fecStream struct {
 
 type fecSegment struct {
 	stream, packets int
+	keep            bool // no loss at the end of the segment
 }
 
 // spliceFECOps decodes the scenario's segments, each from its own stream at
@@ -168,7 +169,7 @@ func spliceFECOps(t *testing.T, rate, ch, fs int, streams []fecStream, segs []fe
 		for k := 0; k < sg.packets; k++ {
 			p := pk[sg.stream][pos]
 			switch {
-			case k == sg.packets-1 && si+1 < len(segs):
+			case k == sg.packets-1 && si+1 < len(segs) && !sg.keep:
 				next := pk[segs[si+1].stream][pos+1]
 				n, _ := opus.PacketGetNumSamples(p, rate)
 				ops = append(ops, op{code: 1, fmt: fmtF32, fec: true, frameSize: n, data: next})
@@ -188,6 +189,9 @@ func spliceFECOps(t *testing.T, rate, ch, fs int, streams []fecStream, segs []fe
 // CELT MDCT out with a silence frame; and the SILK resamplers follow the
 // stream channel count as for a normal packet.
 func TestHuntFECModeSwitch(t *testing.T) {
+	silkWB := fecStream{bw: bwWB, br: 20000}
+	hybSWB := fecStream{bw: 1104, br: 32000}
+	hybFB := fecStream{bw: bwFB, br: 40000}
 	silkMono := fecStream{bw: bwWB, br: 32000, forceCh: 1}
 	silkStereo := fecStream{bw: bwWB, br: 32000, forceCh: 2}
 	scenarios := []struct {
@@ -196,7 +200,8 @@ func TestHuntFECModeSwitch(t *testing.T) {
 		streams []fecStream
 		segs    []fecSegment
 	}{
-		{"channel-switch", 2, []fecStream{silkMono, silkStereo}, []fecSegment{{0, 20}, {1, 20}, {0, 20}, {1, 20}, {0, 20}}},
+		{"hybrid-fec-to-silk", 1, []fecStream{hybFB, silkWB, hybSWB}, []fecSegment{{0, 20, false}, {1, 20, true}, {2, 20, false}, {1, 20, true}, {0, 20, false}, {1, 20, false}}},
+		{"channel-switch", 2, []fecStream{silkMono, silkStereo}, []fecSegment{{0, 20, false}, {1, 20, false}, {0, 20, false}, {1, 20, false}, {0, 20, false}}},
 	}
 	for _, sc := range scenarios {
 		for _, rate := range []int{48000, 16000} {

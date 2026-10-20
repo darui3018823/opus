@@ -110,6 +110,17 @@ func (e *Encoder) silkInternalRateControl(frameSize, desiredRate int, silkPrefil
 func (e *Encoder) switchSILKRateMidStream(rate int, reapply func() error) error {
 	old := e.silkEncoder
 	prevChannels := e.silkPrevChannels
+	// Stereo -> mono in the same call: only the mid channel is controlled,
+	// so the side channel keeps its old-rate resampler and inputBuf, which
+	// the first mono frame averages with (as after a prefill).
+	var oldSideRes *silk.Resampler
+	var oldSideBuf []int16
+	if e.channels == 2 && e.streamChannelsOrInput() == 1 && prevChannels == 2 && len(e.silkInputResamplers) > 1 {
+		oldSideRes = e.silkInputResamplers[1]
+		if oldSideBuf = old.SideInputBuf(); oldSideBuf == nil {
+			oldSideBuf = []int16{}
+		}
+	}
 	if err := e.rebuildSILKEncoder(rate); err != nil {
 		return err
 	}
@@ -130,6 +141,10 @@ func (e *Encoder) switchSILKRateMidStream(rate int, reapply func() error) error 
 		// Mono -> stereo in the same call: silk_Encode copies the mid
 		// channel's resampler, already switched, into the side channel.
 		e.silkInputResamplers[1].CopyStateFrom(e.silkInputResamplers[0])
+	}
+	if oldSideRes != nil && len(e.silkInputResamplers) > 1 {
+		e.silkInputResamplers[1] = oldSideRes
+		e.silkStaleSideBuf = oldSideBuf
 	}
 	return nil
 }
@@ -225,6 +240,7 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 		return nil, err
 	}
 	silkPCM := e.silkInput(pcm, silkFrameSize*nFrames*streamChannels)
+	e.silkStaleSideBuf = nil
 	e.inDTX = false
 	enc := entcode.NewEncoder(maxDataBytes - 1)
 	if err := e.silkEncoder.EncodeMultiWithEncoder(enc, silkPCM, nFrames); err != nil {

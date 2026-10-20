@@ -321,3 +321,20 @@ func TestHuntMonoToStereoRateSwitch(t *testing.T) {
 	}
 	runHuntCells(t, cells)
 }
+
+// TestHuntStereoToMonoRateSwitch: a stereo -> mono switch on a mid-stream
+// rate switch leaves the side channel at its old rate, and only the first
+// SILK frame of the packet is averaged with it.
+func TestHuntStereoToMonoRateSwitch(t *testing.T) {
+	var cells []huntCell
+	for _, cfg := range []struct {
+		src           string
+		vbr, step, fs int
+	}{{"tv05", 1, 1000, 1920}, {"tv12", 0, 1000, 1920}, {"speech24s", 0, 500, 1920}, {"tv02", 0, 1000, 2880}} {
+		c := huntSweepCell(cfg.src, "rsilk", cfg.vbr, cfg.step)
+		c.frames, c.frameSize = 1500*960/cfg.fs, cfg.fs
+		c.ctl = append(c.ctl, cs("fec", 1), cs("loss", 10))
+		cells = append(cells, c)
+	}
+	runHuntCells(t, cells)
+}

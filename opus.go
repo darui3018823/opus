@@ -2292,9 +2292,13 @@ func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
 		out0 := e.silkInputResamplers[0].ProcessAppend(e.silkResScratch[0][:0], in)
 		e.silkResScratch[0] = out0
 		if e.silkPrevChannels == 2 && len(e.silkInputResamplers) > 1 {
-			out1 := e.silkInputResamplers[1].ProcessAppend(e.silkResScratch[1][:0], in)
+			// Only the first SILK frame is averaged (nFramesEncoded == 0),
+			// and only its input runs through the side resampler.
+			firstIn := min(len(in), e.sampleRate*e.silkFrameMsOrDefault()/1000)
+			out1 := e.silkInputResamplers[1].ProcessAppend(e.silkResScratch[1][:0], in[:firstIn])
 			e.silkResScratch[1] = out1
-			for i := range out0 {
+			firstOut := min(len(out0), e.silkSampleRate*e.silkFrameMsOrDefault()/1000)
+			for i := range out0[:firstOut] {
 				switch {
 				case i < len(out1):
 					out0[i] = int16((int32(out0[i]) + int32(out1[i])) >> 1)

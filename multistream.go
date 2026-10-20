@@ -844,7 +844,12 @@ func (d *MultistreamDecoder) DecodePLC24(pcm []int32, frameSize int) (int, error
 // DecodeFEC decodes in-band forward-error-correction data from the multistream
 // packet following a loss. Elementary CELT streams, which carry no FEC data,
 // are recovered with packet-loss concealment for the shared packet duration.
+// An empty packet conceals len(pcm)/Channels() samples, as
+// opus_multistream_decode does with no packet.
 func (d *MultistreamDecoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
+	if len(data) == 0 {
+		return d.DecodePLC(pcm, len(pcm)/d.channels)
+	}
 	packets, duration, err := splitMultistreamPackets(data, d.streams, d.sampleRate)
 	if err != nil {
 		return 0, err
@@ -873,9 +878,14 @@ func (d *MultistreamDecoder) DecodeFECWithDuration(data []byte, pcm []int16, fra
 }
 
 // DecodeFECFloat decodes recovery data for exactly frameSize lost samples per
-// channel and returns interleaved float64 PCM.
+// channel and returns interleaved float64 PCM. An empty packet conceals
+// frameSize samples (opus_multistream_decode_native: len == 0 runs the PLC
+// whatever decode_fec says).
 func (d *MultistreamDecoder) DecodeFECFloat(data []byte, frameSize int) ([]float64, error) {
 	frameSize = clampMultistreamFrameSize(frameSize, d.sampleRate)
+	if len(data) == 0 {
+		return d.DecodePLCFloat(frameSize)
+	}
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
 		return nil, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}

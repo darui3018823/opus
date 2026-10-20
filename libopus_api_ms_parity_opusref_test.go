@@ -90,6 +90,81 @@ func TestParityProjectionCreateErrors(t *testing.T) {
 	}
 }
 
+// TestParityMultistreamDecodeFECEmptyPacket: opus_multistream_decode with
+// no packet runs the PLC on every stream whatever decode_fec says
+// (opus_multistream_decoder.c:213), so the multistream and projection FEC
+// calls conceal instead of failing.
+func TestParityMultistreamDecodeFECEmptyPacket(t *testing.T) {
+	const fs, n, ch = 48000, 960, 3
+	mapping := []byte{0, 1, 2}
+	le, lerr := cgoref.NewAudMSEncoder(fs, ch, 2, 1, mapping, ApplicationVOIP)
+	if le == nil {
+		t.Fatalf("libopus ms create %d", lerr)
+	}
+	le.Set(SetBitrateRequest, 48000)
+	le.Set(SetBandwidthRequest, BandwidthWideband)
+	ld, _ := cgoref.NewAudMSDecoder(fs, ch, 2, 1, mapping)
+	gd, err := NewMultistreamDecoder(fs, ch, 2, 1, mapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for f := 0; f < 4; f++ {
+		p, r := le.EncodeFloat(sineF32(n, ch, fs, 300, 0.3, f*n), n, 4000)
+		if r <= 0 {
+			t.Fatalf("libopus encode %d", r)
+		}
+		ld.Decode(p, n, ch, false)
+		if _, err := gd.DecodeFloat32(p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	le.Close()
+	lp, lr := ld.Decode(nil, n, ch, true)
+	gp, gerr := gd.DecodeFECFloat32(nil, n)
+	if lr != n || gerr != nil || len(gp) != len(lp) {
+		t.Fatalf("empty FEC: lib=%d go=%d,%v", lr, len(gp)/ch, gerr)
+	}
+	for i := range lp {
+		if math.Abs(float64(lp[i]-gp[i])) > 1e-6 {
+			t.Fatalf("empty FEC sample %d: lib=%g go=%g", i, lp[i], gp[i])
+		}
+	}
+	if got, err := gd.DecodeFEC(nil, make([]int16, n*ch)); err != nil || got != n {
+		t.Fatalf("DecodeFEC(nil) = %d, %v", got, err)
+	}
+	ld.Close()
+
+	// Projection: the FEC calls conceal like DecodePLC.
+	enc, err := NewProjectionEncoder(fs, 4, MappingFamilyProjection, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	matrix := enc.DemixingMatrixBytes()
+	a, _ := NewProjectionDecoder(fs, 4, enc.Streams(), enc.CoupledStreams(), matrix)
+	b, _ := NewProjectionDecoder(fs, 4, enc.Streams(), enc.CoupledStreams(), matrix)
+	for f := 0; f < 3; f++ {
+		p, err := enc.EncodeFloat32(sineF32(n, 4, fs, 500, 0.3, f*n), n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = a.DecodeFloat(p)
+		_, _ = b.DecodeFloat(p)
+	}
+	fec, err := a.DecodeFECFloat(nil, n)
+	if err != nil {
+		t.Fatalf("projection DecodeFECFloat(nil): %v", err)
+	}
+	plc, err := b.DecodePLCFloat(n)
+	if err != nil || len(plc) != len(fec) {
+		t.Fatalf("projection PLC: %d, %v", len(plc), err)
+	}
+	for i := range plc {
+		if plc[i] != fec[i] {
+			t.Fatalf("projection FEC(nil) sample %d = %g, PLC %g", i, fec[i], plc[i])
+		}
+	}
+}
+
 // TestParityRestrictedApplicationCTLs: OPUS_SET_APPLICATION fails on a
 // RESTRICTED_SILK / RESTRICTED_CELT encoder even with its own value
 // (opus_encoder.c:2789), and a RESTRICTED_SILK encoder ignores

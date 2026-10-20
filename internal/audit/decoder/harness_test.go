@@ -305,29 +305,48 @@ func (s projDec) run(o op, ch int) (result, error) {
 	switch o.code {
 	case 2:
 		err = d.Reset()
-	case 3, 4:
+	case 3:
+		err = d.SetGain(o.val)
+	case 4:
 		err = opus.ErrUnimplemented
 	case 1:
-		if o.data == nil || o.fec {
-			err = opus.ErrUnimplemented
-			break
-		}
 		switch o.fmt {
 		case fmtI16:
 			pcm := make([]int16, max(0, o.frameSize)*ch)
-			n, err = d.Decode(o.data, pcm)
+			switch {
+			case o.data == nil:
+				n, err = d.DecodePLC(pcm, o.frameSize)
+			case o.fec:
+				n, err = d.DecodeFECWithDuration(o.data, pcm, o.frameSize)
+			default:
+				n, err = d.Decode(o.data, pcm)
+			}
 			if err == nil {
 				x.i16 = pcm[:n*ch]
 			}
 		case fmtI24:
 			pcm := make([]int32, max(0, o.frameSize)*ch)
-			n, err = d.Decode24(o.data, pcm)
+			switch {
+			case o.data == nil:
+				n, err = d.DecodePLC24(pcm, o.frameSize)
+			case o.fec:
+				n, err = d.DecodeFEC24(o.data, pcm, o.frameSize)
+			default:
+				n, err = d.Decode24(o.data, pcm)
+			}
 			if err == nil {
 				x.i24 = pcm[:n*ch]
 			}
 		case fmtF32:
 			var f []float32
-			f, err = d.DecodeFloat32(o.data)
+			switch {
+			case o.data == nil:
+				f, err = d.DecodePLCFloat32(o.frameSize)
+			case o.fec:
+				f, err = d.DecodeFECFloat32(o.data, o.frameSize)
+			default:
+				f, err = d.DecodeFloat32(o.data)
+			}
 			if err == nil {
 				x.f32 = f
 				n = len(f) / ch

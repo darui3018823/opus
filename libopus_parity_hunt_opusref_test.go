@@ -68,11 +68,13 @@ func TestHuntProbe(t *testing.T) {
 		t.Skip("OPUS_HUNT_PROBE not set")
 	}
 	var cells []huntCell
-	for _, src := range []string{"speech24s", "stspeech", "noisy", "mix", "chords", "tv02", "tv05", "tv06", "tv08", "tv11", "tv12"} {
-		for _, step := range []int{250, 500, 1000} {
-			for _, vbr := range []int{0, 1} {
-				for _, app := range []string{"audio", "voip"} {
-					cells = append(cells, huntSweepCell(src, app, vbr, step))
+	for _, src := range []string{"speech24s", "tv02", "tv05", "tv08", "tv11"} {
+		for _, rate := range []int{12000, 16000} {
+			for _, ch := range []int{1, 2} {
+				for _, vbr := range []int{0, 1} {
+					c := huntSweepCell(src, "voip", vbr, 500)
+					c.rate, c.ch, c.frameSize = rate, ch, rate/50
+					cells = append(cells, c)
 				}
 			}
 		}
@@ -269,6 +271,22 @@ func TestHuntPrefillDelayLine(t *testing.T) {
 			ctl: []aStep{cs("bitrate", 20000), cs("vbr", 0), cs("fec", 1), cs("loss", 10)}})
 		cells = append(cells, huntCell{src: src, rate: 16000, ch: 1, app: "audio", frames: 300, frameSize: 1600,
 			ctl: []aStep{cs("bitrate", 32000)}})
+	}
+	runHuntCells(t, cells)
+}
+
+// TestHuntEqualRateSwitchResampler: a mid-stream SILK rate switch from a rate
+// equal to the API rate resamples x_buf through the decoder-direction
+// resampler, which delays its input even at equal rates (delay_matrix_dec).
+func TestHuntEqualRateSwitchResampler(t *testing.T) {
+	var cells []huntCell
+	for _, cfg := range []struct {
+		src      string
+		rate, ch int
+	}{{"tv02", 12000, 1}, {"tv11", 12000, 2}, {"tv05", 16000, 2}, {"speech24s", 16000, 2}} {
+		c := huntSweepCell(cfg.src, "voip", 0, 500)
+		c.rate, c.ch, c.frameSize = cfg.rate, cfg.ch, cfg.rate/50
+		cells = append(cells, c)
 	}
 	runHuntCells(t, cells)
 }

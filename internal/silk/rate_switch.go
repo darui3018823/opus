@@ -96,17 +96,13 @@ func (e *Encoder) carryChannelRateSwitch(old *Encoder, mono bool) (*Resampler, e
 		}
 		xFIX[i] = silkFloat2Int16Even(v)
 	}
-	var xAPI []int16
-	if api == old.sampleRate {
-		// The equal-rate resampler only copies.
-		xAPI = xFIX
-	} else {
-		tmp, err := NewResampler(old.sampleRate, api)
-		if err != nil {
-			return nil, err
-		}
-		xAPI = tmp.Process(xFIX)
+	// Even at equal rates the decoder-direction resampler delays its
+	// input (delay_matrix_dec).
+	tmp, err := NewResampler(old.sampleRate, api)
+	if err != nil {
+		return nil, err
 	}
+	xAPI := tmp.Process(xFIX)
 	var res *Resampler
 	var xNew []int16
 	var line []float64

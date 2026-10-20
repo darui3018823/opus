@@ -234,3 +234,15 @@ func TestHuntHybridPrefillEndBand(t *testing.T) {
 		huntSweepCell("tv05", "voip", 1, 250),
 	})
 }
+
+// TestHuntStereoPrefillLPState: a mono -> stereo switch on a bandwidth
+// switch prefill first initialises the side channel, then the prefill
+// reset restores the saved sLP into both channels, so the side continues
+// the mid's transition.
+func TestHuntStereoPrefillLPState(t *testing.T) {
+	runHuntCells(t, []huntCell{
+		huntSweepCell("tv05", "voip", 0, 1000),
+		huntSweepCell("tv05", "audio", 0, 1000),
+		huntSweepCell("noisy", "voip", 1, 1000),
+	})
+}

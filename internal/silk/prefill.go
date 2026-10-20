@@ -37,7 +37,12 @@ func (e *Encoder) Prefill(pcm []float64) {
 		}
 		fsKHz := e.sampleRate / 1000
 		if e.prevStreamChannels == 1 {
+			// silk_Encode initialises the side channel for the mono ->
+			// stereo switch before the prefill reset, which then restores
+			// the saved sLP into every channel (see CarryPacketState).
+			lp := e.side.lp
 			e.enterStereoStream()
+			e.side.lp = lp
 		}
 		l := make([]float64, n)
 		r := make([]float64, n)

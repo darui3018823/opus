@@ -519,10 +519,11 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			pfGain = 0
 			pfTapset = 0
 		}
-		// CELT-only applies the comb post-filter; hybrid (start!=0) does not.
-		if start == 0 {
-			samplesOut = d.postFilter[c].Apply(samplesOut, pfPeriod, pfGain, pfTapset, d.mode.NBase, lm, d.celtMode.Window)
-		}
+		// celt_decode_with_ec runs the comb post-filter on every frame: a
+		// hybrid frame (start != 0) codes no parameters, so it fades out
+		// whatever filter the previous frame (e.g. a trailing SILK->CELT
+		// redundant frame) left and resets the parameters to zero.
+		samplesOut = d.postFilter[c].Apply(samplesOut, pfPeriod, pfGain, pfTapset, d.mode.NBase, lm, d.celtMode.Window)
 		if d.synthesisStageHook != nil {
 			d.synthesisStageHook("postfilter", c, samplesOut)
 		}

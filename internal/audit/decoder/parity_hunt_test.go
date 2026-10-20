@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"encoding/hex"
 	"fmt"
 	"math"
 	"math/rand"
@@ -298,5 +299,38 @@ func TestHuntHybridToSILKLeadingRedundancy(t *testing.T) {
 			cfg, g := newSingle(t, o.rate, o.ch)
 			requireExact(t, cfg, ops, g)
 		})
+	}
+}
+
+// TestHuntHybridAfterRedundantPostfilter: celt_decode_with_ec runs the comb
+// post-filter on every frame. A SILK packet whose trailing bytes decode as a
+// SILK->CELT redundant frame leaves a post-filter in the CELT state, and the
+// following hybrid frame (no reset: prev_redundancy) must fade it out.
+// The SILK packet is a valid 10 ms WB frame with 26 extra bytes appended.
+func TestHuntHybridAfterRedundantPostfilter(t *testing.T) {
+	var pkts [][]byte
+	for _, h := range []string{
+		"440801ff56b3aa73bcd2438f415f950d30ae47a0b239979e0f8e58fce6f9fd1ff719652314b1d82246cd36f72e7e",
+		"680c531a441cbb2698ea08a1f76a72686066fd551ed943422b9e642a40",
+		"680c45ef463e8bba1cae64a033e0853c07feefc63be13608b3530690",
+	} {
+		b, err := hex.DecodeString(h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pkts = append(pkts, b)
+	}
+	for _, rate := range []int{8000, 16000, 48000} {
+		for _, ch := range []int{1, 2} {
+			t.Run(fmt.Sprintf("%d/%dch", rate, ch), func(t *testing.T) {
+				t.Parallel()
+				cfg, g := newSingle(t, rate, ch)
+				var ops []op
+				for _, p := range pkts {
+					ops = append(ops, op{code: 1, fmt: fmtI16, frameSize: 5760 * rate / 48000, data: p})
+				}
+				requireExact(t, cfg, ops, g)
+			})
+		}
 	}
 }

@@ -5654,6 +5654,9 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	if info.channels < 1 || info.channels > 2 {
 		return nil, 0, fmt.Errorf("%w: invalid channel count %d", ErrInvalidPacket, info.channels)
 	}
+	// A SILK frame after a CELT one (the concealment of a trailing
+	// redundant frame) starts from a reset SILK decoder.
+	d.resetSILKAfterCELT()
 	ri := silkRateIdx(rateKHz)
 	ci := info.channels - 1
 	d.switchSILKRate(ri)
@@ -5692,26 +5695,53 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	silkPCM = d.resampleSILK(silkPCM, nSilkFrames, info.channels, stereoToMono)
 	silkPCM = padOrTrim(silkPCM, packetFrameSize*d.channels)
 	finalRange := infoDec.dec.LastFinalRange()
+
+	// A switch from CELT conceals 5 ms in the old mode.
+	var trans []float64
+	if d.prevMode == framing.ModeCELTOnly {
+		trans = d.transitionPLC(packetFrameSize)
+	}
 	if info.mode == ModeHybrid {
-		// CELT carries no in-band FEC. Its high band advances through PLC and,
-		// as in libopus, supplies the combined final range.
-		if d.lastCeltDec != nil {
-			celtPCM, err := d.decodeCELTPLCFrame(packetFrameSize, true)
-			if err != nil {
-				return nil, 0, err
-			}
-			// Accumulated onto the SILK output in float32, unclipped.
-			for i := range silkPCM {
-				silkPCM[i] = float64(float32(silkPCM[i]) + float32(celtPCM[i]))
-			}
-			finalRange = d.lastCeltDec.LastFinalRange()
-		} else {
-			finalRange = 0
+		// CELT carries no in-band FEC: its high band (start band 17, the
+		// FEC packet's end band) is concealed, from a reset decoder after
+		// a mode change, and supplies the final range.
+		celtEnd := 21
+		if config < 14 {
+			celtEnd = 19
 		}
+		celtLMIdx := 3
+		if frameMs == 10 {
+			celtLMIdx = 2
+		}
+		celtDec := d.celtDecoders[3][celtLMIdx][d.channels-1]
+		if celtDec == nil {
+			return nil, 0, fmt.Errorf("%w: missing CELT decoder", ErrInvalidState)
+		}
+		celtDec.SetStreamChannels(info.channels)
+		if d.prevMode >= 0 && d.prevMode != framing.ModeHybrid && !d.prevRedundancy {
+			celtDec.Reset()
+		} else if d.lastCeltDec != nil && d.lastCeltDec != celtDec {
+			celtDec.CopyStateFrom(d.lastCeltDec)
+		}
+		celtDec.SetAccumulate(true)
+		celtPCM := celtDec.DecodeHybridLoss(17, celtEnd)
+		d.lastCeltDec = celtDec
+		if d.celtResampler != nil {
+			celtPCM = d.celtResampler.Process(celtPCM)
+		}
+		celtPCM = padOrTrim(adjustChannels(celtPCM, celtDec.Channels(), d.channels), packetFrameSize*d.channels)
+		// Accumulated onto the SILK output in float32, unclipped.
+		for i := range silkPCM {
+			silkPCM[i] = float64(float32(silkPCM[i]) + float32(celtPCM[i]))
+		}
+		finalRange = celtDec.LastFinalRange()
 	} else if d.prevMode == framing.ModeHybrid {
 		// For hybrid -> SILK the CELT MDCT fades out through a decoded
 		// silence frame.
 		d.celtSilenceFade(silkPCM, info.channels, celtEndBandForFramingBW(config/4))
+	}
+	if trans != nil {
+		d.applyTransition(silkPCM, trans)
 	}
 	out = append(out, silkPCM...)
 

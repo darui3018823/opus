@@ -200,6 +200,9 @@ func TestHuntFECModeSwitch(t *testing.T) {
 		streams []fecStream
 		segs    []fecSegment
 	}{
+		{"silk-to-hybrid", 1, []fecStream{silkWB, hybFB, hybSWB}, []fecSegment{{0, 20, false}, {1, 20, false}, {0, 20, false}, {2, 20, false}, {0, 20, false}, {1, 20, false}}},
+		{"hybrid-bandwidth", 1, []fecStream{hybSWB, hybFB}, []fecSegment{{0, 20, false}, {1, 20, false}, {0, 20, false}, {1, 20, false}, {0, 20, false}}},
+		{"stereo-silk-to-hybrid", 2, []fecStream{silkStereo, {bw: bwFB, br: 48000, forceCh: 2}}, []fecSegment{{0, 20, false}, {1, 20, false}, {0, 20, false}, {1, 20, false}}},
 		{"hybrid-fec-to-silk", 1, []fecStream{hybFB, silkWB, hybSWB}, []fecSegment{{0, 20, false}, {1, 20, true}, {2, 20, false}, {1, 20, true}, {0, 20, false}, {1, 20, false}}},
 		{"channel-switch", 2, []fecStream{silkMono, silkStereo}, []fecSegment{{0, 20, false}, {1, 20, false}, {0, 20, false}, {1, 20, false}, {0, 20, false}}},
 	}

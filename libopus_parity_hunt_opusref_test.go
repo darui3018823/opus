@@ -68,12 +68,13 @@ func TestHuntProbe(t *testing.T) {
 		t.Skip("OPUS_HUNT_PROBE not set")
 	}
 	var cells []huntCell
-	for _, src := range []string{"speech24s", "tv02", "tv05", "tv08", "tv11"} {
-		for _, rate := range []int{12000, 16000} {
-			for _, ch := range []int{1, 2} {
+	for _, src := range []string{"speech24s", "stspeech", "tv02", "tv05", "tv08", "tv11", "tv12"} {
+		for _, step := range []int{500, 1000} {
+			for _, fs := range []int{1920, 2880, 3840} {
 				for _, vbr := range []int{0, 1} {
-					c := huntSweepCell(src, "voip", vbr, 500)
-					c.rate, c.ch, c.frameSize = rate, ch, rate/50
+					c := huntSweepCell(src, "rsilk", vbr, step)
+					c.frames, c.frameSize = 1500*960/fs, fs
+					c.ctl = append(c.ctl, cs("fec", 1), cs("loss", 10))
 					cells = append(cells, c)
 				}
 			}
@@ -299,6 +300,23 @@ func TestHuntRateSwitchDropsLBRR(t *testing.T) {
 	for _, src := range []string{"speech24s", "tv02", "tv05", "tv11"} {
 		c := huntSweepCell(src, "rsilk", 1, 500)
 		c.ctl = append(c.ctl, cs("fec", 1), cs("loss", 25))
+		cells = append(cells, c)
+	}
+	runHuntCells(t, cells)
+}
+
+// TestHuntMonoToStereoRateSwitch: when a mono -> stereo switch and a SILK
+// rate switch share a call, the side channel starts fresh and copies the
+// mid channel's already switched input resampler.
+func TestHuntMonoToStereoRateSwitch(t *testing.T) {
+	var cells []huntCell
+	for _, cfg := range []struct {
+		src           string
+		vbr, step, fs int
+	}{{"tv08", 0, 1000, 3840}, {"tv08", 1, 1000, 1920}, {"tv11", 0, 500, 1920}, {"speech24s", 0, 500, 2880}} {
+		c := huntSweepCell(cfg.src, "rsilk", cfg.vbr, cfg.step)
+		c.frames, c.frameSize = 1500*960/cfg.fs, cfg.fs
+		c.ctl = append(c.ctl, cs("fec", 1), cs("loss", 10))
 		cells = append(cells, c)
 	}
 	runHuntCells(t, cells)

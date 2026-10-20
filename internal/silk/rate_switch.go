@@ -37,7 +37,8 @@ func (e *Encoder) CarryRateSwitchState(old *Encoder) ([]*Resampler, error) {
 	if old.opusNoActivity {
 		e.SetOpusActivity(VADNoActivity)
 	}
-	if e.side != nil && old.side != nil && old.streamChannels == 2 {
+	// On a mono -> stereo switch the side channel starts fresh instead.
+	if e.side != nil && old.side != nil && old.streamChannels == 2 && old.prevStreamChannels == 2 {
 		r, err := e.side.carryChannelRateSwitch(old.side, false)
 		if err != nil {
 			return nil, err

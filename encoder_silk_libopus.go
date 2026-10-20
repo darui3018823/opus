@@ -126,6 +126,11 @@ func (e *Encoder) switchSILKRateMidStream(rate int, reapply func() error) error 
 			e.silkInputResamplers[ch] = r
 		}
 	}
+	if e.channels == 2 && e.streamChannelsOrInput() == 2 && prevChannels == 1 && len(e.silkInputResamplers) > 1 {
+		// Mono -> stereo in the same call: silk_Encode copies the mid
+		// channel's resampler, already switched, into the side channel.
+		e.silkInputResamplers[1].CopyStateFrom(e.silkInputResamplers[0])
+	}
 	return nil
 }
 

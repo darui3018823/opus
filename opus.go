@@ -5633,6 +5633,20 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	// st->frame_size follows the FEC packet only after the concealed prefix.
 	d.plcFrameSize = packetFrameSize
 
+	if len(frames[0]) <= 1 {
+		// opus_decode_frame treats a first frame of at most one byte as a
+		// loss: it is concealed in the previous mode with a zero final
+		// range, while st->mode already follows the FEC packet.
+		plc, err := d.decodePLCFloat(packetFrameSize)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, plc...)
+		d.lastPacketConfig = config
+		d.lastPacketChannels = info.channels
+		return out, 0, nil
+	}
+
 	rateKHz := silkConfigRateKHz(config)
 	if rateKHz != 8 && rateKHz != 12 && rateKHz != 16 {
 		return nil, 0, fmt.Errorf("%w: invalid SILK rate %d kHz", ErrInvalidPacket, rateKHz)

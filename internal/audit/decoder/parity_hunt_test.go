@@ -141,3 +141,42 @@ func TestHuntCELTSilenceBackground(t *testing.T) {
 		})
 	}
 }
+
+// TestHuntFECShortFirstFrame: FEC from a packet whose first frame has at
+// most one byte is a loss concealed in the previous mode (opus_decode_frame
+// with len <= 1).
+func TestHuntFECShortFirstFrame(t *testing.T) {
+	for _, rate := range []int{48000, 16000} {
+		for _, ch := range []int{1, 2} {
+			t.Run(fmt.Sprintf("%d/%dch", rate, ch), func(t *testing.T) {
+				t.Parallel()
+				fs := rate / 50
+				pcm := audio(t, speechSrc, rate, ch, 4, 1)
+				enc := func(bw, br int) [][]byte {
+					return oracleEncode(t, encCfg{rate: rate, ch: ch, app: appVOIP, bitrate: br, complexity: 9,
+						fec: 1, loss: 30, vbr: 1, bandwidth: bw, signal: sigVoice, frameSize: fs}, pcm).packets
+				}
+				// SILK and hybrid packets alternate every 10 packets; the
+				// FEC carriers of the losses are cut to their TOC or to a
+				// one-byte frame, from the same or the other mode.
+				streams := [2][][]byte{enc(bwWB, 20000), enc(bwFB, 40000)}
+				var ops []op
+				for i := range streams[0] {
+					p := streams[(i/10)%2][i]
+					if i%5 == 4 && i+1 < len(streams[0]) {
+						next := streams[((i+1)/10)%2][i+1]
+						short := []byte{next[0]}
+						if i%10 == 4 {
+							short = []byte{next[0], next[1]}
+						}
+						ops = append(ops, op{code: 1, fmt: fmtF32, fec: true, frameSize: fs, data: short})
+						continue
+					}
+					ops = append(ops, op{code: 1, fmt: fmtF32, frameSize: 5760 * rate / 48000, data: p})
+				}
+				cfg, g := newSingle(t, rate, ch)
+				requireExact(t, cfg, ops, g)
+			})
+		}
+	}
+}

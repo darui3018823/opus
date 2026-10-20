@@ -255,6 +255,9 @@ type Encoder struct {
 	// inputLSBDepth is the precision of the API call (16 for Encode, 24 for
 	// Encode24 / EncodeFloat); libopus uses IMIN(call depth, OPUS_SET_LSB_DEPTH).
 	inputLSBDepth int
+	// inputIntegerAPI marks Encode / Encode24 input (downmix_int*) for the
+	// analysis.
+	inputIntegerAPI bool
 	// analysis is the tonality analysis state (libopus st->analysis), run at
 	// complexity >= 7 on the raw input of every frame.
 	analysis *celt.TonalityAnalysis
@@ -524,7 +527,7 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 		floatPCM[i] = float64(pcm[i]) / 32768.0
 	}
 
-	e.inputLSBDepth = 16
+	e.inputLSBDepth, e.inputIntegerAPI = 16, true
 	return e.encodeCallerFrame(floatPCM, frameSize, selectedFrameSize)
 }
 
@@ -554,7 +557,7 @@ func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608.0
 	}
-	e.inputLSBDepth = 24
+	e.inputLSBDepth, e.inputIntegerAPI = 24, true
 	return e.encodeCallerFrame(floatPCM, frameSize, selectedFrameSize)
 }
 
@@ -573,7 +576,7 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
 
-	e.inputLSBDepth = 24
+	e.inputLSBDepth, e.inputIntegerAPI = 24, false
 	return e.encodeCallerFrame(pcm[:expectedSize], frameSize, selectedFrameSize)
 }
 
@@ -594,7 +597,7 @@ func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
 		floatPCM[i] = float64(pcm[i])
 	}
 	// opus_encode_float passes an LSB depth of 24.
-	e.inputLSBDepth = 24
+	e.inputLSBDepth, e.inputIntegerAPI = 24, false
 	return e.encodeCallerFrame(floatPCM, frameSize, selectedFrameSize)
 }
 
@@ -684,6 +687,7 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 		} else if e.callerPCM != nil {
 			analysisPCM, analysisFrameSize = e.callerPCM, e.callerFrameSize
 		}
+		e.analysis.SetIntegerInput(e.inputIntegerAPI)
 		analysisInfo = e.analysis.Run(analysisPCM, analysisFrameSize, frameSize, e.channels, lsbDepth)
 	} else if e.analysis != nil && e.analysis.Initialized() {
 		e.analysis.Reset()

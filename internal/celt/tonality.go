@@ -48,7 +48,10 @@ type AnalysisInfo struct {
 
 // TonalityAnalysis is libopus TonalityAnalysisState.
 type TonalityAnalysis struct {
-	fs               int
+	fs int
+	// integerInput selects downmix_int / downmix_int24 (opus_encode,
+	// opus_encode24) over downmix_float: no +6 dBFS cap.
+	integerInput     bool
 	angle            [240]float32
 	dAngle           [240]float32
 	d2Angle          [240]float32
@@ -105,6 +108,10 @@ func (t *TonalityAnalysis) Reset() {
 // last reset (libopus st->analysis.initialized).
 func (t *TonalityAnalysis) Initialized() bool { return t.initialized }
 
+// SetIntegerInput tells the analysis whether the encoder input came through
+// an integer API (opus_encode / opus_encode24), whose downmix is uncapped.
+func (t *TonalityAnalysis) SetIntegerInput(v bool) { t.integerInput = v }
+
 // silkResamplerDown2HP is the float silk_resampler_down2_hp: a 2:1
 // decimating all-pass pair that also returns the high-pass energy.
 func silkResamplerDown2HP(S *[3]float32, out []float32, in []float32, inLen int) float32 {
@@ -143,7 +150,7 @@ func silkResamplerDown2HP(S *[3]float32, out []float32, in []float32, inLen int)
 // channels of the float input (interleaved, C channels, samples in [-1, 1])
 // are summed, scaled to the CELT signal domain, capped at +6 dBFS, halved
 // for stereo and decimated to 24 kHz.
-func downmixAndResample(x []float64, y []float32, S *[3]float32, subframe, offset, C, fs int, scratch *[]float32) float32 {
+func downmixAndResample(x []float64, y []float32, S *[3]float32, subframe, offset, C, fs int, capSignal bool, scratch *[]float32) float32 {
 	if subframe == 0 {
 		return 0
 	}
@@ -166,8 +173,9 @@ func downmixAndResample(x []float64, y []float32, S *[3]float32, subframe, offse
 			tmp[j] += float32(float32(x[(j+offset)*C+c]) * 32768)
 		}
 	}
-	// Cap signal to +6 dBFS to avoid problems in the analysis.
-	for j := 0; j < subframe; j++ {
+	// Cap signal to +6 dBFS to avoid problems in the analysis (downmix_float
+	// only: downmix_int and downmix_int24 sum the channels uncapped).
+	for j := 0; j < subframe && capSignal; j++ {
 		if tmp[j] < -65536 {
 			tmp[j] = -65536
 		}
@@ -300,7 +308,7 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 		offset = 3 * offset / 2
 	}
 	t.hpEnerAccum += downmixAndResample(x, t.inmem[t.memFill:], &t.downmixState,
-		minInt(length, analysisBufSize-t.memFill), offset, C, t.fs, &t.dmTmp)
+		minInt(length, analysisBufSize-t.memFill), offset, C, t.fs, !t.integerInput, &t.dmTmp)
 	if t.memFill+length < analysisBufSize {
 		t.memFill += length
 		// Don't have enough to update the analysis.
@@ -325,7 +333,7 @@ func (t *TonalityAnalysis) tonalityAnalysis(x []float64, length, offset, C, lsbD
 	copy(t.inmem[:240], t.inmem[analysisBufSize-240:])
 	remaining := length - (analysisBufSize - t.memFill)
 	t.hpEnerAccum = downmixAndResample(x, t.inmem[240:], &t.downmixState,
-		remaining, offset+analysisBufSize-t.memFill, C, t.fs, &t.dmTmp)
+		remaining, offset+analysisBufSize-t.memFill, C, t.fs, !t.integerInput, &t.dmTmp)
 	t.memFill = 240 + remaining
 	if isSilence {
 		// On silence, copy the previous analysis.

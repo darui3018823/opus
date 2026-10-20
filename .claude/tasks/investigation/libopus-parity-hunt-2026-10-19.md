@@ -87,12 +87,28 @@ frames follows the C code but no available input exercised a non-zero tail.
 | D7 | fix(decoder): follow a SILK channel switch in the FEC resamplers |
 | D8 | fix(decoder): conceal FEC from a packet with a short first frame |
 
+| new | fix(celt): run the comb post-filter on hybrid frames |
+
+The last one was found in `TestMalformedPackets`: a SILK packet whose
+trailing bytes decode as a SILK->CELT redundant frame leaves a post-filter in
+the CELT state, and the next hybrid frame (no reset, `prev_redundancy`) must
+fade it out; the Go decoder skipped the comb filter whenever `start != 0`.
+The audit harness also drove projection PLC / FEC as unimplemented; it now
+calls the real API (`test(opusref): drive projection PLC and FEC in the
+decoder audit`), which fixed 8 of the 9 `TestMultistreamSurround/k2` cells.
+
 Regression tests: `internal/audit/decoder/parity_hunt_test.go`
 (`OPUS_LIBOPUS_AUDIT=1 go test ./internal/audit/decoder -run TestHunt`).
-Decoder audit failures went from 138 to 49; the rest predate this work:
-12 `TestSplicedVectors` cells differ only in `Bandwidth()` before the first
-packet (documented Go semantics), 28 `TestMalformedPackets`, 9
-`TestMultistreamSurround/k2`.
+Decoder audit failures went from 138 to 37, none of them a decoding
+difference:
+
+- 24 `TestMalformedPackets` cells: `DecodeFloat32` on a zero-length packet
+  returns an error, while libopus conceals the caller's buffer length; the Go
+  float API has no length to conceal (API decision).
+- 12 `TestSplicedVectors` cells: `Bandwidth()` before the first packet
+  returns `BandwidthAuto` where libopus returns 0 (documented Go semantics).
+- 1 `TestMultistreamSurround/k2` 9-channel float cell: one sample differs by
+  1.1e-13 (int16 and 24-bit output match exactly); not investigated further.
 
 ## API and multistream fixes
 

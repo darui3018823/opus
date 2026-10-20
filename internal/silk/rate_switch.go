@@ -68,10 +68,9 @@ func (e *Encoder) carryChannelRateSwitch(old *Encoder, mono bool) (*Resampler, e
 	e.lbrrGainIncreases = old.lbrrGainIncreases
 	e.lbrrPrevLastGainIndex = old.lbrrPrevLastGainIndex
 	e.lbrrFlag = old.lbrrFlag
-	e.pendingLBRR = old.pendingLBRR
-	e.pendingLBRRFrames = old.pendingLBRRFrames
-	e.pendingLBRRStereoPred = old.pendingLBRRStereoPred
-	e.pendingLBRRStereoMidOnly = old.pendingLBRRStereoMidOnly
+	// The previous packet's LBRR is dropped: silk_setup_fs sets
+	// first_frame_after_reset, and silk_Encode clears LBRR_flags after the
+	// control pass of such a channel.
 	e.inputBuf = old.inputBuf
 	// The transition state carries on; only its filter state is reset.
 	e.lp = old.lp

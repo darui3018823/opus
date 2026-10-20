@@ -290,3 +290,16 @@ func TestHuntEqualRateSwitchResampler(t *testing.T) {
 	}
 	runHuntCells(t, cells)
 }
+
+// TestHuntRateSwitchDropsLBRR: a SILK rate switch sets
+// first_frame_after_reset, after which silk_Encode clears the pending LBRR
+// flags, so the switch packet carries no redundancy for the previous one.
+func TestHuntRateSwitchDropsLBRR(t *testing.T) {
+	var cells []huntCell
+	for _, src := range []string{"speech24s", "tv02", "tv05", "tv11"} {
+		c := huntSweepCell(src, "rsilk", 1, 500)
+		c.ctl = append(c.ctl, cs("fec", 1), cs("loss", 25))
+		cells = append(cells, c)
+	}
+	runHuntCells(t, cells)
+}

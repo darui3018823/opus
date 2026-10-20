@@ -62,27 +62,6 @@ func runHuntCells(t *testing.T, cells []huntCell) {
 	}
 }
 
-// TestHuntProbe is a scratch matrix used to find triggers.
-func TestHuntProbe(t *testing.T) {
-	if os.Getenv("OPUS_HUNT_PROBE") == "" {
-		t.Skip("OPUS_HUNT_PROBE not set")
-	}
-	var cells []huntCell
-	for _, src := range []string{"speech24s", "stspeech", "tv02", "tv05", "tv08", "tv11", "tv12"} {
-		for _, step := range []int{500, 1000} {
-			for _, fs := range []int{1920, 2880, 3840} {
-				for _, vbr := range []int{0, 1} {
-					c := huntSweepCell(src, "rsilk", vbr, step)
-					c.frames, c.frameSize = 1500*960/fs, fs
-					c.ctl = append(c.ctl, cs("fec", 1), cs("loss", 10))
-					cells = append(cells, c)
-				}
-			}
-		}
-	}
-	runHuntCells(t, cells)
-}
-
 // TestHuntThetaRDOLastBand: with theta RDO (stereo, complexity >= 8) the
 // last band keeps lowband_scratch (bands.c: `if (last && !theta_rdo)`), so
 // the round-down pass does not fold from a modified norm.

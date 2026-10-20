@@ -135,7 +135,11 @@ future policy changes still require a concrete scoreboard target first.
 
 Public multistream and surround entry points:
 
-- `NewMultistreamEncoder(...) (*MultistreamEncoder, error)`
+- `NewMultistreamEncoder(...) (*MultistreamEncoder, error)` /
+  `NewMultistreamEncoderWithProfile(..., profile EncoderProfile)`
+  (`EncoderProfileLibopus`: automatic bitrate, complexity 9 and constrained
+  VBR on every stream, the libopus create-time defaults; the plain
+  constructors keep complexity 5 and CBR)
 - `NewMultistreamDecoder(...) (*MultistreamDecoder, error)`
 - int16, signed-24-bit-in-int32, float32, and float64 encode/decode methods
 - multistream/surround int16, signed-24-bit-in-int32, float32, and float64 PLC
@@ -146,7 +150,8 @@ Public multistream and surround entry points:
   prediction/phase-inversion, bandwidth, and expert frame-duration controls;
   aggregate decoder gain/phase controls; reset, mapping, stream-count,
   coupled-stream-count, bandwidth/duration, and final-range getters
-- `NewSurroundEncoder(...) (*SurroundEncoder, error)`
+- `NewSurroundEncoder(...) (*SurroundEncoder, error)` /
+  `NewSurroundEncoderWithProfile(..., profile EncoderProfile)`
 - `NewSurroundDecoder(...) (*SurroundDecoder, error)`
 - mapping families 0 (mono/stereo), 1 (Vorbis order, 1 through 8 channels), and
   255 (discrete uncoupled channels)
@@ -168,7 +173,8 @@ parent and committed only after successful packet assembly.
 
 Public projection and Ambisonics entry points:
 
-- `NewProjectionEncoder(...) (*ProjectionEncoder, error)`
+- `NewProjectionEncoder(...) (*ProjectionEncoder, error)` /
+  `NewProjectionEncoderWithProfile(..., profile EncoderProfile)`
 - `NewProjectionDecoder(...) (*ProjectionDecoder, error)`
 - `NewAmbisonicsEncoder(...) (*ProjectionEncoder, error)`
 - `NewAmbisonicsDecoder(...) (*AmbisonicsDecoder, error)`
@@ -1586,8 +1592,36 @@ Residual differences:
   `perfSpeechFrame`, 2026-10-15).
 - API: the packet getters, `PacketExtensionsCount`, `NewEncoder` defaults
   (Legacy profile), `Bitrate()`/`EffectiveBitrate()`, mid-stream
-  `SetApplication` and the early `SetExpertFrameDuration` validation keep
-  their documented Go semantics.
+  `SetApplication`, the early single-stream `SetExpertFrameDuration`
+  validation and `Encoder.Bandwidth()` (a pre-encode prediction under both
+  policies, where `OPUS_GET_BANDWIDTH` returns the last coded bandwidth)
+  keep their documented Go semantics. Mapping family 2 in
+  `NewProjectionEncoder` is a Go extension.
+- Projection `Encode24`: `opus_projection_encode24` passes `downmix_int`
+  (an int16 reader) for its 24-bit input, so libopus's tonality analysis
+  reads the int32 samples as pairs of int16 values. The Go encoder analyses
+  the real 24-bit input and does not mirror this libopus bug, so
+  complexity >= 7 projection `Encode24` packets can differ from libopus.
+
+Behavior changes from the 2026-10-19 parity hunt fixes (API and
+multistream):
+
+- `Encoder.SetMaxPacketSize(1)` codes 60-120 ms packets as a one-byte SILK
+  PLC frame and refuses 100 ms packets with `ErrBufferTooSmall`.
+- `DecodeFEC*` with an empty packet conceal (single stream, multistream and
+  projection) instead of failing; a FEC carrier whose first frame has at
+  most one byte leaves `FinalRange` at 0.
+- Invalid frame sizes wrap `ErrBadArg` as well as `ErrUnsupportedFrameSize`.
+- `SetPacketLossPerc` ignores values outside 0..100 instead of clamping.
+- `SetApplication` fails on a RESTRICTED_SILK/CELT encoder even with its own
+  value; a RESTRICTED_SILK encoder ignores `SetPhaseInversionDisabled`.
+- The multistream encoder's default output buffer is 1500 bytes per stream
+  (a CBR packet at `BitrateMax` was 1.95 MB); `MaxPacketSize` reports it.
+- `NewProjectionEncoder` layout errors also wrap `ErrAllocFail`.
+- The multistream/surround/projection `SetExpertFrameDuration` is kept by the
+  multistream encoder without validation or forwarding to the streams (an
+  invalid value fails the next encode with `ErrBadArg`), and the streams'
+  tonality analysis reads the caller's whole frame.
 
 Behavior changes from the audit fixes that callers can observe:
 

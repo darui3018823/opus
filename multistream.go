@@ -83,6 +83,53 @@ func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, ma
 	}, nil
 }
 
+// NewMultistreamEncoderWithProfile is NewMultistreamEncoder with an explicit
+// defaults profile. EncoderProfileLegacy keeps NewMultistreamEncoder's
+// defaults (complexity 5 and CBR on every elementary stream).
+// EncoderProfileLibopus uses opus_multistream_encoder_create's defaults:
+// automatic bitrate, complexity 9 and constrained VBR, as
+// NewEncoderWithProfile does for a single stream. An unknown profile
+// returns ErrBadArg.
+func NewMultistreamEncoderWithProfile(sampleRate, channels, streams, coupledStreams int, mapping []byte, application Application, profile EncoderProfile) (*MultistreamEncoder, error) {
+	if err := validateEncoderProfile(profile); err != nil {
+		return nil, err
+	}
+	enc, err := NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams, mapping, application)
+	if err != nil {
+		return nil, err
+	}
+	if err := enc.applyEncoderProfile(profile); err != nil {
+		return nil, err
+	}
+	return enc, nil
+}
+
+// validateEncoderProfile rejects an unknown EncoderProfile with ErrBadArg.
+func validateEncoderProfile(profile EncoderProfile) error {
+	if profile != EncoderProfileLegacy && profile != EncoderProfileLibopus {
+		return fmt.Errorf("%w: unsupported encoder profile %d", ErrBadArg, profile)
+	}
+	return nil
+}
+
+// applyEncoderProfile sets the elementary streams' defaults of profile:
+// libopus creates every stream encoder with automatic bitrate, complexity 9
+// and constrained VBR (opus_encoder_init).
+func (e *MultistreamEncoder) applyEncoderProfile(profile EncoderProfile) error {
+	if profile != EncoderProfileLibopus {
+		return nil
+	}
+	if err := e.SetBitrate(BitrateAuto); err != nil {
+		return err
+	}
+	if err := e.SetComplexity(ComplexityDefault); err != nil {
+		return err
+	}
+	e.SetVBR(true)
+	e.SetVBRConstraint(true)
+	return nil
+}
+
 // Streams returns the number of elementary Opus streams.
 func (e *MultistreamEncoder) Streams() int { return e.streams }
 

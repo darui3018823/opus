@@ -49,6 +49,42 @@ func TestFrameSizeErrorsAreBadArg(t *testing.T) {
 	check("multistream DecodePLC", err)
 }
 
+// TestMultistreamProfileDefaults: EncoderProfileLibopus gives every
+// elementary stream libopus's create-time defaults (opus_encoder_init:
+// complexity 9, VBR, constrained VBR, automatic bitrate); the legacy
+// constructors keep complexity 5 and CBR.
+func TestMultistreamProfileDefaults(t *testing.T) {
+	ms, err := NewMultistreamEncoderWithProfile(48000, 3, 2, 1, []byte{0, 1, 2}, ApplicationAudio, EncoderProfileLibopus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sur, err := NewSurroundEncoderWithProfile(48000, 6, MappingFamilyVorbis, ApplicationAudio, EncoderProfileLibopus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proj, err := NewProjectionEncoderWithProfile(48000, 4, MappingFamilyProjection, ApplicationAudio, EncoderProfileLibopus)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := NewMultistreamEncoder(48000, 3, 2, 1, []byte{0, 1, 2}, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, e := range map[string]*MultistreamEncoder{"ms": ms, "surround": sur.MultistreamEncoder, "projection": proj.multistream} {
+		for s, enc := range e.encoders {
+			if enc.Complexity() != ComplexityDefault || !enc.VBR() || !enc.VBRConstraint() || enc.Bitrate() != BitrateAuto {
+				t.Fatalf("%s stream %d: complexity %d vbr %v constraint %v bitrate %d", name, s, enc.Complexity(), enc.VBR(), enc.VBRConstraint(), enc.Bitrate())
+			}
+		}
+	}
+	if legacy.Complexity() != 5 || legacy.VBR() {
+		t.Fatalf("legacy defaults changed: complexity %d vbr %v", legacy.Complexity(), legacy.VBR())
+	}
+	if _, err := NewSurroundEncoderWithProfile(48000, 2, 0, ApplicationAudio, EncoderProfile(9)); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("unknown profile = %v, want ErrBadArg", err)
+	}
+}
+
 // TestPacketLossPercRejectsOutOfRange: OPUS_SET_PACKET_LOSS_PERC returns
 // OPUS_BAD_ARG for values outside 0..100 and keeps the previous value
 // (opus_encoder.c:2982); the multistream CTL forwards it to every stream.

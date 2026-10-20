@@ -90,6 +90,30 @@ func NewProjectionEncoder(sampleRate, channels, mappingFamily int, application A
 	return e, nil
 }
 
+// NewProjectionEncoderWithProfile is NewProjectionEncoder with an explicit
+// defaults profile; see NewMultistreamEncoderWithProfile.
+// EncoderProfileLibopus gives the defaults of
+// opus_projection_ambisonics_encoder_create: automatic bitrate,
+// complexity 9 and constrained VBR.
+func NewProjectionEncoderWithProfile(sampleRate, channels, mappingFamily int, application Application, profile EncoderProfile) (*ProjectionEncoder, error) {
+	if err := validateEncoderProfile(profile); err != nil {
+		return nil, err
+	}
+	enc, err := NewProjectionEncoder(sampleRate, channels, mappingFamily, application)
+	if err != nil {
+		return nil, err
+	}
+	if profile == EncoderProfileLibopus {
+		if err := enc.SetBitrate(BitrateAuto); err != nil {
+			return nil, err
+		}
+		if err := enc.multistream.applyEncoderProfile(profile); err != nil {
+			return nil, err
+		}
+	}
+	return enc, nil
+}
+
 // SetModePolicy selects the automatic decision policy; see
 // MultistreamEncoder.SetModePolicy. Under ModePolicyLibopus, mapping family
 // 3 follows opus_projection_encode* and family 2

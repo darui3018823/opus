@@ -44,7 +44,7 @@ type aCfg struct {
 	pcm      []float32 // interleaved
 	steps    []aStep
 	noFloat  bool
-	profile  bool // NewEncoderWithProfile(EncoderProfileLibopus)
+	profile  bool // the *WithProfile constructors with EncoderProfileLibopus
 	onPacket func(pkt int, g auditGoEncoder, goPkt, cPkt []byte)
 	oracle   string // executable to run; auditOraclePath() when empty
 }
@@ -346,6 +346,10 @@ func newAuditGoEncoder(t *testing.T, c aCfg) (auditGoEncoder, error) {
 		}
 		return auditGoEncoder{enc: e}, nil
 	}
+	profile := EncoderProfileLegacy
+	if c.profile {
+		profile = EncoderProfileLibopus
+	}
 	switch c.family {
 	case -1:
 		layout, err := surroundLayoutFor(c.ch, MappingFamilyVorbis)
@@ -355,7 +359,7 @@ func newAuditGoEncoder(t *testing.T, c aCfg) (auditGoEncoder, error) {
 		if err != nil {
 			return auditGoEncoder{}, err
 		}
-		enc, err := NewMultistreamEncoder(c.rate, c.ch, layout.streams, layout.coupledStreams, layout.mapping, app)
+		enc, err := NewMultistreamEncoderWithProfile(c.rate, c.ch, layout.streams, layout.coupledStreams, layout.mapping, app, profile)
 		if err != nil {
 			return auditGoEncoder{}, err
 		}
@@ -363,7 +367,7 @@ func newAuditGoEncoder(t *testing.T, c aCfg) (auditGoEncoder, error) {
 		_ = enc.SetMaxPacketSize(7656)
 		return auditGoEncoder{ms: enc}, nil
 	case 2, 3:
-		enc, err := NewProjectionEncoder(c.rate, c.ch, c.family, app)
+		enc, err := NewProjectionEncoderWithProfile(c.rate, c.ch, c.family, app, profile)
 		if err != nil {
 			return auditGoEncoder{}, err
 		}
@@ -371,7 +375,7 @@ func newAuditGoEncoder(t *testing.T, c aCfg) (auditGoEncoder, error) {
 		_ = enc.SetMaxPacketSize(7656)
 		return auditGoEncoder{ms: enc.multistream, proj: enc}, nil
 	default:
-		enc, err := NewSurroundEncoder(c.rate, c.ch, c.family, app)
+		enc, err := NewSurroundEncoderWithProfile(c.rate, c.ch, c.family, app, profile)
 		if err != nil {
 			return auditGoEncoder{}, err
 		}

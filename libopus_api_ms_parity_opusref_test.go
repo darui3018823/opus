@@ -165,6 +165,52 @@ func TestParityMultistreamDecodeFECEmptyPacket(t *testing.T) {
 	}
 }
 
+// TestParityMultistreamExpertDurationCTL: the multistream
+// OPUS_SET_EXPERT_FRAME_DURATION stores any value without validation
+// (opus_multistream_encoder.c:1303), reads it back, and an invalid value
+// makes the encode fail with OPUS_BAD_ARG (frame_size_select, line 888).
+func TestParityMultistreamExpertDurationCTL(t *testing.T) {
+	const fs, ch, n = 48000, 3, 960
+	mapping := []byte{0, 1, 2}
+	for _, v := range []int{4999, 5000, 5001, 5003, 5006, 5009, 5010, 6000} {
+		le, _ := cgoref.NewAudMSEncoder(fs, ch, 2, 1, mapping, ApplicationAudio)
+		ge, err := NewMultistreamEncoderWithProfile(fs, ch, 2, 1, mapping, ApplicationAudio, EncoderProfileLibopus)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lr := le.Set(SetExpertFrameDurationRequest, v)
+		gerr := ge.SetExpertFrameDuration(ExpertFrameDuration(v))
+		if (lr == 0) != (gerr == nil) {
+			t.Fatalf("set %d: lib=%d go=%v", v, lr, gerr)
+		}
+		if lv, _ := le.Get(GetExpertFrameDurationRequest); lv != int(ge.ExpertFrameDuration()) {
+			t.Fatalf("get after %d: lib=%d go=%d", v, lv, ge.ExpertFrameDuration())
+		}
+		for _, frame := range []int{120, 960, 2880} {
+			pcm := sineF32(frame, ch, fs, 440, 0.3, 0)
+			lp, lr := le.EncodeFloat(pcm, frame, 7656)
+			gp, gerr := ge.EncodeFloat32(pcm, frame)
+			if (lr > 0) != (gerr == nil) || (lr == -1) != errors.Is(gerr, ErrBadArg) {
+				t.Fatalf("duration %d frame %d: lib=%d go=%v", v, frame, lr, gerr)
+			}
+			if lr > 0 {
+				ld, _ := MultistreamPacketGetNumSamples(lp, 2, fs)
+				gd, _ := MultistreamPacketGetNumSamples(gp, 2, fs)
+				if ld != gd {
+					t.Fatalf("duration %d frame %d: lib %d samples, go %d", v, frame, ld, gd)
+				}
+			}
+		}
+		for s := 0; s < 2; s++ {
+			child, _ := ge.StreamEncoder(s)
+			if child.ExpertFrameDuration() != ExpertFrameDurationArgument {
+				t.Fatalf("stream %d duration %d: the multistream CTL is not forwarded", s, child.ExpertFrameDuration())
+			}
+		}
+		le.Close()
+	}
+}
+
 // TestParityRestrictedApplicationCTLs: OPUS_SET_APPLICATION fails on a
 // RESTRICTED_SILK / RESTRICTED_CELT encoder even with its own value
 // (opus_encoder.c:2789), and a RESTRICTED_SILK encoder ignores

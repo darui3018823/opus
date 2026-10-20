@@ -28,6 +28,10 @@ type MultistreamEncoder struct {
 	// maxPacketSize is SetMaxPacketSize (0: defaultOutDataBytes per
 	// stream).
 	maxPacketSize int
+	// application and expertFrameDuration are st->application (fixed at
+	// creation) and st->variable_duration of the multistream encoder.
+	application         Application
+	expertFrameDuration ExpertFrameDuration
 }
 
 // SetMaxPacketSize sets the size of the output buffer that libopus's
@@ -76,14 +80,16 @@ func NewMultistreamEncoder(sampleRate, channels, streams, coupledStreams int, ma
 		encoders[stream] = enc
 	}
 	return &MultistreamEncoder{
-		sampleRate:     sampleRate,
-		channels:       channels,
-		streams:        streams,
-		coupledStreams: coupledStreams,
-		mapping:        append([]byte(nil), mapping...),
-		encoders:       encoders,
-		bitrate:        BitrateAuto,
-		lfeStream:      -1,
+		sampleRate:          sampleRate,
+		channels:            channels,
+		streams:             streams,
+		coupledStreams:      coupledStreams,
+		mapping:             append([]byte(nil), mapping...),
+		encoders:            encoders,
+		bitrate:             BitrateAuto,
+		lfeStream:           -1,
+		application:         application,
+		expertFrameDuration: ExpertFrameDurationArgument,
 		// The libopus policy is the default since v1.5.0, like the
 		// elementary encoders'.
 		libopusPolicy: true,
@@ -402,47 +408,30 @@ func (e *MultistreamEncoder) GetBandwidth() int { return e.Bandwidth() }
 // libopus multistream GET CTL semantics.
 func (e *MultistreamEncoder) Lookahead() int { return e.encoders[0].Lookahead() }
 
-// SetExpertFrameDuration applies a fixed packet duration to every elementary
-// stream. Argument restores frameSize-selected durations.
+// SetExpertFrameDuration is the multistream OPUS_SET_EXPERT_FRAME_DURATION:
+// it selects the packet duration of the multistream encoder itself, which
+// codes every elementary stream with the selected frame size (their own
+// expert durations do not apply). Argument restores frameSize-selected
+// durations. Like libopus, the value is stored without validation; an
+// invalid duration makes the next Encode fail with ErrBadArg.
 func (e *MultistreamEncoder) SetExpertFrameDuration(duration ExpertFrameDuration) error {
-	if _, ok := frameSizeForExpertDuration(duration, e.sampleRate, 0); !ok {
-		return fmt.Errorf("%w: invalid expert frame duration %d", ErrBadArg, duration)
-	}
-	for _, enc := range e.encoders {
-		if err := enc.SetExpertFrameDuration(duration); err != nil {
-			return err
-		}
-	}
+	e.expertFrameDuration = duration
 	return nil
 }
 
-// ExpertFrameDuration returns the packet-duration selection shared by all
-// elementary streams.
+// ExpertFrameDuration returns the SetExpertFrameDuration value.
 func (e *MultistreamEncoder) ExpertFrameDuration() ExpertFrameDuration {
-	if len(e.encoders) == 0 {
-		return ExpertFrameDurationArgument
-	}
-	return e.encoders[0].ExpertFrameDuration()
+	return e.expertFrameDuration
 }
 
+// selectEncodeFrameSize is frame_size_select with the multistream
+// encoder's own application and expert duration
+// (opus_multistream_encode_native).
 func (e *MultistreamEncoder) selectEncodeFrameSize(frameSize int) (int, error) {
 	if len(e.encoders) == 0 {
 		return 0, fmt.Errorf("%w: no multistream encoders", ErrInvalidState)
 	}
-	selected, err := e.encoders[0].selectEncodeFrameSize(frameSize)
-	if err != nil {
-		return 0, fmt.Errorf("stream 0: %w", err)
-	}
-	for stream := 1; stream < len(e.encoders); stream++ {
-		streamSelected, err := e.encoders[stream].selectEncodeFrameSize(frameSize)
-		if err != nil {
-			return 0, fmt.Errorf("stream %d: %w", stream, err)
-		}
-		if streamSelected != selected {
-			return 0, fmt.Errorf("%w: stream %d selects %d samples, stream 0 selects %d", ErrInvalidState, stream, streamSelected, selected)
-		}
-	}
-	return selected, nil
+	return frameSizeSelect(e.application, frameSize, e.expertFrameDuration, e.sampleRate)
 }
 
 // Encode encodes interleaved int16 PCM.
@@ -455,12 +444,11 @@ func (e *MultistreamEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) 
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	selected := selectedFrameSize * e.channels
-	floatPCM := make([]float64, selected)
+	floatPCM := make([]float64, required)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768
 	}
-	return e.encodeFloatSelected(floatPCM, selectedFrameSize, 16)
+	return e.encodeFloatSelected(floatPCM, frameSize, selectedFrameSize, 16)
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
@@ -473,12 +461,11 @@ func (e *MultistreamEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	selected := selectedFrameSize * e.channels
-	floatPCM := make([]float64, selected)
+	floatPCM := make([]float64, required)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608
 	}
-	return e.encodeFloatSelected(floatPCM, selectedFrameSize, 24)
+	return e.encodeFloatSelected(floatPCM, frameSize, selectedFrameSize, 24)
 }
 
 // EncodeFloat32 encodes interleaved float32 PCM.
@@ -491,12 +478,11 @@ func (e *MultistreamEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	selected := selectedFrameSize * e.channels
-	floatPCM := make([]float64, selected)
+	floatPCM := make([]float64, required)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i])
 	}
-	return e.encodeFloatSelected(floatPCM, selectedFrameSize, 24)
+	return e.encodeFloatSelected(floatPCM, frameSize, selectedFrameSize, 24)
 }
 
 // EncodeFloat encodes interleaved float64 PCM.
@@ -509,15 +495,17 @@ func (e *MultistreamEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	return e.encodeFloatSelected(pcm[:selectedFrameSize*e.channels], selectedFrameSize, 24)
+	return e.encodeFloatSelected(pcm[:required], frameSize, selectedFrameSize, 24)
 }
 
-// encodeFloatSelected encodes one packet; lsbDepth is the input's sample
-// depth (the libopus policy's lsb_depth).
-func (e *MultistreamEncoder) encodeFloatSelected(pcm []float64, selectedFrameSize, lsbDepth int) ([]byte, error) {
+// encodeFloatSelected encodes one packet of the first selectedFrameSize
+// samples of the caller's frameSize samples (callerPCM); lsbDepth is the
+// input's sample depth (the libopus policy's lsb_depth).
+func (e *MultistreamEncoder) encodeFloatSelected(callerPCM []float64, frameSize, selectedFrameSize, lsbDepth int) ([]byte, error) {
 	if e.libopusPolicy {
-		return e.encodeLibopus(pcm, selectedFrameSize, lsbDepth, nil)
+		return e.encodeLibopus(callerPCM, frameSize, selectedFrameSize, lsbDepth, nil)
 	}
+	pcm := callerPCM[:selectedFrameSize*e.channels]
 	var commitPolicy func()
 	if e.beforeEncodeFloat != nil {
 		var err error
@@ -543,7 +531,10 @@ func (e *MultistreamEncoder) encodeFloatSelected(pcm []float64, selectedFrameSiz
 				streamPCM[i*streamChannels+codedChannel] = pcm[i*e.channels+inputChannel]
 			}
 		}
-		packet, err := enc.EncodeFloat(streamPCM, selectedFrameSize)
+		// The multistream encoder selected the frame size: the stream's
+		// own expert duration does not apply.
+		enc.inputLSBDepth = 24
+		packet, err := enc.encodeFloat(streamPCM, selectedFrameSize)
 		if err != nil {
 			return nil, fmt.Errorf("stream %d: %w", stream, err)
 		}

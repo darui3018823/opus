@@ -134,12 +134,19 @@ func (e *MultistreamEncoder) libopusRateAllocation(frameSize int) ([]int, int) {
 	return rates, sum
 }
 
-// encodeLibopus is opus_multistream_encode_native. lsbDepth is the input's
-// depth (16 for int16, 24 otherwise); analysisPCM, when not nil, is the
-// input the elementary encoders' tonality analysis reads instead of their
-// own (the projection encoder's unmixed channels).
-func (e *MultistreamEncoder) encodeLibopus(pcm []float64, frameSize, lsbDepth int, analysisPCM []float64) ([]byte, error) {
+// encodeLibopus is opus_multistream_encode_native. callerPCM holds the
+// caller's callerFrameSize samples per channel (analysis_pcm and
+// analysis_frame_size), of which the first frameSize are coded. lsbDepth
+// is the input's depth (16 for int16, 24 otherwise); analysisPCM, when not
+// nil, is the callerFrameSize-sample input the elementary encoders'
+// tonality analysis reads instead of callerPCM (the projection encoder's
+// unmixed channels).
+func (e *MultistreamEncoder) encodeLibopus(callerPCM []float64, callerFrameSize, frameSize, lsbDepth int, analysisPCM []float64) ([]byte, error) {
 	fs := e.sampleRate
+	pcm := callerPCM[:frameSize*e.channels]
+	if analysisPCM == nil && callerFrameSize > frameSize {
+		analysisPCM = callerPCM
+	}
 	vbr := e.encoders[0].rateMode != celt.RateModeCBR
 	smallest := e.streams*2 - 1
 	if fs/frameSize == 10 {
@@ -205,7 +212,7 @@ func (e *MultistreamEncoder) encodeLibopus(pcm []float64, frameSize, lsbDepth in
 		streamPCM := make([]float64, frameSize*streamChannels)
 		var streamAnalysis []float64
 		if analysisPCM != nil {
-			streamAnalysis = make([]float64, frameSize*streamChannels)
+			streamAnalysis = make([]float64, callerFrameSize*streamChannels)
 		}
 		for codedChannel := 0; codedChannel < streamChannels; codedChannel++ {
 			mapped := s*2 + codedChannel
@@ -218,9 +225,9 @@ func (e *MultistreamEncoder) encodeLibopus(pcm []float64, frameSize, lsbDepth in
 			}
 			for i := 0; i < frameSize; i++ {
 				streamPCM[i*streamChannels+codedChannel] = pcm[i*e.channels+inputChannel]
-				if streamAnalysis != nil {
-					streamAnalysis[i*streamChannels+codedChannel] = analysisPCM[i*e.channels+inputChannel]
-				}
+			}
+			for i := 0; i < len(streamAnalysis)/streamChannels; i++ {
+				streamAnalysis[i*streamChannels+codedChannel] = analysisPCM[i*e.channels+inputChannel]
 			}
 		}
 		// Number of bytes left (+ToC); reserve one byte for the last stream
@@ -245,10 +252,12 @@ func (e *MultistreamEncoder) encodeLibopus(pcm []float64, frameSize, lsbDepth in
 		}
 		enc.outDataBytes = currMax
 		enc.inputLSBDepth = lsbDepth
-		enc.analysisInput = streamAnalysis
+		if streamAnalysis != nil {
+			enc.callerPCM, enc.callerFrameSize = streamAnalysis, callerFrameSize
+		}
 		packet, err := enc.encodeFloat(streamPCM, frameSize)
 		enc.outDataBytes = 0
-		enc.analysisInput = nil
+		enc.callerPCM, enc.callerFrameSize = nil, 0
 		if err != nil {
 			return nil, fmt.Errorf("stream %d: %w", s, err)
 		}

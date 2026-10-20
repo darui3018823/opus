@@ -182,16 +182,17 @@ type Encoder struct {
 	// packet's run_analysis (-1 when the analysis did not run).
 	analysisReadPos, analysisReadSubframe int
 	// outDataBytes is the multistream encoder's per-stream packet budget
-	// (opus_encode_native's out_data_bytes; 0 outside it), analysisInput
-	// the input the tonality analysis reads instead of the packet's (the
-	// projection encoder's unmixed channels), and libopusForcedMode
-	// st->user_forced_mode (-1 for automatic) under the libopus policy.
+	// (opus_encode_native's out_data_bytes; 0 outside it), and
+	// libopusForcedMode st->user_forced_mode (-1 for automatic) under the
+	// libopus policy.
 	outDataBytes int
 	// maxPacketSize is SetMaxPacketSize: the caller's output buffer for a
 	// single-stream packet (0 = defaultOutDataBytes).
 	maxPacketSize int
-	// callerPCM / callerFrameSize are the caller's whole input when an
-	// expert frame duration codes only a prefix (analysis_pcm).
+	// callerPCM / callerFrameSize are the input the tonality analysis reads
+	// (analysis_pcm / analysis_frame_size) when it is not the coded frame:
+	// the caller's whole input when an expert frame duration codes only a
+	// prefix, or a projection encoder's unmixed channels.
 	callerPCM []float64
 	// inputBuf holds Encode/Encode24's float64 conversion of the caller's
 	// samples; it is only read during that call.
@@ -201,7 +202,6 @@ type Encoder struct {
 	// bytes per coded frame. Under the libopus policy the packet bitrate
 	// (e.bitrate) is st->bitrate_bps instead, bounded by max_data_bytes.
 	reportedBitrate   int
-	analysisInput     []float64
 	libopusForcedMode int
 	// lfe is st->lfe (OPUS_SET_LFE), set by the surround encoder on its
 	// low-frequency effects stream under the libopus policy.
@@ -688,9 +688,7 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 		}
 		e.analysisReadPos, e.analysisReadSubframe = e.analysis.ReadPosition()
 		analysisPCM, analysisFrameSize := pcm, frameSize
-		if e.analysisInput != nil {
-			analysisPCM = e.analysisInput
-		} else if e.callerPCM != nil {
+		if e.callerPCM != nil {
 			analysisPCM, analysisFrameSize = e.callerPCM, e.callerFrameSize
 		}
 		e.analysis.SetIntegerInput(e.inputIntegerAPI)
@@ -2175,6 +2173,41 @@ func (e *Encoder) validateFrameSize(frameSize int) (int, error) {
 		return 0, fmt.Errorf("%w: %w: packet duration %d ms exceeds Opus maximum 120 ms", ErrBadArg, ErrUnsupportedFrameSize, nFrames*20)
 	}
 	return nFrames, nil
+}
+
+// frameSizeSelect is libopus frame_size_select: the frame size coded for a
+// caller frame of frameSize samples under an expert duration, or an error
+// wrapping ErrBadArg (frame_size_select returns -1).
+func frameSizeSelect(application Application, frameSize int, duration ExpertFrameDuration, fs int) (int, error) {
+	bad := func(why string) (int, error) {
+		return 0, fmt.Errorf("%w: %w: %s (frameSize %d, duration %d, %d Hz)", ErrBadArg, ErrUnsupportedFrameSize, why, frameSize, duration, fs)
+	}
+	if frameSize < fs/400 {
+		return bad("frame shorter than 2.5 ms")
+	}
+	var newSize int
+	switch {
+	case duration == ExpertFrameDurationArgument:
+		newSize = frameSize
+	case duration >= ExpertFrameDuration2_5ms && duration <= ExpertFrameDuration40ms:
+		newSize = (fs / 400) << (duration - ExpertFrameDuration2_5ms)
+	case duration > ExpertFrameDuration40ms && duration <= ExpertFrameDuration120ms:
+		newSize = int(duration-ExpertFrameDuration2_5ms-2) * fs / 50
+	default:
+		return bad("invalid expert frame duration")
+	}
+	if newSize > frameSize {
+		return bad("selected duration longer than the input")
+	}
+	if 400*newSize != fs && 200*newSize != fs && 100*newSize != fs &&
+		50*newSize != fs && 25*newSize != fs && 50*newSize != 3*fs &&
+		50*newSize != 4*fs && 50*newSize != 5*fs && 50*newSize != 6*fs {
+		return bad("not a valid Opus duration")
+	}
+	if application == ApplicationRestrictedSILK && newSize < fs/100 {
+		return bad("restricted SILK needs 10 ms frames or longer")
+	}
+	return newSize, nil
 }
 
 func (e *Encoder) selectCELTEncoder(frameSize int) error {

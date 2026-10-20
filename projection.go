@@ -249,8 +249,8 @@ func (e *ProjectionEncoder) SetComplexity(complexity int) error {
 	return e.multistream.SetComplexity(complexity)
 }
 
-// SetExpertFrameDuration applies a fixed packet duration to every elementary
-// stream. Argument restores frameSize-selected durations.
+// SetExpertFrameDuration selects the packet duration of the projection
+// encoder; see MultistreamEncoder.SetExpertFrameDuration.
 func (e *ProjectionEncoder) SetExpertFrameDuration(duration ExpertFrameDuration) error {
 	return e.multistream.SetExpertFrameDuration(duration)
 }
@@ -334,12 +334,13 @@ func (e *ProjectionEncoder) encodeFloatDepth(pcm []float64, frameSize, lsbDepth 
 	}
 	if e.multistream.libopusPolicy {
 		// opus_projection_encode*: the streams code the mixed channels, the
-		// tonality analysis reads the unmixed input.
+		// tonality analysis reads the caller's whole unmixed input
+		// (analysis_pcm, analysis_frame_size).
 		var analysis []float64
 		if e.mappingFamily == MappingFamilyProjection {
-			analysis = pcm[:selectedFrameSize*e.channels]
+			analysis = pcm[:required]
 		}
-		return e.multistream.encodeLibopus(mixed[:selectedFrameSize*e.channels], selectedFrameSize, lsbDepth, analysis)
+		return e.multistream.encodeLibopus(mixed, frameSize, selectedFrameSize, lsbDepth, analysis)
 	}
 	return e.multistream.EncodeFloat(mixed, frameSize)
 }

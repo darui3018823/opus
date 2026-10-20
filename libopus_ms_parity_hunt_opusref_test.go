@@ -46,3 +46,40 @@ func TestHuntMultistreamLibopusProfile(t *testing.T) {
 	}
 	runMSHuntCells(t, cells, 960, 150)
 }
+
+// TestHuntMultistreamExpertFrameDuration: the multistream
+// OPUS_SET_EXPERT_FRAME_DURATION is stored by the multistream encoder
+// (opus_multistream_encoder.c:1303) and applied by its own
+// frame_size_select (opus_multistream_encoder.c:888); the streams code
+// that frame size while their tonality analysis reads the caller's whole
+// frame (analysis_pcm, analysis_frame_size).
+func TestHuntMultistreamExpertFrameDuration(t *testing.T) {
+	type dur struct {
+		expert, frameSize int
+	}
+	var cells []aCfg
+	for _, d := range []dur{{5003, 960}, {5004, 1920}, {5006, 2880}, {5002, 960}} {
+		for _, l := range []struct{ family, ch int }{{-1, 6}, {1, 6}, {2, 9}, {3, 4}} {
+			for _, app := range []string{"voip", "audio"} {
+				cells = append(cells, aCfg{
+					name: fmt.Sprintf("fam%d/ch%d/%s/expert%d/fs%d", l.family, l.ch, app, d.expert, d.frameSize),
+					rate: 48000, ch: l.ch, app: app, ms: true, family: l.family, profile: true,
+					steps: []aStep{cs("expert", d.expert)},
+				})
+			}
+		}
+		for i := len(cells) - 8; i < len(cells); i++ {
+			cells[i].steps = append(cells[i].steps, framesSteps(60, d.frameSize, 'e', nil)...)
+		}
+	}
+	huntSkip(t)
+	music := auditLoadSources(t)[6]
+	for _, c := range cells {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			c.pcm = auditMultiInput(music, c.rate, c.ch, 60*2880)
+			auditReport(t, c)
+		})
+	}
+}

@@ -171,9 +171,13 @@ func (e *Encoder) CarryPacketState(src *Encoder) {
 		// channel.
 		e.side.lp = src.lp
 	}
-	if len(src.encInputDelay) == len(e.encInputDelay) {
-		copy(e.encInputDelay, src.encInputDelay)
-	} else {
-		e.encInputDelay = append([]float64(nil), src.encInputDelay...)
+	// The re-initialised channel starts from a fresh input resampler (the
+	// front end's delay line); a mono stream still codes from inputBuf + 1,
+	// and inputBuf[1] is sStereo.sMid[1], which the re-init keeps: the
+	// oldest sample of the old line.
+	mono := e.channels == 1 || e.streamChannels == 1
+	e.encInputDelay = make([]float64, e.frontEndDelay(mono))
+	if mono && len(e.encInputDelay) > 0 && len(src.encInputDelay) > 0 {
+		e.encInputDelay[0] = src.encInputDelay[0]
 	}
 }

@@ -257,3 +257,18 @@ func TestHuntRestrictedSILKBandwidthSwitch(t *testing.T) {
 		huntSweepCell("speech24s", "rsilk", 1, 250),
 	})
 }
+
+// TestHuntPrefillDelayLine: the bandwidth-switch prefill re-initialises the
+// SILK channel, so at an API rate equal to the new SILK rate the input
+// resampler (the front end's delay line) restarts from zeros; a mono stream
+// keeps only sStereo.sMid[1] in front of the frame.
+func TestHuntPrefillDelayLine(t *testing.T) {
+	var cells []huntCell
+	for _, src := range []string{"tv02", "tv05", "tv08", "speech24s"} {
+		cells = append(cells, huntCell{src: src, rate: 12000, ch: 2, app: "voip", frames: 1000, frameSize: 240,
+			ctl: []aStep{cs("bitrate", 20000), cs("vbr", 0), cs("fec", 1), cs("loss", 10)}})
+		cells = append(cells, huntCell{src: src, rate: 16000, ch: 1, app: "audio", frames: 300, frameSize: 1600,
+			ctl: []aStep{cs("bitrate", 32000)}})
+	}
+	runHuntCells(t, cells)
+}

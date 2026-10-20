@@ -142,6 +142,78 @@ func TestHuntCELTSilenceBackground(t *testing.T) {
 	}
 }
 
+// fecStream is one oracle-encoded stream of a splice scenario.
+type fecStream struct {
+	bw, br, forceCh int
+}
+
+type fecSegment struct {
+	stream, packets int
+}
+
+// spliceFECOps decodes the scenario's segments, each from its own stream at
+// the same position in time, losing the last packet of every segment and
+// recovering it with FEC from the first packet of the next one.
+func spliceFECOps(t *testing.T, rate, ch, fs int, streams []fecStream, segs []fecSegment) []op {
+	t.Helper()
+	pcm := audio(t, speechSrc, rate, ch, 6, 1)
+	var pk [][][]byte
+	for _, s := range streams {
+		pk = append(pk, oracleEncode(t, encCfg{rate: rate, ch: ch, app: appVOIP, bitrate: s.br, complexity: 9,
+			fec: 1, loss: 30, vbr: 1, bandwidth: s.bw, forcech: s.forceCh, signal: sigVoice, frameSize: fs}, pcm).packets)
+	}
+	var ops []op
+	pos := 0
+	for si, sg := range segs {
+		for k := 0; k < sg.packets; k++ {
+			p := pk[sg.stream][pos]
+			switch {
+			case k == sg.packets-1 && si+1 < len(segs):
+				next := pk[segs[si+1].stream][pos+1]
+				n, _ := opus.PacketGetNumSamples(p, rate)
+				ops = append(ops, op{code: 1, fmt: fmtF32, fec: true, frameSize: n, data: next})
+			default:
+				ops = append(ops, op{code: 1, fmt: fmtF32, frameSize: 5760 * rate / 48000, data: p})
+			}
+			pos++
+		}
+	}
+	return ops
+}
+
+// TestHuntFECModeSwitch covers in-band FEC across SILK/hybrid mode,
+// bandwidth and channel switches: a hybrid FEC frame after a SILK frame
+// resets the CELT decoder and conceals its high band (start band 17) up to
+// the FEC packet's end band; a SILK FEC frame after a hybrid frame fades the
+// CELT MDCT out with a silence frame; and the SILK resamplers follow the
+// stream channel count as for a normal packet.
+func TestHuntFECModeSwitch(t *testing.T) {
+	silkMono := fecStream{bw: bwWB, br: 32000, forceCh: 1}
+	silkStereo := fecStream{bw: bwWB, br: 32000, forceCh: 2}
+	scenarios := []struct {
+		name    string
+		ch      int
+		streams []fecStream
+		segs    []fecSegment
+	}{
+		{"channel-switch", 2, []fecStream{silkMono, silkStereo}, []fecSegment{{0, 20}, {1, 20}, {0, 20}, {1, 20}, {0, 20}}},
+	}
+	for _, sc := range scenarios {
+		for _, rate := range []int{48000, 16000} {
+			for _, ms := range []int{10, 20} {
+				for _, outCh := range []int{1, 2} {
+					t.Run(fmt.Sprintf("%s/%d/%dms/out%d", sc.name, rate, ms, outCh), func(t *testing.T) {
+						t.Parallel()
+						ops := spliceFECOps(t, rate, sc.ch, rate*ms/1000, sc.streams, sc.segs)
+						cfg, g := newSingle(t, rate, outCh)
+						requireExact(t, cfg, ops, g)
+					})
+				}
+			}
+		}
+	}
+}
+
 // TestHuntFECShortFirstFrame: FEC from a packet whose first frame has at
 // most one byte is a loss concealed in the previous mode (opus_decode_frame
 // with len <= 1).

@@ -5668,16 +5668,28 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	infoDec.dec.SetFrameMs(frameMs)
 	nSilkFrames := silkSubframesPerOpusFrame(config)
 
+	// silk_Decode's channel-count switch, as for a normal packet: a mono to
+	// stereo switch seeds the right resampler from the left one, a stereo
+	// to mono switch resamples the right output of the first frame through
+	// the still-warm right resampler.
+	d.ensureSilkResampler(0, rateKHz)
+	if info.channels == 2 {
+		d.ensureSilkResampler(1, rateKHz)
+	}
+	if info.channels == 2 && d.prevSilkInternalCh == 1 && d.silkRS[0] != nil {
+		seeded := *d.silkRS[0]
+		d.silkRS[1] = &seeded
+		d.silkRSInKHz[1] = rateKHz
+	}
+	stereoToMono := info.channels == 1 && d.prevSilkInternalCh == 2 &&
+		d.silkRS[1] != nil && d.silkRSInKHz[1] == rateKHz
+
 	d.prepareSILKStream(infoDec.dec, info.channels)
 	silkPCM, err := infoDec.dec.DecodeFEC(frames[0], nSilkFrames)
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: SILK LBRR decode: %v", ErrInvalidPacket, err)
 	}
-	d.ensureSilkResampler(0, rateKHz)
-	if info.channels == 2 {
-		d.ensureSilkResampler(1, rateKHz)
-	}
-	silkPCM = d.resampleSILK(silkPCM, nSilkFrames, info.channels, false)
+	silkPCM = d.resampleSILK(silkPCM, nSilkFrames, info.channels, stereoToMono)
 	silkPCM = padOrTrim(silkPCM, packetFrameSize*d.channels)
 	finalRange := infoDec.dec.LastFinalRange()
 	if info.mode == ModeHybrid {

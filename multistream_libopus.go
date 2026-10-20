@@ -25,11 +25,6 @@ const (
 // msFrameTmp is MS_FRAME_TMP, the largest elementary packet (6 x 20 ms).
 const msFrameTmp = 6*1275 + 12
 
-// msOutDataBytes stands for the caller's output buffer of
-// opus_multistream_encode: the Go API has none, so the packet is only
-// limited by the elementary encoders.
-const msOutDataBytes = 1275 * 6 * 255
-
 // SetModePolicy selects the automatic decision policy of every elementary
 // encoder and of the multistream layer. Under ModePolicyLibopus the packets
 // follow libopus 1.6.1's opus_multistream_encode_native: its rate
@@ -150,10 +145,8 @@ func (e *MultistreamEncoder) encodeLibopus(pcm []float64, frameSize, lsbDepth in
 	if fs/frameSize == 10 {
 		smallest += e.streams
 	}
-	maxDataBytes := msOutDataBytes
-	if e.maxPacketSize > 0 {
-		maxDataBytes = e.maxPacketSize
-	}
+	// max_data_bytes is the caller's output buffer (MaxPacketSize).
+	maxDataBytes := e.MaxPacketSize()
 	if maxDataBytes < smallest {
 		return nil, fmt.Errorf("%w: %d bytes for %d streams", ErrBufferTooSmall, maxDataBytes, e.streams)
 	}

@@ -85,6 +85,48 @@ func TestMultistreamProfileDefaults(t *testing.T) {
 	}
 }
 
+// TestMultistreamDefaultPacketBuffer: opus_multistream_encode pads the
+// last stream of a CBR packet at OPUS_BITRATE_MAX to the caller's buffer
+// (opus_multistream_encoder.c:1046), so the default buffer bounds the
+// packet: 1500 bytes per stream, not a 1.95 MB packet.
+func TestMultistreamDefaultPacketBuffer(t *testing.T) {
+	enc, err := NewMultistreamEncoder(48000, 3, 2, 1, []byte{0, 1, 2}, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := enc.MaxPacketSize(); got != 2*defaultOutDataBytes {
+		t.Fatalf("default MaxPacketSize = %d", got)
+	}
+	enc.SetVBR(false)
+	if err := enc.SetBitrate(BitrateMax); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{480, 960, 2880} {
+		pkt, err := enc.EncodeFloat(testTone(48000, 3, n, 0), n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(pkt) != 2*defaultOutDataBytes {
+			t.Fatalf("%d samples: CBR BitrateMax packet %d bytes, want %d", n, len(pkt), 2*defaultOutDataBytes)
+		}
+	}
+	sur, err := NewSurroundEncoder(48000, 6, MappingFamilyVorbis, ApplicationAudio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sur.SetVBR(false)
+	if err := sur.SetBitrate(BitrateMax); err != nil {
+		t.Fatal(err)
+	}
+	pkt, err := sur.EncodeFloat(testTone(48000, 6, 960, 0), 960)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := sur.Streams() * defaultOutDataBytes; len(pkt) != want {
+		t.Fatalf("surround CBR BitrateMax packet %d bytes, want %d", len(pkt), want)
+	}
+}
+
 // TestPacketLossPercRejectsOutOfRange: OPUS_SET_PACKET_LOSS_PERC returns
 // OPUS_BAD_ARG for values outside 0..100 and keeps the previous value
 // (opus_encoder.c:2982); the multistream CTL forwards it to every stream.

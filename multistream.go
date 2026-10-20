@@ -25,17 +25,18 @@ type MultistreamEncoder struct {
 	mappingType   msMappingType
 	lfeStream     int
 	policyChanged func()
-	// maxPacketSize is SetMaxPacketSize (0: only the elementary encoders
-	// limit the packet).
+	// maxPacketSize is SetMaxPacketSize (0: defaultOutDataBytes per
+	// stream).
 	maxPacketSize int
 }
 
 // SetMaxPacketSize sets the size of the output buffer that libopus's
 // opus_multistream_encode would receive (max_data_bytes) under
 // ModePolicyLibopus: it bounds the whole multistream packet and is the
-// padded size of a CBR packet at BitrateMax. By default no buffer limit
-// applies beyond the elementary encoders. Under ModePolicyLegacy the value is
-// stored but does not limit the packet. n must be positive.
+// padded size of a CBR packet at BitrateMax. The default is 1500 bytes per
+// elementary stream, the single-stream encoder's default (SetMaxPacketSize
+// of Encoder) for each stream. Under ModePolicyLegacy the value is stored
+// but does not limit the packet. n must be positive.
 func (e *MultistreamEncoder) SetMaxPacketSize(n int) error {
 	if n < 1 {
 		return fmt.Errorf("%w: max packet size %d", ErrBadArg, n)
@@ -44,8 +45,14 @@ func (e *MultistreamEncoder) SetMaxPacketSize(n int) error {
 	return nil
 }
 
-// MaxPacketSize returns the SetMaxPacketSize value, or 0 when none is set.
-func (e *MultistreamEncoder) MaxPacketSize() int { return e.maxPacketSize }
+// MaxPacketSize returns the SetMaxPacketSize value, or the default of
+// 1500 bytes per elementary stream.
+func (e *MultistreamEncoder) MaxPacketSize() int {
+	if e.maxPacketSize > 0 {
+		return e.maxPacketSize
+	}
+	return defaultOutDataBytes * e.streams
+}
 
 // NewMultistreamEncoder creates a multistream encoder. channels and streams
 // must be 1 through 255, coupledStreams must be between zero and streams, and

@@ -1,8 +1,9 @@
 # libopus parity hunt (2026-10-19)
 
-- Status: encoder items fixed on `fix/libopus-parity-hunt`; decoder (D1-D8)
-  and API / multistream items in progress on separate branches.
-- Last updated: 2026-10-20.
+- Status: encoder, decoder (D1-D8) and API / multistream items fixed on
+  `fix/libopus-parity-hunt` (decoder and API work cherry-picked from
+  `fix/decoder-parity-hunt` and `fix/api-ms-parity-hunt`).
+- Last updated: 2026-10-21.
 
 ## Objective
 
@@ -39,9 +40,11 @@ plain-C libopus 1.6.1 (gcc -O2, no SIMD) on real audio, starting from v1.7.1.
 | first fixes (E1, E4, E5 debug, E6-E8, E10, E11) | 5507 of 5690 (99 differ) |
 | `fix/libopus-parity-hunt` before E14 and the restricted-SILK fixes | 5595 of 5690 (16 differ, 79 consistent errors) |
 
+| all encoder fixes | 5611 of 5690 (0 differ, 79 consistent errors) |
+| encoder + decoder + API fixes | encoder 5611, decoder 5611 of 5690 (0 differ) |
+
 The 79 errors are restricted-SILK frames shorter than 10 ms, which both
-encoders reject. The remaining 16 cells of that run were then fixed (see
-below); a full rerun on the final commit is recorded in the PR.
+encoders reject.
 
 ## Encoder fixes
 
@@ -71,16 +74,39 @@ below); a full rerun on the final commit is recorded in the PR.
 Known gap: E9's averaging with side `inputBuf` samples left by longer earlier
 frames follows the C code but no available input exercised a non-zero tail.
 
-## Decoder and API items (other branches)
+## Decoder fixes
 
-D1 `backgroundLogE` across bandwidth switches, D2 hybrid FEC after SILK-only,
-D3 redundancy / fade order, D4 stereo FEC `has_side`, D5 FEC end band, D6 SILK
-FEC after hybrid, D7 FEC channel-count switch, D8 FEC from a <= 1-byte frame;
-API: `SetMaxPacketSize(1)` at >= 60 ms, FEC with an empty packet, stale
-`FinalRange`, frame-size error codes, `SetPacketLossPerc` range, `Bandwidth()`,
-restricted-application CTLs; multistream: default CBR / complexity, CBR at
-`BitrateMax`, projection create error, expert duration, DecodeFEC with an
-empty packet, projection `Encode24`.
+| Item | Commit subject |
+|---|---|
+| D1 | fix(celt): keep background energy of bands above a narrower end band |
+| new | fix(celt): floor every band energy of a silence frame before background |
+| D2, D5 | fix(decoder): conceal the hybrid FEC high band as opus_decode_frame |
+| D3 | fix(decoder): decode CELT-to-SILK redundancy before the silence fade |
+| D4 | fix(silk): follow the libopus has_side rule in stereo LBRR frames |
+| D6 | fix(decoder): fade CELT out on a SILK FEC frame after hybrid |
+| D7 | fix(decoder): follow a SILK channel switch in the FEC resamplers |
+| D8 | fix(decoder): conceal FEC from a packet with a short first frame |
+
+Regression tests: `internal/audit/decoder/parity_hunt_test.go`
+(`OPUS_LIBOPUS_AUDIT=1 go test ./internal/audit/decoder -run TestHunt`).
+Decoder audit failures went from 138 to 49; the rest predate this work:
+12 `TestSplicedVectors` cells differ only in `Bandwidth()` before the first
+packet (documented Go semantics), 28 `TestMalformedPackets`, 9
+`TestMultistreamSurround/k2`.
+
+## API and multistream fixes
+
+See `docs/CURRENT_IMPLEMENTATION.md` for the caller-visible changes. Items
+needing a decision:
+
+- New `NewMultistreamEncoderWithProfile`, `NewSurroundEncoderWithProfile`,
+  `NewProjectionEncoderWithProfile` (libopus create-time defaults); the old
+  constructors keep complexity 5 / CBR.
+- The multistream default packet buffer is now 1500 bytes per stream instead
+  of 1,950,750 bytes, which also caps large VBR packets.
+- Not changed: encoder `Bandwidth()` keeps its documented pre-encode
+  prediction (libopus returns the last coded bandwidth); projection
+  `Encode24` does not mirror the libopus `downmix_int` bug.
 
 ## Acceptance criteria
 

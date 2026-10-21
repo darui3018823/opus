@@ -534,8 +534,15 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 
 		ds := d.downsample
 		outLen := frameSize / ds
-		for i := 0; i < outLen; i++ {
-			output[i*cc+c] = samplesOut[i*ds] * celtFloatScale
+		if ds == 1 {
+			out := output[c:]
+			for i, v := range samplesOut[:outLen] {
+				out[i*cc] = v * celtFloatScale
+			}
+		} else {
+			for i := 0; i < outLen; i++ {
+				output[i*cc+c] = samplesOut[i*ds] * celtFloatScale
+			}
 		}
 	}
 
@@ -763,20 +770,23 @@ func (d *Decoder) applyDeemphasis(ch int, samples []float64) {
 		verySmall = float32(1e-30)
 	)
 	mem := d.preemphMem[ch]
-	for i := range samples {
-		// libopus stores celt_sig as float and evaluates
-		// x[i] + VERY_SMALL + mem in that precision and order; its
-		// accumulating loop without downsampling adds x[i] + mem first.
-		var y float32
-		if d.accum && d.downsample == 1 {
-			y = float32(samples[i]) + mem
+	// libopus stores celt_sig as float and evaluates
+	// x[i] + VERY_SMALL + mem in that precision and order; its
+	// accumulating loop without downsampling adds x[i] + mem first.
+	if d.accum && d.downsample == 1 {
+		for i, x := range samples {
+			y := float32(x) + mem
 			y += verySmall
-		} else {
-			y = float32(samples[i]) + verySmall
-			y += mem
+			mem = coef * y
+			samples[i] = float64(y)
 		}
-		mem = coef * y
-		samples[i] = float64(y)
+	} else {
+		for i, x := range samples {
+			y := float32(x) + verySmall
+			y += mem
+			mem = coef * y
+			samples[i] = float64(y)
+		}
 	}
 	d.preemphMem[ch] = mem
 }

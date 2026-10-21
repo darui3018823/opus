@@ -381,6 +381,18 @@ vacuously.
   bit-exact by the digest guards, opusref and real tracks (12 enc + 12 dec
   cells at 32/64/128 kb/s); arm64 shows no fused multiply-add.
 
+- 2026-10-22 06:30 scheduled run (clock checked 06:30:05): every Next
+  steps item was done and the branch was already merged, so it was
+  fast-forwarded to `main` (`cf63454`, v1.7.1). CELT decode profile
+  (tv01/tv07/tv11): `applyDeemphasis` 4.3%, the strided output loop 3.2%;
+  the band copy, `DenormalizeBands` and `AssembleMDCTInto` together about
+  3%. `b4b28e2` takes the loop-invariant accum/downsample test out of the
+  deemphasis loop and gives the `downsample == 1` output a range loop.
+  2 s x 6: CELT/hybrid vectors -1.2% to -3.0% (tv07 -2.95%), SILK and
+  encode within noise (tv02 +0.8%, untouched code), allocations unchanged;
+  digests pass, no FMA in this module on arm64 (`-a`; the hits are all in
+  the standard library's math package).
+
 ## Next steps (in order)
 
 From an Opus read-only review on 2026-10-15 (commit `52969ac`; estimates
@@ -447,6 +459,12 @@ reuse); guard each with the digest tests.
     into band Coeffs with denormalise and AssembleMDCT (Coeffs also feeds
     the decoder state clone; about one pass per frame), and float32 X in
     the encoder's analysis stages (they already compute in float32).
+
+12. (open, small) Fuse the decoder's float32 X -> band `Coeffs` copy with
+    `DenormalizeBands` and `AssembleMDCTInto` (about 3% of CELT decode
+    together; check the coefficient-stage hook and the state clone, which
+    read `Coeffs`). Note: `fix/libopus-parity-hunt` changes the post-filter
+    lines next to the output loop in `decodeCELTRange`.
 
 Do not: reorder float sums, unroll float32 reductions into partial sums,
 replace `math.Exp2`/`Floor`/`RoundToEven` with approximations, or write

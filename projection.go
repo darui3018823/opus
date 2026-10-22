@@ -270,7 +270,7 @@ func (e *ProjectionEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768
 	}
-	return e.encodeFloatDepth(floatPCM, frameSize, 16)
+	return e.encodeFloatDepth(floatPCM, frameSize, 16, true)
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
@@ -301,11 +301,13 @@ func (e *ProjectionEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte,
 
 // EncodeFloat encodes frameSize samples per channel of interleaved float64 PCM.
 func (e *ProjectionEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
-	return e.encodeFloatDepth(pcm, frameSize, 24)
+	return e.encodeFloatDepth(pcm, frameSize, 24, false)
 }
 
-// encodeFloatDepth encodes one packet; lsbDepth is the input's sample depth.
-func (e *ProjectionEncoder) encodeFloatDepth(pcm []float64, frameSize, lsbDepth int) ([]byte, error) {
+// encodeFloatDepth encodes one packet; lsbDepth is the input's sample depth
+// and integerInput marks Encode input (downmix_int). Encode24 takes the
+// float path (see its comment on the libopus downmix_int bug).
+func (e *ProjectionEncoder) encodeFloatDepth(pcm []float64, frameSize, lsbDepth int, integerInput bool) ([]byte, error) {
 	required := frameSize * e.channels
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
@@ -340,7 +342,7 @@ func (e *ProjectionEncoder) encodeFloatDepth(pcm []float64, frameSize, lsbDepth 
 		if e.mappingFamily == MappingFamilyProjection {
 			analysis = pcm[:required]
 		}
-		return e.multistream.encodeLibopus(mixed, frameSize, selectedFrameSize, lsbDepth, analysis)
+		return e.multistream.encodeLibopus(mixed, frameSize, selectedFrameSize, lsbDepth, integerInput, analysis)
 	}
 	return e.multistream.EncodeFloat(mixed, frameSize)
 }

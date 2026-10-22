@@ -141,7 +141,7 @@ func (e *MultistreamEncoder) libopusRateAllocation(frameSize int) ([]int, int) {
 // nil, is the callerFrameSize-sample input the elementary encoders'
 // tonality analysis reads instead of callerPCM (the projection encoder's
 // unmixed channels).
-func (e *MultistreamEncoder) encodeLibopus(callerPCM []float64, callerFrameSize, frameSize, lsbDepth int, analysisPCM []float64) ([]byte, error) {
+func (e *MultistreamEncoder) encodeLibopus(callerPCM []float64, callerFrameSize, frameSize, lsbDepth int, integerInput bool, analysisPCM []float64) ([]byte, error) {
 	fs := e.sampleRate
 	pcm := callerPCM[:frameSize*e.channels]
 	if analysisPCM == nil && callerFrameSize > frameSize {
@@ -251,7 +251,7 @@ func (e *MultistreamEncoder) encodeLibopus(callerPCM []float64, callerFrameSize,
 			enc.setLibopusBitrate(bitsToBitrate(currMax*8, fs, frameSize))
 		}
 		enc.outDataBytes = currMax
-		enc.inputLSBDepth = lsbDepth
+		enc.inputLSBDepth, enc.inputIntegerAPI = lsbDepth, integerInput
 		if streamAnalysis != nil {
 			enc.callerPCM, enc.callerFrameSize = streamAnalysis, callerFrameSize
 		}

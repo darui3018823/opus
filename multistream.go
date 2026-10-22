@@ -448,7 +448,7 @@ func (e *MultistreamEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) 
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768
 	}
-	return e.encodeFloatSelected(floatPCM, frameSize, selectedFrameSize, 16)
+	return e.encodeFloatSelected(floatPCM, frameSize, selectedFrameSize, 16, true)
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
@@ -465,7 +465,7 @@ func (e *MultistreamEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608
 	}
-	return e.encodeFloatSelected(floatPCM, frameSize, selectedFrameSize, 24)
+	return e.encodeFloatSelected(floatPCM, frameSize, selectedFrameSize, 24, true)
 }
 
 // EncodeFloat32 encodes interleaved float32 PCM.
@@ -482,7 +482,7 @@ func (e *MultistreamEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i])
 	}
-	return e.encodeFloatSelected(floatPCM, frameSize, selectedFrameSize, 24)
+	return e.encodeFloatSelected(floatPCM, frameSize, selectedFrameSize, 24, false)
 }
 
 // EncodeFloat encodes interleaved float64 PCM.
@@ -495,15 +495,16 @@ func (e *MultistreamEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	return e.encodeFloatSelected(pcm[:required], frameSize, selectedFrameSize, 24)
+	return e.encodeFloatSelected(pcm[:required], frameSize, selectedFrameSize, 24, false)
 }
 
 // encodeFloatSelected encodes one packet of the first selectedFrameSize
 // samples of the caller's frameSize samples (callerPCM); lsbDepth is the
-// input's sample depth (the libopus policy's lsb_depth).
-func (e *MultistreamEncoder) encodeFloatSelected(callerPCM []float64, frameSize, selectedFrameSize, lsbDepth int) ([]byte, error) {
+// input's sample depth (the libopus policy's lsb_depth) and integerInput
+// marks Encode / Encode24 input (downmix_int / downmix_int24).
+func (e *MultistreamEncoder) encodeFloatSelected(callerPCM []float64, frameSize, selectedFrameSize, lsbDepth int, integerInput bool) ([]byte, error) {
 	if e.libopusPolicy {
-		return e.encodeLibopus(callerPCM, frameSize, selectedFrameSize, lsbDepth, nil)
+		return e.encodeLibopus(callerPCM, frameSize, selectedFrameSize, lsbDepth, integerInput, nil)
 	}
 	pcm := callerPCM[:selectedFrameSize*e.channels]
 	var commitPolicy func()
@@ -533,7 +534,7 @@ func (e *MultistreamEncoder) encodeFloatSelected(callerPCM []float64, frameSize,
 		}
 		// The multistream encoder selected the frame size: the stream's
 		// own expert duration does not apply.
-		enc.inputLSBDepth = 24
+		enc.inputLSBDepth, enc.inputIntegerAPI = 24, integerInput
 		packet, err := enc.encodeFloat(streamPCM, selectedFrameSize)
 		if err != nil {
 			return nil, fmt.Errorf("stream %d: %w", stream, err)

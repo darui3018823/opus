@@ -71,6 +71,12 @@ encoders reject.
 | new | mono-to-stereo rate switch seeded the side resampler too early | fix(silk): copy the switched mid resampler on a stereo rate switch |
 | new | stereo-to-mono averaging covered the whole packet | fix(encoder): average only the first frame after a stereo-to-mono switch |
 
+Review follow-up (PR #36): multistream and projection integer entry points
+now set the integer downmix on every stream (`fix(multistream): pass the
+integer-input downmix to every stream`). Possible gap, not reproduced: a
+hybrid frame after a SILK rate other than 16 kHz rebuilds the SILK encoder,
+where libopus switches the rate through `silk_setup_resamplers`.
+
 Known gap: E9's averaging with side `inputBuf` samples left by longer earlier
 frames follows the C code but no available input exercised a non-zero tail.
 

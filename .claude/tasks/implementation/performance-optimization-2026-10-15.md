@@ -382,8 +382,8 @@ vacuously.
   cells at 32/64/128 kb/s); arm64 shows no fused multiply-add.
 
 - 2026-10-22 06:30 scheduled run (clock checked 06:30:05): every Next
-  steps item was done and the branch was already merged, so it was
-  fast-forwarded to `main` (`cf63454`, v1.7.1). CELT decode profile
+  steps item was done; the step was made on `main` (`cf63454`) and moved
+  onto `fix/libopus-parity-hunt` to ship in one PR. CELT decode profile
   (tv01/tv07/tv11): `applyDeemphasis` 4.3%, the strided output loop 3.2%;
   the band copy, `DenormalizeBands` and `AssembleMDCTInto` together about
   3%. `b4b28e2` takes the loop-invariant accum/downsample test out of the
@@ -463,8 +463,7 @@ reuse); guard each with the digest tests.
 12. (open, small) Fuse the decoder's float32 X -> band `Coeffs` copy with
     `DenormalizeBands` and `AssembleMDCTInto` (about 3% of CELT decode
     together; check the coefficient-stage hook and the state clone, which
-    read `Coeffs`). Note: `fix/libopus-parity-hunt` changes the post-filter
-    lines next to the output loop in `decodeCELTRange`.
+    read `Coeffs`).
 
 Do not: reorder float sums, unroll float32 reductions into partial sums,
 replace `math.Exp2`/`Floor`/`RoundToEven` with approximations, or write

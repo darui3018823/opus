@@ -5810,11 +5810,6 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	if trans != nil {
 		d.applyTransition(silkPCM, trans)
 	}
-	if len(frames[0]) <= 1 {
-		// opus_decode_frame: a payload of 0 or 1 byte runs the PLC and
-		// leaves rangeFinal at 0.
-		finalRange = 0
-	}
 	out = append(out, silkPCM...)
 
 	d.prevSilkInternalCh = info.channels

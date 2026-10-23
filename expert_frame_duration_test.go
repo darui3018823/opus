@@ -233,12 +233,14 @@ func TestMultistreamExpertFrameDuration(t *testing.T) {
 	if got := enc.ExpertFrameDuration(); got != ExpertFrameDuration10ms {
 		t.Fatalf("duration = %d", got)
 	}
+	// The multistream CTL is not forwarded to the streams
+	// (opus_multistream_encoder.c:1303).
 	for stream := 0; stream < streams; stream++ {
 		child, err := enc.StreamEncoder(stream)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := child.ExpertFrameDuration(); got != ExpertFrameDuration10ms {
+		if got := child.ExpertFrameDuration(); got != ExpertFrameDurationArgument {
 			t.Fatalf("stream %d duration = %d", stream, got)
 		}
 	}
@@ -249,14 +251,18 @@ func TestMultistreamExpertFrameDuration(t *testing.T) {
 	if got, err := MultistreamPacketGetNumSamples(packet, streams, rate); err != nil || got != 480 {
 		t.Fatalf("packet samples = %d, %v; want 480", got, err)
 	}
-	if err := enc.SetExpertFrameDuration(ExpertFrameDuration(6000)); !errors.Is(err, ErrBadArg) {
+	// Like libopus, an invalid value is stored and the encode fails.
+	if err := enc.SetExpertFrameDuration(ExpertFrameDuration(6000)); err != nil {
 		t.Fatalf("invalid setter error = %v", err)
 	}
-	for stream := 0; stream < streams; stream++ {
-		child, _ := enc.StreamEncoder(stream)
-		if got := child.ExpertFrameDuration(); got != ExpertFrameDuration10ms {
-			t.Fatalf("invalid setter changed stream %d duration to %d", stream, got)
-		}
+	if got := enc.ExpertFrameDuration(); got != 6000 {
+		t.Fatalf("duration = %d, want 6000", got)
+	}
+	if _, err := enc.Encode(make([]int16, available*channels), available); !errors.Is(err, ErrBadArg) {
+		t.Fatalf("encode with an invalid duration = %v, want ErrBadArg", err)
+	}
+	if err := enc.SetExpertFrameDuration(ExpertFrameDuration10ms); err != nil {
+		t.Fatal(err)
 	}
 	if err := enc.Reset(); err != nil {
 		t.Fatal(err)
@@ -311,7 +317,11 @@ func TestMultistreamExpertFrameDurationAllPCMInputs(t *testing.T) {
 	}
 }
 
-func TestMultistreamExpertFrameDurationRejectsDivergentChildren(t *testing.T) {
+// TestMultistreamExpertFrameDurationIgnoresChildren: opus_multistream_encode
+// selects the frame size with its own variable_duration and codes every
+// stream with opus_encode_native, so the streams' own expert durations do
+// not apply (opus_multistream_encoder.c:888, 1043).
+func TestMultistreamExpertFrameDurationIgnoresChildren(t *testing.T) {
 	enc, err := NewMultistreamEncoder(48000, 2, 2, 0, []byte{0, 1}, ApplicationAudio)
 	if err != nil {
 		t.Fatal(err)
@@ -321,43 +331,25 @@ func TestMultistreamExpertFrameDurationRejectsDivergentChildren(t *testing.T) {
 	if err := first.SetExpertFrameDuration(ExpertFrameDuration10ms); err != nil {
 		t.Fatal(err)
 	}
-	if err := second.SetExpertFrameDuration(ExpertFrameDuration20ms); err != nil {
+	if err := second.SetExpertFrameDuration(ExpertFrameDuration5ms); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := enc.Encode(make([]int16, 960*2), 960); !errors.Is(err, ErrInvalidState) {
-		t.Fatalf("divergent duration error = %v, want ErrInvalidState", err)
-	}
-
 	control, err := NewMultistreamEncoder(48000, 2, 2, 0, []byte{0, 1}, ApplicationAudio)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := control.SetExpertFrameDuration(ExpertFrameDuration10ms); err != nil {
-		t.Fatal(err)
-	}
-	if err := second.SetExpertFrameDuration(ExpertFrameDuration10ms); err != nil {
-		t.Fatal(err)
-	}
-	got, err := enc.Encode(make([]int16, 960*2), 960)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, err := control.Encode(make([]int16, 960*2), 960)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, want) || enc.FinalRange() != control.FinalRange() {
-		t.Fatal("rejected divergent duration advanced encoder state")
-	}
-
-	if err := first.SetExpertFrameDuration(ExpertFrameDuration5ms); err != nil {
-		t.Fatal(err)
-	}
-	if err := second.SetExpertFrameDuration(ExpertFrameDuration20ms); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := enc.Encode(make([]int16, 480*2), 480); !errors.Is(err, ErrBadArg) {
-		t.Fatalf("later short child error = %v, want ErrBadArg", err)
+	for f := 0; f < 3; f++ {
+		got, err := enc.Encode(make([]int16, 960*2), 960)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, err := control.Encode(make([]int16, 960*2), 960)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) || enc.FinalRange() != control.FinalRange() {
+			t.Fatalf("frame %d: stream expert durations changed the multistream packet", f)
+		}
 	}
 }
 

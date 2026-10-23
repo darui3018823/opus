@@ -34,8 +34,10 @@ func (e *Encoder) silkInternalRateControl(frameSize, desiredRate int, silkPrefil
 		e.silkEncoder.SetMaxBits(silkMaxBits)
 		e.silkEncoder.SetStreamChannels(streamChannels, e.toMono)
 		e.silkEncoder.SetLBRRCoded(e.lbrrCoded)
+		e.silkEncoder.SetInternalRateLimits(e.silkMinInternalRate, e.silkMaxInternalRate)
 		return nil
 	}
+	e.silkEncoder.SetInternalRateLimits(e.silkMinInternalRate, e.silkMaxInternalRate)
 	if silkPrefill != nil {
 		// silk_Encode(prefill): the channel states are re-initialised (the
 		// top-level silk_encoder state stays); prefill 2 first runs the
@@ -50,6 +52,19 @@ func (e *Encoder) silkInternalRateControl(frameSize, desiredRate int, silkPrefil
 		}
 		old := e.silkEncoder
 		oldPrevChannels := e.silkPrevChannels
+		// The prefill re-initialises only the nChannelsInternal channel
+		// states: on a stereo -> mono switch the side channel keeps its
+		// resampler and inputBuf at the old rate, and the first mono frame
+		// averages with them.
+		var oldSideRes *silk.Resampler
+		var oldSideBuf []int16
+		if streamChannels == 1 && oldPrevChannels == 2 && len(e.silkInputResamplers) > 1 {
+			oldSideRes = e.silkInputResamplers[1]
+			oldSideBuf = old.SideInputBuf()
+			if oldSideBuf == nil {
+				oldSideBuf = []int16{} // never written: zeros
+			}
+		}
 		if err := e.rebuildSILKEncoder(rate); err != nil {
 			return false, err
 		}
@@ -61,15 +76,77 @@ func (e *Encoder) silkInternalRateControl(frameSize, desiredRate int, silkPrefil
 			e.silkEncoder.SetLPState(silk.LPState{})
 		}
 		e.silkPrevChannels = oldPrevChannels
+		if oldSideRes != nil && len(e.silkInputResamplers) > 1 {
+			e.silkInputResamplers[1] = oldSideRes
+			e.silkStaleSideBuf = oldSideBuf
+		}
 		e.silkEncoder.Prefill(e.silkInput(silkPrefill, e.silkSampleRate/100*streamChannels))
+		e.silkStaleSideBuf = nil
+		// silk_Encode ends every call, the prefill included, with
+		// nPrevChannelsInternal = nChannelsInternal.
+		e.silkPrevChannels = streamChannels
 	}
-	// The main call's control pass (opusCanSwitch was cleared after the
-	// prefill); the rate cannot change here.
-	fs, ready := e.silkEncoder.ControlAudioBandwidth(desiredRate, false, payloadMs)
+	// The main call's control pass. silk_mode.opusCanSwitch keeps the
+	// previous packet's switchReady && !nonfinal_frame (cleared after a
+	// prefill): when the redundant frame of a prepared switch did not fit,
+	// no prefill runs and this pass switches the rate itself.
+	canSwitch := e.silkOpusCanSwitch && silkPrefill == nil
+	fs, ready := e.silkEncoder.ControlAudioBandwidth(desiredRate, canSwitch, payloadMs)
 	if fs*1000 != e.silkSampleRate {
-		return false, fmt.Errorf("SILK internal rate %d kHz requested outside a switch (encoder at %d Hz)", fs, e.silkSampleRate)
+		// A switch the Opus layer allowed, or a rate above
+		// maxInternalSampleRate (or below the minimum), which the control
+		// pass enforces at once.
+		if err := e.switchSILKRateMidStream(fs*1000, reapply); err != nil {
+			return false, err
+		}
 	}
 	return ready, nil
+}
+
+// switchSILKRateMidStream re-creates the SILK encoder at rate the way
+// silk_control_encoder switches without a prefill: silk_setup_resamplers
+// and silk_setup_fs keep most of the channel state and resample the input
+// history (see silk.Encoder.CarryRateSwitchState).
+func (e *Encoder) switchSILKRateMidStream(rate int, reapply func() error) error {
+	old := e.silkEncoder
+	prevChannels := e.silkPrevChannels
+	// Stereo -> mono in the same call: only the mid channel is controlled,
+	// so the side channel keeps its old-rate resampler and inputBuf, which
+	// the first mono frame averages with (as after a prefill).
+	var oldSideRes *silk.Resampler
+	var oldSideBuf []int16
+	if e.channels == 2 && e.streamChannelsOrInput() == 1 && prevChannels == 2 && len(e.silkInputResamplers) > 1 {
+		oldSideRes = e.silkInputResamplers[1]
+		if oldSideBuf = old.SideInputBuf(); oldSideBuf == nil {
+			oldSideBuf = []int16{}
+		}
+	}
+	if err := e.rebuildSILKEncoder(rate); err != nil {
+		return err
+	}
+	if err := reapply(); err != nil {
+		return err
+	}
+	res, err := e.silkEncoder.CarryRateSwitchState(old)
+	if err != nil {
+		return err
+	}
+	e.silkPrevChannels = prevChannels
+	for ch, r := range res {
+		if r != nil && ch < len(e.silkInputResamplers) {
+			e.silkInputResamplers[ch] = r
+		}
+	}
+	if e.channels == 2 && e.streamChannelsOrInput() == 2 && prevChannels == 1 && len(e.silkInputResamplers) > 1 {
+		// Mono -> stereo in the same call: silk_Encode copies the mid
+		// channel's resampler, already switched, into the side channel.
+		e.silkInputResamplers[1].CopyStateFrom(e.silkInputResamplers[0])
+	}
+	if oldSideRes != nil && len(e.silkInputResamplers) > 1 {
+		e.silkInputResamplers[1] = oldSideRes
+		e.silkStaleSideBuf = oldSideBuf
+	}
+	return nil
 }
 
 // encodeSILKOnlyPacketLibopus codes one 20 ms SILK-only packet the way
@@ -87,6 +164,21 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 	frameRate := e.sampleRate / frameSize
 	streamChannels := e.streamChannelsOrInput()
 	desiredRate := e.silkInternalRateForBandwidth(d.bandwidth)
+	// A small packet budget caps the SILK internal rate (opus_encode_native:
+	// effective_max_rate, 2/3 of it above 50 frames/s).
+	e.silkMinInternalRate, e.silkMaxInternalRate = 8000, 16000
+	effectiveMaxRate := bitsToBitrate(maxDataBytes*8, e.sampleRate, frameSize)
+	if frameRate > 50 {
+		effectiveMaxRate = effectiveMaxRate * 2 / 3
+	}
+	if effectiveMaxRate < 8000 {
+		e.silkMaxInternalRate = 12000
+		desiredRate = min(desiredRate, 12000)
+	}
+	if effectiveMaxRate < 7000 {
+		e.silkMaxInternalRate = 8000
+		desiredRate = min(desiredRate, 8000)
+	}
 	if !e.silkFramesCoded && e.silkSampleRate != desiredRate {
 		// A fresh encoder starts at the rate of the decided bandwidth
 		// (silk_control_audio_bandwidth: fs = min(desired, API)).
@@ -132,6 +224,7 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 	if err != nil {
 		return nil, err
 	}
+	e.silkOpusCanSwitch = switchReady && !e.nonfinalFrame
 	// The coded bandwidth is the SILK rate actually in use.
 	bw, ok := nativeSilkFramingBandwidth(e.silkSampleRate)
 	if !ok {
@@ -147,6 +240,7 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 		return nil, err
 	}
 	silkPCM := e.silkInput(pcm, silkFrameSize*nFrames*streamChannels)
+	e.silkStaleSideBuf = nil
 	e.inDTX = false
 	enc := entcode.NewEncoder(maxDataBytes - 1)
 	if err := e.silkEncoder.EncodeMultiWithEncoder(enc, silkPCM, nFrames); err != nil {
@@ -163,8 +257,12 @@ func (e *Encoder) encodeSILKOnlyPacketLibopus(pcm, celtPCM []float64, nFrames in
 	if switchReady && !e.nonfinalFrame {
 		// For the first frame at a new SILK bandwidth: a trailing redundant
 		// frame now, the switch (with prefill) on the next packet.
-		redBytes = computeRedundancyBytes(maxDataBytes, d.bitrate, frameRate, streamChannels)
-		redundancy = redBytes != 0
+		// RESTRICTED_SILK has no CELT, so no redundant frame: the switch
+		// then happens without a prefill (silk_bw_switch is cleared below).
+		if e.application != ApplicationRestrictedSILK {
+			redBytes = computeRedundancyBytes(maxDataBytes, d.bitrate, frameRate, streamChannels)
+			redundancy = redBytes != 0
+		}
 		celtToSilk = false
 		e.silkBwSwitch = true
 	}

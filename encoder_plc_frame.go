@@ -40,8 +40,10 @@ func (e *Encoder) libopusPLCFrame(frameSize, maxDataBytes int) ([]byte, bool) {
 	}
 	// >= 60 ms frames.
 	if frameRate <= 16 {
-		// 1 x 60 ms, 2 x 40 ms, 2 x 60 ms (out_data_bytes is never 1 here).
-		if tocMode == framing.ModeSILKOnly && frameRate != 10 {
+		// 1 x 60 ms, 2 x 40 ms, 2 x 60 ms; a one-byte output buffer
+		// (out_data_bytes == 1) has no room for the code-3 frame count.
+		if e.outBufferBytes() == 1 || (tocMode == framing.ModeSILKOnly && frameRate != 10) {
+			tocMode = framing.ModeSILKOnly
 			if frameRate <= 12 {
 				packetCode = 1
 			}

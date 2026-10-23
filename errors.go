@@ -33,6 +33,8 @@ var (
 	ErrUnsupportedChannels = errors.New("opus: unsupported number of channels")
 
 	// ErrUnsupportedFrameSize indicates the frame size is not supported.
+	// Invalid frame-size arguments also wrap ErrBadArg (libopus
+	// OPUS_BAD_ARG).
 	ErrUnsupportedFrameSize = errors.New("opus: unsupported frame size")
 
 	// ErrUnsupportedBandwidth indicates the bandwidth is not supported.

@@ -129,6 +129,12 @@ type Encoder struct {
 	shapeTiltSmooth float64
 	noiseShapeBuf   []float64
 	side            *Encoder // side-channel encoder for stereo packets
+	// minInternalFsHz / maxInternalFsHz are encControl's internal sample
+	// rate limits (0: 8000 / 16000).
+	minInternalFsHz, maxInternalFsHz int
+	// inputBuf mirrors the side channel's sCmn.inputBuf (MAX_FRAME_LENGTH
+	// + 2 samples) as silk_Encode leaves it; see recordInputBuf.
+	inputBuf []int16
 	// reducedDependency is encControl->reducedDependency: every packet
 	// is coded as the first frame after a reset (no inter-packet
 	// prediction).
@@ -607,6 +613,12 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 	for i, signal := range frames {
 		e.curFrame = i
 		tell := enc.ECTell()
+		if i > 0 {
+			// silk_Encode declares curr_nBitsUsedLBRR = 0 inside its frame
+			// loop, so every later frame of a 40/60 ms packet resets
+			// nBitsUsedLBRR before its target rate.
+			e.updateLBRRUsage(0)
+		}
 		e.targetRateBps = e.frameTargetRate(nFrames, i, tell)
 		e.frameMaxBits, e.frameUseCBR = e.frameBitBudget(nFrames, i)
 		e.encodeRangeFrame(enc, signal, vadFlags[i], i > 0)
@@ -731,6 +743,10 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 	e.lastStereoTrace = e.lastStereoTrace[:0]
 	for i := 0; i < nFrames; i++ {
 		tell := enc.ECTell()
+		if i > 0 {
+			// curr_nBitsUsedLBRR is per frame (see EncodeMultiWithEncoder).
+			e.updateLBRRUsage(0)
+		}
 		total := e.frameTargetRate(nFrames, i, tell)
 		e.targetRateBps = total
 		e.side.targetRateBps = total
@@ -795,6 +811,7 @@ func (e *Encoder) encodeMultiStereoWithEncoder(enc *entcode.Encoder, pcm []float
 		} else {
 			e.side.appendMissingLBRRFrame()
 		}
+		e.side.recordInputBuf(right[i], side)
 		e.prevOnlyMiddle = ms.midOnly
 		e.lastStereoTrace = append(e.lastStereoTrace, st)
 	}
@@ -972,10 +989,15 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 	var ltpScaleQ14 int16
 	var frameSeed int32
 	rateScale := 1.0
+	// silk_LBRR_encode_FLP copies the indices before the quantiser loop, so
+	// the redundant frame keeps process_gains' quantOffsetType even when
+	// the loop lowers it to 0 for the regular frame.
+	lbrrQuantOffset := quantOffset
 	if exactGains != nil {
 		// silk_encode_frame_FLP: code the frame from the process_gains gains
 		// and, when the packet has a bit budget, iterate the quantiser loop.
 		quantOffset = exactGains.quantOffset
+		lbrrQuantOffset = quantOffset
 		e.lastSNRVBRFrame = false
 		e.restoreFrameState(initialState)
 		r := e.encodeFrameLoop(enc, initialState, signal, vadActive, signalType, quantOffset, conditionalGain,
@@ -1012,7 +1034,7 @@ func (e *Encoder) encodeRangeFrame(enc *entcode.Encoder, signal []float64, vadAc
 		lbrrGainSymbols = exactGains.symbols
 		lastGainIndex = exactGains.absIndices[e.nSubframes-1]
 	}
-	e.generateLBRRFrame(signal, signalType, quantOffset, lbrrGainSymbols, lastGainIndex, conditionalGain, nlsf,
+	e.generateLBRRFrame(signal, signalType, lbrrQuantOffset, lbrrGainSymbols, lastGainIndex, conditionalGain, nlsf,
 		pitchLags, ltpCoeffsQ14, ltpScaleQ14, frameSeed, rateScale, initialState)
 	if lbrrDebug {
 		if after := e.leakFingerprint(); after != leakBefore {
@@ -1091,12 +1113,13 @@ func (e *Encoder) codedFrameLookahead() []float64 {
 // advanceInputBuffer shifts xBuf by one frame once the frame is coded, so the
 // history ends at the coded frame and the old look-ahead heads the next frame
 // (silk_encode_frame_FLP: silk_memmove(x_buf, &x_buf[frame_length], ...)).
+// Like libopus it leaves the last frame's input in the tail, which a
+// mid-stream rate switch resamples with the history (silk_setup_resamplers).
 func (e *Encoder) advanceInputBuffer() {
 	if len(e.xBuf) < e.frameSize {
 		return
 	}
 	copy(e.xBuf, e.xBuf[e.frameSize:])
-	clear(e.xBuf[len(e.xBuf)-e.frameSize:])
 }
 
 // snapshotFrameStateInto stores the same state as snapshotFrameState in
@@ -3114,6 +3137,7 @@ func (e *Encoder) resetForSideReactivation() {
 
 func (e *Encoder) Reset() {
 	e.frameVAD = nil
+	e.inputBuf = nil
 	e.curFrame = 0
 	e.noSpeechCounter = 0
 	e.inDTX = false

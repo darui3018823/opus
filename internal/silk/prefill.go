@@ -7,8 +7,8 @@ package silk
 // first coded frame has an input history. Like libopus it advances the
 // front-end delay line, runs the VAD (and the mid/side analysis of a stereo
 // stream), places the samples at the end of the x_buf history and counts
-// the frame for the NSQ seed; the rate control, LBRR and coding state are
-// untouched. bitrate is the frame's SILK bitrate (the stereo analysis
+// the frame for the NSQ seed. The rate control and coding state are
+// untouched; the LBRR setup runs (see below). bitrate is the frame's SILK bitrate (the stereo analysis
 // reads it as the prefill's target rate).
 func (e *Encoder) Prefill(pcm []float64) {
 	// silk_Encode's prefill always runs one 10 ms frame (payloadSize_ms =
@@ -22,13 +22,27 @@ func (e *Encoder) Prefill(pcm []float64) {
 	e.allowBandwidthSwitch = false
 	e.beginDTXPacket()
 	stereo := e.channels == 2 && e.streamChannels == 2 && e.side != nil
+	// The prefill silk_Encode call runs silk_control_encoder (its
+	// controlled_since_last_payload was cleared by silk_init_encoder), and
+	// with it silk_setup_LBRR on every internal channel: LBRR_enabled
+	// becomes LBRR_coded, so the next coded packet sees
+	// LBRR_in_previous_packet set.
+	e.setupLBRR()
+	if stereo {
+		e.side.setupLBRR()
+	}
 	if stereo {
 		if len(pcm) < 2*n {
 			return
 		}
 		fsKHz := e.sampleRate / 1000
 		if e.prevStreamChannels == 1 {
+			// silk_Encode initialises the side channel for the mono ->
+			// stereo switch before the prefill reset, which then restores
+			// the saved sLP into every channel (see CarryPacketState).
+			lp := e.side.lp
 			e.enterStereoStream()
+			e.side.lp = lp
 		}
 		l := make([]float64, n)
 		r := make([]float64, n)
@@ -55,6 +69,7 @@ func (e *Encoder) Prefill(pcm []float64) {
 			}
 			e.side.prefillFrame(side)
 		}
+		e.side.recordInputBuf(right, side)
 		e.prefillFrame(mid)
 		e.prevOnlyMiddle = ms.midOnly
 		e.prevStreamChannels = 2
@@ -62,6 +77,11 @@ func (e *Encoder) Prefill(pcm []float64) {
 	}
 	if len(pcm) < n {
 		return
+	}
+	if e.channels == 2 && e.prevStreamChannels == 2 {
+		// A stereo -> mono switch on the prefill call: the mono line starts
+		// with the buffered sMid[1] sample, as for a coded first mono frame.
+		e.enterMonoStream()
 	}
 	framePCM := e.frontEndFrame(pcm[:n], true)
 	if e.channels == 2 {
@@ -151,9 +171,13 @@ func (e *Encoder) CarryPacketState(src *Encoder) {
 		// channel.
 		e.side.lp = src.lp
 	}
-	if len(src.encInputDelay) == len(e.encInputDelay) {
-		copy(e.encInputDelay, src.encInputDelay)
-	} else {
-		e.encInputDelay = append([]float64(nil), src.encInputDelay...)
+	// The re-initialised channel starts from a fresh input resampler (the
+	// front end's delay line); a mono stream still codes from inputBuf + 1,
+	// and inputBuf[1] is sStereo.sMid[1], which the re-init keeps: the
+	// oldest sample of the old line.
+	mono := e.channels == 1 || e.streamChannels == 1
+	e.encInputDelay = make([]float64, e.frontEndDelay(mono))
+	if mono && len(e.encInputDelay) > 0 && len(src.encInputDelay) > 0 {
+		e.encInputDelay[0] = src.encInputDelay[0]
 	}
 }

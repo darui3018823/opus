@@ -262,3 +262,35 @@ func (e *Encoder) LastSpeechActivityQ8() int {
 func (e *Encoder) PitchResidualTrace() []float64 {
 	return append([]float64(nil), e.pitchResidual...)
 }
+
+// recordInputBuf updates the side channel's inputBuf mirror after a stereo
+// frame: silk_resampler writes the frame at inputBuf[2:2+n], then
+// silk_stereo_LR_to_MS overwrites inputBuf[1:1+n] with the predicted side
+// signal, which silk_LP_variable_cutoff filters in place when the side is
+// coded. side is that final frame (int16/32768), resampled the resampler
+// output. Samples beyond the current frame keep what longer frames left
+// there, which the first mono frame after a rate switch averages with
+// (see InputBuf).
+func (e *Encoder) recordInputBuf(resampled []int16, side []float64) {
+	if len(e.inputBuf) != silkMaxFrameLength+2 {
+		e.inputBuf = make([]int16, silkMaxFrameLength+2)
+	}
+	copy(e.inputBuf[2:], resampled)
+	for i, v := range side {
+		if 1+i < len(e.inputBuf) {
+			e.inputBuf[1+i] = Float2Int16Sample(v)
+		}
+	}
+}
+
+// SideInputBuf returns the side channel's inputBuf mirror (nil before the
+// first stereo frame or after a reset): on a stereo -> mono switch whose
+// rate changes, silk_Encode averages the mono frame with the side
+// channel's inputBuf over the new, longer frame length, so the samples past
+// the side channel's own resampler output come from earlier frames.
+func (e *Encoder) SideInputBuf() []int16 {
+	if e.side == nil {
+		return nil
+	}
+	return e.side.inputBuf
+}

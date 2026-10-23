@@ -712,14 +712,17 @@ func (d *Decoder) decodeFECStereo(dec *entcode.Decoder, nFrames int) ([]float64,
 			return nil, err
 		}
 
+		// silk_Decode (FLAG_DECODE_LBRR): the side prediction memory is
+		// cleared on the first frame without the mid-only flag after a
+		// mid-only frame, whether or not the side channel has LBRR data.
+		if !decodeOnlyMiddle && d.prevDecodeOnlyMiddle {
+			d.side.applySetFsReset()
+		}
+		// has_side = !prev_decode_only_middle || side LBRR flag: without
+		// it the side channel is silent.
 		side := make([]float64, d.frameSize)
-		if !decodeOnlyMiddle {
+		if !d.prevDecodeOnlyMiddle || sidePresent {
 			if sidePresent {
-				if d.prevDecodeOnlyMiddle {
-					// The first frame with side coding clears the side
-					// prediction memory only.
-					d.side.applySetFsReset()
-				}
 				side, err = d.side.decodeFrame(dec, 1, frame > 0 && masks[1]&(1<<uint(frame-1)) != 0)
 			} else {
 				side = d.side.concealLBRRGap()

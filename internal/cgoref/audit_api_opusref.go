@@ -449,6 +449,27 @@ func (a *AudMSDecoder) Get(req int) (int, int) {
 }
 func (a *AudMSDecoder) Close() { C.opus_multistream_decoder_destroy(a.d) }
 
+// Decode decodes into a buffer of frameSize samples per channel (float); a
+// nil packet is passed as NULL.
+func (a *AudMSDecoder) Decode(packet []byte, frameSize, channels int, fec bool) ([]float32, int) {
+	buf := make([]float32, max(frameSize*channels, 1))
+	var pp *C.uchar
+	if packet != nil {
+		var f func()
+		pp, f = cbuf(packet)
+		defer f()
+	}
+	fc := 0
+	if fec {
+		fc = 1
+	}
+	ret := int(C.opus_multistream_decode_float(a.d, pp, C.opus_int32(len(packet)), (*C.float)(unsafe.Pointer(&buf[0])), C.int(frameSize), C.int(fc)))
+	if ret < 0 {
+		return nil, ret
+	}
+	return buf[:ret*channels], ret
+}
+
 // AudAmbisonics creates a projection encoder and returns its geometry/matrix.
 func AudAmbisonics(fs, ch, family, app int) (streams, coupled, gain int, matrix []byte, err int) {
 	var cerr C.int

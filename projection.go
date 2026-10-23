@@ -32,7 +32,21 @@ type ProjectionEncoder struct {
 // NewProjectionEncoder creates an Ambisonics encoder for RFC 8486 mapping
 // family 2 or 3. Family 2 supports orders 0 through 14; family 3 uses the
 // first- through fifth-order matrices provided by libopus 1.6.1.
+//
+// As opus_projection_ambisonics_encoder_create, whose size query fails
+// before anything else, a family or channel count without a family-3
+// matrix returns an error wrapping ErrAllocFail (OPUS_ALLOC_FAIL) as well
+// as ErrBadArg; family 2 is a Go extension and only wraps ErrBadArg.
 func NewProjectionEncoder(sampleRate, channels, mappingFamily int, application Application) (*ProjectionEncoder, error) {
+	if mappingFamily != MappingFamilyAmbisonics {
+		// opus_projection_ambisonics_encoder_get_size returns 0.
+		if mappingFamily != MappingFamilyProjection {
+			return nil, fmt.Errorf("%w: %w: projection supports mapping family 2 or 3", ErrBadArg, ErrAllocFail)
+		}
+		if _, err := predefinedAmbisonicsMatrices(channels); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrAllocFail, err)
+		}
+	}
 	_, nondiegetic, err := ambisonicsOrder(channels)
 	if err != nil {
 		return nil, err
@@ -88,6 +102,30 @@ func NewProjectionEncoder(sampleRate, channels, mappingFamily int, application A
 		e.configureForPolicy()
 	}
 	return e, nil
+}
+
+// NewProjectionEncoderWithProfile is NewProjectionEncoder with an explicit
+// defaults profile; see NewMultistreamEncoderWithProfile.
+// EncoderProfileLibopus gives the defaults of
+// opus_projection_ambisonics_encoder_create: automatic bitrate,
+// complexity 9 and constrained VBR.
+func NewProjectionEncoderWithProfile(sampleRate, channels, mappingFamily int, application Application, profile EncoderProfile) (*ProjectionEncoder, error) {
+	if err := validateEncoderProfile(profile); err != nil {
+		return nil, err
+	}
+	enc, err := NewProjectionEncoder(sampleRate, channels, mappingFamily, application)
+	if err != nil {
+		return nil, err
+	}
+	if profile == EncoderProfileLibopus {
+		if err := enc.SetBitrate(BitrateAuto); err != nil {
+			return nil, err
+		}
+		if err := enc.multistream.applyEncoderProfile(profile); err != nil {
+			return nil, err
+		}
+	}
+	return enc, nil
 }
 
 // SetModePolicy selects the automatic decision policy; see
@@ -211,8 +249,8 @@ func (e *ProjectionEncoder) SetComplexity(complexity int) error {
 	return e.multistream.SetComplexity(complexity)
 }
 
-// SetExpertFrameDuration applies a fixed packet duration to every elementary
-// stream. Argument restores frameSize-selected durations.
+// SetExpertFrameDuration selects the packet duration of the projection
+// encoder; see MultistreamEncoder.SetExpertFrameDuration.
 func (e *ProjectionEncoder) SetExpertFrameDuration(duration ExpertFrameDuration) error {
 	return e.multistream.SetExpertFrameDuration(duration)
 }
@@ -232,7 +270,7 @@ func (e *ProjectionEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768
 	}
-	return e.encodeFloatDepth(floatPCM, frameSize, 16)
+	return e.encodeFloatDepth(floatPCM, frameSize, 16, true)
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
@@ -263,11 +301,13 @@ func (e *ProjectionEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte,
 
 // EncodeFloat encodes frameSize samples per channel of interleaved float64 PCM.
 func (e *ProjectionEncoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
-	return e.encodeFloatDepth(pcm, frameSize, 24)
+	return e.encodeFloatDepth(pcm, frameSize, 24, false)
 }
 
-// encodeFloatDepth encodes one packet; lsbDepth is the input's sample depth.
-func (e *ProjectionEncoder) encodeFloatDepth(pcm []float64, frameSize, lsbDepth int) ([]byte, error) {
+// encodeFloatDepth encodes one packet; lsbDepth is the input's sample depth
+// and integerInput marks Encode input (downmix_int). Encode24 takes the
+// float path (see its comment on the libopus downmix_int bug).
+func (e *ProjectionEncoder) encodeFloatDepth(pcm []float64, frameSize, lsbDepth int, integerInput bool) ([]byte, error) {
 	required := frameSize * e.channels
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
@@ -296,12 +336,13 @@ func (e *ProjectionEncoder) encodeFloatDepth(pcm []float64, frameSize, lsbDepth 
 	}
 	if e.multistream.libopusPolicy {
 		// opus_projection_encode*: the streams code the mixed channels, the
-		// tonality analysis reads the unmixed input.
+		// tonality analysis reads the caller's whole unmixed input
+		// (analysis_pcm, analysis_frame_size).
 		var analysis []float64
 		if e.mappingFamily == MappingFamilyProjection {
-			analysis = pcm[:selectedFrameSize*e.channels]
+			analysis = pcm[:required]
 		}
-		return e.multistream.encodeLibopus(mixed[:selectedFrameSize*e.channels], selectedFrameSize, lsbDepth, analysis)
+		return e.multistream.encodeLibopus(mixed, frameSize, selectedFrameSize, lsbDepth, integerInput, analysis)
 	}
 	return e.multistream.EncodeFloat(mixed, frameSize)
 }
@@ -573,7 +614,7 @@ func (d *ProjectionDecoder) checkOutput(have, duration int) error {
 
 func (d *ProjectionDecoder) checkLossOutput(have, frameSize int) error {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	return d.checkOutput(have, frameSize)
 }

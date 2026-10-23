@@ -38,7 +38,9 @@ We appreciate code contributions! Please follow these steps:
    git remote add upstream https://github.com/darui3018823/opus.git
    ```
 3. **Set Up Your Development Environment:**
-   - **Go:** Ensure you have Go 1.24.11 or newer installed.
+   - **Go:** Ensure you have Go 1.24.11 or newer installed. With an older
+     toolchain than 1.27.3, `go` downloads 1.27.3 automatically because of
+     the `toolchain` line in `go.mod` (unless `GOTOOLCHAIN=local`).
    - **Dependencies:** Install Go modules.
      ```bash
      go mod download

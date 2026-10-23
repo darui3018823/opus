@@ -38,7 +38,10 @@ configurations; see
 go get github.com/darui3018823/opus
 ```
 
-The module currently declares Go 1.24.11 in [`go.mod`](go.mod).
+The module currently declares Go 1.24.11 in [`go.mod`](go.mod) as its
+minimum version. The `toolchain go1.27.3` line only selects the Go release
+used to build and test this repository (CI included); it is ignored when
+the module is used as a dependency.
 
 ## Minimal encode/decode
 

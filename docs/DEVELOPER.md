@@ -3,7 +3,8 @@
 ## Getting Started
 
 ### Prerequisites
-- Go 1.24.11 or later (see `go.mod`)
+- Go 1.24.11 or later (see `go.mod`); the `toolchain go1.27.3` line makes
+  `go` fetch 1.27.3 for work in this repository
 - Basic understanding of digital signal processing
 - Familiarity with audio codecs (helpful but not required)
 

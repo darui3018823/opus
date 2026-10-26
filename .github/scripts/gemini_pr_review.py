@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 
 
-MODEL = "gemini-3.1-pro-preview"
+MODEL = "gemini-3.8-flash"
 MAX_OUTPUT_TOKENS = 65536
 TRIGGER_MENTION = re.compile(r"(?<![\w-])@gemini(?![\w-])", re.IGNORECASE)
 DEFAULT_MAX_DIFF_CHARS = 850_000
@@ -582,7 +582,7 @@ def call_gemini(prompt: str, tool_context: ToolContext | None = None) -> dict[st
             ]
         },
         "generationConfig": {
-            "temperature": 0.1,
+            "thinkingConfig": {"thinkingLevel": "HIGH"},
             "maxOutputTokens": MAX_OUTPUT_TOKENS,
             "responseMimeType": "application/json",
             "responseSchema": gemini_schema(),
@@ -657,7 +657,8 @@ def call_gemini(prompt: str, tool_context: ToolContext | None = None) -> dict[st
             if name == "get_diff_for_file" or (name == "run_readonly_command" and args.get("command") == "gh_pr_diff"):
                 inspected_detail = True
             response = trim_tool_response(execute_tool(tool_context, name, args))
-            response_parts.append({"functionResponse": {"name": name, "response": response}})
+            response_parts.append({"functionResponse": {"id": call["id"], "name": name, "response": response}})
+        response_parts.append({"text": "Continue inspecting the PR, or return the final review JSON when ready."})
         contents.append({"role": "user", "parts": response_parts})
 
     contents.append(
@@ -756,7 +757,7 @@ def append_unposted(summary: str, unposted: list[ReviewComment]) -> str:
 
 
 def format_review_body(body: str) -> str:
-    return f"Gemini 3.1 Pro:\n\n{body.strip()}"
+    return f"Gemini 3.8 Flash (High):\n\n{body.strip()}"
 
 
 def post_review(repo: str, pr_number: int, head_sha: str, body: str, comments: list[ReviewComment]) -> None:

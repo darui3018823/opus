@@ -274,6 +274,10 @@ func (e *ProjectionEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 }
 
 // Encode24 encodes interleaved signed 24-bit PCM stored in int32 values.
+// Unlike libopus 1.6.1's opus_projection_encode24, whose tonality analysis
+// reads the int32 input through the int16 downmix_int reader, this method
+// analyses the actual 24-bit samples through the float path. Packets can
+// therefore differ from libopus at complexity 7 or higher.
 func (e *ProjectionEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
 	required := frameSize * e.channels
 	if len(pcm) < required {

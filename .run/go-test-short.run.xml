@@ -1,0 +1,13 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Go test - short" type="GoTestRunConfiguration" factoryName="Go Test">
+    <module name="opus" />
+    <working_directory value="$PROJECT_DIR$" />
+    <go_parameters value="" />
+    <parameters value="-test.count=1 -test.short" />
+    <kind value="DIRECTORY" />
+    <directory value="$PROJECT_DIR$" />
+    <framework value="gotest" />
+    <pattern value="" />
+    <method v="2" />
+  </configuration>
+</component>

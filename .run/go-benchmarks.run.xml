@@ -3,11 +3,11 @@
     <module name="opus" />
     <working_directory value="$PROJECT_DIR$" />
     <go_parameters value="" />
-    <parameters value="-test.bench=. -test.benchmem -test.benchtime=10x" />
+    <parameters value="-test.benchmem -test.benchtime=10x" />
     <kind value="DIRECTORY" />
     <directory value="$PROJECT_DIR$" />
-    <framework value="gotest" />
-    <pattern value="^$" />
+    <framework value="gobench" />
+    <pattern value="." />
     <method v="2" />
   </configuration>
 </component>

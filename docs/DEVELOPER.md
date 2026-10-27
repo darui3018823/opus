@@ -33,6 +33,25 @@ go test -cover ./...
 go test -bench=. ./internal/dsp/
 ```
 
+### JetBrains IDEs
+
+GoLand loads the shared configurations in `.run/`: all tests, short tests,
+coverage, benchmarks, and the CELT, SILK, and Ogg Opus package tests.
+The benchmark configuration skips tests and runs each benchmark ten times.
+
+For CLion, load the root `CMakeLists.txt` as a CMake project. If the local,
+git-ignored `libopus/` source tree is present, its upstream CMake project
+registers the C sources with their actual include paths and compile definitions.
+This enables navigation without the "file does not belong to any project
+target" warning. The `opus` reference library is excluded from the default
+build and does not change the pure Go build.
+
+CLion also exposes the `go-build`, `go-vet`, `go-test`, `go-test-short`,
+`go-test-coverage`, and `go-benchmarks` custom build targets when `go` is on
+`PATH`. Build the desired target to run its command from the repository root.
+GoLand's Go Test run configurations require the Go plugin and are separate
+from these CLion build targets.
+
 ## Project Structure
 
 ```

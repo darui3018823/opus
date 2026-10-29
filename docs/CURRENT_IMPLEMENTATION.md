@@ -26,8 +26,8 @@ The `oggopus` subpackage implements Ogg page and Ogg Opus container APIs.
 Constants are in `constants.go` and package-level error values in `errors.go`.
 Public version constants are generated into `version_gen.go` from the
 repository-level `VERSION` file; `go generate ./...` refreshes them and CI
-rejects generated-file drift. The current released baseline is `v1.7.0`;
-`VERSION` holds the `v1.7.1` release candidate.
+rejects generated-file drift. The current released baseline is `v1.7.1`;
+`VERSION` holds the `v1.8.0` release candidate.
 Release preparation follows [`docs/RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
 and compatibility-breaking cleanup is recorded separately in
 [`docs/V2_API_CANDIDATES.md`](V2_API_CANDIDATES.md).
@@ -1622,6 +1622,9 @@ multistream):
   multistream encoder without validation or forwarding to the streams (an
   invalid value fails the next encode with `ErrBadArg`), and the streams'
   tonality analysis reads the caller's whole frame.
+- Multistream `Encode`/`Encode24` and projection `Encode` give every stream
+  the integer analysis downmix (no +6 dBFS cap, `downmix_int` /
+  `downmix_int24`); the float entry points keep the capped `downmix_float`.
 
 Behavior changes from the audit fixes that callers can observe:
 
@@ -1650,6 +1653,20 @@ Behavior changes from the audit fixes that callers can observe:
   bytes change only on frames that reach these paths; 56 real-audio cells
   (1,006,840 packets, 16-128 kb/s VBR) are byte-identical to plain-C libopus
   1.6.1. Decoding is unchanged.
+- v1.8.0 (PR #36) closes the remaining differences from plain-C libopus
+  1.6.1 found by an `opus_demo -e/-d` comparison over 5690 real-audio cells
+  (14 tracks, 16-bit, 24-bit and float input): v1.7.1 differed in 501
+  encoder cells, v1.8.0 in none, and the decoder matches in every cell (79
+  cells are restricted-SILK frames under 10 ms that both reject). The
+  encoder fixes cover the mid-stream SILK internal rate switch, LBRR,
+  stereo/mono transitions and prefills, CELT hybrid decisions, CBR
+  multi-frame padding and the analysis downmix; the decoder fixes cover CELT
+  background energy, hybrid FEC, redundancy ordering and the comb
+  post-filter on hybrid frames. It adds the `...WithProfile` multistream,
+  surround and projection constructors, the API changes listed above, a
+  1-3% faster CELT decode, and a `toolchain go1.27.3` line (the module
+  minimum stays Go 1.24.11). Record:
+  `.claude/tasks/investigation/libopus-parity-hunt-2026-10-19.md`.
 - `oggopus`: `PacketWriter` keeps the granule of a packet completed on a page
   that ends inside the next packet (it wrote -1, which `Reader` rejected);
   `Writer.Close` before any audio packet returns `ErrInvalidOpusStream`;

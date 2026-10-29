@@ -164,7 +164,9 @@ elementary packet の長さを変えずに、決定的な 5.1 / 7.1 fixture の 
 に比べて encode / decode 時間をおよそ半分にし、確保バイト数を約 97% 減らしました。
 デコード PCM、final range、エンコード byte 列は変わりません。v1.7.1 は実音声で
 見つかった plain-C libopus とのエンコーダ差分 4 件を修正したため、該当フレームの
-エンコード byte 列が変わります。デコードは変わりません。これらは回帰用
+エンコード byte 列が変わります。デコードは変わりません。v1.8.0 は 5690 cell の
+実音声比較で見つかった plain-C libopus 1.6.1 とのエンコーダ・デコーダ差分を
+すべて解消しました。これらは回帰用
 fixture とローカル測定であり、一般的な品質・性能保証ではありません。条件と数値は
 [real-corpus scoreboard](docs/REAL_CORPUS_SCOREBOARD.md) と
 [performance baseline](docs/PERF_BASELINE.md) を参照してください。

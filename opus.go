@@ -140,6 +140,15 @@ type Encoder struct {
 	// count of the last SILK-coded packet (0 after a SILK re-init), which
 	// drives the resampler hand-over on mono<->stereo transitions.
 	silkPrevChannels int
+	// silkStaleSideBuf is the side channel's inputBuf during a stereo ->
+	// mono prefill at a new SILK rate (see silkInternalRateControl).
+	silkStaleSideBuf []int16
+	// silkMinInternalRate / silkMaxInternalRate are the packet's
+	// silk_mode.minInternalSampleRate / maxInternalSampleRate.
+	silkMinInternalRate, silkMaxInternalRate int
+	// silkOpusCanSwitch is st->silk_mode.opusCanSwitch: switchReady &&
+	// !nonfinal_frame of the last SILK call, read by the next one.
+	silkOpusCanSwitch bool
 	// silkBwSwitch is st->silk_bw_switch: SILK signalled switchReady, the
 	// next packet switches its internal rate (leading redundancy, prefill 2).
 	silkBwSwitch bool
@@ -164,23 +173,26 @@ type Encoder struct {
 	// coded under the libopus policy: 10 for a 10 ms packet, 20 otherwise.
 	silkFrameMs int
 	// packetEquivRate is the libopus policy's equiv_rate for the packet
-	// being coded (0 outside it).
-	packetEquivRate int
+	// being coded, valid while packetEquivRateSet. It can be zero or
+	// negative (2.5 ms frames at low rates).
+	packetEquivRate    int
+	packetEquivRateSet bool
 	// analysisReadPos / analysisReadSubframe are analysis_read_pos_bak and
 	// analysis_read_subframe_bak: the analysis read position before this
 	// packet's run_analysis (-1 when the analysis did not run).
 	analysisReadPos, analysisReadSubframe int
 	// outDataBytes is the multistream encoder's per-stream packet budget
-	// (opus_encode_native's out_data_bytes; 0 outside it), analysisInput
-	// the input the tonality analysis reads instead of the packet's (the
-	// projection encoder's unmixed channels), and libopusForcedMode
-	// st->user_forced_mode (-1 for automatic) under the libopus policy.
+	// (opus_encode_native's out_data_bytes; 0 outside it), and
+	// libopusForcedMode st->user_forced_mode (-1 for automatic) under the
+	// libopus policy.
 	outDataBytes int
 	// maxPacketSize is SetMaxPacketSize: the caller's output buffer for a
 	// single-stream packet (0 = defaultOutDataBytes).
 	maxPacketSize int
-	// callerPCM / callerFrameSize are the caller's whole input when an
-	// expert frame duration codes only a prefix (analysis_pcm).
+	// callerPCM / callerFrameSize are the input the tonality analysis reads
+	// (analysis_pcm / analysis_frame_size) when it is not the coded frame:
+	// the caller's whole input when an expert frame duration codes only a
+	// prefix, or a projection encoder's unmixed channels.
 	callerPCM []float64
 	// inputBuf holds Encode/Encode24's float64 conversion of the caller's
 	// samples; it is only read during that call.
@@ -190,7 +202,6 @@ type Encoder struct {
 	// bytes per coded frame. Under the libopus policy the packet bitrate
 	// (e.bitrate) is st->bitrate_bps instead, bounded by max_data_bytes.
 	reportedBitrate   int
-	analysisInput     []float64
 	libopusForcedMode int
 	// lfe is st->lfe (OPUS_SET_LFE), set by the surround encoder on its
 	// low-frequency effects stream under the libopus policy.
@@ -244,6 +255,9 @@ type Encoder struct {
 	// inputLSBDepth is the precision of the API call (16 for Encode, 24 for
 	// Encode24 / EncodeFloat); libopus uses IMIN(call depth, OPUS_SET_LSB_DEPTH).
 	inputLSBDepth int
+	// inputIntegerAPI marks Encode / Encode24 input (downmix_int*) for the
+	// analysis.
+	inputIntegerAPI bool
 	// analysis is the tonality analysis state (libopus st->analysis), run at
 	// complexity >= 7 on the raw input of every frame.
 	analysis *celt.TonalityAnalysis
@@ -513,7 +527,7 @@ func (e *Encoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 		floatPCM[i] = float64(pcm[i]) / 32768.0
 	}
 
-	e.inputLSBDepth = 16
+	e.inputLSBDepth, e.inputIntegerAPI = 16, true
 	return e.encodeCallerFrame(floatPCM, frameSize, selectedFrameSize)
 }
 
@@ -543,7 +557,7 @@ func (e *Encoder) Encode24(pcm []int32, frameSize int) ([]byte, error) {
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608.0
 	}
-	e.inputLSBDepth = 24
+	e.inputLSBDepth, e.inputIntegerAPI = 24, true
 	return e.encodeCallerFrame(floatPCM, frameSize, selectedFrameSize)
 }
 
@@ -562,7 +576,7 @@ func (e *Encoder) EncodeFloat(pcm []float64, frameSize int) ([]byte, error) {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
 
-	e.inputLSBDepth = 24
+	e.inputLSBDepth, e.inputIntegerAPI = 24, false
 	return e.encodeCallerFrame(pcm[:expectedSize], frameSize, selectedFrameSize)
 }
 
@@ -583,7 +597,7 @@ func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
 		floatPCM[i] = float64(pcm[i])
 	}
 	// opus_encode_float passes an LSB depth of 24.
-	e.inputLSBDepth = 24
+	e.inputLSBDepth, e.inputIntegerAPI = 24, false
 	return e.encodeCallerFrame(floatPCM, frameSize, selectedFrameSize)
 }
 
@@ -631,6 +645,12 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 	// from both channels), which is also what a 40/60 ms packet coded during
 	// the stereo->mono delay leaves behind: it sets force_channels = 1 for
 	// good.
+	if e.libopusModePolicy && e.outBufferBytes() == 1 && e.sampleRate == frameSize*10 {
+		// opus_encode_native: "Cannot encode 100 ms in 1 byte" (after
+		// clearing rangeFinal, before any state moves).
+		e.lastFinalRange = 0
+		return nil, fmt.Errorf("%w: 100 ms packet in a 1-byte buffer", ErrBufferTooSmall)
+	}
 	e.streamStarted = true
 	if !e.libopusModePolicy && e.forceChannels == ChannelsMono && e.channels == ChannelsStereo {
 		mono := make([]float64, frameSize)
@@ -668,11 +688,10 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 		}
 		e.analysisReadPos, e.analysisReadSubframe = e.analysis.ReadPosition()
 		analysisPCM, analysisFrameSize := pcm, frameSize
-		if e.analysisInput != nil {
-			analysisPCM = e.analysisInput
-		} else if e.callerPCM != nil {
+		if e.callerPCM != nil {
 			analysisPCM, analysisFrameSize = e.callerPCM, e.callerFrameSize
 		}
+		e.analysis.SetIntegerInput(e.inputIntegerAPI)
 		analysisInfo = e.analysis.Run(analysisPCM, analysisFrameSize, frameSize, e.channels, lsbDepth)
 	} else if e.analysis != nil && e.analysis.Initialized() {
 		e.analysis.Reset()
@@ -730,7 +749,7 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 			e.silkEncoder.SetReducedDependency(e.predictionDisabled)
 		}
 		e.frameIsSilence, e.frameAnalysis, e.packetLSBDepth = isSilence, analysisInfo, lsbDepth
-		defer func() { e.packetEquivRate = 0 }()
+		defer func() { e.packetEquivRate, e.packetEquivRateSet = 0, false }()
 		e.decideStreamChannelsLibopus(frameSize, maxDataBytes, analysisInfo)
 		decision = e.decideLibopusMode(raw, frameSize, maxDataBytes, analysisInfo)
 		if decision.mode == framing.ModeCELTOnly && e.toMono {
@@ -738,7 +757,7 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 			e.streamChannels = 1
 		}
 		e.pendingMode = decision.mode
-		e.packetEquivRate = decision.equivRate
+		e.packetEquivRate, e.packetEquivRateSet = decision.equivRate, true
 	} else {
 		e.pendingMode = -1
 	}
@@ -1001,8 +1020,9 @@ func (e *Encoder) encodeDecidedFrameCore(pcm []float64, frameSize, nFrames, maxD
 		out, redundancyEmitted, err := e.encodeHybridPacket(pcm, celtPCM, nFrames, bw, redundancy, celtToSilk, redundancyBytes, silkPrefill, decision.silkPrefill2, maxDataBytes, decision.bitrate)
 		if err == nil {
 			// to_celt: after the deferred frame the real switch happens, so the
-			// next packet's predecessor is CELT-only (opus_encode_native).
-			if redundancyEmitted && !celtToSilk {
+			// next packet's predecessor is CELT-only (opus_encode_native),
+			// whether or not the redundant frame fit.
+			if (e.libopusModePolicy && decision.toCelt) || (!e.libopusModePolicy && redundancyEmitted && !celtToSilk) {
 				e.prevMode = framing.ModeCELTOnly
 			} else {
 				e.prevMode = framing.ModeHybrid
@@ -1480,10 +1500,13 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 	// prefill of a re-initialised encoder; switchReady arms a SILK bandwidth
 	// switch with a trailing redundant frame.
 	if e.libopusModePolicy {
+		// Hybrid: no bandwidth reduction at the lowest bitrates.
+		e.silkMinInternalRate, e.silkMaxInternalRate = 16000, 16000
 		switchReady, err := e.silkInternalRateControl(unit, 16000, silkPrefill, prefill2, silkRate, silkMaxBits, streamChannels)
 		if err != nil {
 			return nil, false, err
 		}
+		e.silkOpusCanSwitch = switchReady && !e.nonfinalFrame
 		if switchReady && nFrames == 1 && !e.nonfinalFrame {
 			// For the first frame at a new SILK bandwidth: a trailing
 			// redundant frame now, the switch on the next packet.
@@ -1658,6 +1681,9 @@ func (e *Encoder) encodeHybridPacket(pcm, celtPCM []float64, nFrames, bw int, re
 		// reset CELT state prefilled with the 2.5 ms before the frame, without
 		// prediction (the analysis and SILK info set above are cleared too).
 		if e.libopusModePolicy && k == 0 && e.prevMode >= 0 && e.prevMode != framing.ModeHybrid {
+			// CELT_SET_END_BAND comes first in opus_encode_frame_native, so
+			// the prefill codes the packet's bands.
+			e.celtEncoder.SetEndBand(celtEnd)
 			if err := e.celtModeTransition(17); err != nil {
 				return nil, false, err
 			}
@@ -2124,7 +2150,7 @@ func (e *Encoder) selectEncodeFrameSize(frameSize int) (int, error) {
 		return 0, err
 	}
 	if e.application == ApplicationRestrictedSILK && selected*100 < e.sampleRate {
-		return 0, fmt.Errorf("%w: restricted SILK needs 10 ms frames or longer", ErrUnsupportedFrameSize)
+		return 0, fmt.Errorf("%w: %w: restricted SILK needs 10 ms frames or longer", ErrBadArg, ErrUnsupportedFrameSize)
 	}
 	return selected, nil
 }
@@ -2132,7 +2158,7 @@ func (e *Encoder) selectEncodeFrameSize(frameSize int) (int, error) {
 func (e *Encoder) validateFrameSize(frameSize int) (int, error) {
 	base := e.frameSize
 	if base <= 0 || frameSize <= 0 {
-		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, e.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, e.sampleRate)
 	}
 	for _, divisor := range []int{8, 4, 2} {
 		if frameSize*divisor == base {
@@ -2140,13 +2166,48 @@ func (e *Encoder) validateFrameSize(frameSize int) (int, error) {
 		}
 	}
 	if frameSize%base != 0 {
-		return 0, fmt.Errorf("%w: frameSize %d is not a valid Opus duration at %d Hz", ErrUnsupportedFrameSize, frameSize, e.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d is not a valid Opus duration at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, e.sampleRate)
 	}
 	nFrames := frameSize / base
 	if nFrames < 1 || nFrames > 6 {
-		return 0, fmt.Errorf("%w: packet duration %d ms exceeds Opus maximum 120 ms", ErrUnsupportedFrameSize, nFrames*20)
+		return 0, fmt.Errorf("%w: %w: packet duration %d ms exceeds Opus maximum 120 ms", ErrBadArg, ErrUnsupportedFrameSize, nFrames*20)
 	}
 	return nFrames, nil
+}
+
+// frameSizeSelect is libopus frame_size_select: the frame size coded for a
+// caller frame of frameSize samples under an expert duration, or an error
+// wrapping ErrBadArg (frame_size_select returns -1).
+func frameSizeSelect(application Application, frameSize int, duration ExpertFrameDuration, fs int) (int, error) {
+	bad := func(why string) (int, error) {
+		return 0, fmt.Errorf("%w: %w: %s (frameSize %d, duration %d, %d Hz)", ErrBadArg, ErrUnsupportedFrameSize, why, frameSize, duration, fs)
+	}
+	if frameSize < fs/400 {
+		return bad("frame shorter than 2.5 ms")
+	}
+	var newSize int
+	switch {
+	case duration == ExpertFrameDurationArgument:
+		newSize = frameSize
+	case duration >= ExpertFrameDuration2_5ms && duration <= ExpertFrameDuration40ms:
+		newSize = (fs / 400) << (duration - ExpertFrameDuration2_5ms)
+	case duration > ExpertFrameDuration40ms && duration <= ExpertFrameDuration120ms:
+		newSize = int(duration-ExpertFrameDuration2_5ms-2) * fs / 50
+	default:
+		return bad("invalid expert frame duration")
+	}
+	if newSize > frameSize {
+		return bad("selected duration longer than the input")
+	}
+	if 400*newSize != fs && 200*newSize != fs && 100*newSize != fs &&
+		50*newSize != fs && 25*newSize != fs && 50*newSize != 3*fs &&
+		50*newSize != 4*fs && 50*newSize != 5*fs && 50*newSize != 6*fs {
+		return bad("not a valid Opus duration")
+	}
+	if application == ApplicationRestrictedSILK && newSize < fs/100 {
+		return bad("restricted SILK needs 10 ms frames or longer")
+	}
+	return newSize, nil
 }
 
 func (e *Encoder) selectCELTEncoder(frameSize int) error {
@@ -2270,11 +2331,24 @@ func (e *Encoder) silkInput(pcm []float64, want int) []float64 {
 		out0 := e.silkInputResamplers[0].ProcessAppend(e.silkResScratch[0][:0], in)
 		e.silkResScratch[0] = out0
 		if e.silkPrevChannels == 2 && len(e.silkInputResamplers) > 1 {
-			out1 := e.silkInputResamplers[1].ProcessAppend(e.silkResScratch[1][:0], in)
+			// Only the first SILK frame is averaged (nFramesEncoded == 0),
+			// and only its input runs through the side resampler.
+			firstIn := min(len(in), e.sampleRate*e.silkFrameMsOrDefault()/1000)
+			out1 := e.silkInputResamplers[1].ProcessAppend(e.silkResScratch[1][:0], in[:firstIn])
 			e.silkResScratch[1] = out1
-			for i := range out0 {
-				if i < len(out1) {
+			firstOut := min(len(out0), e.silkSampleRate*e.silkFrameMsOrDefault()/1000)
+			for i := range out0[:firstOut] {
+				switch {
+				case i < len(out1):
 					out0[i] = int16((int32(out0[i]) + int32(out1[i])) >> 1)
+				case e.silkStaleSideBuf != nil:
+					// The side channel ran at a lower rate: past its own
+					// output, its inputBuf holds what earlier frames left.
+					var stale int32
+					if 2+i < len(e.silkStaleSideBuf) {
+						stale = int32(e.silkStaleSideBuf[2+i])
+					}
+					out0[i] = int16((int32(out0[i]) + stale) >> 1)
 				}
 			}
 		}
@@ -2529,7 +2603,13 @@ func (e *Encoder) PredictionDisabled() bool { return e.predictionDisabled }
 // SetPhaseInversionDisabled disables CELT intensity-stereo phase inversion.
 // This is intended for compatibility with downmixing pipelines; disabling it
 // is not compliant with the Opus specification.
+//
+// A RESTRICTED_SILK encoder has no CELT layer: like libopus it ignores the
+// setting and PhaseInversionDisabled reports false.
 func (e *Encoder) SetPhaseInversionDisabled(disabled bool) {
+	if e.application == ApplicationRestrictedSILK {
+		return
+	}
 	e.phaseInversionDisabled = disabled
 	for _, enc := range e.celtEncoders {
 		if enc != nil {
@@ -2855,14 +2935,13 @@ func (e *Encoder) SetInbandFECMode(mode int) error {
 func (e *Encoder) InbandFECMode() int { return e.fecConfig }
 
 // SetPacketLossPerc sets the expected packet-loss percentage used to tune FEC
-// redundancy (higher loss → smaller, more frequent LBRR frames). Values are
-// clamped to 0 through 100. With FEC enabled, zero disables LBRR emission.
+// redundancy (higher loss → smaller, more frequent LBRR frames). Like
+// OPUS_SET_PACKET_LOSS_PERC, which rejects them with OPUS_BAD_ARG, values
+// outside 0 through 100 are ignored and leave the setting unchanged. With
+// FEC enabled, zero disables LBRR emission.
 func (e *Encoder) SetPacketLossPerc(perc int) {
-	if perc < 0 {
-		perc = 0
-	}
-	if perc > 100 {
-		perc = 100
+	if perc < 0 || perc > 100 {
+		return
 	}
 	e.packetLossPerc = perc
 	e.syncSILKFEC()
@@ -2897,12 +2976,14 @@ func (e *Encoder) SetApplication(application Application) error {
 	if !isValidApplication(application) {
 		return fmt.Errorf("%w: unsupported application %d", ErrBadArg, application)
 	}
-	// libopus fixes the restricted SILK / CELT applications at creation.
-	if isRestrictedCodecApplication(e.application) || isRestrictedCodecApplication(application) {
-		if application == e.application {
-			return nil
-		}
+	// libopus fixes the restricted SILK / CELT applications at creation:
+	// OPUS_SET_APPLICATION fails on such an encoder even with its own
+	// value, and cannot select them.
+	if isRestrictedCodecApplication(e.application) {
 		return fmt.Errorf("%w: application %d is fixed at creation", ErrBadArg, e.application)
+	}
+	if isRestrictedCodecApplication(application) {
+		return fmt.Errorf("%w: application %d can only be set at creation", ErrBadArg, application)
 	}
 	e.application = application
 	e.syncSignalType()
@@ -3151,6 +3232,7 @@ func (e *Encoder) Reset() error {
 	e.streamChannels = e.channels
 	e.prevStreamChannels = 0
 	e.silkBwSwitch = false
+	e.silkOpusCanSwitch = false
 	e.nonfinalFrame = false
 	e.silkPrevChannels = 0
 	clear(e.celtPrefillTail)
@@ -3673,28 +3755,47 @@ func packOpusFramesToPacketSize(frames [][]byte, vbr bool, targetBytes int) ([]b
 		return code3, 3, nil
 	}
 
-	// A padded code-3 packet adds padBytes data bytes plus the padding-count
-	// run. Each continuation byte represents 254 padding bytes, so the run
-	// length is max(1, ceil(padBytes/254)). Invert that relationship in O(1)
-	// and validate the candidate because sizes immediately after each
-	// continuation boundary are not representable exactly.
-	requiredPadding := targetBytes - 1 - len(code3)
-	if requiredPadding >= 1 {
-		padBytes := requiredPadding - (requiredPadding+254)/255
-		if padBytes >= 0 && padBytes+len(encodePaddingCount(padBytes)) == requiredPadding {
-			padded, err := packOpusFramesCode3(frames, vbr, true, padBytes)
-			if err != nil {
-				return nil, 0, err
-			}
-			if 1+len(padded) == targetBytes {
-				return padded, 3, nil
-			}
+	// A padded code-3 packet: opus_repacketizer_out_range_impl spends
+	// pad_amount = P bytes on the padding-count run and the padding data,
+	// writing nb_255s = (P-1)/255 bytes of 255 and then P-255*nb_255s-1, so
+	// every P >= 1 is representable (the run ends in 0 when P = 255k+1).
+	if requiredPadding := targetBytes - 1 - len(code3); requiredPadding >= 1 {
+		run, padBytes := libopusPaddingRun(requiredPadding)
+		padded, err := packOpusFramesCode3Run(frames, vbr, run, padBytes)
+		if err != nil {
+			return nil, 0, err
+		}
+		if 1+len(padded) == targetBytes {
+			return padded, 3, nil
 		}
 	}
 	return compact, code, nil
 }
 
+// libopusPaddingRun returns the padding-count run and the padding data size
+// opus_repacketizer_out_range_impl writes for pad_amount bytes of padding.
+func libopusPaddingRun(padAmount int) (run []byte, padBytes int) {
+	nb255s := (padAmount - 1) / 255
+	run = make([]byte, nb255s+1)
+	for i := 0; i < nb255s; i++ {
+		run[i] = 255
+	}
+	run[nb255s] = byte(padAmount - 255*nb255s - 1)
+	return run, padAmount - len(run)
+}
+
 func packOpusFramesCode3(frames [][]byte, vbr, padding bool, padBytes int) ([]byte, error) {
+	var run []byte
+	if padding && padBytes >= 0 {
+		run = encodePaddingCount(padBytes)
+	}
+	return packOpusFramesCode3Run(frames, vbr, run, padBytes)
+}
+
+// packOpusFramesCode3Run is packOpusFramesCode3 with an explicit
+// padding-count run (nil for no padding) covering padBytes data bytes.
+func packOpusFramesCode3Run(frames [][]byte, vbr bool, run []byte, padBytes int) ([]byte, error) {
+	padding := run != nil
 	n := len(frames)
 	if n == 0 {
 		return nil, fmt.Errorf("no frames to pack")
@@ -3717,10 +3818,7 @@ func packOpusFramesCode3(frames [][]byte, vbr, padding bool, padBytes int) ([]by
 	// explicit per-frame lengths (VBR layout) are required.
 	useVBR := vbr || !allEqual
 
-	capacity := 1 + 2*n + padBytes
-	if padding {
-		capacity += len(encodePaddingCount(padBytes))
-	}
+	capacity := 1 + 2*n + padBytes + len(run)
 	out := make([]byte, 0, capacity)
 	flags := byte(n)
 	if useVBR {
@@ -3730,9 +3828,7 @@ func packOpusFramesCode3(frames [][]byte, vbr, padding bool, padBytes int) ([]by
 		flags |= 0x40
 	}
 	out = append(out, flags)
-	if padding {
-		out = append(out, encodePaddingCount(padBytes)...)
-	}
+	out = append(out, run...)
 	if useVBR {
 		// First n-1 frame lengths, then all payloads.
 		for i := 0; i < n-1; i++ {
@@ -4419,27 +4515,37 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 				d.applyTransition(pcm, trans)
 			}
 		}
+		// opus_decode_frame decodes a CELT->SILK redundant frame first, from
+		// (and advancing) the persistent CELT state, before the hybrid ->
+		// SILK silence fade-out decodes from that state.
+		var redundantRange uint32
+		var leadingRedundancy []float64
+		if redundancy && celtToSilk && redundancyBytes >= 2 {
+			redPCM, redRange, redDec := d.decodeRedundancy(
+				stream[len(stream)-redundancyBytes:], pktChannels, redundancyEndBand, true,
+			)
+			if redDec != nil {
+				redundantRange = redRange
+				d.lastCeltDec = redDec
+				leadingRedundancy = redPCM
+			}
+		}
 		// For hybrid -> SILK transitions the CELT MDCT fades out through a
 		// decoded silence frame.
 		if frameMode == framing.ModeHybrid && !(redundancy && celtToSilk && frameRedundancy) {
 			d.celtSilenceFade(pcm, pktChannels, redundancyEndBand)
 		}
-		var redundantRange uint32
-		if redundancy && redundancyBytes >= 2 {
-			carryState := celtToSilk
+		if leadingRedundancy != nil && prevModeRedundancy {
+			d.crossfadeLeadingRedundancy(pcm, leadingRedundancy)
+		}
+		if redundancy && !celtToSilk && redundancyBytes >= 2 {
 			redPCM, redRange, redDec := d.decodeRedundancy(
-				stream[len(stream)-redundancyBytes:], pktChannels, redundancyEndBand, carryState,
+				stream[len(stream)-redundancyBytes:], pktChannels, redundancyEndBand, false,
 			)
 			if redDec != nil {
 				redundantRange = redRange
 				d.lastCeltDec = redDec
-				if celtToSilk {
-					if prevModeRedundancy {
-						d.crossfadeLeadingRedundancy(pcm, redPCM)
-					}
-				} else {
-					d.crossfadeRedundancy(pcm, redPCM, samplesPerStream)
-				}
+				d.crossfadeRedundancy(pcm, redPCM, samplesPerStream)
 			}
 		}
 		d.lastFrameConcealed = false
@@ -5161,7 +5267,7 @@ func interleaveSILKOutInto(dst []float64, l, r []int16, channels int) []float64 
 // concealment returns zero samples.
 func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	required := frameSize * d.channels
 	if len(pcm) < required {
@@ -5179,7 +5285,7 @@ func (d *Decoder) DecodePLC(pcm []int16, frameSize int) (int, error) {
 // PCM stored in int32 values. frameSize follows DecodePLC semantics.
 func (d *Decoder) DecodePLC24(pcm []int32, frameSize int) (int, error) {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	required := frameSize * d.channels
 	if len(pcm) < required {
@@ -5230,7 +5336,7 @@ func (d *Decoder) DecodePLCFloat32(frameSize int) ([]float32, error) {
 // advancing entropy, synthesis, or resampler state.
 func (d *Decoder) validatePLCState(frameSize int) error {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	lossMode := d.previousLossMode()
 	if lossMode == -1 {
@@ -5468,7 +5574,13 @@ func lossDecodeChunk(remaining, sampleRate, mode int) int {
 // DecodeFEC decodes in-band forward-error-correction data from the packet
 // following a loss. For v1 compatibility, the lost duration is inferred from
 // the packet's total duration. Use DecodeFECWithDuration when it differs.
+//
+// An empty packet conceals len(pcm)/Channels() samples, like opus_decode
+// with no packet and decode_fec set.
 func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
+	if len(data) == 0 {
+		return d.DecodePLC(pcm, len(pcm)/d.channels)
+	}
 	info, err := inspectPacket(data, d.sampleRate)
 	if err != nil {
 		return 0, err
@@ -5484,7 +5596,7 @@ func (d *Decoder) DecodeFEC(data []byte, pcm []int16) (int, error) {
 // packet cannot carry LBRR, concealment is used as in libopus.
 func (d *Decoder) DecodeFECWithDuration(data []byte, pcm []int16, frameSize int) (int, error) {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	required := frameSize * d.channels
 	if len(pcm) < required {
@@ -5503,7 +5615,7 @@ func (d *Decoder) DecodeFECWithDuration(data []byte, pcm []int16, frameSize int)
 // DecodeFECWithDuration.
 func (d *Decoder) DecodeFEC24(data []byte, pcm []int32, frameSize int) (int, error) {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return 0, fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return 0, fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	required := frameSize * d.channels
 	if len(pcm) < required {
@@ -5520,8 +5632,13 @@ func (d *Decoder) DecodeFEC24(data []byte, pcm []int32, frameSize int) (int, err
 // DecodeFECFloat decodes recovery data for exactly frameSize lost samples per
 // channel and returns interleaved float64 PCM.
 // Like opus_decode_native, FEC output is never soft-clipped and leaves the
-// soft-clip memory of the int16 API untouched.
+// soft-clip memory of the int16 API untouched. An empty packet conceals
+// frameSize samples (opus_decode_native runs the PLC for len == 0 whatever
+// decode_fec says).
 func (d *Decoder) DecodeFECFloat(data []byte, frameSize int) ([]float64, error) {
+	if len(data) == 0 {
+		return d.DecodePLCFloat(frameSize)
+	}
 	if err := d.validateFECState(data, frameSize); err != nil {
 		return nil, err
 	}
@@ -5583,6 +5700,20 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	// st->frame_size follows the FEC packet only after the concealed prefix.
 	d.plcFrameSize = packetFrameSize
 
+	if len(frames[0]) <= 1 {
+		// opus_decode_frame treats a first frame of at most one byte as a
+		// loss: it is concealed in the previous mode with a zero final
+		// range, while st->mode already follows the FEC packet.
+		plc, err := d.decodePLCFloat(packetFrameSize)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, plc...)
+		d.lastPacketConfig = config
+		d.lastPacketChannels = info.channels
+		return out, 0, nil
+	}
+
 	rateKHz := silkConfigRateKHz(config)
 	if rateKHz != 8 && rateKHz != 12 && rateKHz != 16 {
 		return nil, 0, fmt.Errorf("%w: invalid SILK rate %d kHz", ErrInvalidPacket, rateKHz)
@@ -5590,6 +5721,9 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	if info.channels < 1 || info.channels > 2 {
 		return nil, 0, fmt.Errorf("%w: invalid channel count %d", ErrInvalidPacket, info.channels)
 	}
+	// A SILK frame after a CELT one (the concealment of a trailing
+	// redundant frame) starts from a reset SILK decoder.
+	d.resetSILKAfterCELT()
 	ri := silkRateIdx(rateKHz)
 	ci := info.channels - 1
 	d.switchSILKRate(ri)
@@ -5604,34 +5738,77 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 	infoDec.dec.SetFrameMs(frameMs)
 	nSilkFrames := silkSubframesPerOpusFrame(config)
 
+	// silk_Decode's channel-count switch, as for a normal packet: a mono to
+	// stereo switch seeds the right resampler from the left one, a stereo
+	// to mono switch resamples the right output of the first frame through
+	// the still-warm right resampler.
+	d.ensureSilkResampler(0, rateKHz)
+	if info.channels == 2 {
+		d.ensureSilkResampler(1, rateKHz)
+	}
+	if info.channels == 2 && d.prevSilkInternalCh == 1 && d.silkRS[0] != nil {
+		seeded := *d.silkRS[0]
+		d.silkRS[1] = &seeded
+		d.silkRSInKHz[1] = rateKHz
+	}
+	stereoToMono := info.channels == 1 && d.prevSilkInternalCh == 2 &&
+		d.silkRS[1] != nil && d.silkRSInKHz[1] == rateKHz
+
 	d.prepareSILKStream(infoDec.dec, info.channels)
 	silkPCM, err := infoDec.dec.DecodeFEC(frames[0], nSilkFrames)
 	if err != nil {
 		return nil, 0, fmt.Errorf("%w: SILK LBRR decode: %v", ErrInvalidPacket, err)
 	}
-	d.ensureSilkResampler(0, rateKHz)
-	if info.channels == 2 {
-		d.ensureSilkResampler(1, rateKHz)
-	}
-	silkPCM = d.resampleSILK(silkPCM, nSilkFrames, info.channels, false)
+	silkPCM = d.resampleSILK(silkPCM, nSilkFrames, info.channels, stereoToMono)
 	silkPCM = padOrTrim(silkPCM, packetFrameSize*d.channels)
 	finalRange := infoDec.dec.LastFinalRange()
+
+	// A switch from CELT conceals 5 ms in the old mode.
+	var trans []float64
+	if d.prevMode == framing.ModeCELTOnly {
+		trans = d.transitionPLC(packetFrameSize)
+	}
 	if info.mode == ModeHybrid {
-		// CELT carries no in-band FEC. Its high band advances through PLC and,
-		// as in libopus, supplies the combined final range.
-		if d.lastCeltDec != nil {
-			celtPCM, err := d.decodeCELTPLCFrame(packetFrameSize, true)
-			if err != nil {
-				return nil, 0, err
-			}
-			// Accumulated onto the SILK output in float32, unclipped.
-			for i := range silkPCM {
-				silkPCM[i] = float64(float32(silkPCM[i]) + float32(celtPCM[i]))
-			}
-			finalRange = d.lastCeltDec.LastFinalRange()
-		} else {
-			finalRange = 0
+		// CELT carries no in-band FEC: its high band (start band 17, the
+		// FEC packet's end band) is concealed, from a reset decoder after
+		// a mode change, and supplies the final range.
+		celtEnd := 21
+		if config < 14 {
+			celtEnd = 19
 		}
+		celtLMIdx := 3
+		if frameMs == 10 {
+			celtLMIdx = 2
+		}
+		celtDec := d.celtDecoders[3][celtLMIdx][d.channels-1]
+		if celtDec == nil {
+			return nil, 0, fmt.Errorf("%w: missing CELT decoder", ErrInvalidState)
+		}
+		celtDec.SetStreamChannels(info.channels)
+		if d.prevMode >= 0 && d.prevMode != framing.ModeHybrid && !d.prevRedundancy {
+			celtDec.Reset()
+		} else if d.lastCeltDec != nil && d.lastCeltDec != celtDec {
+			celtDec.CopyStateFrom(d.lastCeltDec)
+		}
+		celtDec.SetAccumulate(true)
+		celtPCM := celtDec.DecodeHybridLoss(17, celtEnd)
+		d.lastCeltDec = celtDec
+		if d.celtResampler != nil {
+			celtPCM = d.celtResampler.Process(celtPCM)
+		}
+		celtPCM = padOrTrim(adjustChannels(celtPCM, celtDec.Channels(), d.channels), packetFrameSize*d.channels)
+		// Accumulated onto the SILK output in float32, unclipped.
+		for i := range silkPCM {
+			silkPCM[i] = float64(float32(silkPCM[i]) + float32(celtPCM[i]))
+		}
+		finalRange = celtDec.LastFinalRange()
+	} else if d.prevMode == framing.ModeHybrid {
+		// For hybrid -> SILK the CELT MDCT fades out through a decoded
+		// silence frame.
+		d.celtSilenceFade(silkPCM, info.channels, celtEndBandForFramingBW(config/4))
+	}
+	if trans != nil {
+		d.applyTransition(silkPCM, trans)
 	}
 	out = append(out, silkPCM...)
 
@@ -5656,7 +5833,7 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 
 func (d *Decoder) validateFECState(data []byte, frameSize int) error {
 	if !isValidLossFrameSize(frameSize, d.sampleRate) {
-		return fmt.Errorf("%w: frameSize %d at %d Hz", ErrUnsupportedFrameSize, frameSize, d.sampleRate)
+		return fmt.Errorf("%w: %w: frameSize %d at %d Hz", ErrBadArg, ErrUnsupportedFrameSize, frameSize, d.sampleRate)
 	}
 	info, err := inspectPacket(data, d.sampleRate)
 	if err != nil {

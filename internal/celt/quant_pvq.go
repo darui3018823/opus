@@ -1234,7 +1234,7 @@ func quantAllBandsImpl(encode bool, enc *entcode.Encoder, dec *entcode.Decoder, 
 		ctx.tfChange = tfRes[i]
 
 		lowbandScratch := scratch
-		if last {
+		if last && !thetaRdo {
 			lowbandScratch = nil
 		}
 

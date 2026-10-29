@@ -191,7 +191,11 @@ func TestPackOpusFramesPaddedRoundtrip(t *testing.T) {
 	}
 }
 
-func TestPackOpusFramesToPacketSizeMatchesPaddingSearch(t *testing.T) {
+// TestPackOpusFramesToPacketSizeMatchesRepacketizer: every target above the
+// compact size is reached exactly, with opus_repacketizer_out_range_impl's
+// padding-count run (nb_255s = (P-1)/255 bytes of 255, then
+// P-255*nb_255s-1), including P = 255k+1 where the run ends in 0.
+func TestPackOpusFramesToPacketSizeMatchesRepacketizer(t *testing.T) {
 	frames := [][]byte{
 		bytes.Repeat([]byte{0x11}, 17),
 		bytes.Repeat([]byte{0x22}, 23),
@@ -205,34 +209,47 @@ func TestPackOpusFramesToPacketSizeMatchesPaddingSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	for target := 1 + len(compact); target <= 1275; target++ {
-		wantPayload, wantCode := compact, compactCode
-		if 1+len(code3) == target {
-			wantPayload, wantCode = code3, 3
-		} else {
-			for padBytes := 0; padBytes < target; padBytes++ {
-				padded, err := packOpusFramesCode3(frames, true, true, padBytes)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if 1+len(padded) == target {
-					wantPayload, wantCode = padded, 3
-					break
-				}
-				if 1+len(padded) > target {
-					break
-				}
-			}
-		}
-
-		gotPayload, gotCode, err := packOpusFramesToPacketSize(frames, true, target)
+		got, code, err := packOpusFramesToPacketSize(frames, true, target)
 		if err != nil {
 			t.Fatalf("target=%d: %v", target, err)
 		}
-		if gotCode != wantCode || !bytes.Equal(gotPayload, wantPayload) {
-			t.Fatalf("target=%d: got code=%d len=%d, want code=%d len=%d",
-				target, gotCode, len(gotPayload), wantCode, len(wantPayload))
+		switch {
+		case target == 1+len(compact):
+			if code != compactCode || !bytes.Equal(got, compact) {
+				t.Fatalf("target=%d: want the compact packet", target)
+			}
+			continue
+		case target == 1+len(code3):
+			if code != 3 || !bytes.Equal(got, code3) {
+				t.Fatalf("target=%d: want the unpadded code-3 packet", target)
+			}
+			continue
+		}
+		if code != 3 || 1+len(got) != target {
+			t.Fatalf("target=%d: got code=%d len=%d", target, code, 1+len(got))
+		}
+		pad := target - 1 - len(code3)
+		nb255s := (pad - 1) / 255
+		if got[0]&0x40 == 0 {
+			t.Fatalf("target=%d: padding flag not set", target)
+		}
+		for i := 0; i < nb255s; i++ {
+			if got[1+i] != 255 {
+				t.Fatalf("target=%d: run byte %d = %d, want 255", target, i, got[1+i])
+			}
+		}
+		if want := byte(pad - 255*nb255s - 1); got[1+nb255s] != want {
+			t.Fatalf("target=%d: last run byte = %d, want %d", target, got[1+nb255s], want)
+		}
+		frames2, err := splitOpusFrames(got, 3)
+		if err != nil {
+			t.Fatalf("target=%d: %v", target, err)
+		}
+		for i := range frames {
+			if !bytes.Equal(frames2[i], frames[i]) {
+				t.Fatalf("target=%d: frame %d does not round-trip", target, i)
+			}
 		}
 	}
 }

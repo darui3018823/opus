@@ -56,7 +56,16 @@ type Decoder struct {
 	// loss_duration, plc_duration, skip_plc, last_frame_type,
 	// prefilter_and_fold, last_pitch_index, the LPC of the pitch-based
 	// concealment and the extrapolated overlap it leaves (plcTail).
+	// backgroundLogE always spans the 21 bands of the 48 kHz mode (stride
+	// NumBands48000) whatever this decoder's band count: libopus keeps one
+	// background energy array across bandwidth changes, and the bands above
+	// a narrower packet's end keep rising towards zero.
 	backgroundLogE []float64
+	// highBandE holds oldBandE (stride NumBands48000) for the bands at or
+	// above this decoder's band count, inherited from a wider decoder by
+	// CopyStateFrom: libopus only clears them after the next decoded frame
+	// has updated the background energy from them.
+	highBandE [2 * NumBands48000]float64
 	// downsample is st->downsample: the output rate is 48 kHz/downsample
 	// (the spectrum above it is cleared and the de-emphasised output
 	// decimated), 1 by default.
@@ -162,7 +171,7 @@ func NewDecoderEx(frameSize, sampleRate, numBands, channels int) (*Decoder, erro
 		d.prevLogE[i] = -28.0
 		d.prevLogE2[i] = -28.0
 	}
-	d.backgroundLogE = make([]float64, nEBands)
+	d.backgroundLogE = make([]float64, 2*NumBands48000)
 	d.downsample = 1
 	d.skipPLC = true
 	d.plcTail = make([][]float64, channels)
@@ -234,6 +243,9 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	if ch == 1 {
 		for i := 0; i < numBands; i++ {
 			d.prevEnergies[i] = max(d.prevEnergies[i], d.prevEnergies[numBands+i])
+		}
+		for i := numBands; i < NumBands48000; i++ {
+			d.highBandE[i] = max(d.highBandE[i], d.highBandE[NumBands48000+i])
 		}
 	}
 
@@ -367,15 +379,30 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	}
 	if ch == 1 && len(d.prevEnergies) >= 2*numBands {
 		copy(d.prevEnergies[numBands:2*numBands], d.prevEnergies[:numBands])
+		copy(d.highBandE[NumBands48000+numBands:], d.highBandE[numBands:NumBands48000])
 	}
 	d.updateLogEnergyHistory(isTransient)
 	// The noise floor may rise by up to 2.4 dB/second, or by the weight of
 	// all the missing packets after a loss.
 	// The explicit conversion keeps the product rounded (no FMA with the add).
 	maxBackgroundIncrease := float32(float32(min(160, d.lossDuration+(1<<lm))) * float32(0.001))
-	for i := range d.backgroundLogE {
-		d.backgroundLogE[i] = float64(min(float32(d.backgroundLogE[i])+maxBackgroundIncrease, float32(d.prevEnergies[i])))
+	for c := 0; c < 2; c++ {
+		for i := 0; i < NumBands48000; i++ {
+			bi := c*NumBands48000 + i
+			e := float32(d.highBandE[bi])
+			if i < numBands {
+				e = float32(d.prevEnergies[c*numBands+i])
+			}
+			if silence {
+				// A silence frame sets oldBandE of every band, not only
+				// start..end, to -28 before this update.
+				e = -28
+			}
+			d.backgroundLogE[bi] = float64(min(float32(d.backgroundLogE[bi])+maxBackgroundIncrease, e))
+		}
 	}
+	// The bands past this decoder's band count are past end too.
+	d.highBandE = [2 * NumBands48000]float64{}
 	// In case start or end were to change.
 	for c := 0; c < 2 && (c+1)*numBands <= len(d.prevEnergies); c++ {
 		for i := 0; i < numBands; i++ {
@@ -492,10 +519,11 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			pfGain = 0
 			pfTapset = 0
 		}
-		// CELT-only applies the comb post-filter; hybrid (start!=0) does not.
-		if start == 0 {
-			samplesOut = d.postFilter[c].Apply(samplesOut, pfPeriod, pfGain, pfTapset, d.mode.NBase, lm, d.celtMode.Window)
-		}
+		// celt_decode_with_ec runs the comb post-filter on every frame: a
+		// hybrid frame (start != 0) codes no parameters, so it fades out
+		// whatever filter the previous frame (e.g. a trailing SILK->CELT
+		// redundant frame) left and resets the parameters to zero.
+		samplesOut = d.postFilter[c].Apply(samplesOut, pfPeriod, pfGain, pfTapset, d.mode.NBase, lm, d.celtMode.Window)
 		if d.synthesisStageHook != nil {
 			d.synthesisStageHook("postfilter", c, samplesOut)
 		}
@@ -506,8 +534,15 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 
 		ds := d.downsample
 		outLen := frameSize / ds
-		for i := 0; i < outLen; i++ {
-			output[i*cc+c] = samplesOut[i*ds] * celtFloatScale
+		if ds == 1 {
+			out := output[c:]
+			for i, v := range samplesOut[:outLen] {
+				out[i*cc] = v * celtFloatScale
+			}
+		} else {
+			for i := 0; i < outLen; i++ {
+				output[i*cc+c] = samplesOut[i*ds] * celtFloatScale
+			}
 		}
 	}
 
@@ -609,22 +644,30 @@ func (d *Decoder) CopyStateFrom(src *Decoder) {
 		if sc >= srcHistCh {
 			sc = srcHistCh - 1
 		}
+		for i := dstBands; i < NumBands48000; i++ {
+			d.highBandE[c*NumBands48000+i] = 0
+			if sc >= 0 {
+				d.highBandE[c*NumBands48000+i] = src.oldBandE(sc, i)
+			}
+		}
 		for i := 0; i < dstBands; i++ {
 			di := c*dstBands + i
 			if i >= srcBands || sc < 0 {
 				d.prevEnergies[di] = 0
+				if sc >= 0 {
+					d.prevEnergies[di] = src.oldBandE(sc, i)
+				}
 				d.prevLogE[di] = -28
 				d.prevLogE2[di] = -28
-				d.backgroundLogE[di] = 0
 				continue
 			}
 			si := sc*srcBands + i
 			d.prevEnergies[di] = src.prevEnergies[si]
 			d.prevLogE[di] = src.prevLogE[si]
 			d.prevLogE2[di] = src.prevLogE2[si]
-			d.backgroundLogE[di] = src.backgroundLogE[si]
 		}
 	}
+	copy(d.backgroundLogE, src.backgroundLogE)
 
 	for c := range d.postFilter {
 		sc := c
@@ -661,6 +704,15 @@ func (d *Decoder) CopyStateFrom(src *Decoder) {
 			copy(d.plcTail[c], src.plcTail[sc])
 		}
 	}
+}
+
+// oldBandE is libopus's oldBandE[c*nbEBands+i] for any of the 21 bands.
+func (d *Decoder) oldBandE(c, i int) float64 {
+	nb := d.mode.Bands.NumBands
+	if i < nb {
+		return d.prevEnergies[c*nb+i]
+	}
+	return d.highBandE[c*NumBands48000+i]
 }
 
 // CopyAllStateFrom copies the complete decoder configuration and streaming
@@ -718,20 +770,23 @@ func (d *Decoder) applyDeemphasis(ch int, samples []float64) {
 		verySmall = float32(1e-30)
 	)
 	mem := d.preemphMem[ch]
-	for i := range samples {
-		// libopus stores celt_sig as float and evaluates
-		// x[i] + VERY_SMALL + mem in that precision and order; its
-		// accumulating loop without downsampling adds x[i] + mem first.
-		var y float32
-		if d.accum && d.downsample == 1 {
-			y = float32(samples[i]) + mem
+	// libopus stores celt_sig as float and evaluates
+	// x[i] + VERY_SMALL + mem in that precision and order; its
+	// accumulating loop without downsampling adds x[i] + mem first.
+	if d.accum && d.downsample == 1 {
+		for i, x := range samples {
+			y := float32(x) + mem
 			y += verySmall
-		} else {
-			y = float32(samples[i]) + verySmall
-			y += mem
+			mem = coef * y
+			samples[i] = float64(y)
 		}
-		mem = coef * y
-		samples[i] = float64(y)
+	} else {
+		for i, x := range samples {
+			y := float32(x) + verySmall
+			y += mem
+			mem = coef * y
+			samples[i] = float64(y)
+		}
 	}
 	d.preemphMem[ch] = mem
 }
@@ -1019,6 +1074,7 @@ func (d *Decoder) Reset() {
 	for i := range d.backgroundLogE {
 		d.backgroundLogE[i] = 0
 	}
+	d.highBandE = [2 * NumBands48000]float64{}
 	d.lossDuration = 0
 	d.plcDuration = 0
 	d.skipPLC = true

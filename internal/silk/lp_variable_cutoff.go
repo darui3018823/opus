@@ -174,9 +174,12 @@ func (e *Encoder) ControlAudioBandwidth(desiredFsHz int, opusCanSwitch bool, pay
 		// Make room for redundancy.
 		e.maxBits -= e.maxBits * 5 / (payloadMs + 5)
 	}
-	if e.channels == 2 && e.streamChannels == 2 && e.side != nil {
+	if e.channels == 2 && e.streamChannels == 2 && e.side != nil && e.prevStreamChannels == 2 {
 		// silk_control_encoder hands both channels silk_Encode's single
-		// allowBandwidthSwitch.
+		// allowBandwidthSwitch. On the first stereo packet silk_Encode has
+		// just re-initialised the side channel (fs_kHz = 0), so its pass
+		// takes the "just initialized" branch: no transition and no
+		// switchReady (the mid's rate is forced on it afterwards).
 		e.side.allowBandwidthSwitch = e.allowBandwidthSwitch
 		if _, ready := e.side.controlAudioBandwidthState(desiredFsHz, opusCanSwitch); ready {
 			e.maxBits -= e.maxBits * 5 / (payloadMs + 5)
@@ -200,7 +203,13 @@ func (e *Encoder) controlAudioBandwidthState(desiredFsHz int, opusCanSwitch bool
 	if apiFsHz == 0 {
 		apiFsHz = e.sampleRate
 	}
-	const maxInternalFsHz, minInternalFsHz = 16000, 8000
+	maxInternalFsHz, minInternalFsHz := 16000, 8000
+	if e.maxInternalFsHz > 0 {
+		maxInternalFsHz = e.maxInternalFsHz
+	}
+	if e.minInternalFsHz > 0 {
+		minInternalFsHz = e.minInternalFsHz
+	}
 	switch {
 	case fsHz > apiFsHz || fsHz > maxInternalFsHz || fsHz < minInternalFsHz:
 		// Make sure internal rate is not higher than external rate or
@@ -273,6 +282,16 @@ func (e *Encoder) controlAudioBandwidthState(desiredFsHz int, opusCanSwitch bool
 		}
 	}
 	return fsKHz, switchReady
+}
+
+// SetInternalRateLimits sets encControl->minInternalSampleRate and
+// maxInternalSampleRate (Hz) for the next control pass of every internal
+// channel; 0 keeps the default (8000 / 16000).
+func (e *Encoder) SetInternalRateLimits(minHz, maxHz int) {
+	e.minInternalFsHz, e.maxInternalFsHz = minHz, maxHz
+	if e.side != nil {
+		e.side.minInternalFsHz, e.side.maxInternalFsHz = minHz, maxHz
+	}
 }
 
 // InWBModeWithoutVariableLP is encControl->inWBmodeWithoutVariableLP: the

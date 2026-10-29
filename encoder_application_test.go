@@ -32,8 +32,10 @@ func TestRestrictedApplications(t *testing.T) {
 		if err := enc.SetApplication(ApplicationAudio); !errors.Is(err, ErrBadArg) {
 			t.Fatalf("application %d: SetApplication = %v, want ErrBadArg", app, err)
 		}
-		if err := enc.SetApplication(app); err != nil {
-			t.Fatalf("application %d: SetApplication(same) = %v", app, err)
+		// OPUS_SET_APPLICATION fails on a restricted encoder even with its
+		// own value (opus_encoder.c:2789).
+		if err := enc.SetApplication(app); !errors.Is(err, ErrBadArg) {
+			t.Fatalf("application %d: SetApplication(same) = %v, want ErrBadArg", app, err)
 		}
 		// libopus reports the delay compensation for RESTRICTED_SILK only.
 		want := 48000/400 + 48000/250

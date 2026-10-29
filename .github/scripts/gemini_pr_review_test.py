@@ -3,6 +3,7 @@ import importlib.util
 import pathlib
 import sys
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = pathlib.Path(__file__).with_name("gemini_pr_review.py")
@@ -179,8 +180,45 @@ diff --git a/a.go b/a.go
     def test_format_review_body_prefixes_model(self):
         self.assertEqual(
             gemini_pr_review.format_review_body("body"),
-            "Gemini 3.1 Pro:\n\nbody",
+            "Gemini 3.8 Flash (High):\n\nbody",
         )
+
+    def test_call_gemini_uses_flash_high_without_tools(self):
+        result = {"summary": "ok", "comments": []}
+        with patch.object(gemini_pr_review, "request_gemini", return_value={
+            "candidates": [{"content": {"parts": [{"text": '{"summary":"ok","comments":[]}'}]}}]
+        }) as request:
+            self.assertEqual(gemini_pr_review.call_gemini("review"), result)
+        self.assertIn("/gemini-3.8-flash:generateContent", gemini_pr_review.GEMINI_ENDPOINT)
+        config = request.call_args.args[0]["generationConfig"]
+        self.assertEqual(config["thinkingConfig"], {"thinkingLevel": "HIGH"})
+        self.assertNotIn("temperature", config)
+
+    def test_tool_results_preserve_call_ids_and_thought_signatures(self):
+        model_parts = [
+            {"functionCall": {"id": "call-1", "name": "list_changed_files", "args": {}},
+             "thoughtSignature": "signature"},
+            {"functionCall": {"id": "call-2", "name": "get_diff_for_file", "args": {"path": "a.go"}}},
+        ]
+        replies = [
+            {"candidates": [{"content": {"parts": model_parts}}]},
+            {"candidates": [{"content": {"parts": [{"text": '{"summary":"ok","comments":[]}'}]}}]},
+        ]
+        ctx = gemini_pr_review.ToolContext(
+            repo="owner/repo", pr_number=1, pr={}, diff="", changed_files=["a.go"]
+        )
+        with patch.object(gemini_pr_review, "request_gemini", side_effect=replies) as request, \
+             patch.object(gemini_pr_review, "execute_tool", return_value={"result": "ok"}):
+            self.assertEqual(gemini_pr_review.call_gemini("review", ctx)["summary"], "ok")
+        for invocation in request.call_args_list:
+            self.assertEqual(invocation.args[0]["generationConfig"]["thinkingConfig"]["thinkingLevel"], "HIGH")
+        contents = request.call_args.args[0]["contents"]
+        self.assertEqual(contents[1]["parts"], model_parts)
+        results = contents[2]["parts"]
+        self.assertEqual([part["functionResponse"]["id"] for part in results[:2]], ["call-1", "call-2"])
+        self.assertEqual([part["functionResponse"]["name"] for part in results[:2]],
+                         ["list_changed_files", "get_diff_for_file"])
+        self.assertTrue(results[-1]["text"])
 
     def test_execute_tool_rejects_unlisted_file_diff(self):
         ctx = gemini_pr_review.ToolContext(

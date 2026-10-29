@@ -89,6 +89,30 @@ func NewSurroundEncoder(sampleRate, channels, mappingFamily int, application App
 	return s, nil
 }
 
+// NewSurroundEncoderWithProfile is NewSurroundEncoder with an explicit
+// defaults profile; see NewMultistreamEncoderWithProfile.
+// EncoderProfileLibopus gives the defaults of
+// opus_multistream_surround_encoder_create: automatic bitrate, complexity 9
+// and constrained VBR.
+func NewSurroundEncoderWithProfile(sampleRate, channels, mappingFamily int, application Application, profile EncoderProfile) (*SurroundEncoder, error) {
+	if err := validateEncoderProfile(profile); err != nil {
+		return nil, err
+	}
+	enc, err := NewSurroundEncoder(sampleRate, channels, mappingFamily, application)
+	if err != nil {
+		return nil, err
+	}
+	if profile == EncoderProfileLibopus {
+		if err := enc.SetBitrate(BitrateAuto); err != nil {
+			return nil, err
+		}
+		if err := enc.MultistreamEncoder.applyEncoderProfile(profile); err != nil {
+			return nil, err
+		}
+	}
+	return enc, nil
+}
+
 // MappingFamily returns the configured channel mapping family.
 func (e *SurroundEncoder) MappingFamily() int { return e.mappingFamily }
 

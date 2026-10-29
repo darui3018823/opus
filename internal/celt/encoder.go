@@ -540,6 +540,9 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	frameSize := e.mode.FrameSize
 	ov := e.mode.Overlap
 	shared := sharedEnc != nil
+	// hybrid is celt_encode_with_ec's `hybrid = start != 0`: it also holds
+	// for the hybrid prefill, which codes into a private 2-byte buffer.
+	hybrid := startBand != 0
 	tell0Frac := 1
 	tell0 := 1
 	if shared {
@@ -746,7 +749,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		var tfEst32 float32
 		// Reduces the likelihood of energy instability on fricatives at low
 		// bitrate in hybrid mode.
-		allowWeakTransients := shared && effectiveBytes < 15 && e.silkSignalType != 2
+		allowWeakTransients := hybrid && effectiveBytes < 15 && e.silkSignalType != 2
 		isTransient, tfEst32, tfChan, weakTransient = transientAnalysis32(bufs, frameSize+ov, CC, allowWeakTransients, toneFreq, toneishness, e.analysisScratch)
 		tfEstimate = float64(tfEst32)
 		if CC == 2 && ch == 1 {
@@ -761,7 +764,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// pitch search is enabled for this frame.
 	// libopus reads `tell` here, captured before the silence flag was coded
 	// (and replaced by the full budget on a silent frame).
-	pfEnabled := ((e.lfe && nbAvailableBytes > 3) || nbAvailableBytes > 12*ch) && !shared && !silence && tell0+16 <= totalBits && !e.disablePF
+	pfEnabled := ((e.lfe && nbAvailableBytes > 3) || nbAvailableBytes > 12*ch) && !hybrid && !silence && tell0+16 <= totalBits && !e.disablePF
 	pf := e.runPrefilter(bufs, frameSize, ov, pfEnabled, float32(tfEstimate), nbAvailableBytes, toneFreq, toneishness, e.window32)
 	// pitch_change reads the previous period (clamped by run_prefilter) and
 	// gain, which are only replaced at the end of the frame.
@@ -915,7 +918,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// much less masked than that get a dynalloc boost.
 	var surroundDynalloc []float64
 	var surroundTrim, surroundMasking float32
-	if !shared && len(e.energyMask) > 0 && !e.lfe {
+	if !hybrid && len(e.energyMask) > 0 && !e.lfe {
 		surroundDynalloc, surroundTrim, surroundMasking = surroundMaskAnalysis(e.energyMask, ch, numBands, max(2, e.lastCodedBands))
 	}
 
@@ -981,7 +984,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// Post-filter parameters (CELT-only): the flag, and when enabled the
 	// period as octave + mantissa, the quantised gain and the tapset.
 	if !pf.pfOn {
-		if !shared && tell0+16 <= totalBits {
+		if !hybrid && tell0+16 <= totalBits {
 			enc.EncodeBitLogp(false, 1)
 		}
 	} else {
@@ -1022,7 +1025,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// very low bitrate, below complexity 2 and on pure tones.
 	tfRes := scratchInt(&e.frame.tfRes, numBands)
 	tfSelect := 0
-	enableTFAnalysis := effectiveBytes >= 15*ch && !shared && e.complexity >= 2 && !e.lfe && toneishness < 0.98
+	enableTFAnalysis := effectiveBytes >= 15*ch && !hybrid && e.complexity >= 2 && !e.lfe && toneishness < 0.98
 	if enableTFAnalysis {
 		lambda := 20480/effectiveBytes + 2
 		if lambda < 80 {
@@ -1032,14 +1035,14 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		for i := end; i < numBands; i++ {
 			tfRes[i] = tfRes[end-1]
 		}
-	} else if shared && weakTransient {
+	} else if hybrid && weakTransient {
 		// For weak transients, we rely on the fact that improving time
 		// resolution using TF on a long window is imperfect and will not
 		// result in an energy collapse at low bitrate.
 		for i := 0; i < end; i++ {
 			tfRes[i] = 1
 		}
-	} else if shared && effectiveBytes < 15 && e.silkSignalType != 2 {
+	} else if hybrid && effectiveBytes < 15 && e.silkSignalType != 2 {
 		// For low bitrate hybrid, we force temporal resolution to 5 ms
 		// rather than 2.5 ms.
 		if isTransient {
@@ -1111,7 +1114,7 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 		case e.lfe:
 			e.tapsetDecision = 0
 			spread = spreadNormal
-		case shared:
+		case hybrid:
 			if e.complexity == 0 {
 				spread = spreadNone
 			} else if isTransient {

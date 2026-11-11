@@ -212,15 +212,21 @@ func TestPacketReaderRejectsUnfinishedPacketAtEOFAndEOS(t *testing.T) {
 	}
 	var stream bytes.Buffer
 	_ = WritePage(&stream, page)
-	if _, err := NewPacketReader(bytes.NewReader(stream.Bytes())).Next(); !errors.Is(err, ErrTruncatedPacket) {
-		t.Fatalf("EOF error = %v", err)
+	reader := NewPacketReader(bytes.NewReader(stream.Bytes()))
+	for call := 1; call <= 2; call++ {
+		if _, err := reader.Next(); !errors.Is(err, ErrTruncatedPacket) {
+			t.Fatalf("EOF error on call %d = %v", call, err)
+		}
 	}
 
 	page.HeaderType |= HeaderEOS
 	stream.Reset()
 	_ = WritePage(&stream, page)
-	if _, err := NewPacketReader(bytes.NewReader(stream.Bytes())).Next(); !errors.Is(err, ErrTruncatedPacket) {
-		t.Fatalf("EOS error = %v", err)
+	reader = NewPacketReader(bytes.NewReader(stream.Bytes()))
+	for call := 1; call <= 2; call++ {
+		if _, err := reader.Next(); !errors.Is(err, ErrTruncatedPacket) {
+			t.Fatalf("EOS error on call %d = %v", call, err)
+		}
 	}
 }
 

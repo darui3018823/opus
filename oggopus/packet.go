@@ -82,13 +82,12 @@ func (r *PacketReader) EOS() bool { return r.eos }
 
 // Next returns the next complete packet with caller-owned Data. It validates
 // page CRCs, serial numbers, sequences, and continuation. After queued EOS
-// packets are returned, it returns io.EOF.
+// packets are returned, it returns io.EOF. A packet left unfinished at EOF or
+// EOS makes every later call return ErrTruncatedPacket.
 func (r *PacketReader) Next() (Packet, error) {
 	for len(r.queue) == 0 {
 		if r.terminalErr != nil {
-			err := r.terminalErr
-			r.terminalErr = nil
-			return Packet{}, err
+			return Packet{}, r.terminalErr
 		}
 		if r.eos {
 			return Packet{}, io.EOF
@@ -96,7 +95,8 @@ func (r *PacketReader) Next() (Packet, error) {
 		if err := r.readPage(); err != nil {
 			if err == io.EOF && len(r.partial) != 0 {
 				r.partial = nil
-				return Packet{}, ErrTruncatedPacket
+				r.terminalErr = ErrTruncatedPacket
+				continue
 			}
 			return Packet{}, err
 		}

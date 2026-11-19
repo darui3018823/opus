@@ -39,7 +39,7 @@ We appreciate code contributions! Please follow these steps:
    ```
 3. **Set Up Your Development Environment:**
    - **Go:** Ensure you have Go 1.24.11 or newer installed. With an older
-     toolchain than 1.27.3, `go` downloads 1.27.3 automatically because of
+     toolchain than 1.27.4, `go` downloads 1.27.4 automatically because of
      the `toolchain` line in `go.mod` (unless `GOTOOLCHAIN=local`).
    - **Dependencies:** Install Go modules.
      ```bash

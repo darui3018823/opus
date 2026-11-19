@@ -30,7 +30,7 @@ go get github.com/darui3018823/opus
 ```
 
 現在の [`go.mod`](go.mod) は最低バージョンとして Go 1.24.11 を指定しています。
-`toolchain go1.27.3` の行はこのリポジトリのビルドとテスト (CI を含む) で使う
+`toolchain go1.27.4` の行はこのリポジトリのビルドとテスト (CI を含む) で使う
 Go を選ぶだけで、依存モジュールとして使われるときは無視されます。
 
 ## 最小の encode/decode 例

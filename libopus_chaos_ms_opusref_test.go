@@ -88,7 +88,25 @@ func TestChaosMultistreamCTLOracle(t *testing.T) {
 	}
 }
 
+type chaosMSOp struct {
+	kind byte
+	ctl  int
+	val  int
+	n    int
+	pcm  []float32
+}
+
+type chaosMSCase struct {
+	family, ch, fs int
+	ap             chaosApp
+	ops            []chaosMSOp
+}
+
 func chaosMSRun(t *testing.T, seed int64) string {
+	return chaosMSEval(t, chaosMSGen(seed))
+}
+
+func chaosMSGen(seed int64) chaosMSCase {
 	r := rand.New(rand.NewSource(seed))
 	type layout struct{ family, channels int }
 	layouts := []layout{{1, 3}, {1, 4}, {1, 6}, {1, 8}, {2, 4}, {2, 9}, {255, 3}, {255, 5}, {3, 4}, {3, 9}}
@@ -98,28 +116,7 @@ func chaosMSRun(t *testing.T, seed int64) string {
 	apps := []chaosApp{{"voip", ApplicationVOIP}, {"audio", ApplicationAudio}, {"lowdelay", ApplicationRestrictedLowDelay}}
 	ap := apps[r.Intn(len(apps))]
 	ch := ly.channels
-	cfg := fmt.Sprintf("family=%d ch=%d fs=%d app=%s", ly.family, ch, fs, ap.name)
-
-	var ge chaosMSEncoder
-	var err error
-	if ly.family == 3 {
-		ge, err = NewProjectionEncoderWithProfile(fs, ch, 3, Application(ap.app), EncoderProfileLibopus)
-	} else {
-		ge, err = NewSurroundEncoderWithProfile(fs, ch, ly.family, Application(ap.app), EncoderProfileLibopus)
-	}
-	if err != nil {
-		return fmt.Sprintf("%s go create: %v", cfg, err)
-	}
-	// The oracle's output buffer (max_data_bytes) is 7656 bytes.
-	ge.SetMaxPacketSize(7656)
-
-	type op struct {
-		kind byte
-		ctl  int
-		val  int
-		n    int
-		pcm  []float32
-	}
+	type op = chaosMSOp
 	var ops []op
 	durs := []int{25, 50, 100, 200, 400, 600}
 	phase, kind := 0, r.Intn(3)
@@ -155,6 +152,25 @@ func chaosMSRun(t *testing.T, seed int64) string {
 		}
 		ops = append(ops, op{kind: k, n: n, pcm: pcm})
 	}
+	return chaosMSCase{family: ly.family, ch: ch, fs: fs, ap: ap, ops: ops}
+}
+
+func chaosMSEval(t *testing.T, c chaosMSCase) string {
+	fs, ch, ap, ops := c.fs, c.ch, c.ap, c.ops
+	ly := struct{ family, channels int }{c.family, c.ch}
+	cfg := fmt.Sprintf("family=%d ch=%d fs=%d app=%s", ly.family, ch, fs, ap.name)
+	var ge chaosMSEncoder
+	var err error
+	if ly.family == 3 {
+		ge, err = NewProjectionEncoderWithProfile(fs, ch, 3, Application(ap.app), EncoderProfileLibopus)
+	} else {
+		ge, err = NewSurroundEncoderWithProfile(fs, ch, ly.family, Application(ap.app), EncoderProfileLibopus)
+	}
+	if err != nil {
+		return fmt.Sprintf("%s go create: %v", cfg, err)
+	}
+	// The oracle's output buffer (max_data_bytes) is 7656 bytes.
+	ge.SetMaxPacketSize(7656)
 
 	dir := t.TempDir()
 	var pf, sf bytes.Buffer
@@ -245,6 +261,9 @@ func chaosMSRun(t *testing.T, seed int64) string {
 			}
 			lp, _ := hex.DecodeString(f[2])
 			rf := next()
+			if os.Getenv("CHAOS_DUMP") != "" {
+				t.Logf("frame %d %c n=%d lib len=%d go len=%d eq=%v", frame, o.kind, o.n, len(lp), len(gp), bytes.Equal(lp, gp))
+			}
 			if !bytes.Equal(lp, gp) {
 				streams := 0
 				if sd, ok := ge.(interface{ Streams() int }); ok {
@@ -267,4 +286,32 @@ func chaosMSRun(t *testing.T, seed int64) string {
 		}
 	}
 	return ""
+}
+
+// TestChaosMultistreamCTLMinimize drops controls and resets of CHAOS_MS_SEED
+// while it still fails and logs the remainder (a debugging aid).
+func TestChaosMultistreamCTLMinimize(t *testing.T) {
+	seed, err := strconv.ParseInt(os.Getenv("CHAOS_MS_SEED"), 10, 64)
+	if err != nil {
+		t.Skip("CHAOS_MS_SEED not set")
+	}
+	c := chaosMSGen(seed)
+	msg := chaosMSEval(t, c)
+	if msg == "" {
+		t.Fatal("seed passes")
+	}
+	for i := 0; i < len(c.ops); {
+		if k := c.ops[i].kind; k != 'c' && k != 'r' {
+			i++
+			continue
+		}
+		trial := c
+		trial.ops = append(append([]chaosMSOp(nil), c.ops[:i]...), c.ops[i+1:]...)
+		if m := chaosMSEval(t, trial); m != "" {
+			c, msg = trial, m
+			continue
+		}
+		i++
+	}
+	t.Logf("minimal: %s", msg)
 }

@@ -2,8 +2,7 @@
 
 - **Objective:** apply the findings of the four 2026-11-22 performance and memory audits that are worth taking, without changing any packet, final range, decoded PCM, or the parity with plain-C libopus.
 - **Status (last updated 2026-11-22):**
-  - Phases 0 to 5 are in place on `perf/audit-2026-11-22-fixes`.
-  - Phase 6 (CPU hot loops) is in progress.
+  - Phases 0 to 6 are in place on `perf/audit-2026-11-22-fixes`.
   - This change is not merged.
 - **Sources:**
   - [ChatGPT-6.2-Sol audit](../../memory/audits/performance-audit-2026-11-22.md)
@@ -94,3 +93,21 @@ All benchmarks below were run on an Intel Core i7-11700 with Go 1.27.4 on Window
 - Reusing the redundancy CELT decoder. It becomes `lastCeltDec`, and a reset would have to match a fresh decoder exactly. It is about 40 KB per mode transition.
 - Lazy SILK decoders. They interact through the mono/stereo peers and the rate switch, so a lazily created decoder could differ from the eager one. It is about 7 KB per decoder.
 - The remaining SILK encoder allocations whose slices outlive the frame, such as `lastGainSymbols` reused by LBRR.
+
+## Phase 6: CPU hot loops
+
+Each candidate was measured alone in 7 interleaved rounds of 1 s. A candidate was kept only when it measured faster.
+
+| Candidate | Result | Decision |
+|---|---|---|
+| NSQ delayed-decision index: conditional wrap instead of `% 40` | SILK and hybrid encode -2.2% to +0.2% | Kept |
+| `cwrsiLibopusInto`: read the U table row or column directly | CELT and hybrid decode -0.3% to -5.2%; tv09 -3.8% | Kept |
+| int16 decode: soft clip range test inside the float32 conversion | Decode -1% to -3.7%; tv02 -4.4% | Kept |
+| `opPVQSearch`: truncation instead of `math.Floor` | -0.7% to +1.1% | Reverted |
+| `pitchXcorr32` | The inner loop already has no bounds checks | Not changed |
+
+**Why the remaining audit CPU items were left:** the other candidates either restructure an already well-predicted branch, or reorder arithmetic in ways that need fresh parity work. They are listed as future work:
+- SILK `synthesize` branch hoisting.
+- Unrolling the FFT butterflies.
+- A ring buffer for the postfilter history.
+- Fusing de-emphasis with output conversion.

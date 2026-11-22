@@ -553,10 +553,17 @@ func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nF
 		return fmt.Errorf("invalid PCM length: got %d, expected %d", len(pcm), expected)
 	}
 	if e.reducedDependency {
-		// silk_Encode: first_frame_after_reset = 1 for every API channel.
+		// silk_Encode: first_frame_after_reset = 1 for every API channel,
+		// and silk_control_encoder's caller then clears the LBRR flags of
+		// each internal channel, so no LBRR from the previous packet is
+		// coded.
 		e.firstFrameAfterReset = true
 		if e.side != nil {
 			e.side.firstFrameAfterReset = true
+		}
+		e.pendingLBRR, e.pendingLBRRFrames, e.pendingLBRRStereoPred = nil, 0, nil
+		if streamChannels == 2 && e.side != nil {
+			e.side.pendingLBRR, e.side.pendingLBRRFrames = nil, 0
 		}
 	}
 	e.beginDTXPacket()

@@ -109,7 +109,97 @@ func silkNLSFWeightsLaroia(nlsfQ15 []int16) []int16 {
 	return out
 }
 
+// nlsfMaxCBEntries bounds the first-stage codebook size (32 in libopus).
+const nlsfMaxCBEntries = 32
+
 func silkNLSFEncode(targetQ15 []int16, cb *nlsfCBParams, weightsQ2 []int16, muQ20 int32, nSurvivors, signalType int) (int, []int) {
+	order := cb.order
+	if len(targetQ15) < order {
+		return 0, make([]int, order)
+	}
+	if order > silkMaxLPCOrder || cb.nEntries > nlsfMaxCBEntries {
+		return silkNLSFEncodeGeneric(targetQ15, cb, weightsQ2, muQ20, nSurvivors, signalType)
+	}
+	var targetArr [silkMaxLPCOrder]int16
+	target := targetArr[:order]
+	copy(target, targetQ15[:order])
+	silkNLSFStabilize(target, cb.deltaMinQ15, order)
+	if nSurvivors <= 0 {
+		nSurvivors = defaultNLSFQuantSurvivors
+	}
+	if nSurvivors > cb.nEntries {
+		nSurvivors = cb.nEntries
+	}
+
+	var errArr [nlsfMaxCBEntries]int64
+	errQ24 := silkNLSFVQErrorsInto(errArr[:cb.nEntries], target, cb)
+	// Stable insertion sort of the codebook indices by error: equal errors
+	// keep the lower index first, as sort.SliceStable does.
+	var survArr [nlsfMaxCBEntries]int
+	survivors := survArr[:cb.nEntries]
+	for i := range survivors {
+		k := i
+		for k > 0 && errQ24[i] < errQ24[survivors[k-1]] {
+			survivors[k] = survivors[k-1]
+			k--
+		}
+		survivors[k] = i
+	}
+	survivors = survivors[:nSurvivors]
+
+	out0Table, out1Table := nlsfDelDecOutTables(cb.quantStepSizeQ16)
+	bestCB1 := survivors[0]
+	var bestRaw, raw [silkMaxLPCOrder]int
+	bestRD := int64(math.MaxInt64)
+	for _, cb1 := range survivors {
+		var resArr, wAdjArr [silkMaxLPCOrder]int16
+		resQ10 := resArr[:order]
+		wAdjQ5 := wAdjArr[:order]
+		for i := 0; i < order; i++ {
+			cb1ValQ15 := int32(cb.cb1Q8[cb1*order+i]) << 7
+			wQ9 := int32(cb.cb1WghtQ9[cb1*order+i])
+			resQ10[i] = int16((int64(int32(target[i])-cb1ValQ15) * int64(wQ9)) >> 14)
+			den := int32(wQ9 * wQ9)
+			if den <= 0 {
+				wAdjQ5[i] = 1
+			} else {
+				w := int64(silkDIV32VarQ(int32(weightsQ2[i]), den, 21))
+				if w < 1 {
+					w = 1
+				}
+				if w > math.MaxInt16 {
+					w = math.MaxInt16
+				}
+				wAdjQ5[i] = int16(w)
+			}
+		}
+
+		var ecIxArr [silkMaxLPCOrder]int
+		var predQ8Arr [silkMaxLPCOrder]uint8
+		ecIx, predQ8 := nlsfUnpackInto(cb, cb1, ecIxArr[:order], predQ8Arr[:order])
+		rd := silkNLSFDelDecQuantInto(raw[:order], resQ10, wAdjQ5, predQ8, ecIx, cb.cb2RatesQ5, &out0Table, &out1Table, cb.invQuantStepSizeQ6, muQ20)
+
+		icdf := cb.cb1ICDF[(signalType>>1)*cb.nEntries:]
+		probQ8 := int32(0)
+		if cb1 == 0 {
+			probQ8 = 256 - int32(icdf[0])
+		} else {
+			probQ8 = int32(icdf[cb1-1]) - int32(icdf[cb1])
+		}
+		bitsQ7 := int64((8 << 7) - silkLin2Log(probQ8))
+		rd += bitsQ7 * int64(muQ20>>2)
+		if rd < bestRD {
+			bestRD = rd
+			bestCB1 = cb1
+			bestRaw = raw
+		}
+	}
+	return bestCB1, append(make([]int, 0, order), bestRaw[:order]...)
+}
+
+// silkNLSFEncodeGeneric is silkNLSFEncode for codebooks beyond the fixed
+// array bounds (none in libopus).
+func silkNLSFEncodeGeneric(targetQ15 []int16, cb *nlsfCBParams, weightsQ2 []int16, muQ20 int32, nSurvivors, signalType int) (int, []int) {
 	order := cb.order
 	if len(targetQ15) < order {
 		return 0, make([]int, order)
@@ -188,7 +278,11 @@ func silkNLSFEncode(targetQ15 []int16, cb *nlsfCBParams, weightsQ2 []int16, muQ2
 }
 
 func silkNLSFVQErrors(target []int16, cb *nlsfCBParams) []int64 {
-	errs := make([]int64, cb.nEntries)
+	return silkNLSFVQErrorsInto(make([]int64, cb.nEntries), target, cb)
+}
+
+// silkNLSFVQErrorsInto is silkNLSFVQErrors writing into errs (cb.nEntries).
+func silkNLSFVQErrorsInto(errs []int64, target []int16, cb *nlsfCBParams) []int64 {
 	for idx := 0; idx < cb.nEntries; idx++ {
 		sum := int64(0)
 		predQ24 := int64(0)
@@ -210,8 +304,16 @@ func silkNLSFVQErrors(target []int16, cb *nlsfCBParams) []int64 {
 }
 
 func silkNLSFDelDecQuant(xQ10, wQ5 []int16, predCoefQ8 []uint8, ecIx []int, ecRatesQ5 []uint8, quantStepSizeQ16, invQuantStepSizeQ6, muQ20 int32) ([]int, int64) {
-	order := len(xQ10)
-	var out0Table, out1Table [2 * nlsfQuantMaxAmplitudeExt]int32
+	out0Table, out1Table := nlsfDelDecOutTables(quantStepSizeQ16)
+	raw := make([]int, len(xQ10))
+	rd := silkNLSFDelDecQuantInto(raw, xQ10, wQ5, predCoefQ8, ecIx, ecRatesQ5, &out0Table, &out1Table, invQuantStepSizeQ6, muQ20)
+	return raw, rd
+}
+
+// nlsfDelDecOutTables returns the reconstruction levels of the delayed
+// decision quantizer for one codebook step size (silk_NLSF_del_dec_quant's
+// out0_Q10_table and out1_Q10_table).
+func nlsfDelDecOutTables(quantStepSizeQ16 int32) (out0Table, out1Table [2 * nlsfQuantMaxAmplitudeExt]int32) {
 	for i := -nlsfQuantMaxAmplitudeExt; i <= nlsfQuantMaxAmplitudeExt-1; i++ {
 		out0 := int32(i << 10)
 		out1 := out0 + 1024
@@ -231,7 +333,13 @@ func silkNLSFDelDecQuant(xQ10, wQ5 []int16, predCoefQ8 []uint8, ecIx []int, ecRa
 		out0Table[slot] = int32((int64(out0) * int64(quantStepSizeQ16)) >> 16)
 		out1Table[slot] = int32((int64(out1) * int64(quantStepSizeQ16)) >> 16)
 	}
+	return out0Table, out1Table
+}
 
+// silkNLSFDelDecQuantInto is silkNLSFDelDecQuant writing the indices into raw
+// (len(xQ10)) with precomputed reconstruction tables.
+func silkNLSFDelDecQuantInto(raw []int, xQ10, wQ5 []int16, predCoefQ8 []uint8, ecIx []int, ecRatesQ5 []uint8, out0Table, out1Table *[2 * nlsfQuantMaxAmplitudeExt]int32, invQuantStepSizeQ6, muQ20 int32) int64 {
+	order := len(xQ10)
 	var ind [nlsfQuantDelDecStates][silkMaxLPCOrder]int
 	var prevOutQ10 [2 * nlsfQuantDelDecStates]int16
 	var rdQ25 [2 * nlsfQuantDelDecStates]int32
@@ -325,10 +433,9 @@ func silkNLSFDelDecQuant(xQ10, wQ5 []int16, predCoefQ8 []uint8, ecIx []int, ecRa
 			best = j
 		}
 	}
-	raw := make([]int, order)
 	copy(raw, ind[best&(nlsfQuantDelDecStates-1)][:order])
 	raw[0] += best >> nlsfQuantDelDecStatesLog2
-	return raw, int64(minQ25)
+	return int64(minQ25)
 }
 
 func nlsfResidualRatesQ5(indTmp, ecIx int, ecRatesQ5 []uint8) (int32, int32) {

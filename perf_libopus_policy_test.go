@@ -185,3 +185,37 @@ func TestEncodeInt16AllocsMatchFloat(t *testing.T) {
 		t.Fatalf("Encode(int16) allocates %.1f per call, EncodeFloat %.1f", int16Allocs, floatAllocs)
 	}
 }
+
+// TestEncodeFloat32AllocsMatchFloat guards the float32 Encode path the same
+// way: its float64 conversion reuses the int16 path's buffer.
+func TestEncodeFloat32AllocsMatchFloat(t *testing.T) {
+	wl := perfWorkload{name: "celt/stereo/128k", channels: 2, app: ApplicationAudio, bitrate: 128000, gen: perfMusicFrame}
+	frames := perfInputFrames(wl)
+	frames32 := perfFloat32Frames(frames)
+	encF := newPerfDefaultEncoder(t, wl)
+	enc32 := newPerfDefaultEncoder(t, wl)
+	for i := 0; i < 8; i++ {
+		if _, err := encF.EncodeFloat(frames[i%len(frames)], perfFrameSize); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := enc32.EncodeFloat32(frames32[i%len(frames32)], perfFrameSize); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var iF, i32 int
+	floatAllocs := testing.AllocsPerRun(100, func() {
+		if _, err := encF.EncodeFloat(frames[iF%len(frames)], perfFrameSize); err != nil {
+			t.Fatal(err)
+		}
+		iF++
+	})
+	float32Allocs := testing.AllocsPerRun(100, func() {
+		if _, err := enc32.EncodeFloat32(frames32[i32%len(frames32)], perfFrameSize); err != nil {
+			t.Fatal(err)
+		}
+		i32++
+	})
+	if float32Allocs > floatAllocs {
+		t.Fatalf("EncodeFloat32 allocates %.1f per call, EncodeFloat %.1f", float32Allocs, floatAllocs)
+	}
+}

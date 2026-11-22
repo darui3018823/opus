@@ -82,7 +82,7 @@ func (enc *Encoder) EncodeLaplace(value *int, fs uint32, decay int) {
 		}
 	}
 
-	enc.Encode(fl, fl+fs, 32768)
+	enc.EncodeBin(fl, fl+fs, 15)
 }
 
 // DecodeLaplace decodes an integer value assumed to be Laplace-distributed.
@@ -93,7 +93,7 @@ func (enc *Encoder) EncodeLaplace(value *int, fs uint32, decay int) {
 func (dec *Decoder) DecodeLaplace(fs uint32, decay int) int {
 	val := 0
 	fl := uint32(0)
-	fm := dec.Decode(32768)
+	fm := dec.DecodeBin(15)
 
 	if fm >= fs {
 		val++

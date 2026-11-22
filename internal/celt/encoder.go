@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
 
 	"github.com/darui3018823/opus/internal/dsp"
 	"github.com/darui3018823/opus/internal/entcode"
@@ -123,8 +125,31 @@ type FrameTrace struct {
 }
 
 // LastFrameTrace returns the trace of the most recently coded frame. Its
-// slices are reused by the next frame.
+// slices are reused by the next frame. The per-frame input, spectrum and
+// band-energy rows are recorded only while EnableFrameTraces is in effect.
 func (e *Encoder) LastFrameTrace() FrameTrace { return e.lastTrace }
+
+// frameTraceUsers counts the EnableFrameTraces holders. Recording the trace
+// rows copies the frame input and spectrum, so it is off unless asked for.
+var frameTraceUsers atomic.Int32
+
+// EnableFrameTraces turns on full FrameTrace recording for every encoder
+// until the returned release function is called. Oracle tests call it
+// before encoding. Recording does not change the encoded output.
+func EnableFrameTraces() (release func()) {
+	frameTraceUsers.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { frameTraceUsers.Add(-1) }) }
+}
+
+func frameTracesEnabled() bool { return frameTraceUsers.Load() > 0 }
+
+// coarseScratch holds the range coder snapshots and the intra-pass energies
+// of quantCoarseEnergy's intra/inter decision, reused across frames.
+type coarseScratch struct {
+	encStart, encIntra       entcode.Encoder
+	oldEBandsIntra, errIntra []float64
+}
 
 // frameScratch holds encodeRange's per-frame buffers.
 type frameScratch struct {
@@ -196,6 +221,10 @@ type Encoder struct {
 	qab         quantAllBandsScratch
 	lastTrace   FrameTrace
 	traceCoeffs [][]float64
+	// traceBandLogE keeps the unbiased band energies for the trace.
+	traceBandLogE []float64
+	// coarse holds quantCoarseEnergy's two-pass snapshots.
+	coarse coarseScratch
 	// frame is the per-frame work storage of encodeRange, reused between
 	// frames (nothing outlives the frame: the trace copies what it keeps).
 	frame         frameScratch
@@ -1057,7 +1086,12 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	// When the energy is stable, slightly bias energy quantization towards
 	// the previous error to make the gain more stable (a constant offset is
 	// better than fluctuations). The trace keeps the unbiased amp2Log2 output.
-	traceBandLogE := append([]float64(nil), logE...)
+	tracing := frameTracesEnabled()
+	var traceBandLogE []float64
+	if tracing {
+		traceBandLogE = append(e.traceBandLogE[:0], logE...)
+		e.traceBandLogE = traceBandLogE
+	}
 	for c := 0; c < ch; c++ {
 		for i := start; i < end; i++ {
 			idx := c*numBands + i
@@ -1075,7 +1109,16 @@ func (e *Encoder) encodeRange(samples []float64, sharedEnc *entcode.Encoder, max
 	intra := e.quantCoarseEnergy(enc, start, end, end, logE, quantLogE, totalBits, coarseError,
 		ch, lm, nbAvailableBytes, e.complexity >= 4, numBands)
 	etr(enc, "coarse")
-	{
+	if !tracing {
+		prev := e.lastTrace
+		e.lastTrace = FrameTrace{IsTransient: isTransient, TFEstimate: tfEstimate, TFChan: tfChan, Intra: intra, TellCoarse: enc.ECTell(),
+			PFOn: pf.pfOn, PitchIndex: pf.pitchIndex, PFGain: float64(pf.gain), PitchChange: pitchChange, Analysis: e.analysis,
+			PitchSearch: pf.searchIndex, PitchRaw: pf.rawIndex, PitchGain: float64(pf.rawGain)}
+		if isTransient {
+			e.lastTrace.ShortBlocks = M
+		}
+		e.lastTrace.TFRes, e.lastTrace.Offsets, e.lastTrace.Pulses, e.lastTrace.FineQuant, e.lastTrace.FinePriority = prev.TFRes[:0], prev.Offsets[:0], prev.Pulses[:0], prev.FineQuant[:0], prev.FinePriority[:0]
+	} else {
 		// The trace reuses the previous frame's buffers: LastFrameTrace is
 		// only valid until the next frame is coded.
 		prev := e.lastTrace

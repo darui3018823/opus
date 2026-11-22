@@ -328,3 +328,43 @@ func TestReaderSeekWithShortReads(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+type countingReadSeeker struct {
+	io.ReadSeeker
+	seeks int
+	read  int64
+}
+
+func (c *countingReadSeeker) Seek(offset int64, whence int) (int64, error) {
+	c.seeks++
+	return c.ReadSeeker.Seek(offset, whence)
+}
+
+func (c *countingReadSeeker) Read(p []byte) (int, error) {
+	n, err := c.ReadSeeker.Read(p)
+	c.read += int64(n)
+	return n, err
+}
+
+// TestReaderSeekBisectionConverges guards the bisection in SeekPCM: a probe
+// whose first page lies at or past the upper bound must still shrink the
+// interval. Before the fix a seek on this stream re-read the same probe until
+// the iteration cap, issuing 198 seeks and reading 1.8 times the stream.
+func TestReaderSeekBisectionConverges(t *testing.T) {
+	data := benchSeekStream(t)
+	src := &countingReadSeeker{ReadSeeker: bytes.NewReader(data)}
+	r, err := NewReader(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []int64{0, 960 * 200, 960 * 4000, 960 * 6500, 960*128*64 - 312} {
+		src.seeks, src.read = 0, 0
+		if err := r.SeekPCM(target); err != nil {
+			t.Fatalf("SeekPCM(%d): %v", target, err)
+		}
+		t.Logf("target %d: %d seeks, %d bytes read of %d", target, src.seeks, src.read, len(data))
+		if src.seeks > 100 || src.read > int64(len(data)) {
+			t.Errorf("SeekPCM(%d): %d seeks, read %d of %d bytes", target, src.seeks, src.read, len(data))
+		}
+	}
+}

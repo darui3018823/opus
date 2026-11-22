@@ -1,6 +1,9 @@
 package dsp
 
-import "math"
+import (
+	"math"
+	"sync"
+)
 
 // opusComplex is the scalar type used by the floating-point libopus KISS FFT.
 type opusComplex struct {
@@ -112,14 +115,28 @@ func buildOpusFFTPlan(n int) *opusFFTPlan {
 	}
 	buildBitrev(0, 0, 1, 0)
 
-	plan.twiddles = make([]opusComplex, 480)
-	for i := range plan.twiddles {
-		plan.twiddles[i] = opusComplex{
-			r: math.Float32frombits(libopusFFTTwiddleBits[2*i]),
-			i: math.Float32frombits(libopusFFTTwiddleBits[2*i+1]),
-		}
-	}
+	plan.twiddles = opusFFTTwiddles()
 	return plan
+}
+
+var (
+	opusFFTTwiddlesOnce sync.Once
+	opusFFTTwiddleTable []opusComplex
+)
+
+// opusFFTTwiddles returns the 480-point fft_twiddles48000_960 table. Like
+// libopus, every plan reads the one read-only table at its own stride.
+func opusFFTTwiddles() []opusComplex {
+	opusFFTTwiddlesOnce.Do(func() {
+		opusFFTTwiddleTable = make([]opusComplex, 480)
+		for i := range opusFFTTwiddleTable {
+			opusFFTTwiddleTable[i] = opusComplex{
+				r: math.Float32frombits(libopusFFTTwiddleBits[2*i]),
+				i: math.Float32frombits(libopusFFTTwiddleBits[2*i+1]),
+			}
+		}
+	})
+	return opusFFTTwiddleTable
 }
 
 func opusFFTFactors(n int) []int {
@@ -315,7 +332,13 @@ func OpusFFTScaled32(re, im []float32) {
 	n := len(re)
 	plan := getOpusFFTPlan(n)
 	scale := float32(1) / float32(n)
-	fout := make([]opusComplex, n)
+	var stack [480]opusComplex
+	var fout []opusComplex
+	if n <= len(stack) {
+		fout = stack[:n]
+	} else {
+		fout = make([]opusComplex, n)
+	}
 	for i := range re {
 		fout[plan.bitrev[i]] = opusComplex{r: re[i] * scale, i: im[i] * scale}
 	}

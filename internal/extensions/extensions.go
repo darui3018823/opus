@@ -26,6 +26,8 @@ type Extension struct {
 	Data  []byte
 }
 
+// iterator walks an extension padding region. The payloads it returns alias
+// data.
 type iterator struct {
 	data []byte
 
@@ -139,7 +141,7 @@ func (it *iterator) nextRepeat() (Extension, bool, error) {
 			return Extension{
 				ID:    repeatIDByte >> 1,
 				Frame: it.repeatFrame,
-				Data:  append([]byte(nil), it.data[payloadStart:it.currPos]...),
+				Data:  it.data[payloadStart:it.currPos:it.currPos],
 			}, true, nil
 		}
 		it.srcPos = it.repeatPos
@@ -218,7 +220,7 @@ func (it *iterator) next() (Extension, bool, error) {
 			return Extension{
 				ID:    id,
 				Frame: it.currFrame,
-				Data:  append([]byte(nil), it.data[payloadStart:it.currPos]...),
+				Data:  it.data[payloadStart:it.currPos:it.currPos],
 			}, true, nil
 		}
 	}
@@ -241,6 +243,8 @@ func Parse(data []byte, nbFrames int) ([]Extension, error) {
 		if !ok {
 			return out, nil
 		}
+		// The iterator borrows the payload from data; Parse hands out copies.
+		ext.Data = append([]byte(nil), ext.Data...)
 		out = append(out, ext)
 	}
 }
@@ -248,11 +252,21 @@ func Parse(data []byte, nbFrames int) ([]Extension, error) {
 // Count validates and counts the extensions in an extension-bearing padding
 // region. Repeat indicators count once for every expanded frame occurrence.
 func Count(data []byte, nbFrames int) (int, error) {
-	exts, err := Parse(data, nbFrames)
-	if err != nil {
-		return 0, err
+	if nbFrames < 1 || nbFrames > MaxFrames {
+		return 0, fmt.Errorf("%w: frame count %d", ErrBadArg, nbFrames)
 	}
-	return len(exts), nil
+	it := newIterator(data, nbFrames)
+	n := 0
+	for {
+		_, ok, err := it.next()
+		if err != nil {
+			return 0, err
+		}
+		if !ok {
+			return n, nil
+		}
+		n++
+	}
 }
 
 func appendPayload(dst []byte, ext Extension, last bool) ([]byte, error) {

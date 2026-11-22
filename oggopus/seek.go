@@ -105,6 +105,7 @@ func (r *Reader) SeekPCM(sample int64) (err error) {
 }
 
 func findLogicalStreamEnd(rs io.ReadSeeker, start, end int64, serial uint32) (int64, int64, error) {
+	var scan pageScanner
 	low, high := start, end
 	bestOffset := int64(-1)
 	for range 64 {
@@ -112,7 +113,7 @@ func findLogicalStreamEnd(rs io.ReadSeeker, start, end int64, serial uint32) (in
 			break
 		}
 		mid := low + (high-low)/2
-		page, offset, next, err := scanNextPage(rs, mid, end)
+		page, offset, next, err := scan.next(rs, mid, end)
 		if errors.Is(err, io.EOF) {
 			high = mid
 			continue
@@ -124,7 +125,9 @@ func findLogicalStreamEnd(rs io.ReadSeeker, start, end int64, serial uint32) (in
 			bestOffset = offset
 			low = max(next, mid+1)
 		} else {
-			high = offset
+			// No page starts in [mid, offset), so the last page of this
+			// link starts before mid. offset itself may lie beyond high.
+			high = mid
 		}
 	}
 	from := start
@@ -132,7 +135,7 @@ func findLogicalStreamEnd(rs io.ReadSeeker, start, end int64, serial uint32) (in
 		from = bestOffset
 	}
 	for from < end {
-		page, offset, next, err := scanNextPage(rs, from, end)
+		page, offset, next, err := scan.next(rs, from, end)
 		if err != nil {
 			return 0, 0, err
 		}
@@ -151,6 +154,7 @@ func findLogicalStreamEnd(rs io.ReadSeeker, start, end int64, serial uint32) (in
 }
 
 func bisectPageAtOrBefore(rs io.ReadSeeker, start, end int64, serial uint32, target int64) (Page, int64, bool, error) {
+	var scan pageScanner
 	low, high := start, end
 	var best Page
 	bestOffset := int64(-1)
@@ -160,7 +164,7 @@ func bisectPageAtOrBefore(rs io.ReadSeeker, start, end int64, serial uint32, tar
 			break
 		}
 		mid := low + (high-low)/2
-		page, offset, next, err := scanNextPage(rs, mid, end)
+		page, offset, next, err := scan.next(rs, mid, end)
 		if errors.Is(err, io.EOF) {
 			high = mid
 			continue
@@ -175,14 +179,16 @@ func bisectPageAtOrBefore(rs io.ReadSeeker, start, end int64, serial uint32, tar
 			best, bestOffset, bestNext = page, offset, next
 			low = max(next, mid+1)
 		} else {
-			high = offset
+			// No page starts in [mid, offset), so the answer starts before
+			// mid. Using offset could stall or even widen the interval.
+			high = mid
 		}
 	}
 	if bestOffset < 0 {
 		return Page{}, 0, false, nil
 	}
 	for from := bestNext; from < end; {
-		page, offset, next, err := scanNextPage(rs, from, end)
+		page, offset, next, err := scan.next(rs, from, end)
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -205,8 +211,22 @@ func bisectPageAtOrBefore(rs io.ReadSeeker, start, end int64, serial uint32, tar
 }
 
 func scanNextPage(rs io.ReadSeeker, from, end int64) (Page, int64, int64, error) {
+	var scan pageScanner
+	return scan.next(rs, from, end)
+}
+
+// pageScanner keeps the capture-pattern search buffer across the probes of one
+// seek, so a bisection does not allocate a fresh chunk per probe.
+type pageScanner struct {
+	buffer []byte
+}
+
+func (s *pageScanner) next(rs io.ReadSeeker, from, end int64) (Page, int64, int64, error) {
 	const chunkSize = 32 * 1024
-	buffer := make([]byte, chunkSize)
+	if s.buffer == nil {
+		s.buffer = make([]byte, chunkSize)
+	}
+	buffer := s.buffer
 	for from < end {
 		if _, err := rs.Seek(from, io.SeekStart); err != nil {
 			return Page{}, 0, 0, err

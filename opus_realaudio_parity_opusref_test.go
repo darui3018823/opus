@@ -32,6 +32,7 @@ func TestRealAudioCELTParity(t *testing.T) {
 		t.Skip("OPUS_PARITY_PCM not set")
 	}
 	t.Cleanup(silk.EnableFrameTraces())
+	t.Cleanup(celt.EnableFrameTraces())
 	frames := parityEnvInt("OPUS_PARITY_FRAMES", 20)
 	kbps := parityEnvInt("OPUS_PARITY_KBPS", 64)
 	const rate, channels, n = 48000, 2, 960

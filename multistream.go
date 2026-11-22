@@ -9,6 +9,13 @@ import (
 // elementary encoders; all parent and child operations must be serialized.
 // Encode frame sizes are samples per channel and PCM is interleaved.
 type MultistreamEncoder struct {
+	// inputBuf, streamBufs and analysisBufs hold the float64 conversion of
+	// the caller's PCM and each stream's extracted channels. The stream
+	// encoders copy what they keep, so the buffers are reused per call.
+	inputBuf     []float64
+	streamBufs   [][]float64
+	analysisBufs [][]float64
+
 	sampleRate        int
 	channels          int
 	streams           int
@@ -444,7 +451,7 @@ func (e *MultistreamEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) 
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	floatPCM := msScratch(&e.inputBuf, required)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768
 	}
@@ -461,7 +468,7 @@ func (e *MultistreamEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	floatPCM := msScratch(&e.inputBuf, required)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608
 	}
@@ -478,7 +485,7 @@ func (e *MultistreamEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	floatPCM := msScratch(&e.inputBuf, required)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i])
 	}
@@ -518,7 +525,7 @@ func (e *MultistreamEncoder) encodeFloatSelected(callerPCM []float64, frameSize,
 	packets := make([][]byte, e.streams)
 	for stream, enc := range e.encoders {
 		streamChannels := enc.Channels()
-		streamPCM := make([]float64, selectedFrameSize*streamChannels)
+		streamPCM := e.streamScratch(stream, selectedFrameSize*streamChannels)
 		for codedChannel := 0; codedChannel < streamChannels; codedChannel++ {
 			mapped := stream*2 + codedChannel
 			if stream >= e.coupledStreams {
@@ -549,6 +556,32 @@ func (e *MultistreamEncoder) encodeFloatSelected(callerPCM []float64, frameSize,
 		commitPolicy()
 	}
 	return packet, nil
+}
+
+// msScratch returns *buf resized to n elements; every element is
+// overwritten by the caller.
+func msScratch(buf *[]float64, n int) []float64 {
+	if cap(*buf) < n {
+		*buf = make([]float64, n)
+	}
+	*buf = (*buf)[:n]
+	return *buf
+}
+
+// streamScratch returns stream's reused extraction buffer of n samples.
+func (e *MultistreamEncoder) streamScratch(stream, n int) []float64 {
+	if len(e.streamBufs) != e.streams {
+		e.streamBufs = make([][]float64, e.streams)
+	}
+	return msScratch(&e.streamBufs[stream], n)
+}
+
+// analysisScratch returns stream's reused analysis-PCM buffer of n samples.
+func (e *MultistreamEncoder) analysisScratch(stream, n int) []float64 {
+	if len(e.analysisBufs) != e.streams {
+		e.analysisBufs = make([][]float64, e.streams)
+	}
+	return msScratch(&e.analysisBufs[stream], n)
 }
 
 // Reset resets every elementary encoder while retaining configuration.
@@ -584,6 +617,9 @@ type MultistreamDecoder struct {
 	coupledStreams int
 	mapping        []byte
 	decoders       []*Decoder
+	// outBuf holds the mapped PCM of the int16 and projection paths, which
+	// convert it before returning.
+	outBuf []float64
 }
 
 // NewMultistreamDecoder creates a multistream decoder. channels and streams
@@ -684,18 +720,29 @@ func (d *MultistreamDecoder) GetLastPacketDuration() int {
 
 // DecodeFloat decodes a multistream packet to interleaved float64 PCM.
 func (d *MultistreamDecoder) DecodeFloat(data []byte) ([]float64, error) {
-	return d.decodeMapped(data, false)
+	return d.decodeMapped(data, false, false)
 }
 
 // decodeMapped decodes every elementary stream and maps it to the output
 // channels. softClip is opus_multistream_decode's OPTIONAL_CLIP: the int16
 // API soft-clips each stream with its own memory before the mapping.
-func (d *MultistreamDecoder) decodeMapped(data []byte, softClip bool) ([]float64, error) {
+// With reuse the result is d.outBuf, valid until the next decode; otherwise
+// it is caller-owned.
+func (d *MultistreamDecoder) decodeMapped(data []byte, softClip, reuse bool) ([]float64, error) {
 	packets, duration, err := splitMultistreamPackets(data, d.streams, d.sampleRate)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]float64, duration*d.channels)
+	var out []float64
+	if reuse {
+		if cap(d.outBuf) < duration*d.channels {
+			d.outBuf = make([]float64, duration*d.channels)
+		}
+		out = d.outBuf[:duration*d.channels]
+		clear(out)
+	} else {
+		out = make([]float64, duration*d.channels)
+	}
 	for stream, packet := range packets {
 		decode := d.decoders[stream].decodeFloatShared
 		if softClip {
@@ -750,7 +797,7 @@ func (d *MultistreamDecoder) Decode(data []byte, pcm []int16) (int, error) {
 	if len(pcm) < required {
 		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
 	}
-	floatPCM, err := d.decodeMapped(data, true)
+	floatPCM, err := d.decodeMapped(data, true, true)
 	if err != nil {
 		return 0, err
 	}
@@ -900,7 +947,14 @@ func (d *MultistreamDecoder) DecodeFECFloat(data []byte, frameSize int) ([]float
 		if err != nil {
 			return nil, fmt.Errorf("stream %d: %w", stream, err)
 		}
-		streamPCM, err := staged[stream].DecodeFECFloat(packet, frameSize)
+		// staged[stream] is already a copy, so decode FEC on it in place
+		// instead of through DecodeFECFloat, which would copy it again.
+		var streamPCM []float64
+		if len(packet) == 0 {
+			streamPCM, err = staged[stream].DecodePLCFloat(frameSize)
+		} else if err = staged[stream].validateFECState(packet, frameSize); err == nil {
+			streamPCM, err = staged[stream].decodeFECStaged(packet, frameSize)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("stream %d: %w", stream, err)
 		}
@@ -1113,7 +1167,9 @@ func splitMultistreamPackets(data []byte, streams, sampleRate int) ([][]byte, in
 			if offset >= len(data) {
 				return nil, 0, fmt.Errorf("%w: missing stream %d", ErrInvalidPacket, stream)
 			}
-			packet = append([]byte(nil), data[offset:]...)
+			// The streams decode synchronously and keep no reference, so
+			// the last stream's bytes are not copied.
+			packet = data[offset:len(data):len(data)]
 			used = len(data) - offset
 		} else {
 			packet, used, err = parseSelfDelimitedPacket(data[offset:])

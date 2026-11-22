@@ -455,12 +455,29 @@ func cwrsiLibopusInto(y []int, n, k int, index uint32) []int {
 			q := celtPVQU(n, n)
 			if q > i {
 				k = n
-				for {
-					k--
-					p = celtPVQU(k, n)
-					if p <= i {
-						break
+				if uint(n) < pvqUTableLarge && uint(n) <= pvqUTableSmall {
+					// U(k, n) for k < n is the table's column n.
+					for {
+						k--
+						p = uint64(pvqUTable[k][n])
+						if p <= i {
+							break
+						}
 					}
+				} else {
+					for {
+						k--
+						p = celtPVQU(k, n)
+						if p <= i {
+							break
+						}
+					}
+				}
+			} else if uint(n) < pvqUTableSmall && uint(k) < pvqUTableLarge {
+				// U(n, k) for k >= n is the table's row n.
+				row := &pvqUTable[n]
+				for p = uint64(row[k]); p > i; p = uint64(row[k]) {
+					k--
 				}
 			} else {
 				for p = celtPVQU(n, k); p > i; p = celtPVQU(n, k) {
@@ -482,11 +499,22 @@ func cwrsiLibopusInto(y []int, n, k int, index uint32) []int {
 					i -= q
 				}
 				k0 := k
-				for {
-					k--
-					p = celtPVQU(k, n)
-					if p <= i {
-						break
+				if uint(n) < pvqUTableLarge && uint(k) <= pvqUTableSmall {
+					// k < n here: U(k, n) is the table's column n.
+					for {
+						k--
+						p = uint64(pvqUTable[k][n])
+						if p <= i {
+							break
+						}
+					}
+				} else {
+					for {
+						k--
+						p = celtPVQU(k, n)
+						if p <= i {
+							break
+						}
 					}
 				}
 				i -= p

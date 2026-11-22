@@ -327,9 +327,12 @@ func (e *Encoder) silkNSQDelDec(
 					bIdx := smplBufIdx + decisionDelay
 					base := sf * subframeLen
 					for i := 0; i < decisionDelay; i++ {
-						bIdx = (bIdx - 1) % silkDecisionDelay
+						// bIdx-1 is in [-1, 78]: one wrap matches the modulo.
+						bIdx--
 						if bIdx < 0 {
 							bIdx += silkDecisionDelay
+						} else if bIdx >= silkDecisionDelay {
+							bIdx -= silkDecisionDelay
 						}
 						outPos := base - decisionDelay + i
 						xPos := ltpMemLen + base - decisionDelay + i
@@ -389,9 +392,11 @@ func (e *Encoder) silkNSQDelDec(
 	gainQ10 := silkRSHIFT32(gainsQ16[e.nSubframes-1], 6)
 	pxqOffset := ltpMemLen + e.frameSize
 	for i := 0; i < decisionDelay; i++ {
-		lastIdx = (lastIdx - 1) % silkDecisionDelay
+		lastIdx--
 		if lastIdx < 0 {
 			lastIdx += silkDecisionDelay
+		} else if lastIdx >= silkDecisionDelay {
+			lastIdx -= silkDecisionDelay
 		}
 		outPos := e.frameSize - decisionDelay + i
 		if outPos >= 0 && outPos < len(pulses) {
@@ -565,11 +570,16 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 			}
 		}
 
-		sIdx = (sIdx - 1) % silkDecisionDelay
+		// sIdx is in [0, 39] and decisionDelay in [1, 40], so one wrap
+		// each replaces the two divisions per sample.
+		sIdx--
 		if sIdx < 0 {
 			sIdx += silkDecisionDelay
 		}
-		lastIdx := (sIdx + decisionDelay) % silkDecisionDelay
+		lastIdx := sIdx + decisionDelay
+		if lastIdx >= silkDecisionDelay {
+			lastIdx -= silkDecisionDelay
+		}
 
 		winner := 0
 		rdMin := sampleState[0][0].rdQ10

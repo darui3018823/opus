@@ -30,17 +30,23 @@ func TestPhaseInversionControl(t *testing.T) {
 	if dec.PhaseInversionDisabled() {
 		t.Fatal("decoder phase inversion disabled by default")
 	}
+	if _, err := dec.celtDecoder(3, 3); err != nil {
+		t.Fatal(err)
+	}
 	dec.SetPhaseInversionDisabled(true)
 	if !dec.PhaseInversionDisabled() {
 		t.Fatal("decoder phase inversion setting was not retained")
 	}
+	// A CELT decoder created before the call and one created after both
+	// take the setting.
 	for bw := range dec.celtDecoders {
 		for lm := range dec.celtDecoders[bw] {
-			for ch := range dec.celtDecoders[bw][lm] {
-				celtDec := dec.celtDecoders[bw][lm][ch]
-				if celtDec != nil && !celtDec.PhaseInversionDisabled() {
-					t.Fatalf("CELT decoder [%d][%d][%d] did not receive setting", bw, lm, ch)
-				}
+			celtDec, err := dec.celtDecoder(bw, lm)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !celtDec.PhaseInversionDisabled() {
+				t.Fatalf("CELT decoder [%d][%d] did not receive setting", bw, lm)
 			}
 		}
 	}

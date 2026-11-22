@@ -22,18 +22,65 @@ const (
 	framePLCPeriodic = 3
 )
 
+// plcScratch holds decodeLoss's working buffers, kept across concealed frames
+// so a loss does not allocate. It is created on the first loss.
+type plcScratch struct {
+	mem          [2][]float32
+	pitchMemRows [2][]float32
+	lp           []float32
+	xx           []float32
+	rden, yy     []float32
+	etmp         []float32
+	x, freq      []float64
+	mdct         [2][]float64
+	exc          []float32
+	firTmp, ext  []float32
+	frame        [2][]float64
+	output       []float64
+}
+
+func (d *Decoder) plcBuffers() *plcScratch {
+	if d.plc == nil {
+		d.plc = new(plcScratch)
+	}
+	return d.plc
+}
+
+// zeroedF32 returns *buf resized to n zeroed elements.
+func zeroedF32(buf *[]float32, n int) []float32 {
+	if cap(*buf) < n {
+		*buf = make([]float32, n)
+		return *buf
+	}
+	*buf = (*buf)[:n]
+	clear(*buf)
+	return *buf
+}
+
+// zeroedF64 returns *buf resized to n zeroed elements.
+func zeroedF64(buf *[]float64, n int) []float64 {
+	if cap(*buf) < n {
+		*buf = make([]float64, n)
+		return *buf
+	}
+	*buf = (*buf)[:n]
+	clear(*buf)
+	return *buf
+}
+
 // plcPitchSearch is celt_plc_pitch_search.
 func (d *Decoder) plcPitchSearch() int {
 	C := d.mode.Channels
-	mem := make([][]float32, C)
+	sc := d.plcBuffers()
+	mem := sc.pitchMemRows[:C]
 	for c := 0; c < C; c++ {
-		mem[c] = make([]float32, decodeBufferSize)
+		mem[c] = zeroedF32(&sc.mem[c], decodeBufferSize)
 		buf := d.postFilter[c].buf
 		for i := range mem[c] {
 			mem[c][i] = float32(buf[len(buf)-decodeBufferSize+i])
 		}
 	}
-	lp := make([]float32, decodeBufferSize>>1)
+	lp := zeroedF32(&sc.lp, decodeBufferSize>>1)
 	pitchDownsample32(mem, lp, decodeBufferSize>>1, C)
 	pitch := pitchSearch32(lp[plcPitchLagMax>>1:], lp, decodeBufferSize-plcPitchLagMax, plcPitchLagMax-plcPitchLagMin)
 	return plcPitchLagMax - pitch
@@ -42,7 +89,18 @@ func (d *Decoder) plcPitchSearch() int {
 // celtAutocorrWindowed32 is _celt_autocorr with the analysis window applied
 // to the first and last overlap samples.
 func celtAutocorrWindowed32(x []float32, ac []float32, window []float64, overlap, lag, n int) {
-	xx := make([]float32, n)
+	celtAutocorrWindowed32Into(nil, x, ac, window, overlap, lag, n)
+}
+
+// celtAutocorrWindowed32Into is celtAutocorrWindowed32 using *xxBuf (when
+// non-nil) for the windowed copy.
+func celtAutocorrWindowed32Into(xxBuf *[]float32, x []float32, ac []float32, window []float64, overlap, lag, n int) {
+	var xx []float32
+	if xxBuf != nil {
+		xx = zeroedF32(xxBuf, n)
+	} else {
+		xx = make([]float32, n)
+	}
 	copy(xx, x[:n])
 	for i := 0; i < overlap; i++ {
 		w := float32(window[i])
@@ -68,11 +126,22 @@ func celtFIR32(x []float32, xOff int, num []float32, y []float32, n, ord int) {
 // 4): y = x filtered by 1/(1 + Σ den[k] z^-(k+1)), mem holding the last
 // outputs (newest first). It may run in place.
 func celtIIR32(x []float32, den []float32, y []float32, n, ord int, mem []float32) {
-	rden := make([]float32, ord)
+	celtIIR32Into(nil, x, den, y, n, ord, mem)
+}
+
+// celtIIR32Into is celtIIR32 with its work buffers taken from sc when non-nil.
+func celtIIR32Into(sc *plcScratch, x []float32, den []float32, y []float32, n, ord int, mem []float32) {
+	var rden, yy []float32
+	if sc != nil {
+		rden = zeroedF32(&sc.rden, ord)
+		yy = zeroedF32(&sc.yy, n+ord)
+	} else {
+		rden = make([]float32, ord)
+		yy = make([]float32, n+ord)
+	}
 	for i := 0; i < ord; i++ {
 		rden[i] = den[ord-i-1]
 	}
-	yy := make([]float32, n+ord)
 	for i := 0; i < ord; i++ {
 		yy[i] = -mem[ord-i-1]
 	}
@@ -120,7 +189,7 @@ func (d *Decoder) prefilterAndFoldCarry(c int) {
 		}
 		return float32(x[k])
 	}
-	etmp := make([]float32, ov)
+	etmp := zeroedF32(&d.plcBuffers().etmp, ov)
 	g0 := -float32(pf.prevGain)
 	g1 := -float32(pf.gain)
 	if (g0 == 0 && g1 == 0) || g1 == 0 {
@@ -171,7 +240,9 @@ func (d *Decoder) decodeLoss() []float64 {
 	if d.plcDuration >= 40 || start != 0 || d.skipPLC {
 		frameType = framePLCNoise
 	}
-	samples := make([][]float64, C)
+	sc := d.plcBuffers()
+	var samplesBuf [2][]float64
+	samples := samplesBuf[:C]
 	if frameType == framePLCNoise {
 		effEnd := max(start, min(end, NumBands48000))
 		if d.prefilterAndFold {
@@ -194,7 +265,7 @@ func (d *Decoder) decodeLoss() []float64 {
 		seed := d.lastFinalRange
 		M := 1 << lm
 		for c := 0; c < C; c++ {
-			X := make([]float64, N)
+			X := zeroedF64(&sc.x, N)
 			for i := start; i < effEnd; i++ {
 				boffs := int(EBands48000[i]) * M
 				blen := int(EBands48000[i+1]-EBands48000[i]) * M
@@ -205,7 +276,7 @@ func (d *Decoder) decodeLoss() []float64 {
 				renormaliseVector(X[boffs:boffs+blen], blen, 1)
 			}
 			// celt_synthesis: denormalise_bands and the IMDCT.
-			freq := make([]float64, N)
+			freq := zeroedF64(&sc.freq, N)
 			for i := start; i < effEnd; i++ {
 				lg := float32(d.prevEnergies[c*nb+i]) + float32(EMean(i))
 				g := celtExp2RoundedFloat32(min(float32(32), lg))
@@ -213,7 +284,7 @@ func (d *Decoder) decodeLoss() []float64 {
 					freq[j] = float64(float32(X[j]) * g)
 				}
 			}
-			out := d.celtMode.CLTMDCTBackward(freq, d.overlap[c])
+			out := d.celtMode.CLTMDCTBackwardInto(freq, d.overlap[c], zeroedF64(&sc.mdct[c], N))
 			// Run the postfilter with the last parameters (libopus keeps the
 			// periods clamped to COMBFILTER_MINPERIOD).
 			pf := d.postFilter[c]
@@ -242,14 +313,14 @@ func (d *Decoder) decodeLoss() []float64 {
 			pf := d.postFilter[c]
 			old := pf.buf[len(pf.buf)-decodeBufferSize:]
 			// exc[-ORDER .. MAX_PERIOD): the last MAX_PERIOD+ORDER samples.
-			exc := make([]float32, plcMaxPeriod+celtLPCOrder)
+			exc := zeroedF32(&sc.exc, plcMaxPeriod+celtLPCOrder)
 			for i := range exc {
 				exc[i] = float32(old[decodeBufferSize-plcMaxPeriod-celtLPCOrder+i])
 			}
 			lpc := d.plcLPC[c][:]
 			if d.lastFrameType != framePLCPeriodic {
 				var ac [celtLPCOrder + 1]float32
-				celtAutocorrWindowed32(exc[celtLPCOrder:], ac[:], window, ov, celtLPCOrder, plcMaxPeriod)
+				celtAutocorrWindowed32Into(&sc.xx, exc[celtLPCOrder:], ac[:], window, ov, celtLPCOrder, plcMaxPeriod)
 				// Add a noise floor of -40 dB.
 				ac[0] *= 1.0001
 				// Lag windowing.
@@ -260,7 +331,7 @@ func (d *Decoder) decodeLoss() []float64 {
 				celtLPC32(lpc, ac[:], celtLPCOrder)
 			}
 			// The excitation for excLength samples before the loss.
-			firTmp := make([]float32, excLength)
+			firTmp := zeroedF32(&sc.firTmp, excLength)
 			celtFIR32(exc, celtLPCOrder+plcMaxPeriod-excLength, lpc, firTmp, excLength, celtLPCOrder)
 			copy(exc[celtLPCOrder+plcMaxPeriod-excLength:], firTmp)
 			// Check if the waveform is decaying, and if so how fast.
@@ -277,7 +348,7 @@ func (d *Decoder) decodeLoss() []float64 {
 			// Extrapolate from the end of the excitation with a period of
 			// pitchIndex, scaling down each period by decay.
 			extrapolationOffset := plcMaxPeriod - pitchIndex
-			ext := make([]float32, extrapolationLen)
+			ext := zeroedF32(&sc.ext, extrapolationLen)
 			attenuation := float32(fade * decay)
 			var s1 float32
 			for i, j := 0, 0; i < extrapolationLen; i, j = i+1, j+1 {
@@ -296,7 +367,7 @@ func (d *Decoder) decodeLoss() []float64 {
 			for i := 0; i < celtLPCOrder; i++ {
 				lpcMem[i] = float32(old[decodeBufferSize-1-i])
 			}
-			celtIIR32(ext, lpc, ext, extrapolationLen, celtLPCOrder, lpcMem[:])
+			celtIIR32Into(sc, ext, lpc, ext, extrapolationLen, celtLPCOrder, lpcMem[:])
 			// Attenuate if the synthesis energy is higher than expected.
 			var s2 float32
 			for _, v := range ext {
@@ -314,7 +385,7 @@ func (d *Decoder) decodeLoss() []float64 {
 					ext[i] = float32(ratio * ext[i])
 				}
 			}
-			frame := make([]float64, N)
+			frame := zeroedF64(&sc.frame[c], N)
 			for i := 0; i < N; i++ {
 				frame[i] = float64(ext[i])
 			}
@@ -338,8 +409,9 @@ func (d *Decoder) decodeLoss() []float64 {
 	d.plcDuration = min(10000, d.plcDuration+(1<<lm))
 	d.lastFrameType = frameType
 
+	// Like Decode's output, the concealed frame is reused by the next loss.
 	nd := N / d.downsample
-	output := make([]float64, nd*C)
+	output := zeroedF64(&sc.output, nd*C)
 	for c := 0; c < C; c++ {
 		d.applyDeemphasis(c, samples[c])
 		for i := 0; i < nd; i++ {

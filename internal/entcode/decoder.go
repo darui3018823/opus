@@ -21,15 +21,30 @@ type Decoder struct {
 	dif        uint32 // coded value complement (top-down)
 	rem        int    // remainder bits from previous byte read
 	nbitsTotal int    // bits consumed, tracked like libopus nbits_total (counts past buffer end)
-	err        error
+	// ext caches rng/ft from the last Decode, like libopus ec_dec.ext, so the
+	// following DecodeUpdate skips the second division. extRng and extFt tie
+	// the cache to the state it was computed from.
+	ext    uint32
+	extRng uint32
+	extFt  uint32
 }
+
+// tellFracCorrection is the ec_tell_frac correction table (celt/entcode.c).
+var tellFracCorrection = [8]uint32{35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535}
 
 // NewDecoder creates a new range decoder from encoded data.
 // Matches ec_dec_init in libopus.
 func NewDecoder(data []byte) *Decoder {
-	dec := &Decoder{
+	dec := new(Decoder)
+	dec.Init(data)
+	return dec
+}
+
+// Init resets dec to decode data, like ec_dec_init, so a caller can keep a
+// Decoder value and reuse it across packets.
+func (dec *Decoder) Init(data []byte) {
+	*dec = Decoder{
 		buf: data,
-		pos: 0,
 		rng: 1 << CodeExtra, // 128
 	}
 
@@ -46,8 +61,6 @@ func NewDecoder(data []byte) *Decoder {
 
 	// Normalize to fill the range
 	dec.normalize()
-
-	return dec
 }
 
 // Tell returns the number of bits consumed so far.
@@ -73,21 +86,22 @@ func (dec *Decoder) SetTell(bits int) {
 // TellFrac returns bits consumed in 1/8-bit (Q3) resolution.
 // Bit-exact with ec_tell_frac in libopus (celt/entcode.c).
 func (dec *Decoder) TellFrac() int {
-	correction := [8]uint32{35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535}
 	nbits := dec.nbitsTotal << 3
 	l := ILog(dec.rng)
 	r := dec.rng >> uint(l-16)
+	// r is in [2^15, 2^16), so b is in [0, 7].
 	b := (r >> 12) - 8
-	if r > correction[b] {
+	if r > tellFracCorrection[b&7] {
 		b++
 	}
 	l = (l << 3) + int(b)
 	return nbits - l
 }
 
-// Error returns any decoding error.
+// Error returns any decoding error. The decoder, like libopus, keeps decoding
+// past corrupt data, so it never records one; Error always returns nil.
 func (dec *Decoder) Error() error {
-	return dec.err
+	return nil
 }
 
 // Debug accessors for testing
@@ -161,9 +175,6 @@ func (dec *Decoder) normalize() {
 //	do { t = s; s = r * icdf[++ret]; } while (d < s);
 //	dif = d - s; rng = t - s; normalize();
 func (dec *Decoder) DecodeIcdf(icdf []uint8, ftb int) int {
-	if dec.err != nil {
-		return 0
-	}
 
 	r := dec.rng >> uint(ftb)
 	d := dec.dif
@@ -197,9 +208,6 @@ func (dec *Decoder) DecodeIcdf(icdf []uint8, ftb int) int {
 //
 // Top-down decoder: dif < r => true, dif >= r => false.
 func (dec *Decoder) DecodeBitLogp(logp uint) bool {
-	if dec.err != nil {
-		return false
-	}
 	r := dec.rng >> logp
 	d := dec.dif
 
@@ -219,10 +227,11 @@ func (dec *Decoder) DecodeBitLogp(logp uint) bool {
 //
 // In top-down convention, dif/r gives position from top.
 func (dec *Decoder) Decode(ft uint32) uint32 {
-	if dec.err != nil || ft == 0 {
+	if ft == 0 {
 		return 0
 	}
 	r := dec.rng / ft
+	dec.ext, dec.extRng, dec.extFt = r, dec.rng, ft
 	if r == 0 {
 		// Range is smaller than the alphabet; return the last symbol as a
 		// safe fallback (DecodeUpdate will correct the state).
@@ -239,7 +248,10 @@ func (dec *Decoder) Decode(ft uint32) uint32 {
 // fl, fh are CDF bounds [fl, fh) out of [0, ft).
 // Matches ec_dec_update in libopus.
 func (dec *Decoder) DecodeUpdate(fl, fh, ft uint32) {
-	r := dec.rng / ft
+	r := dec.ext
+	if dec.extRng != dec.rng || dec.extFt != ft {
+		r = dec.rng / ft
+	}
 	dec.dif -= r * (ft - fh)
 	if fl > 0 {
 		dec.rng = r * (fh - fl)
@@ -247,6 +259,22 @@ func (dec *Decoder) DecodeUpdate(fl, fh, ft uint32) {
 		dec.rng -= r * (ft - fh)
 	}
 	dec.normalize()
+}
+
+// DecodeBin is Decode for ft = 1<<bits, like ec_decode_bin: the scale is a
+// shift instead of a division.
+func (dec *Decoder) DecodeBin(bits uint) uint32 {
+	ft := uint32(1) << bits
+	r := dec.rng >> bits
+	dec.ext, dec.extRng, dec.extFt = r, dec.rng, ft
+	if r == 0 {
+		return ft - 1
+	}
+	s := dec.dif / r
+	if s >= ft {
+		return 0
+	}
+	return ft - 1 - s
 }
 
 // DecodeUint decodes a value in [0, ft) using ec_dec_uint scheme from libopus.
@@ -341,9 +369,6 @@ func (dec *Decoder) DecodeUintTrace(ft uint32) uint32 {
 // Top-down: true => dif in [0, rng-split), false => dif in [rng-split, rng)
 // rng - split = (rng >> 15) * prob
 func (dec *Decoder) DecodeBit(prob uint16) bool {
-	if dec.err != nil {
-		return false
-	}
 	d := dec.dif
 	// rng - split = (rng >> 15) * prob = true-interval width in dif-space
 	trueWidth := (dec.rng >> 15) * uint32(prob)

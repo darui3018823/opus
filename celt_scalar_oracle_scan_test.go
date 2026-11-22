@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
+	"github.com/darui3018823/opus/internal/celt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -130,14 +131,10 @@ func TestCELTScalarSynthesisStageScan(t *testing.T) {
 			t.Fatalf("unexpected coefficient stage %q", stage)
 		}
 	}
-	for bandwidth := range decoder.celtDecoders {
-		for lm := range decoder.celtDecoders[bandwidth] {
-			for channel := range decoder.celtDecoders[bandwidth][lm] {
-				decoder.celtDecoders[bandwidth][lm][channel].SetCoefficientStageHook(coefficientHook)
-				decoder.celtDecoders[bandwidth][lm][channel].SetSynthesisStageHook(synthesisHook)
-			}
-		}
-	}
+	forEachCELTDecoder(decoder, func(c *celt.Decoder) {
+		c.SetCoefficientStageHook(coefficientHook)
+		c.SetSynthesisStageHook(synthesisHook)
+	})
 
 	for packet, record := range packets {
 		currentPacket = packet

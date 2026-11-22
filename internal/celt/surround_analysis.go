@@ -17,6 +17,9 @@ type SurroundAnalyzer struct {
 	overlap    [][]float64 // float32 values
 	preemphMem []float64   // float32 values
 	modes      map[int]*dsp.CELTMode
+	// Analyze's working buffers; the returned masks alias bandLogE until
+	// the next Analyze call.
+	in, freq, bandLogE []float64
 }
 
 func NewSurroundAnalyzer(sampleRate, channels int) (*SurroundAnalyzer, error) {
@@ -53,6 +56,24 @@ func (a *SurroundAnalyzer) Clone() *SurroundAnalyzer {
 	return clone
 }
 
+// CopyFrom copies src's memories into a, an analyzer of the same layout,
+// reusing a's storage.
+func (a *SurroundAnalyzer) CopyFrom(src *SurroundAnalyzer) {
+	for channel := range a.overlap {
+		copy(a.overlap[channel], src.overlap[channel])
+	}
+	copy(a.preemphMem, src.preemphMem)
+	a.modes = src.modes
+}
+
+func surroundGrow(buf *[]float64, n int) []float64 {
+	if cap(*buf) < n {
+		*buf = make([]float64, n)
+	}
+	*buf = (*buf)[:n]
+	return *buf
+}
+
 func (a *SurroundAnalyzer) Reset() {
 	for channel := range a.overlap {
 		clear(a.overlap[channel])
@@ -61,7 +82,8 @@ func (a *SurroundAnalyzer) Reset() {
 }
 
 // Analyze runs surround_analysis on frameSize samples per channel of
-// interleaved PCM (nominal range [-1, 1]).
+// interleaved PCM (nominal range [-1, 1]). The returned masks are reused by
+// the next call.
 func (a *SurroundAnalyzer) Analyze(pcm []float64, frameSize int) ([]float64, error) {
 	if frameSize <= 0 || len(pcm) < frameSize*a.channels {
 		return nil, fmt.Errorf("celt: invalid surround analysis frame")
@@ -88,15 +110,15 @@ func (a *SurroundAnalyzer) Analyze(pcm []float64, frameSize int) ([]float64, err
 	}
 	M := 1 << lm
 	pos := surroundChannelPos(a.channels)
-	bandLogE := make([]float64, a.channels*NumBands48000)
+	bandLogE := surroundGrow(&a.bandLogE, a.channels*NumBands48000)
 	var maskLogE [3][NumBands48000]float32
 	for c := range maskLogE {
 		for i := range maskLogE[c] {
 			maskLogE[c][i] = -28
 		}
 	}
-	in := make([]float64, n+overlap)
-	freq := make([]float64, freqSize)
+	in := surroundGrow(&a.in, n+overlap)
+	freq := surroundGrow(&a.freq, freqSize)
 	for c := 0; c < a.channels; c++ {
 		copy(in, a.overlap[c])
 		// celt_preemphasis (upsampled input is zero-stuffed).
@@ -123,7 +145,7 @@ func (a *SurroundAnalyzer) Analyze(pcm []float64, frameSize int) ([]float64, err
 		}
 		var bandE [NumBands48000]float32
 		for frame := 0; frame < n/freqSize; frame++ {
-			copy(freq, mode.CLTMDCTForward(in[freqSize*frame:freqSize*frame+freqSize+overlap]))
+			mode.CLTMDCTForwardInto(in[freqSize*frame:freqSize*frame+freqSize+overlap], freq)
 			if upsample != 1 {
 				bound := freqSize / upsample
 				for i := 0; i < bound; i++ {

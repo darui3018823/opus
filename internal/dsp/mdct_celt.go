@@ -1,6 +1,9 @@
 package dsp
 
-import "math"
+import (
+	"math"
+	"sync"
+)
 
 //go:generate go run generate_mdct_twiddles.go
 
@@ -26,12 +29,25 @@ type CELTMode struct {
 // twiddles returns the mode's MDCT twiddles, libopusMDCTTwiddle(N, i).
 func (m *CELTMode) twiddles() []float32 {
 	if len(m.trig) != m.N {
-		m.trig = make([]float32, m.N)
-		for i := range m.trig {
-			m.trig[i] = libopusMDCTTwiddle(m.N, i)
-		}
+		m.trig = sharedMDCTTwiddles(m.N)
 	}
 	return m.trig
+}
+
+// mdctTwiddleCache holds one read-only twiddle table per MDCT size, shared by
+// every mode of that size.
+var mdctTwiddleCache sync.Map // int -> []float32
+
+func sharedMDCTTwiddles(n int) []float32 {
+	if t, ok := mdctTwiddleCache.Load(n); ok {
+		return t.([]float32)
+	}
+	t := make([]float32, n)
+	for i := range t {
+		t[i] = libopusMDCTTwiddle(n, i)
+	}
+	actual, _ := mdctTwiddleCache.LoadOrStore(n, t)
+	return actual.([]float32)
 }
 
 // NewCELTMode creates a CELT mode.  window is the overlap-region window (length = overlap).
@@ -263,8 +279,6 @@ func (m *CELTMode) cltMDCTForward(in []float64, dst []float64, static bool) []fl
 
 	if len(m.fwdF) != N2 {
 		m.fwdF = make([]float32, N2)
-		m.fwdFC = make([]Complex, N4)
-		m.fwdZ = make([]Complex, N4)
 		m.fwdIn = make([]opusComplex, N4)
 	}
 	f := m.fwdF
@@ -342,6 +356,11 @@ func (m *CELTMode) cltMDCTForward(in []float64, dst []float64, static bool) []fl
 		return out
 	}
 
+	// The Complex scratch serves only this generic path.
+	if len(m.fwdFC) != N4 {
+		m.fwdFC = make([]Complex, N4)
+		m.fwdZ = make([]Complex, N4)
+	}
 	// Pre-rotation (float build: scale before the FFT).
 	fc := m.fwdFC
 	for i := 0; i < N4; i++ {

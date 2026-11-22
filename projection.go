@@ -17,6 +17,12 @@ const (
 // signalling metadata. It is stateful and owns its elementary encoders; calls
 // through StreamEncoder must be serialized with parent operations.
 type ProjectionEncoder struct {
+	// inputBuf and mixBuf hold the float64 conversion of the caller's PCM
+	// and the mixed channels, reused per call: the streams copy what they
+	// keep.
+	inputBuf []float64
+	mixBuf   []float64
+
 	sampleRate     int
 	channels       int
 	mappingFamily  int
@@ -266,7 +272,7 @@ func (e *ProjectionEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) {
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	floatPCM := msScratch(&e.inputBuf, required)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768
 	}
@@ -283,7 +289,7 @@ func (e *ProjectionEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error)
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	floatPCM := msScratch(&e.inputBuf, required)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608
 	}
@@ -296,7 +302,7 @@ func (e *ProjectionEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte,
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	floatPCM := msScratch(&e.inputBuf, required)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i])
 	}
@@ -330,10 +336,10 @@ func (e *ProjectionEncoder) encodeFloatDepth(pcm []float64, frameSize, lsbDepth 
 	}
 	mixed := pcm[:required]
 	if e.mappingFamily == MappingFamilyProjection && e.multistream.libopusPolicy {
-		mixed = e.mixing.multiplyFloat32(pcm, selectedFrameSize, e.channels, e.channels)
+		mixed = e.mixing.multiplyFloat32Into(msScratch(&e.mixBuf, selectedFrameSize*e.channels), pcm, selectedFrameSize, e.channels, e.channels)
 	} else if e.mappingFamily == MappingFamilyProjection {
 		var err error
-		mixed, err = e.mixing.multiplyFloat64(mixed, frameSize, e.channels)
+		mixed, err = e.mixing.multiplyFloat64Into(msScratch(&e.mixBuf, frameSize*e.channels), mixed, frameSize, e.channels)
 		if err != nil {
 			return nil, err
 		}
@@ -487,7 +493,7 @@ func (d *ProjectionDecoder) Decode(data []byte, pcm []int16) (int, error) {
 	if err := d.checkOutput(len(pcm), duration); err != nil {
 		return 0, err
 	}
-	coded, err := d.multistream.decodeMapped(data, true)
+	coded, err := d.multistream.decodeMapped(data, true, true)
 	if err != nil {
 		return 0, err
 	}

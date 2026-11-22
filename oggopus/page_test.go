@@ -105,3 +105,40 @@ func TestPageLacingValidation(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 }
+
+// bitwiseOggCRC is the reference bit-at-a-time Ogg CRC-32.
+func bitwiseOggCRC(data []byte) uint32 {
+	var crc uint32
+	for _, v := range data {
+		crc ^= uint32(v) << 24
+		for range 8 {
+			if crc&0x80000000 != 0 {
+				crc = crc<<1 ^ 0x04c11db7
+			} else {
+				crc <<= 1
+			}
+		}
+	}
+	return crc
+}
+
+func TestCRCTableMatchesBitwise(t *testing.T) {
+	data := make([]byte, 4096)
+	seed := uint32(1)
+	for i := range data {
+		seed = seed*1664525 + 1013904223
+		data[i] = byte(seed >> 24)
+	}
+	for _, n := range []int{0, 1, 21, 22, 25, 26, 27, 300, len(data)} {
+		if got, want := checksum(data[:n]), bitwiseOggCRC(data[:n]); got != want {
+			t.Fatalf("checksum(%d bytes) = %08x, want %08x", n, got, want)
+		}
+		zeroed := append([]byte(nil), data[:n]...)
+		for i := 22; i < 26 && i < n; i++ {
+			zeroed[i] = 0
+		}
+		if got, want := checksumWithZeroedField(data[:n]), bitwiseOggCRC(zeroed); got != want {
+			t.Fatalf("checksumWithZeroedField(%d bytes) = %08x, want %08x", n, got, want)
+		}
+	}
+}

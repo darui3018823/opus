@@ -1125,6 +1125,9 @@ type quantAllBandsScratch struct {
 	scratch []float32
 	// iy is algUnquant's pulse vector.
 	iy [maxPVQN]int
+	// The theta RDO's range coder snapshots and band copies.
+	encSave, encSave2                    entcode.Encoder
+	xSave, ySave, xSave2, ySave2, nSave2 []float32
 }
 
 // zeroedFloat64 returns *buf resized to n zeroed elements, keeping the
@@ -1301,22 +1304,25 @@ func quantAllBandsImpl(encode bool, enc *entcode.Encoder, dec *entcode.Decoder, 
 				computeChannelWeights(float32(bandE[i]), float32(bandE[nbEBands+i]), &w)
 				cm := int(xcm | ycm)
 				// Make a copy.
-				encSave := enc.Clone()
+				encSave := enc.CloneInto(&qs.encSave)
 				ctxSave := *ctx
-				xSave := append([]float32(nil), Xband[:N]...)
-				ySave := append([]float32(nil), Yband[:N]...)
+				xSave := append(qs.xSave[:0], Xband[:N]...)
+				ySave := append(qs.ySave[:0], Yband[:N]...)
+				qs.xSave, qs.ySave = xSave, ySave
 				// Encode and round down.
 				ctx.thetaRound = -1
 				cmDown := quantBandStereo(ctx, Xband, Yband, N, b, B, lb, lm, out, lowbandScratch, cm)
 				dist0 := float32(w[0]*innerProd32(xSave, Xband, N)) + float32(w[1]*innerProd32(ySave, Yband, N))
 				// Save first result.
-				encSave2 := enc.Clone()
+				encSave2 := enc.CloneInto(&qs.encSave2)
 				ctxSave2 := *ctx
-				xSave2 := append([]float32(nil), Xband[:N]...)
-				ySave2 := append([]float32(nil), Yband[:N]...)
+				xSave2 := append(qs.xSave2[:0], Xband[:N]...)
+				ySave2 := append(qs.ySave2[:0], Yband[:N]...)
+				qs.xSave2, qs.ySave2 = xSave2, ySave2
 				var normSave2 []float32
 				if !last {
-					normSave2 = append([]float32(nil), out[:N]...)
+					normSave2 = append(qs.nSave2[:0], out[:N]...)
+					qs.nSave2 = normSave2
 				}
 				// Restore.
 				enc.Restore(encSave)

@@ -155,11 +155,14 @@ func (e *Encoder) quantCoarseEnergy(enc *entcode.Encoder, start, end, effEnd int
 	if e.lfe {
 		maxDecay = 3
 	}
-	encStart := enc.Clone()
+	encStart := enc.CloneInto(&e.coarse.encStart)
 
-	oldEBandsIntra := make([]float64, len(oldEBands))
+	oldEBandsIntra := growFloat64(e.coarse.oldEBandsIntra, len(oldEBands))
+	e.coarse.oldEBandsIntra = oldEBandsIntra
 	copy(oldEBandsIntra, oldEBands)
-	errIntra := make([]float64, len(errOut))
+	errIntra := growFloat64(e.coarse.errIntra, len(errOut))
+	e.coarse.errIntra = errIntra
+	clear(errIntra)
 
 	badness1 := 0
 	if twoPass || intra {
@@ -169,7 +172,7 @@ func (e *Encoder) quantCoarseEnergy(enc *entcode.Encoder, start, end, effEnd int
 
 	if !intra {
 		tellIntra := int32(enc.TellFrac())
-		encIntra := enc.Clone()
+		encIntra := enc.CloneInto(&e.coarse.encIntra)
 		enc.Restore(encStart)
 		interIdx := 0
 		badness2 := quantCoarseEnergyImpl(enc, start, end, eBands, oldEBands, budget, tell,

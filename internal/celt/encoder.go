@@ -144,6 +144,13 @@ func EnableFrameTraces() (release func()) {
 
 func frameTracesEnabled() bool { return frameTraceUsers.Load() > 0 }
 
+// coarseScratch holds the range coder snapshots and the intra-pass energies
+// of quantCoarseEnergy's intra/inter decision, reused across frames.
+type coarseScratch struct {
+	encStart, encIntra       entcode.Encoder
+	oldEBandsIntra, errIntra []float64
+}
+
 // frameScratch holds encodeRange's per-frame buffers.
 type frameScratch struct {
 	x, bandE, logE, logE2, coarseError []float64
@@ -216,6 +223,8 @@ type Encoder struct {
 	traceCoeffs [][]float64
 	// traceBandLogE keeps the unbiased band energies for the trace.
 	traceBandLogE []float64
+	// coarse holds quantCoarseEnergy's two-pass snapshots.
+	coarse coarseScratch
 	// frame is the per-frame work storage of encodeRange, reused between
 	// frames (nothing outlives the frame: the trace copies what it keeps).
 	frame         frameScratch

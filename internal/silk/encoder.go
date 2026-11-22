@@ -192,7 +192,12 @@ type Encoder struct {
 	// per-packet flag telling the Opus layer that the speech activity is low
 	// enough to switch the audio bandwidth (the threshold relaxes with the
 	// time since the last allowed switch).
-	allowBandwidthSwitch     bool
+	allowBandwidthSwitch bool
+	// controlHeld marks that Reset ran since the last encode; the encControl
+	// outputs then report the held pre-reset values.
+	controlHeld              bool
+	heldAllowBandwidthSwitch bool
+	heldInWBWithoutLP        bool
 	timeSinceSwitchAllowedMs int32
 	// lp is silk_LP_state: the variable low-pass of an internal rate
 	// transition (lp_variable_cutoff.go).
@@ -501,6 +506,7 @@ func (e *Encoder) SetRateMode(mode RateMode) {
 
 // Encode encodes a frame of audio samples using the range encoder.
 func (e *Encoder) Encode(pcm []float64) ([]byte, error) {
+	e.controlHeld = false
 	if len(pcm) != e.frameSize*e.channels {
 		return nil, fmt.Errorf("invalid PCM length: got %d, expected %d", len(pcm), e.frameSize*e.channels)
 	}
@@ -534,6 +540,7 @@ func (e *Encoder) EncodeMulti(pcm []float64, nFrames int) ([]byte, error) {
 // range encoder. It is used by hybrid Opus packets, where SILK and CELT share
 // one entropy stream.
 func (e *Encoder) EncodeMultiWithEncoder(enc *entcode.Encoder, pcm []float64, nFrames int) error {
+	e.controlHeld = false
 	if enc == nil {
 		return fmt.Errorf("nil range encoder")
 	}
@@ -2429,6 +2436,9 @@ func (e *Encoder) SetReducedDependency(on bool) { e.reducedDependency = on }
 // the audio bandwidth (opus_encode_native re-runs its automatic bandwidth
 // selection only then for SILK and hybrid packets).
 func (e *Encoder) AllowBandwidthSwitch() bool {
+	if e.controlHeld {
+		return e.heldAllowBandwidthSwitch
+	}
 	return e.allowBandwidthSwitch
 }
 
@@ -3136,6 +3146,15 @@ func (e *Encoder) resetForSideReactivation() {
 }
 
 func (e *Encoder) Reset() {
+	// encControl's allowBandwidthSwitch and inWBmodeWithoutVariableLP are
+	// outputs of the last silk_Encode in st->silk_mode; OPUS_RESET_STATE
+	// re-initialises SILK with a dummy control, so the Opus layer keeps
+	// reading the pre-reset values until the next encode.
+	if !e.controlHeld {
+		e.heldAllowBandwidthSwitch = e.allowBandwidthSwitch
+		e.heldInWBWithoutLP = e.InWBModeWithoutVariableLP()
+		e.controlHeld = true
+	}
 	e.frameVAD = nil
 	e.inputBuf = nil
 	e.curFrame = 0

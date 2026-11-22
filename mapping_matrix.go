@@ -91,10 +91,22 @@ func (m *MappingMatrix) subset(rows, cols int) (*MappingMatrix, error) {
 }
 
 func (m *MappingMatrix) multiplyFloat64(input []float64, frames, inputChannels int) ([]float64, error) {
+	return m.multiplyFloat64Into(nil, input, frames, inputChannels)
+}
+
+// multiplyFloat64Into is multiplyFloat64 writing into dst when it holds
+// frames*rows samples (it is cleared first), allocating otherwise.
+func (m *MappingMatrix) multiplyFloat64Into(dst, input []float64, frames, inputChannels int) ([]float64, error) {
 	if inputChannels != m.cols || frames < 0 || len(input) < frames*inputChannels {
 		return nil, fmt.Errorf("%w: matrix %dx%d cannot multiply %d frames of %d-channel input", ErrBadArg, m.rows, m.cols, frames, inputChannels)
 	}
-	out := make([]float64, frames*m.rows)
+	var out []float64
+	if len(dst) >= frames*m.rows {
+		out = dst[:frames*m.rows]
+		clear(out)
+	} else {
+		out = make([]float64, frames*m.rows)
+	}
 	const q15 = 1.0 / 32768.0
 	for frame := 0; frame < frames; frame++ {
 		for col := 0; col < m.cols; col++ {
@@ -108,13 +120,14 @@ func (m *MappingMatrix) multiplyFloat64(input []float64, frames, inputChannels i
 	return out, nil
 }
 
-// multiplyFloat32 is mapping_matrix_multiply_channel_in_float (the
+// multiplyFloat32Into is mapping_matrix_multiply_channel_in_float (the
 // projection encoder's input mixing under the libopus policy): each output
 // channel is the float32 sum over the input channels of coefficient x
 // sample, scaled by 1/32768. (The int16 variant gives the same values in
 // the float build.) outputs is the number of output channels computed.
-func (m *MappingMatrix) multiplyFloat32(input []float64, frames, inputChannels, outputs int) []float64 {
-	out := make([]float64, frames*outputs)
+// It writes every one of the frames*outputs samples of dst.
+func (m *MappingMatrix) multiplyFloat32Into(dst, input []float64, frames, inputChannels, outputs int) []float64 {
+	out := dst[:frames*outputs]
 	for i := 0; i < frames; i++ {
 		for row := 0; row < outputs; row++ {
 			var tmp float32

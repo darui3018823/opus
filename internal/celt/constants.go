@@ -176,11 +176,12 @@ func NewModeEx(frameSize, sampleRate, numBands, channels int) *Mode {
 // celtWindow computes the CELT overlap window of length n using the formula from libopus.
 // w[i] = sin(π/2 * sin²(π*(i+0.5)/(2*n)))
 // For n=120 returns the precomputed Window120 table cast to float32 slice.
+//
+// The 120-sample window is the shared Window120 table; callers must not
+// modify the returned slice.
 func celtWindow(n int) []float32 {
 	if n == 120 {
-		w := make([]float32, 120)
-		copy(w, Window120[:])
-		return w
+		return Window120[:]
 	}
 	w := make([]float32, n)
 	for i := 0; i < n; i++ {

@@ -23,6 +23,13 @@ const celtFloatScale = 1.0 / 32768.0
 
 // Decoder is a CELT decoder instance
 type Decoder struct {
+	// Per-frame scratch for the coarse energies, tf_res and dynalloc boosts.
+	coarseScratch   []float64
+	tfScratch       [NumBands48000]int
+	dynallocScratch [NumBands48000]int
+	// rangeDec is the CELT-only frame's range decoder, reused across frames.
+	rangeDec entcode.Decoder
+
 	// alloc is the bit allocation scratch reused between frames.
 	alloc         allocScratch
 	mode          *Mode
@@ -196,8 +203,11 @@ func (d *Decoder) Decode(frameData []byte) ([]float64, error) {
 		d.lastFinalRange = 0x01000000
 		return d.decodeLoss(), nil
 	}
-	dec := entcode.NewDecoder(frameData)
-	return d.decodeCELTRange(dec, len(frameData), 0, d.mode.Bands.NumBands)
+	d.rangeDec.Init(frameData)
+	pcm, err := d.decodeCELTRange(&d.rangeDec, len(frameData), 0, d.mode.Bands.NumBands)
+	// Drop the reference to the caller's packet.
+	d.rangeDec = entcode.Decoder{}
+	return pcm, err
 }
 
 // growFloat64 returns buf resized to n elements, reallocating only when its
@@ -295,13 +305,14 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	}
 
 	// Coarse band log-energies (Laplace, forward).
-	quantLogE := UnquantizeCoarseEnergy(
-		dec, d.prevEnergies, nil, intra, numBands, start, end, lm, ch, totalBits,
+	d.coarseScratch = growFloat64(d.coarseScratch, numBands*ch)
+	quantLogE := unquantizeCoarseEnergyInto(
+		d.coarseScratch, dec, d.prevEnergies, intra, numBands, start, end, lm, ch, totalBits,
 	)
 	htr(dec, "coarse")
 
 	// Time-frequency allocation bits.
-	tfRes := celtTFDecode(dec, totalBits, isTransient, numBands, start, end, lm)
+	tfRes := celtTFDecodeInto(d.tfScratch[:], dec, totalBits, isTransient, numBands, start, end, lm)
 	htr(dec, "tf_decode")
 
 	// Spread decision (default SPREAD_NORMAL).
@@ -312,7 +323,7 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	htr(dec, "spread")
 
 	// Per-band dynamic allocation boosts (BEFORE alloc_trim, libopus order).
-	offsets, tellQ3, boostedTotalQ3 := decodeDynalloc(dec, numBands, start, end, lm, ch, totalBits)
+	offsets, tellQ3, boostedTotalQ3 := decodeDynallocInto(d.dynallocScratch[:], dec, numBands, start, end, lm, ch, totalBits)
 	htr(dec, "dynalloc")
 
 	// Allocation trim (7-bit ICDF, default 5 = neutral). Like libopus, the
@@ -728,6 +739,8 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 	d.mdctBuf = [2][]float64{}
 	d.bandX, d.collapse = nil, nil
 	d.qab = quantAllBandsScratch{}
+	d.coarseScratch = nil
+	d.rangeDec = entcode.Decoder{}
 	for ch, proc := range src.bandProcs {
 		if proc == nil {
 			d.bandProcs[ch] = nil
@@ -1104,7 +1117,19 @@ func (d *Decoder) Reset() {
 // (ec_tell_frac as last sampled) and total_bits (Q3, less every boost),
 // which gate the following alloc_trim symbol.
 func decodeDynalloc(dec *entcode.Decoder, numBands, start, end, lm, ch, totalBits int) ([]int, int, int) {
-	offsets := make([]int, numBands)
+	return decodeDynallocInto(nil, dec, numBands, start, end, lm, ch, totalBits)
+}
+
+// decodeDynallocInto is decodeDynalloc writing the boosts into dst when it
+// holds numBands values (cleared first), allocating otherwise.
+func decodeDynallocInto(dst []int, dec *entcode.Decoder, numBands, start, end, lm, ch, totalBits int) ([]int, int, int) {
+	var offsets []int
+	if len(dst) >= numBands {
+		offsets = dst[:numBands]
+		clear(offsets)
+	} else {
+		offsets = make([]int, numBands)
+	}
 	dynallocLogp := 6
 	// libopus: total_bits<<=BITRES (Q3), decreases as boosts are applied;
 	// tell tracked via ec_tell_frac (Q3).
@@ -1167,7 +1192,19 @@ var tfSelectTable = [4][8]int{
 // celtTFDecode reads the time-frequency allocation bits and returns tf_res[i]
 // per band. Faithful port of libopus tf_decode() (celt/bands.c).
 func celtTFDecode(dec *entcode.Decoder, totalBits int, isTransient bool, numBands, start, end, lm int) []int {
-	tfRes := make([]int, numBands)
+	return celtTFDecodeInto(nil, dec, totalBits, isTransient, numBands, start, end, lm)
+}
+
+// celtTFDecodeInto is celtTFDecode writing into dst when it holds numBands
+// values (cleared first), allocating otherwise.
+func celtTFDecodeInto(dst []int, dec *entcode.Decoder, totalBits int, isTransient bool, numBands, start, end, lm int) []int {
+	var tfRes []int
+	if len(dst) >= numBands {
+		tfRes = dst[:numBands]
+		clear(tfRes)
+	} else {
+		tfRes = make([]int, numBands)
+	}
 	isT := 0
 	if isTransient {
 		isT = 1

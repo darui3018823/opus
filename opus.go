@@ -3360,6 +3360,11 @@ type Decoder struct {
 	silkActiveRi       int
 	prevSilkInternalCh int // previous packet's SILK internal channel count (0 = none yet)
 
+	// silkRange and hybridRange hold the range decoder of the SILK-only and
+	// hybrid frame in flight, reused across frames instead of allocated. Each
+	// keeps a reference to the last frame's bytes until the next frame.
+	silkRange   entcode.Decoder
+	hybridRange entcode.Decoder
 
 	frameSize          int // frame size in samples at sampleRate
 	internalFrameSize  int // always 960 (20ms at 48kHz)
@@ -4421,7 +4426,8 @@ func (d *Decoder) decodeSILKPacket(payload []byte, countCode, config, pktChannel
 			rangeFinal = 0
 			continue
 		}
-		dec := entcode.NewDecoder(stream)
+		d.silkRange.Init(stream)
+		dec := &d.silkRange
 		if dec.Error() != nil {
 			allPCM = append(allPCM, make([]float64, samplesPerStream)...)
 			continue
@@ -4767,7 +4773,8 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 			continue
 		}
 		// One shared range decoder per Opus frame: SILK reads first, CELT after.
-		dec := entcode.NewDecoder(stream)
+		d.hybridRange.Init(stream)
+		dec := &d.hybridRange
 		if dec.Error() != nil {
 			allPCM = append(allPCM, make([]float64, samplesPerFrame)...)
 			continue

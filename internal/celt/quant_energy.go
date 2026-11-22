@@ -274,6 +274,22 @@ func UnquantizeCoarseEnergy(
 	channels int,
 	totalBits int,
 ) []float64 {
+	return unquantizeCoarseEnergyInto(make([]float64, numBands*channels), dec, prevLogE, intra, numBands, start, end, lm, channels, totalBits)
+}
+
+// unquantizeCoarseEnergyInto is UnquantizeCoarseEnergy writing into dst
+// (numBands*channels values, cleared first), so the decoder can reuse it.
+func unquantizeCoarseEnergyInto(
+	dst []float64,
+	dec *entcode.Decoder,
+	prevLogE []float64,
+	intra bool,
+	numBands int,
+	start, end int,
+	lm int,
+	channels int,
+	totalBits int,
+) []float64 {
 	lm = lmClamp(lm)
 	intraIdx := 0
 	if intra {
@@ -291,10 +307,17 @@ func UnquantizeCoarseEnergy(
 	budget := totalBits // whole bits, matches libopus: budget = dec->storage*8
 
 	// quantLogE[c*numBands+i] matches libopus oldEBands[c*nbEBands+i].
-	quantLogE := make([]float64, numBands*channels)
+	quantLogE := dst[:numBands*channels]
+	clear(quantLogE)
 	// The floating-point libopus build aliases opus_val16/32/64 and celt_glog
 	// to float, so its predictor and stored oldBandE values round to float32.
-	prev := make([]float32, channels) // per-channel inter-band predictor
+	var prevBuf [2]float32
+	var prev []float32 // per-channel inter-band predictor
+	if channels <= len(prevBuf) {
+		prev = prevBuf[:channels]
+	} else {
+		prev = make([]float32, channels)
+	}
 
 	for i := start; i < end; i++ {
 		pi := 2 * i

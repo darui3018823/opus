@@ -3299,8 +3299,8 @@ type Decoder struct {
 	// celtDecoderHook, when set (by tests), is applied to every CELT decoder
 	// as celtDecoder creates it.
 	celtDecoderHook func(*celt.Decoder)
-	lastCeltDec  *celt.Decoder
-	prevMode     int
+	lastCeltDec     *celt.Decoder
+	prevMode        int
 	// prevRedundancy records that the previous hybrid frame ended with a
 	// trailing CELT redundancy frame. libopus keeps this separately from
 	// prev_mode so the next lost frame uses CELT-only PLC while normal packet

@@ -900,7 +900,14 @@ func (d *MultistreamDecoder) DecodeFECFloat(data []byte, frameSize int) ([]float
 		if err != nil {
 			return nil, fmt.Errorf("stream %d: %w", stream, err)
 		}
-		streamPCM, err := staged[stream].DecodeFECFloat(packet, frameSize)
+		// staged[stream] is already a copy, so decode FEC on it in place
+		// instead of through DecodeFECFloat, which would copy it again.
+		var streamPCM []float64
+		if len(packet) == 0 {
+			streamPCM, err = staged[stream].DecodePLCFloat(frameSize)
+		} else if err = staged[stream].validateFECState(packet, frameSize); err == nil {
+			streamPCM, err = staged[stream].decodeFECStaged(packet, frameSize)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("stream %d: %w", stream, err)
 		}

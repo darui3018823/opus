@@ -5587,14 +5587,25 @@ func (d *Decoder) DecodeFECFloat(data []byte, frameSize int) ([]float64, error) 
 	if err != nil {
 		return nil, err
 	}
-	pcm, finalRange, err := staged.decodeFECFloat(data, frameSize)
+	pcm, err := staged.decodeFECStaged(data, frameSize)
 	if err != nil {
 		return nil, err
 	}
-	staged.applyGain(pcm)
-	staged.lastPacketDuration = frameSize
-	staged.lastFinalRange = finalRange
 	*d = *staged
+	return pcm, nil
+}
+
+// decodeFECStaged is DecodeFECFloat on a decoder that is already a staged
+// copy (cloneState): it advances d in place, so the caller commits d only
+// when every step succeeds. data must have passed validateFECState.
+func (d *Decoder) decodeFECStaged(data []byte, frameSize int) ([]float64, error) {
+	pcm, finalRange, err := d.decodeFECFloat(data, frameSize)
+	if err != nil {
+		return nil, err
+	}
+	d.applyGain(pcm)
+	d.lastPacketDuration = frameSize
+	d.lastFinalRange = finalRange
 	return pcm, nil
 }
 

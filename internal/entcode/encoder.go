@@ -169,12 +169,11 @@ func (enc *Encoder) ECTell() int { return enc.Tell() + 1 }
 // the shared CELT quant/allocation code computes identical budgets in both
 // directions.
 func (enc *Encoder) TellFrac() int {
-	correction := [8]uint32{35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535}
 	nbits := enc.ecNbitsTotal() << 3
 	l := ILog(enc.rng)
 	r := enc.rng >> uint(l-16)
 	b := (r >> 12) - 8
-	if r > correction[b] {
+	if r > tellFracCorrection[b&7] {
 		b++
 	}
 	l = (l << 3) + int(b)
@@ -298,6 +297,24 @@ func (enc *Encoder) Encode(fl, fh, ft uint32) {
 	r := enc.rng / ft
 	if r == 0 {
 		// ft exceeds current range; skip to avoid rng → 0 and infinite normalize.
+		enc.normalize()
+		return
+	}
+	if fl > 0 {
+		enc.val += enc.rng - r*(ft-fl)
+		enc.rng = r * (fh - fl)
+	} else {
+		enc.rng -= r * (ft - fh)
+	}
+	enc.normalize()
+}
+
+// EncodeBin is Encode for ft = 1<<bits, like ec_encode_bin: the scale is a
+// shift instead of a division.
+func (enc *Encoder) EncodeBin(fl, fh uint32, bits uint) {
+	ft := uint32(1) << bits
+	r := enc.rng >> bits
+	if r == 0 {
 		enc.normalize()
 		return
 	}

@@ -2716,10 +2716,11 @@ func (e *Encoder) applyBitrateSetting(frameSize int) error {
 		}
 	}
 	e.reportedBitrate = bitrate
-	if e.libopusModePolicy && e.outDataBytes == 0 {
+	if e.libopusModePolicy {
 		// user_bitrate_to_bitrate: OPUS_BITRATE_MAX is 1.5 Mb/s and a
-		// numeric setting is used as is; max_data_bytes bounds both when
-		// the packet is coded (applyOutDataBytes).
+		// numeric setting is used as is, bounded only by max_data_bytes
+		// (the multistream encoder's per-stream budget while it codes a
+		// stream), not by the 1275-byte frame size.
 		switch e.bitrateSetting {
 		case BitrateAuto:
 		case BitrateMax:

@@ -3290,12 +3290,15 @@ type Decoder struct {
 	sampleRate int
 	channels   int
 
-	// CELT decoders indexed by [bwIdx 0-3][lmIdx 0-3][chIdx 0-1].
+	// CELT decoders indexed by [bwIdx 0-3][lmIdx 0-3], each with the output
+	// channel count, created on first use by celtDecoder.
 	// bwIdx: 0=NB(13bands), 1=WB(17bands), 2=SWB(19bands), 3=FB(21bands)
 	// lmIdx: 0=2.5ms, 1=5ms, 2=10ms, 3=20ms
-	// chIdx: 0=mono, 1=stereo
 	// CELT always runs at 48kHz internally; bandwidth only limits numBands.
-	celtDecoders [4][4][2]*celt.Decoder
+	celtDecoders [4][4]*celt.Decoder
+	// celtDecoderHook, when set (by tests), is applied to every CELT decoder
+	// as celtDecoder creates it.
+	celtDecoderHook func(*celt.Decoder)
 	lastCeltDec  *celt.Decoder
 	prevMode     int
 	// prevRedundancy records that the previous hybrid frame ended with a
@@ -3442,24 +3445,8 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 		silkActiveRi:      -1,
 	}
 
-	// Create CELT decoders for all 4 bandwidths × 4 frame sizes × 2 channel counts.
-	// CELT always runs at 48kHz internally; bandwidth only controls numBands.
-	for bw := 0; bw < 4; bw++ {
-		numBands := celtBWNumBands[bw]
-		for lm := 0; lm < 4; lm++ {
-			fs := celtLMFrameSize[lm]
-			for ch := 1; ch <= 2; ch++ {
-				d, err := celt.NewDecoderEx(fs, 48000, numBands, ch)
-				if err == nil {
-					d.SetDownsample(48000 / sampleRate)
-				}
-				if err != nil {
-					return nil, fmt.Errorf("failed to create CELT decoder (bw=%d lm=%d ch=%d): %w", bw, lm, ch, err)
-				}
-				dec.celtDecoders[bw][lm][ch-1] = d
-			}
-		}
-	}
+	// CELT decoders are created per bandwidth and frame size on first use
+	// (celtDecoder); a stream normally uses one or two of the sixteen.
 
 	// Pre-create ONE SILK decoder per rate × channel config. The Opus frame
 	// duration (10ms/20ms) is switched per packet via SetFrameMs so that the
@@ -4161,14 +4148,9 @@ func (d *Decoder) decodePacketFloat(data []byte) ([]float64, error) {
 	// the packet's coded channels (CELT_SET_CHANNELS).
 	bwIdx := celtConfigBWIdx(config)
 	lmIdx := celtConfigLMIdx(config)
-	chIdx := d.channels - 1
-	activeCeltDec := d.celtDecoders[bwIdx][lmIdx][chIdx]
-	if activeCeltDec == nil {
-		// Fallback: mono decoder
-		activeCeltDec = d.celtDecoders[bwIdx][lmIdx][0]
-	}
-	if activeCeltDec == nil {
-		return nil, fmt.Errorf("no CELT decoder for config=%d (bw=%d lm=%d ch=%d)", config, bwIdx, lmIdx, pktChannels)
+	activeCeltDec, err := d.celtDecoder(bwIdx, lmIdx)
+	if err != nil {
+		return nil, fmt.Errorf("no CELT decoder for config=%d (bw=%d lm=%d ch=%d): %w", config, bwIdx, lmIdx, pktChannels, err)
 	}
 
 	allPCM := d.pcmScratch[:0]
@@ -4700,7 +4682,10 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 	}
 	const celtBWIdx = 3 // fullband (21 bands)
 	celtActualCh := d.channels
-	celtDec := d.celtDecoders[celtBWIdx][celtLMIdx][d.channels-1]
+	celtDec, err := d.celtDecoder(celtBWIdx, celtLMIdx)
+	if err != nil {
+		return nil, false, err
+	}
 	celtDec.SetStreamChannels(pktChannels)
 
 	if d.silkDecoders[ri][ci] == nil {
@@ -5076,8 +5061,8 @@ func (d *Decoder) celtSilenceFade(pcm []float64, pktChannels, endBand int) {
 			bw = i
 		}
 	}
-	dec := d.celtDecoders[bw][0][d.channels-1]
-	if dec == nil {
+	dec, err := d.celtDecoder(bw, 0)
+	if err != nil {
 		return
 	}
 	if dec != d.lastCeltDec {
@@ -5437,9 +5422,9 @@ func (d *Decoder) decodeCELTPLCFrame(frameSize int, accum bool) ([]float64, erro
 	default:
 		return nil, fmt.Errorf("%w: invalid CELT bandwidth %d", ErrInvalidState, bandwidth)
 	}
-	active := d.celtDecoders[bw][lm][d.channels-1]
-	if active == nil {
-		return nil, fmt.Errorf("%w: missing CELT PLC decoder", ErrInvalidState)
+	active, err := d.celtDecoder(bw, lm)
+	if err != nil {
+		return nil, fmt.Errorf("%w: missing CELT PLC decoder: %v", ErrInvalidState, err)
 	}
 	if active != d.lastCeltDec {
 		active.CopyStateFrom(d.lastCeltDec)
@@ -5736,9 +5721,9 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 		if frameMs == 10 {
 			celtLMIdx = 2
 		}
-		celtDec := d.celtDecoders[3][celtLMIdx][d.channels-1]
-		if celtDec == nil {
-			return nil, 0, fmt.Errorf("%w: missing CELT decoder", ErrInvalidState)
+		celtDec, err := d.celtDecoder(3, celtLMIdx)
+		if err != nil {
+			return nil, 0, fmt.Errorf("%w: missing CELT decoder: %v", ErrInvalidState, err)
 		}
 		celtDec.SetStreamChannels(info.channels)
 		if d.prevMode >= 0 && d.prevMode != framing.ModeHybrid && !d.prevRedundancy {
@@ -5837,17 +5822,19 @@ func (d *Decoder) cloneState() (*Decoder, error) {
 	clone.silkActiveRi = d.silkActiveRi
 	clone.silkStereoDec = nil
 
+	clone.celtDecoderHook = d.celtDecoderHook
 	for bw := range d.celtDecoders {
-		for lm := range d.celtDecoders[bw] {
-			for ch := range d.celtDecoders[bw][lm] {
-				src := d.celtDecoders[bw][lm][ch]
-				dst := clone.celtDecoders[bw][lm][ch]
-				if src != nil && dst != nil {
-					dst.CopyAllStateFrom(src)
-				}
-				if src == d.lastCeltDec {
-					clone.lastCeltDec = dst
-				}
+		for lm, src := range d.celtDecoders[bw] {
+			if src == nil {
+				continue
+			}
+			dst, err := clone.celtDecoder(bw, lm)
+			if err != nil {
+				return nil, err
+			}
+			dst.CopyAllStateFrom(src)
+			if src == d.lastCeltDec {
+				clone.lastCeltDec = dst
 			}
 		}
 	}
@@ -5872,15 +5859,37 @@ func (d *Decoder) cloneState() (*Decoder, error) {
 	return clone, nil
 }
 
+// celtDecoder returns the CELT decoder for bandwidth index bw and frame-size
+// index lm, creating it on first use with the decoder's output channels,
+// downsampling and phase-inversion setting. A new decoder holds the same
+// state as one created up front and never used: callers transfer the
+// previous decoder's state into it on a switch, as before.
+func (d *Decoder) celtDecoder(bw, lm int) (*celt.Decoder, error) {
+	if dec := d.celtDecoders[bw][lm]; dec != nil {
+		return dec, nil
+	}
+	dec, err := celt.NewDecoderEx(celtLMFrameSize[lm], 48000, celtBWNumBands[bw], d.channels)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create CELT decoder (bw=%d lm=%d ch=%d): %w", bw, lm, d.channels, err)
+	}
+	dec.SetDownsample(48000 / d.sampleRate)
+	if d.phaseInversionDisabled {
+		dec.SetPhaseInversionDisabled(true)
+	}
+	if d.celtDecoderHook != nil {
+		d.celtDecoderHook(dec)
+	}
+	d.celtDecoders[bw][lm] = dec
+	return dec, nil
+}
+
 // Reset clears codec history and last-packet range, pitch, and bandwidth while
 // retaining decoder configuration such as output gain and phase inversion.
 func (d *Decoder) Reset() error {
 	for bw := range d.celtDecoders {
-		for lm := range d.celtDecoders[bw] {
-			for ch := range d.celtDecoders[bw][lm] {
-				if d.celtDecoders[bw][lm][ch] != nil {
-					d.celtDecoders[bw][lm][ch].Reset()
-				}
+		for _, dec := range d.celtDecoders[bw] {
+			if dec != nil {
+				dec.Reset()
 			}
 		}
 	}
@@ -5982,11 +5991,9 @@ func (d *Decoder) Gain() int { return d.gainQ8 }
 func (d *Decoder) SetPhaseInversionDisabled(disabled bool) {
 	d.phaseInversionDisabled = disabled
 	for bw := range d.celtDecoders {
-		for lm := range d.celtDecoders[bw] {
-			for ch := range d.celtDecoders[bw][lm] {
-				if dec := d.celtDecoders[bw][lm][ch]; dec != nil {
-					dec.SetPhaseInversionDisabled(disabled)
-				}
+		for _, dec := range d.celtDecoders[bw] {
+			if dec != nil {
+				dec.SetPhaseInversionDisabled(disabled)
 			}
 		}
 	}

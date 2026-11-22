@@ -1,6 +1,10 @@
 package opus
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/darui3018823/opus/internal/celt"
+)
 
 func TestTV01Packet31PostfilterAgainstLibopus(t *testing.T) {
 	packets := readOpusDemoPackets(t, "testvector01.bit")
@@ -39,13 +43,9 @@ func TestTV01Packet31PostfilterAgainstLibopus(t *testing.T) {
 		got[frame][stageIndex][channel] = hashFloat32Slice(values)
 		counts[stageIndex][channel]++
 	}
-	for bandwidth := range decoder.celtDecoders {
-		for lm := range decoder.celtDecoders[bandwidth] {
-			for channel := range decoder.celtDecoders[bandwidth][lm] {
-				decoder.celtDecoders[bandwidth][lm][channel].SetSynthesisStageHook(hook)
-			}
-		}
-	}
+	forEachCELTDecoder(decoder, func(c *celt.Decoder) {
+		c.SetSynthesisStageHook(hook)
+	})
 	for packet := 0; packet <= targetPacket; packet++ {
 		currentPacket = packet
 		if _, err := decoder.DecodeFloat(packets[packet].packet); err != nil {

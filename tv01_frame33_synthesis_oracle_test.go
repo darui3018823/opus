@@ -1,6 +1,7 @@
 package opus
 
 import (
+	"github.com/darui3018823/opus/internal/celt"
 	"math"
 	"testing"
 )
@@ -43,13 +44,9 @@ func TestTV01Packet33SynthesisStagesAgainstLibopus(t *testing.T) {
 		}
 		counts[stageIndex][channel]++
 	}
-	for bandwidth := range decoder.celtDecoders {
-		for lm := range decoder.celtDecoders[bandwidth] {
-			for channel := range decoder.celtDecoders[bandwidth][lm] {
-				decoder.celtDecoders[bandwidth][lm][channel].SetSynthesisStageHook(hook)
-			}
-		}
-	}
+	forEachCELTDecoder(decoder, func(c *celt.Decoder) {
+		c.SetSynthesisStageHook(hook)
+	})
 
 	for packet := 0; packet <= targetPacket; packet++ {
 		currentPacket = packet

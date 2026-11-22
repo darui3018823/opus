@@ -749,13 +749,8 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 			d.bandProcs[ch] = nil
 			continue
 		}
-		clone := NewBandProcessor(src.mode)
-		for i, band := range proc.bands {
-			clone.bands[i].Start = band.Start
-			clone.bands[i].Size = band.Size
-			clone.bands[i].Energy = band.Energy
-			clone.bands[i].Coeffs = append([]float64(nil), band.Coeffs...)
-		}
+		clone := NewBandProcessor(proc.mode)
+		clone.copyFrom(proc)
 		d.bandProcs[ch] = clone
 	}
 	d.overlap = make([][]float64, len(src.overlap))

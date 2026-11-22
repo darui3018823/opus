@@ -17,14 +17,16 @@ type Band struct {
 // BandProcessor handles band-level operations
 type BandProcessor struct {
 	mode  *Mode
-	bands []*Band
+	bands []Band
+	// coeffs backs every band's Coeffs, one contiguous allocation.
+	coeffs []float64
 }
 
 // NewBandProcessor creates a new band processor
 func NewBandProcessor(mode *Mode) *BandProcessor {
 	bp := &BandProcessor{
 		mode:  mode,
-		bands: make([]*Band, mode.Bands.NumBands),
+		bands: make([]Band, mode.Bands.NumBands),
 	}
 
 	// BandStart/BandSizes are stored at LM=0 (NBase-sample) scale.
@@ -34,17 +36,33 @@ func NewBandProcessor(mode *Mode) *BandProcessor {
 		M = 1
 	}
 
+	total := 0
+	for i := 0; i < mode.Bands.NumBands; i++ {
+		total += mode.Bands.BandSizes[i] * M
+	}
+	bp.coeffs = make([]float64, total)
+	off := 0
 	for i := 0; i < mode.Bands.NumBands; i++ {
 		start := mode.Bands.BandStart[i] * M
 		size := mode.Bands.BandSizes[i] * M
-		bp.bands[i] = &Band{
+		bp.bands[i] = Band{
 			Start:  start,
 			Size:   size,
-			Coeffs: make([]float64, size),
+			Coeffs: bp.coeffs[off : off+size : off+size],
 		}
+		off += size
 	}
 
 	return bp
+}
+
+// copyFrom copies src's band energies and coefficients; both processors
+// must share the mode geometry.
+func (bp *BandProcessor) copyFrom(src *BandProcessor) {
+	for i := range bp.bands {
+		bp.bands[i].Energy = src.bands[i].Energy
+	}
+	copy(bp.coeffs, src.coeffs)
 }
 
 // DecodeBandEnergies decodes band energies from bitstream

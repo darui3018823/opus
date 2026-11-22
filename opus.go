@@ -194,7 +194,7 @@ type Encoder struct {
 	// the caller's whole input when an expert frame duration codes only a
 	// prefix, or a projection encoder's unmixed channels.
 	callerPCM []float64
-	// inputBuf holds Encode/Encode24's float64 conversion of the caller's
+	// inputBuf holds Encode/Encode24/EncodeFloat32's float64 conversion of the caller's
 	// samples; it is only read during that call.
 	inputBuf        []float64
 	callerFrameSize int
@@ -592,7 +592,7 @@ func (e *Encoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte, error) {
 	if len(pcm) < expectedSize {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), expectedSize)
 	}
-	floatPCM := make([]float64, expectedSize)
+	floatPCM := e.inputScratch(expectedSize)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i])
 	}

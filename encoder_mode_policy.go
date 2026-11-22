@@ -132,18 +132,16 @@ type modeDecision struct {
 	bitrate int
 }
 
-// libopusVoiceEst is opus_encode_native's voice_est: 127 for a voice hint,
-// 0 for music, otherwise the tonality analysis' music probability (through
-// voice_ratio, with the previous mode selecting the min/max estimate), and
-// without analysis 115 for VOIP and 48 for the other applications.
-func (e *Encoder) libopusVoiceEst(analysis celt.AnalysisInfo) int {
-	switch e.signalSetting {
-	case SignalVoice:
-		return 127
-	case SignalMusic:
-		return 0
+// updateVoiceRatio is opus_encode_native's voice_ratio update: a frame that
+// is not digitally silent forgets the previous estimate, and a valid
+// analysis with the automatic signal type sets it from the music
+// probability (min/max by the previous mode). A silent frame therefore keeps
+// the estimate of the last non-silent one, even once the analysis is off.
+func (e *Encoder) updateVoiceRatio(isSilence bool, analysis celt.AnalysisInfo) {
+	if !isSilence {
+		e.voiceRatio = -1
 	}
-	if analysis.Valid {
+	if analysis.Valid && e.signalSetting == SignalAuto {
 		var prob float32
 		switch {
 		case e.prevMode < 0:
@@ -153,8 +151,22 @@ func (e *Encoder) libopusVoiceEst(analysis celt.AnalysisInfo) int {
 		default:
 			prob = analysis.MusicProbMin
 		}
-		voiceRatio := int(math.Floor(0.5 + float64(float32(100)*(1-prob))))
-		ve := voiceRatio * 327 >> 8
+		e.voiceRatio = int(math.Floor(0.5 + float64(float32(100)*(1-prob))))
+	}
+}
+
+// libopusVoiceEst is opus_encode_native's voice_est: 127 for a voice hint,
+// 0 for music, otherwise voice_ratio (updateVoiceRatio) scaled to Q7, and
+// without one 115 for VOIP and 48 for the other applications.
+func (e *Encoder) libopusVoiceEst() int {
+	switch e.signalSetting {
+	case SignalVoice:
+		return 127
+	case SignalMusic:
+		return 0
+	}
+	if e.voiceRatio >= 0 {
+		ve := e.voiceRatio * 327 >> 8
 		// For AUDIO, never be more than 90% confident of having speech.
 		if e.application == ApplicationAudio && ve > 115 {
 			ve = 115
@@ -208,7 +220,7 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 		decidedChannels = 1
 	}
 	equivRate := computeEquivRate(bitrate, decidedChannels, frameRate, vbr, -1, e.complexity, e.packetLossPerc)
-	voiceEst := e.libopusVoiceEst(analysis)
+	voiceEst := e.libopusVoiceEst()
 	maxRate := bitsToBitrate(maxDataBytes*8, e.sampleRate, frameSize)
 
 	var mode int

@@ -3,6 +3,7 @@ package dsp
 import (
 	"errors"
 	"math"
+	"sync"
 )
 
 // FFT performs a Cooley-Tukey FFT on the input data.
@@ -107,6 +108,76 @@ func RealFFT(input []float64) ([]Complex, error) {
 
 	// Return first half + DC
 	return fullFFT[:n/2+1], nil
+}
+
+// fftTables caches the bit-reversal permutation and the per-stage twiddles
+// of FFT for one size. The twiddles are evaluated from the same expressions
+// FFT uses, so a cached transform gives bit-identical results.
+type fftTables struct {
+	bitrev   []int
+	twiddles [][]Complex // per stage (size 2, 4, ..., n), halfSize entries
+}
+
+var fftTableCache sync.Map // int -> *fftTables
+
+func getFFTTables(n int) *fftTables {
+	if t, ok := fftTableCache.Load(n); ok {
+		return t.(*fftTables)
+	}
+	t := &fftTables{bitrev: make([]int, n)}
+	bits := Log2(n)
+	for i := range t.bitrev {
+		t.bitrev[i] = BitReverse(i, bits)
+	}
+	for size := 2; size <= n; size *= 2 {
+		halfSize := size / 2
+		step := 2 * math.Pi / float64(size)
+		tw := make([]Complex, halfSize)
+		for k := range tw {
+			angle := -step * float64(k)
+			tw[k] = Complex{Real: math.Cos(angle), Imag: math.Sin(angle)}
+		}
+		t.twiddles = append(t.twiddles, tw)
+	}
+	actual, _ := fftTableCache.LoadOrStore(n, t)
+	return actual.(*fftTables)
+}
+
+// RealFFTInto is RealFFT computed in work (len(input) elements) with cached
+// tables. The returned bins alias work and match RealFFT bit for bit.
+func RealFFTInto(input []float64, work []Complex) ([]Complex, error) {
+	n := len(input)
+	if !IsPowerOf2(n) {
+		return nil, errors.New("dsp: FFT size must be a power of 2")
+	}
+	output := work[:n]
+	for i, v := range input {
+		output[i] = Complex{Real: v, Imag: 0}
+	}
+	if n <= 1 {
+		return output[:n/2+1], nil
+	}
+	t := getFFTTables(n)
+	for i := 0; i < n; i++ {
+		if j := t.bitrev[i]; j > i {
+			output[i], output[j] = output[j], output[i]
+		}
+	}
+	stage := 0
+	for size := 2; size <= n; size *= 2 {
+		halfSize := size / 2
+		tw := t.twiddles[stage]
+		stage++
+		for start := 0; start < n; start += size {
+			for k := 0; k < halfSize; k++ {
+				even := output[start+k]
+				odd := output[start+k+halfSize].Mul(tw[k])
+				output[start+k] = even.Add(odd)
+				output[start+k+halfSize] = even.Sub(odd)
+			}
+		}
+	}
+	return output[:n/2+1], nil
 }
 
 // RealIFFT performs inverse FFT to produce real-valued output.

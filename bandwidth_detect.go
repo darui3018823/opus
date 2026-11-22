@@ -2,6 +2,7 @@ package opus
 
 import (
 	"math"
+	"sync"
 
 	framing "github.com/darui3018823/opus/internal"
 	"github.com/darui3018823/opus/internal/dsp"
@@ -65,7 +66,9 @@ func detectSignalBandwidth(pcm []float64, channels, sampleRate, prev int) int {
 // hybrid mode selection and returns both the detected bandwidth and whether the
 // spectrum is tonal/harmonic.
 func detectSignalBandwidthAndSparsity(pcm []float64, channels, sampleRate, prev int) (int, bool) {
-	power, nfft, ok := signalSpectrumPower(pcm, channels)
+	ws := spectrumWorkPool.Get().(*spectrumWork)
+	defer spectrumWorkPool.Put(ws)
+	power, nfft, ok := signalSpectrumPower(pcm, channels, ws)
 	if !ok {
 		return framing.BandwidthFullband, false
 	}
@@ -105,7 +108,9 @@ func detectSignalBandwidthAndSparsity(pcm []float64, channels, sampleRate, prev 
 // former still benefits from retaining the SILK low band and must not fall out
 // of hybrid merely because its highest harmonic is below 4 kHz.
 func isSpectrallySparse(pcm []float64, channels int) bool {
-	power, _, ok := signalSpectrumPower(pcm, channels)
+	ws := spectrumWorkPool.Get().(*spectrumWork)
+	defer spectrumWorkPool.Put(ws)
+	power, _, ok := signalSpectrumPower(pcm, channels, ws)
 	if !ok {
 		return false
 	}
@@ -121,9 +126,42 @@ func isSpectrallySparse(pcm []float64, channels int) bool {
 	return effectiveBins <= hybridSparseBinLimit
 }
 
+// spectrumWork holds signalSpectrumPower's buffers; a pool shares them
+// between concurrent encoders without per-frame allocation.
+type spectrumWork struct {
+	mono, buf, power []float64
+	fft              []dsp.Complex
+}
+
+var spectrumWorkPool = sync.Pool{New: func() any { return new(spectrumWork) }}
+
+func growF64(buf []float64, n int) []float64 {
+	if cap(buf) < n {
+		return make([]float64, n)
+	}
+	return buf[:n]
+}
+
+// hannWindows caches the analysis window per length, evaluated with the
+// expression the per-frame loop used.
+var hannWindows sync.Map // int -> []float64
+
+func hannWindow(n int) []float64 {
+	if w, ok := hannWindows.Load(n); ok {
+		return w.([]float64)
+	}
+	w := make([]float64, n)
+	for i := range w {
+		w[i] = 0.5 - float64(0.5*math.Cos(2*math.Pi*float64(i)/float64(n-1)))
+	}
+	actual, _ := hannWindows.LoadOrStore(n, w)
+	return actual.([]float64)
+}
+
 // signalSpectrumPower returns the Hann-windowed mono-downmix power spectrum and
-// FFT size shared by bandwidth and hybrid-tonality analysis.
-func signalSpectrumPower(pcm []float64, channels int) ([]float64, int, bool) {
+// FFT size shared by bandwidth and hybrid-tonality analysis. The spectrum
+// lives in ws.
+func signalSpectrumPower(pcm []float64, channels int, ws *spectrumWork) ([]float64, int, bool) {
 	if channels <= 0 {
 		return nil, 0, false
 	}
@@ -133,7 +171,8 @@ func signalSpectrumPower(pcm []float64, channels int) ([]float64, int, bool) {
 	}
 
 	// Mono downmix for the analysis.
-	mono := make([]float64, n)
+	ws.mono = growF64(ws.mono, n)
+	mono := ws.mono
 	if channels == 1 {
 		copy(mono, pcm[:n])
 	} else {
@@ -148,20 +187,25 @@ func signalSpectrumPower(pcm []float64, channels int) ([]float64, int, bool) {
 
 	// Hann window so a strong low tone does not leak enough into high bins to look
 	// like real high-frequency content, then zero-pad to a power-of-two FFT size.
-	for i := 0; i < n; i++ {
-		w := 0.5 - float64(0.5*math.Cos(2*math.Pi*float64(i)/float64(n-1)))
+	for i, w := range hannWindow(n) {
 		mono[i] *= w
 	}
 	nfft := dsp.NextPowerOf2(n)
-	buf := make([]float64, nfft)
-	copy(buf, mono)
+	ws.buf = growF64(ws.buf, nfft)
+	buf := ws.buf
+	clear(buf[copy(buf, mono):])
 
-	spec, err := dsp.RealFFT(buf)
+	if cap(ws.fft) < nfft {
+		ws.fft = make([]dsp.Complex, nfft)
+	}
+	spec, err := dsp.RealFFTInto(buf, ws.fft[:nfft])
 	if err != nil {
 		return nil, 0, false
 	}
 
-	power := make([]float64, len(spec))
+	ws.power = growF64(ws.power, len(spec))
+	power := ws.power
+	power[0] = 0
 	for k := 1; k < len(spec); k++ {
 		p := float64(spec[k].Real*spec[k].Real) + float64(spec[k].Imag*spec[k].Imag)
 		power[k] = p

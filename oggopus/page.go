@@ -166,36 +166,54 @@ func ParsePage(data []byte) (Page, int, error) {
 // ReadPage reads and CRC-verifies exactly one page from r. It returns io.EOF
 // when no page bytes are available and io.ErrUnexpectedEOF for a partial page.
 func ReadPage(r io.Reader) (Page, error) {
-	header := make([]byte, 27)
-	n, err := io.ReadFull(r, header)
+	// The header and lacing share one buffer and the body gets its own; the
+	// returned page owns both, so nothing is copied again.
+	head := make([]byte, 27, 27+255)
+	n, err := io.ReadFull(r, head)
 	if err != nil {
 		if err == io.EOF && n > 0 {
 			err = io.ErrUnexpectedEOF
 		}
 		return Page{}, err
 	}
-	if !bytes.Equal(header[:4], []byte(CapturePattern)) {
+	if !bytes.Equal(head[:4], []byte(CapturePattern)) {
 		return Page{}, ErrInvalidCapture
 	}
-	segmentCount := int(header[26])
-	rest := make([]byte, segmentCount)
-	if _, err := io.ReadFull(r, rest); err != nil {
+	segmentCount := int(head[26])
+	head = head[:27+segmentCount]
+	segments := head[27:]
+	if _, err := io.ReadFull(r, segments); err != nil {
 		return Page{}, unexpectedEOF(err)
 	}
 	bodyLen := 0
-	for _, size := range rest {
+	for _, size := range segments {
 		bodyLen += int(size)
 	}
 	body := make([]byte, bodyLen)
 	if _, err := io.ReadFull(r, body); err != nil {
 		return Page{}, unexpectedEOF(err)
 	}
-	encoded := make([]byte, 0, len(header)+len(rest)+len(body))
-	encoded = append(encoded, header...)
-	encoded = append(encoded, rest...)
-	encoded = append(encoded, body...)
-	p, _, err := ParsePage(encoded)
-	return p, err
+	want := binary.LittleEndian.Uint32(head[22:26])
+	crc := crcUpdate(0, head[:22])
+	crc = crcUpdate(crc, zeroCRCField[:])
+	crc = crcUpdate(crc, head[26:])
+	if crcUpdate(crc, body) != want {
+		return Page{}, ErrChecksum
+	}
+	p := Page{
+		Version:         head[4],
+		HeaderType:      HeaderType(head[5]),
+		GranulePosition: int64(binary.LittleEndian.Uint64(head[6:14])),
+		Serial:          binary.LittleEndian.Uint32(head[14:18]),
+		Sequence:        binary.LittleEndian.Uint32(head[18:22]),
+		Checksum:        want,
+		Segments:        segments[:len(segments):len(segments)],
+		Data:            body,
+	}
+	if err := p.Validate(); err != nil {
+		return Page{}, err
+	}
+	return p, nil
 }
 
 func unexpectedEOF(err error) error {
@@ -205,13 +223,11 @@ func unexpectedEOF(err error) error {
 	return err
 }
 
-func checksumWithZeroedField(page []byte) uint32 {
-	var crc uint32
-	for i, value := range page {
-		if i >= 22 && i < 26 {
-			value = 0
-		}
-		crc ^= uint32(value) << 24
+// crcTable is the MSB-first table for the Ogg CRC-32 (polynomial 0x04c11db7,
+// initial value 0, no final XOR).
+var crcTable = func() (t [256]uint32) {
+	for i := range t {
+		crc := uint32(i) << 24
 		for range 8 {
 			if crc&0x80000000 != 0 {
 				crc = crc<<1 ^ 0x04c11db7
@@ -219,23 +235,40 @@ func checksumWithZeroedField(page []byte) uint32 {
 				crc <<= 1
 			}
 		}
+		t[i] = crc
+	}
+	return t
+}()
+
+var zeroCRCField [4]byte
+
+func crcUpdate(crc uint32, data []byte) uint32 {
+	for _, v := range data {
+		crc = crc<<8 ^ crcTable[byte(crc>>24)^v]
 	}
 	return crc
 }
 
-func checksum(page []byte) uint32 {
-	var crc uint32
-	for _, value := range page {
-		crc ^= uint32(value) << 24
-		for range 8 {
-			if crc&0x80000000 != 0 {
-				crc = crc<<1 ^ 0x04c11db7
-			} else {
-				crc <<= 1
+// checksumWithZeroedField is the page CRC with the checksum field (bytes 22
+// to 25) read as zeros.
+func checksumWithZeroedField(page []byte) uint32 {
+	if len(page) < 26 {
+		var crc uint32
+		for i, v := range page {
+			if i >= 22 {
+				v = 0
 			}
+			crc = crcUpdate(crc, []byte{v})
 		}
+		return crc
 	}
-	return crc
+	crc := crcUpdate(0, page[:22])
+	crc = crcUpdate(crc, zeroCRCField[:])
+	return crcUpdate(crc, page[26:])
+}
+
+func checksum(page []byte) uint32 {
+	return crcUpdate(0, page)
 }
 
 func writeAll(w io.Writer, data []byte) error {

@@ -287,6 +287,12 @@ func (e *Encoder) decideLibopusMode(raw []float64, frameSize, maxDataBytes int, 
 		d.silkPrefill = true
 	}
 
+	// The delayed stereo->mono transition (silk_mode.toMono) only holds
+	// for SILK and hybrid packets: on a CELT-only packet libopus clears it
+	// before this point, so st->stream_channels is the decided mono.
+	if e.toMono && mode == framing.ModeCELTOnly {
+		streamChannels = 1
+	}
 	// Update equivalent rate with mode decision.
 	equivRate = computeEquivRate(bitrate, streamChannels, frameRate, vbr, mode, e.complexity, e.packetLossPerc)
 

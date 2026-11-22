@@ -41,6 +41,7 @@ type SurroundEncoder struct {
 	bitrate       int
 	bandwidth     int
 	analyzer      *celt.SurroundAnalyzer
+	analyzerNext  *celt.SurroundAnalyzer // staging bank for analyzeSurroundFrame
 }
 
 // NewSurroundEncoder creates an encoder for mapping family 0, 1, 2, or 255
@@ -239,15 +240,29 @@ func (e *SurroundEncoder) prepareFrame(frameSize int) error {
 }
 
 func (e *SurroundEncoder) analyzeSurroundFrame(pcm []float64, frameSize int) (func(), error) {
-	next := e.analyzer.Clone()
+	// The analysis runs on a second bank holding a copy of the committed
+	// memories; a successful packet swaps the banks.
+	if e.analyzerNext == nil {
+		e.analyzerNext = e.analyzer.Clone()
+	} else {
+		e.analyzerNext.CopyFrom(e.analyzer)
+	}
+	next := e.analyzerNext
 	masks, err := next.Analyze(pcm, frameSize)
 	if err != nil {
 		return nil, err
 	}
 	const bands = celt.NumBands48000
+	var maskBuf [2 * bands]float64
 	for stream, enc := range e.encoders {
 		streamChannels := enc.Channels()
-		streamMask := make([]float64, streamChannels*bands)
+		var streamMask []float64
+		if streamChannels*bands <= len(maskBuf) {
+			streamMask = maskBuf[:streamChannels*bands]
+			clear(streamMask)
+		} else {
+			streamMask = make([]float64, streamChannels*bands)
+		}
 		for codedChannel := 0; codedChannel < streamChannels; codedChannel++ {
 			mapped := stream*2 + codedChannel
 			if stream >= e.coupledStreams {
@@ -261,7 +276,13 @@ func (e *SurroundEncoder) analyzeSurroundFrame(pcm []float64, frameSize int) (fu
 		}
 		enc.setSurroundEnergyMask(streamMask)
 	}
-	return func() { e.analyzer = next }, nil
+	return e.commitAnalyzer, nil
+}
+
+// commitAnalyzer makes the bank analyzeSurroundFrame ran on the committed
+// analyzer.
+func (e *SurroundEncoder) commitAnalyzer() {
+	e.analyzer, e.analyzerNext = e.analyzerNext, e.analyzer
 }
 
 func (e *SurroundEncoder) allocateRates(frameSize int) []int {

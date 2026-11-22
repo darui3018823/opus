@@ -617,6 +617,9 @@ type MultistreamDecoder struct {
 	coupledStreams int
 	mapping        []byte
 	decoders       []*Decoder
+	// outBuf holds the mapped PCM of the int16 and projection paths, which
+	// convert it before returning.
+	outBuf []float64
 }
 
 // NewMultistreamDecoder creates a multistream decoder. channels and streams
@@ -717,18 +720,29 @@ func (d *MultistreamDecoder) GetLastPacketDuration() int {
 
 // DecodeFloat decodes a multistream packet to interleaved float64 PCM.
 func (d *MultistreamDecoder) DecodeFloat(data []byte) ([]float64, error) {
-	return d.decodeMapped(data, false)
+	return d.decodeMapped(data, false, false)
 }
 
 // decodeMapped decodes every elementary stream and maps it to the output
 // channels. softClip is opus_multistream_decode's OPTIONAL_CLIP: the int16
 // API soft-clips each stream with its own memory before the mapping.
-func (d *MultistreamDecoder) decodeMapped(data []byte, softClip bool) ([]float64, error) {
+// With reuse the result is d.outBuf, valid until the next decode; otherwise
+// it is caller-owned.
+func (d *MultistreamDecoder) decodeMapped(data []byte, softClip, reuse bool) ([]float64, error) {
 	packets, duration, err := splitMultistreamPackets(data, d.streams, d.sampleRate)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]float64, duration*d.channels)
+	var out []float64
+	if reuse {
+		if cap(d.outBuf) < duration*d.channels {
+			d.outBuf = make([]float64, duration*d.channels)
+		}
+		out = d.outBuf[:duration*d.channels]
+		clear(out)
+	} else {
+		out = make([]float64, duration*d.channels)
+	}
 	for stream, packet := range packets {
 		decode := d.decoders[stream].decodeFloatShared
 		if softClip {
@@ -783,7 +797,7 @@ func (d *MultistreamDecoder) Decode(data []byte, pcm []int16) (int, error) {
 	if len(pcm) < required {
 		return 0, fmt.Errorf("%w: got %d samples, need %d", ErrBufferTooSmall, len(pcm), required)
 	}
-	floatPCM, err := d.decodeMapped(data, true)
+	floatPCM, err := d.decodeMapped(data, true, true)
 	if err != nil {
 		return 0, err
 	}
@@ -1153,7 +1167,9 @@ func splitMultistreamPackets(data []byte, streams, sampleRate int) ([][]byte, in
 			if offset >= len(data) {
 				return nil, 0, fmt.Errorf("%w: missing stream %d", ErrInvalidPacket, stream)
 			}
-			packet = append([]byte(nil), data[offset:]...)
+			// The streams decode synchronously and keep no reference, so
+			// the last stream's bytes are not copied.
+			packet = data[offset:len(data):len(data)]
 			used = len(data) - offset
 		} else {
 			packet, used, err = parseSelfDelimitedPacket(data[offset:])

@@ -493,7 +493,7 @@ func (d *ProjectionDecoder) Decode(data []byte, pcm []int16) (int, error) {
 	if err := d.checkOutput(len(pcm), duration); err != nil {
 		return 0, err
 	}
-	coded, err := d.multistream.decodeMapped(data, true)
+	coded, err := d.multistream.decodeMapped(data, true, true)
 	if err != nil {
 		return 0, err
 	}

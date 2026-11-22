@@ -3269,21 +3269,10 @@ func (e *Encoder) Reset() error {
 }
 
 // silkRateInfo holds a SILK decoder and its associated resampler for one SILK sample rate.
+// silkRateInfo holds one internal rate's SILK decoder. Resampling to the
+// output rate runs on the physical-channel resamplers in Decoder.silkRS.
 type silkRateInfo struct {
-	dec       *silk.Decoder
-	resampler *resampler.Resampler // silkRate -> outputRate (nil if same rate); stereo fallback
-
-	// silkResampler is the bit-exact libopus SILK resampler used for the mono
-	// path. sMid carries the 1-sample delay libopus applies via sStereo.sMid.
-	silkResampler *silk.Resampler
-	sMid          int16
-
-	// silkResamplerL/R are bit-exact libopus SILK resamplers for the stereo
-	// path. libopus resamples each L/R channel separately at the internal rate
-	// after silk_stereo_MS_to_LR, with no sMid-style 1-sample delay (the MS->LR
-	// alignment already accounts for it). Used only for the stereo (ci=1) info.
-	silkResamplerL *silk.Resampler
-	silkResamplerR *silk.Resampler
+	dec *silk.Decoder
 }
 
 // Decoder represents the state of one Opus stream decoder.
@@ -3371,8 +3360,6 @@ type Decoder struct {
 	silkActiveRi       int
 	prevSilkInternalCh int // previous packet's SILK internal channel count (0 = none yet)
 
-	// Resampler for non-48kHz CELT output rates
-	celtResampler *resampler.Resampler // 48kHz -> outRate
 
 	frameSize          int // frame size in samples at sampleRate
 	internalFrameSize  int // always 960 (20ms at 48kHz)
@@ -3480,32 +3467,7 @@ func NewDecoder(sampleRate, channels int) (*Decoder, error) {
 			if err != nil {
 				return nil, fmt.Errorf("failed to create SILK decoder (rate=%d ch=%d): %w", silkRate, ch, err)
 			}
-			var rs *resampler.Resampler
-			if silkRate != sampleRate {
-				rs, err = resampler.NewResampler(silkRate, sampleRate, ch, resampler.QualityDefault)
-				if err != nil {
-					return nil, fmt.Errorf("failed to create SILK resampler (%d->%d, ch=%d): %w", silkRate, sampleRate, ch, err)
-				}
-			}
-			// Bit-exact libopus SILK resampler (used for the mono path).
-			silkRs, err := silk.NewResampler(silkRate, sampleRate)
-			if err != nil {
-				return nil, fmt.Errorf("failed to create bit-exact SILK resampler (%d->%d): %w", silkRate, sampleRate, err)
-			}
-			info := &silkRateInfo{dec: sd, resampler: rs, silkResampler: silkRs}
-			if ch == 2 {
-				// Per-channel bit-exact resamplers for the stereo L/R path.
-				lRs, lErr := silk.NewResampler(silkRate, sampleRate)
-				if lErr != nil {
-					return nil, fmt.Errorf("failed to create stereo bit-exact SILK resampler L (%d->%d): %w", silkRate, sampleRate, lErr)
-				}
-				rRs, rErr := silk.NewResampler(silkRate, sampleRate)
-				if rErr != nil {
-					return nil, fmt.Errorf("failed to create stereo bit-exact SILK resampler R (%d->%d): %w", silkRate, sampleRate, rErr)
-				}
-				info.silkResamplerL = lRs
-				info.silkResamplerR = rRs
-			}
+			info := &silkRateInfo{dec: sd}
 			dec.silkDecoders[ri][ch-1] = info
 		}
 	}
@@ -4261,10 +4223,6 @@ func (d *Decoder) decodePacketFloat(data []byte) ([]float64, error) {
 		rangeFinal = activeCeltDec.LastFinalRange()
 		d.lastPitch = activeCeltDec.Pitch()
 
-		// Resample from 48kHz to output sample rate if needed
-		if d.celtResampler != nil {
-			pcm = d.celtResampler.Process(pcm)
-		}
 		pcm = padOrTrim(pcm, targetLen)
 		if trans != nil {
 			d.applyTransition(pcm, trans)
@@ -4707,9 +4665,6 @@ func (d *Decoder) decodeRedundancy(frame []byte, pktChannels, endBand int, carry
 		return nil, 0, nil
 	}
 	redundantRange := redDec.LastFinalRange()
-	if d.celtResampler != nil {
-		redPCM = d.celtResampler.Process(redPCM)
-	}
 	redPCM = adjustChannels(redPCM, actualCh, d.channels)
 	redPCM = padOrTrim(redPCM, (d.sampleRate/200)*d.channels)
 	return redPCM, redundantRange, redDec
@@ -4903,9 +4858,6 @@ func (d *Decoder) decodeHybridPacket(payload []byte, countCode, config, pktChann
 		}
 		if cerr == nil {
 			d.lastCeltDec = celtDec
-			if d.celtResampler != nil {
-				celtPCM = d.celtResampler.Process(celtPCM)
-			}
 			celtPCM = adjustChannels(celtPCM, celtActualCh, d.channels)
 			celtPCM = padOrTrim(celtPCM, samplesPerFrame)
 			// Time-domain sum of the two layers. libopus accumulates the CELT
@@ -5491,9 +5443,6 @@ func (d *Decoder) decodeCELTPLCFrame(frameSize int, accum bool) ([]float64, erro
 		return nil, fmt.Errorf("CELT PLC decoding failed: %w", err)
 	}
 	d.lastCeltDec = active
-	if d.celtResampler != nil {
-		frame = d.celtResampler.Process(frame)
-	}
 	frame = adjustChannels(frame, active.Channels(), d.channels)
 	return padOrTrim(frame, frameSize*d.channels), nil
 }
@@ -5793,9 +5742,6 @@ func (d *Decoder) decodeFECFloat(data []byte, frameSize int) ([]float64, uint32,
 		celtDec.SetAccumulate(true)
 		celtPCM := celtDec.DecodeHybridLoss(17, celtEnd)
 		d.lastCeltDec = celtDec
-		if d.celtResampler != nil {
-			celtPCM = d.celtResampler.Process(celtPCM)
-		}
 		celtPCM = padOrTrim(adjustChannels(celtPCM, celtDec.Channels(), d.channels), packetFrameSize*d.channels)
 		// Accumulated onto the SILK output in float32, unclipped.
 		for i := range silkPCM {
@@ -5906,23 +5852,6 @@ func (d *Decoder) cloneState() (*Decoder, error) {
 				continue
 			}
 			dst.dec.CopyAllStateFrom(src.dec)
-			dst.sMid = src.sMid
-			if src.resampler != nil && dst.resampler != nil {
-				dst.resampler.CopyStateFrom(src.resampler)
-			} else if src.resampler == nil {
-				dst.resampler = nil
-			}
-			copySilkResampler := func(srcRS *silk.Resampler) *silk.Resampler {
-				if srcRS == nil {
-					return nil
-				}
-				dstRS := new(silk.Resampler)
-				dstRS.CopyStateFrom(srcRS)
-				return dstRS
-			}
-			dst.silkResampler = copySilkResampler(src.silkResampler)
-			dst.silkResamplerL = copySilkResampler(src.silkResamplerL)
-			dst.silkResamplerR = copySilkResampler(src.silkResamplerR)
 		}
 	}
 	for ch, src := range d.silkRS {
@@ -5932,9 +5861,6 @@ func (d *Decoder) cloneState() (*Decoder, error) {
 		} else {
 			clone.silkRS[ch] = nil
 		}
-	}
-	if d.celtResampler != nil && clone.celtResampler != nil {
-		clone.celtResampler.CopyStateFrom(d.celtResampler)
 	}
 	return clone, nil
 }
@@ -5956,19 +5882,6 @@ func (d *Decoder) Reset() error {
 			info := d.silkDecoders[ri][ci]
 			if info != nil {
 				info.dec.Reset()
-				if info.resampler != nil {
-					info.resampler.Reset()
-				}
-				if info.silkResampler != nil {
-					info.silkResampler.Reset()
-				}
-				if info.silkResamplerL != nil {
-					info.silkResamplerL.Reset()
-				}
-				if info.silkResamplerR != nil {
-					info.silkResamplerR.Reset()
-				}
-				info.sMid = 0
 			}
 		}
 	}
@@ -5980,9 +5893,6 @@ func (d *Decoder) Reset() error {
 	d.silkActiveRi = -1
 	d.prevSilkInternalCh = 0
 	d.lastPacketDuration = d.frameSize
-	if d.celtResampler != nil {
-		d.celtResampler.Reset()
-	}
 	d.lastCeltDec = nil
 	d.prevMode = -1
 	d.prevRedundancy = false

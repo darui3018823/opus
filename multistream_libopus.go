@@ -209,10 +209,10 @@ func (e *MultistreamEncoder) encodeLibopus(callerPCM []float64, callerFrameSize,
 	last := e.streams - 1
 	for s, enc := range e.encoders {
 		streamChannels := enc.Channels()
-		streamPCM := make([]float64, frameSize*streamChannels)
+		streamPCM := e.streamScratch(s, frameSize*streamChannels)
 		var streamAnalysis []float64
 		if analysisPCM != nil {
-			streamAnalysis = make([]float64, callerFrameSize*streamChannels)
+			streamAnalysis = e.analysisScratch(s, callerFrameSize*streamChannels)
 		}
 		for codedChannel := 0; codedChannel < streamChannels; codedChannel++ {
 			mapped := s*2 + codedChannel

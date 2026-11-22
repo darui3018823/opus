@@ -9,6 +9,13 @@ import (
 // elementary encoders; all parent and child operations must be serialized.
 // Encode frame sizes are samples per channel and PCM is interleaved.
 type MultistreamEncoder struct {
+	// inputBuf, streamBufs and analysisBufs hold the float64 conversion of
+	// the caller's PCM and each stream's extracted channels. The stream
+	// encoders copy what they keep, so the buffers are reused per call.
+	inputBuf     []float64
+	streamBufs   [][]float64
+	analysisBufs [][]float64
+
 	sampleRate        int
 	channels          int
 	streams           int
@@ -444,7 +451,7 @@ func (e *MultistreamEncoder) Encode(pcm []int16, frameSize int) ([]byte, error) 
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	floatPCM := msScratch(&e.inputBuf, required)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 32768
 	}
@@ -461,7 +468,7 @@ func (e *MultistreamEncoder) Encode24(pcm []int32, frameSize int) ([]byte, error
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	floatPCM := msScratch(&e.inputBuf, required)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i]) / 8388608
 	}
@@ -478,7 +485,7 @@ func (e *MultistreamEncoder) EncodeFloat32(pcm []float32, frameSize int) ([]byte
 	if len(pcm) < required {
 		return nil, fmt.Errorf("%w: insufficient PCM data: got %d, need %d", ErrBadArg, len(pcm), required)
 	}
-	floatPCM := make([]float64, required)
+	floatPCM := msScratch(&e.inputBuf, required)
 	for i := range floatPCM {
 		floatPCM[i] = float64(pcm[i])
 	}
@@ -518,7 +525,7 @@ func (e *MultistreamEncoder) encodeFloatSelected(callerPCM []float64, frameSize,
 	packets := make([][]byte, e.streams)
 	for stream, enc := range e.encoders {
 		streamChannels := enc.Channels()
-		streamPCM := make([]float64, selectedFrameSize*streamChannels)
+		streamPCM := e.streamScratch(stream, selectedFrameSize*streamChannels)
 		for codedChannel := 0; codedChannel < streamChannels; codedChannel++ {
 			mapped := stream*2 + codedChannel
 			if stream >= e.coupledStreams {
@@ -549,6 +556,32 @@ func (e *MultistreamEncoder) encodeFloatSelected(callerPCM []float64, frameSize,
 		commitPolicy()
 	}
 	return packet, nil
+}
+
+// msScratch returns *buf resized to n elements; every element is
+// overwritten by the caller.
+func msScratch(buf *[]float64, n int) []float64 {
+	if cap(*buf) < n {
+		*buf = make([]float64, n)
+	}
+	*buf = (*buf)[:n]
+	return *buf
+}
+
+// streamScratch returns stream's reused extraction buffer of n samples.
+func (e *MultistreamEncoder) streamScratch(stream, n int) []float64 {
+	if len(e.streamBufs) != e.streams {
+		e.streamBufs = make([][]float64, e.streams)
+	}
+	return msScratch(&e.streamBufs[stream], n)
+}
+
+// analysisScratch returns stream's reused analysis-PCM buffer of n samples.
+func (e *MultistreamEncoder) analysisScratch(stream, n int) []float64 {
+	if len(e.analysisBufs) != e.streams {
+		e.analysisBufs = make([][]float64, e.streams)
+	}
+	return msScratch(&e.analysisBufs[stream], n)
 }
 
 // Reset resets every elementary encoder while retaining configuration.

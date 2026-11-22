@@ -29,6 +29,8 @@ type Decoder struct {
 	dynallocScratch [NumBands48000]int
 	// rangeDec is the CELT-only frame's range decoder, reused across frames.
 	rangeDec entcode.Decoder
+	// plc holds the loss concealment buffers, created on the first loss.
+	plc *plcScratch
 
 	// alloc is the bit allocation scratch reused between frames.
 	alloc         allocScratch
@@ -741,6 +743,7 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 	d.qab = quantAllBandsScratch{}
 	d.coarseScratch = nil
 	d.rangeDec = entcode.Decoder{}
+	d.plc = nil
 	for ch, proc := range src.bandProcs {
 		if proc == nil {
 			d.bandProcs[ch] = nil

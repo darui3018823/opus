@@ -268,7 +268,7 @@ func repacketizeOutRange(toc byte, all []repacketizerFrame, begin, end, maxlen i
 			totSize++
 		}
 	}
-	data := make([]byte, 0, min(maxlen, 1<<16))
+	data := make([]byte, 0, repacketizeCapHint(frames, lens, maxlen, pad, extra))
 	switch count {
 	case 1:
 		totSize += lens[0] + 1
@@ -402,6 +402,27 @@ func repacketizeOutRange(toc byte, all []repacketizerFrame, begin, end, maxlen i
 		}
 	}
 	return data[:totSize], nil
+}
+
+// repacketizeCapHint estimates the output length so the packet is
+// allocated once at about its final size: the frames, their framing and the
+// extension data they carry, or maxlen when padding fills the packet. An
+// estimate that falls short only costs a reallocation.
+func repacketizeCapHint(frames []repacketizerFrame, lens []int, maxlen int, pad bool, extra []packetext.Extension) int {
+	if pad {
+		return min(maxlen, 1<<16)
+	}
+	n := 4 + 2*len(lens)
+	for _, l := range lens {
+		n += l
+	}
+	for _, f := range frames {
+		n += len(f.padding) + 2
+	}
+	for _, e := range extra {
+		n += len(e.Data) + 3
+	}
+	return min(maxlen, n)
 }
 
 // outRangeUnbounded is the maxlen that stands for an output buffer large

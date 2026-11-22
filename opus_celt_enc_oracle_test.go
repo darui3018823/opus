@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"fmt"
+	"github.com/darui3018823/opus/internal/celt"
 	"github.com/darui3018823/opus/internal/silk"
 	"math"
 	"os"
@@ -349,6 +350,7 @@ type celtOracleCase struct {
 
 func runCELTOracleCase(t *testing.T, tc celtOracleCase) {
 	t.Cleanup(silk.EnableFrameTraces())
+	t.Cleanup(celt.EnableFrameTraces())
 	t.Helper()
 	const rate = 48000
 	ref := runCELTEncOracle(t, "ref-speech", tc.frames, tc.bitrate, tc.complexity, tc.vbr, tc.channels)

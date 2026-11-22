@@ -4046,10 +4046,21 @@ func (d *Decoder) decodeSoftClipped32(data []byte) ([]float32, error) {
 		d.softclipScratch = make([]float32, len(pcm))
 	}
 	f := d.softclipScratch[:len(pcm)]
+	// Check the range during the conversion: with zero clipping memory and
+	// every sample in [-1, 1] (NaN fails), the soft clip is the identity
+	// (softClipIsIdentity) and would only leave the zero memory in place.
+	inRange := true
 	for i, v := range pcm {
-		f[i] = float32(v)
+		x := float32(v)
+		f[i] = x
+		if !(x >= -1 && x <= 1) {
+			inRange = false
+		}
 	}
-	_ = SoftClipFloat32(f, d.channels, d.softclipMem[:d.channels])
+	mem := d.softclipMem[:d.channels]
+	if !inRange || mem[0] != 0 || mem[len(mem)-1] != 0 {
+		_ = SoftClipFloat32(f, d.channels, mem)
+	}
 	return f, nil
 }
 

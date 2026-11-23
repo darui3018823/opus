@@ -11,8 +11,9 @@
   Phase 2b (the rest of each state's sample) is on the same branch.
   Phase 3a (CELT FFT stages and backward-MDCT rotations, plus a
   reassociated SILK synthesis prediction) is on `perf/simd-celt-fft`,
-  stacked on phase 2. None is merged. The rest of phase 3 and phase 4 are
-  proposals.
+  stacked on phase 2. Phase 3b (the decoder's comb post-filter) is on
+  `perf/simd-combfilter`, stacked on 3a. None is merged. Phase 4 is a
+  proposal.
 - **Inputs:** the four 2026-11-22 performance audits (ARCH-03 in
   [the Gemini high audit](../memory/audits/2026-11-22-perf-memory-optimization-audit.md)),
   CPU profiles of `BenchmarkPerfDefault` and `BenchmarkDecodeOfficialVectors`
@@ -312,16 +313,48 @@ Verification: official-vector and packet digests, the 600-cell and SILK
 matrices (amd64 default and `purego`), and on arm64 under qemu the dsp
 tests, the digests and a 300-cell matrix with the same digest as amd64.
 
-### 3b (proposed)
+### 3b (implemented): the comb post-filter
 
-| Function | Share of decode | Plan |
+The decoder's pitch post-filter (`comb_filter` in place) is recursive, but
+output `i` reads samples no later than `i - period + 2` with
+`period >= 15`, so a block of four consecutive outputs reads only samples
+written before the block. `CombConst` and `CombOverlap` run four outputs
+per pass with the scalar operation order.
+
+The scalar filter reads through `getHistorySample`, which branches on
+every tap. The vector path instead copies the reachable history
+(`period + 2` samples, zeros before the start of `pf.buf`) and the frame
+into one float32 buffer, filters it, and copies back only the samples the
+filter wrote (so samples it skips keep their float64 bits). A first
+version did the conversions in Go loops; they then cost four times the
+filtering itself, so they now use `CVTPD2PS`/`CVTPS2PD`
+(`Float64sToFloat32s`, `Float32sToFloat64s`), which round like Go's
+conversions. Without the kernels the conversions would only add work, so
+other builds keep the existing scalar filter unchanged.
+
+Effect, from CPU profiles of the CELT-heavy vectors (tv01, tv09, tv10,
+tv11): `PostFilter.Apply` fell from 7.0% to 3.8% of decode time, i.e.
+about 3% of CELT decoding. Timed runs on this VM could not resolve a
+change that small: an unchanged pure Go build measured +2.3% against
+itself in the same session.
+
+### Not vectorisable without changing bits
+
+These remain in the profiles and are why the bit-exact plan ends here for
+the encoder:
+
+| Function | Share | Why |
 |---|---:|---|
-| `applyDeemphasis` | 3.3% | Recursive per channel: only two lanes (stereo). Low value. |
-| `combFilter`, `combFilterConst` | 6% | 5-tap FIR per output sample: one output per lane. |
-| `CLTMDCTBackwardInto` TDAC/window | 1.3% | Element-wise mirror pairs, as the rotations. |
-| `interleaveSILKOutInto`, `up2HQInternal` | 8% | Interleave is a shuffle; the up2 all-pass is serial per channel. |
-| CELT encoder `opPVQSearch` | 5% of encode | Lane-parallel candidates with a lowest-index argmax. Needs the PVQ oracle. |
-| forward MDCT rotations | ~2% of CELT encode | Same scheme as the backward ones. |
+| `opPVQSearch` | 5.7% of encode | Pulse placement keeps the first maximum under `best_den*Rxy > Ryy*best_num`, compared with float32 rounding against the running best. That comparison is not transitive, so per-lane maxima merged afterwards can pick another index in near-ties. (libopus's SSE version is not bit-exact with its C version for this reason.) |
+| `innerProd32`, `dualInnerProd32`, energy sums | ~3% of encode | Float32 reductions: lanes would reassociate the sum. |
+| `pitchDownsample32` FIR, `celtLPC32` | ~2% of encode | Serial recurrences. |
+| `silkWarpedAutocorrelationFLP32`, `silkInnerProductFLP32` | ~6% of encode | A serial all-pass chain; a float64 sum. |
+| `applyDeemphasis` | 3.3% of decode | First-order IIR per channel; only the two channels of a stereo stream are independent. |
+| `up2HQInternal` | 2–5% of SILK decode | Serial all-pass sections per channel. |
+
+Smaller remaining candidates that are exact: the forward MDCT rotations
+(about 1% of CELT encode), the radix-2 and m = 1 radix-4 FFT stages (~2%
+of decode), and `interleaveSILKOutInto` (a shuffle).
 
 ## Phase 4: arm64 NEON
 

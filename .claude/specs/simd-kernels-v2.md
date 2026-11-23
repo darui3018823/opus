@@ -3,10 +3,12 @@
 - **Objective:** speed up the hottest inner loops with vector instructions
   while every packet, final range and decoded sample stays bit-identical to
   the scalar build on every architecture.
-- **Status (last updated 2026-11-23):** phase 1 is implemented on
-  `perf/simd-pitch-xcorr`: the `internal/kernels` package with three amd64
-  kernels, its tests, and the CI guards. Not merged. Phases 2 to 4 are
-  proposals.
+- **Status (last updated 2026-11-24):** phase 1 is implemented on
+  `perf/simd-pitch-xcorr` (PR #42): the `internal/kernels` package with
+  three amd64 kernels, its tests, and the CI guards. The first part of
+  phase 2 (warped AR noise shaping and short-term prediction across
+  delayed-decision states) is on `perf/simd-nsq-deldec`, stacked on it.
+  Neither is merged. The rest of phase 2 and phases 3 and 4 are proposals.
 - **Inputs:** the four 2026-11-22 performance audits (ARCH-03 in
   [the Gemini high audit](../memory/audits/2026-11-22-perf-memory-optimization-audit.md)),
   CPU profiles of `BenchmarkPerfDefault` and `BenchmarkDecodeOfficialVectors`
@@ -137,26 +139,78 @@ phase 2). Allocations are unchanged.
 - `go test ./...`, `go test -tags purego ./...`, `go test -race` on the
   touched packages, `go vet` for amd64, arm64, 386, js/wasm, and windows.
 
-## Phase 2: SILK encoder (largest remaining CPU)
+## Phase 2: SILK delayed-decision quantizer
 
-Profile share of the default-policy encode benchmarks (2026-11-23; phase 1 does not touch these functions):
+`silkNoiseShapeQuantizerDelDec` was 44% of the SILK and hybrid default
+encode profile (2026-11-23). Inside it, the warped AR noise-shaping filter
+took about 37%, the short-term LPC prediction 12% and the quantizer
+candidates 9%. All three are fixed point, and the delayed-decision states
+(2 at complexity 2–5, 3 at 6–7, 4 at 8–10) are independent until the
+per-sample survivor selection, so one state per lane is exact. This is the
+structure of libopus's `NSQ_del_dec_avx2.c`.
 
-| Function | flat | cum | Vectorisable exactly? |
-|---|---:|---:|---|
-| `silkNoiseShapeQuantizerDelDec` (+ inlined `silkSMULWB`/`SMLAWB`) | 19% | 25% | **Yes**, across the delayed-decision states (up to 4), as libopus `NSQ_del_dec_sse4_1.c` does. All fixed point. `silk_SMULWB(a, b)` is `(a * int64(int16(b))) >> 16`: PMULDQ (SSE4.1) on even/odd lanes or PMULHW/PMULLW pairs. The per-state short-term (16-tap) and noise-shaping (`sAR2`, up to 24 taps) filters are the inner loops. |
-| `silkLPCPredictQ10` | 2.6% | | Across states with the above |
-| `silkWarpedAutocorrelationFLP32` | 2.8% | | **No**: a serial all-pass chain per sample. Leave scalar. |
-| `silkInnerProductFLP32` | 3.5% | | **No** as a vector reduction (float64 accumulation order); only the float32 products could be vectorised. Low value. |
-| `silkNLSFDelDecQuantInto` | 2.4% | | Partly, across the NLSF survivors. Medium. |
+### 2a (implemented)
 
-Work items:
+| Kernel | Method |
+|---|---|
+| `WarpedAR4.Step` | The whole warped all-pass chain and the `n_AR_Q14` sum for 2 or 4 states. Two states per XMM, one per 64-bit half: `PMULDQ` then `PSRLQ $16` leaves bits 16–47 of the 64-bit product in the low dword, which is exactly `silk_SMULWB`'s int32 result (logical and arithmetic shifts agree on those bits); `PADDL`/`PSUBL`/`PSLLL` wrap like the scalar code. A 2-lane variant serves complexity 2–5. |
+| `LPC4.Predict` | `LPC_pred_Q14` for 2 or 4 states over a per-lane mirror of `sLPC_Q14`. The int32 sum wraps, so tap order is free. |
 
-1. `kernels.NSQDelDecFilters` (amd64 SSE4.1, detected via CPUID.1:ECX bit
-   19): state-major int32 layout, one state per lane, 4 lanes. Keep the
-   per-state candidate selection and sorting scalar.
-2. Exactness check: the existing NSQ oracle tests plus a kernel test that
-   drives random states through both versions for whole subframes.
-3. Expected: −15 to −25% for SILK and hybrid encode.
+Both need SSE4.1 (`PMULDQ`), detected from CPUID.1:ECX bit 19. The
+quantizer keeps its per-state arrays (AoS) as the source of truth: the
+filter state moves to `WarpedAR4.S` for one subframe and back, and
+`LPC4.H` receives the same per-sample writes and survivor copies as each
+state's `sLPC_Q14`. Without SSE4.1, on other architectures and with
+`purego`, the existing per-state loop runs unchanged; the `purego` CI job
+keeps it covered.
+
+Min of 25 interleaved runs, pinned to one CPU (`taskset -c 1`), against
+phase 1. Medians on this VM spread by ±10–20% and could not resolve the
+smaller changes; interference only adds time, so the minimum is the
+cleaner estimate:
+
+| Workload (default policy) | phase 1 | 2a | change |
+|---|---:|---:|---:|
+| silk/mono/12k, complexity 5 | 470.5 µs | 445.5 µs | −5.3% |
+| silk/stereo/12k, complexity 5 | 506.8 µs | 484.5 µs | −4.4% |
+| hybrid/mono/24k, complexity 5 | 276.0 µs | 267.7 µs | −3.0% |
+| hybrid/stereo/36k, complexity 5 | 777.4 µs | 745.6 µs | −4.1% |
+| silk/mono/12k, complexity 10 | 919.6 µs | 746.3 µs | −18.8% |
+| silk/stereo/12k, complexity 10 | 1127.1 µs | 886.5 µs | −21.3% |
+| hybrid/mono/24k, complexity 10 | 472.3 µs | 405.2 µs | −14.2% |
+| hybrid/stereo/36k, complexity 10 | 1406.9 µs | 1177.6 µs | −16.3% |
+
+`BenchmarkPerfDefaultComplexity10` is new; complexity 5 is the
+`NewEncoder` default and complexity 9 the `EncoderProfileLibopus` one.
+
+The warped AR kernel now sits at its latency floor: each sample is a
+24-step serial chain (`PSUBL` → `PMULDQ` → `PSRLQ` → `PADDL`, about 8
+cycles a step), about 83 ns at 2.3 GHz against 88 ns measured. A wider
+vector does not shorten the chain. Note that the kernel executes *more*
+instructions than the scalar loop (callgrind: +2% for the whole encode);
+the gain comes from running the states' chains side by side.
+
+Verification: kernel differential tests on every path (random and
+extreme int32/int16 values, all even orders 2–24, 1–4 states, 8
+consecutive samples so state updates are compared), the packet-regression
+digests, and a SILK-focused random matrix (800 cells, VoIP, 6–40 kb/s,
+complexity 2–10, DTX/FEC/PLC; 27,327 packets) with the same digest for this
+branch, `-tags purego` and `main`.
+
+### 2b (proposed)
+
+What is left in the quantizer at complexity 10, by profile share of the
+SILK encode: the per-state scalar bookkeeping in the function itself
+(~22%), `nsqQuantCandidates` (~5%), survivor copies (~6% including the
+lane copies). Vectorising the candidates needs branch-free selects for the
+four `q1_Q0` cases and the rate-distortion ordering; the survivor
+selection stays scalar. Expected gain is smaller than 2a; measure on a
+quieter machine before deciding.
+
+Outside the quantizer: `silkWarpedAutocorrelationFLP32` (serial all-pass
+chain, not vectorisable exactly), `silkInnerProductFLP32` (float64
+accumulation order), `silkNLSFDelDecQuantInto` (vectorisable across
+survivors, medium effort).
 
 ## Phase 3: CELT transform and remaining CELT encoder loops
 

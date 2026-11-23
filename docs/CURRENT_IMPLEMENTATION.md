@@ -800,6 +800,10 @@ or the build. On amd64 (without the `purego` tag):
   at init from CPUID and XCR0.
 - `FIR8Interp` (the SILK IIR/FIR resampler's 8-tap interpolation) uses SSE2
   PMADDWD; the int32 sums wrap like the scalar code.
+- `WarpedAR4` and `LPC4` (the SILK delayed-decision quantizer, two or more
+  states) run the warped AR noise-shaping filter and the short-term
+  prediction for all states at once, one state per lane, with SSE4.1
+  PMULDQ; the quantizer's per-state loop is used without SSE4.1.
 - `Float32ToInt16` (the int16 `Decode` output) scales, clamps with
   MAXPS/MINPS (whose NaN rule matches the scalar clamp) and rounds half to
   even with CVTPS2DQ; it is checked against the reference for all 2^32

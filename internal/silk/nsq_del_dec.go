@@ -35,16 +35,6 @@ type nsqDelayedDecision struct {
 	rdQ10     int32
 }
 
-type nsqSampleState struct {
-	qQ10       int32
-	rdQ10      int32
-	xqQ14      int32
-	lfARQ14    int32
-	diffQ14    int32
-	sLTPShpQ14 int32
-	lpcExcQ14  int32
-}
-
 func newSilkNSQState(frameSize, ltpMemLen int) silkNSQState {
 	return silkNSQState{
 		xq:          make([]int16, ltpMemLen+frameSize),
@@ -450,12 +440,9 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 	smplBufIdx *int,
 	decisionDelay int,
 ) {
-	var sampleStateArr [4][2]nsqSampleState
-	sampleState := sampleStateArr[:]
-	if nStatesDelayedDecision > len(sampleStateArr) {
-		sampleState = make([][2]nsqSampleState, nStatesDelayedDecision)
+	if nStatesDelayedDecision > 4 {
+		panic("silk: more than MAX_DEL_DEC_STATES delayed-decision states")
 	}
-	sampleState = sampleState[:nStatesDelayedDecision]
 	shpLagBase := e.nsq.sLTPShpBufIdx - lag + silkHarmShapeFIRTaps/2
 	predLagBase := e.nsq.sLTPBufIdx - lag + 5/2
 	gainQ10 := silkRSHIFT32(gainQ16, 6)
@@ -467,13 +454,19 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 	// subframe and is written back at the end.
 	useLanes := nStatesDelayedDecision >= 2 && nStatesDelayedDecision <= 4 && kernels.HasStateLanes()
 	var war kernels.WarpedAR4
-	var warDiff, warLF, warNAR [4]int32
+	var warDiff, warLF [4]int32
 	// The short-term prediction runs the same way on lpc.H, a per-lane
 	// mirror of each state's sLPC_Q14 that gets the same writes and copies
 	// as the per-state arrays below.
 	var lpc kernels.LPC4
-	var lpcPred [4]int32
+	// cand holds each state's two quantizer candidates for the sample, one
+	// state per lane. With the vector kernels the rest of each state's
+	// sample (residual, candidates and their state) runs there too, with
+	// the branches turned into lane masks; otherwise the per-state loop
+	// below fills it.
+	var cand kernels.NSQCand4
 	if useLanes {
+		cand.SetSubframe(lfShpQ14, offsetQ10, lambdaQ10)
 		lpc.SetCoefficients(aQ12, predictLPCOrder, nStatesDelayedDecision)
 		for k := 0; k < nStatesDelayedDecision; k++ {
 			for j, v := range delDec[k].sLPCQ14[:silkMaxLPCOrder] {
@@ -536,33 +529,35 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 				warDiff[k] = delDec[k].diffQ14
 				warLF[k] = delDec[k].lfARQ14
 			}
-			war.Step(&warDiff, &warLF, &warNAR)
-			lpc.Predict(i, &lpcPred)
-		}
-		for k := 0; k < nStatesDelayedDecision; k++ {
-			dd := &delDec[k]
-			ss := &sampleState[k]
-			dd.seed = silkRAND(dd.seed)
-			// The window ending at sLPC_Q14[NSQ_LPC_BUF_LENGTH-1+i] is always
-			// in range (i < length <= 120).
-			var lpcPredQ14 int32
-			if useLanes {
-				lpcPredQ14 = lpcPred[k]
-			} else {
-				lpcPredQ14 = silkLPCPredictQ10((*[silkMaxLPCOrder]int32)(dd.sLPCQ14[i:i+silkMaxLPCOrder]), aQ12, predictLPCOrder)
-				lpcPredQ14 = silkLSHIFT32(lpcPredQ14, 4)
+			war.Step(&warDiff, &warLF, &cand.NAR)
+			lpc.Predict(i, &cand.LPCPred)
+			for k := 0; k < nStatesDelayedDecision; k++ {
+				dd := &delDec[k]
+				cand.Seed[k] = dd.seed
+				cand.Shape[k] = dd.shapeQ14[sIdx]
+				cand.LFAR[k] = dd.lfARQ14
+				cand.RD[k] = dd.rdQ10
 			}
+			cand.SetSample(xQ10[i], nLTPQ14, ltpPredQ14)
+			cand.Step()
+			for k := 0; k < nStatesDelayedDecision; k++ {
+				delDec[k].seed = cand.Seed[k]
+			}
+		} else {
+			for k := 0; k < nStatesDelayedDecision; k++ {
+				dd := &delDec[k]
+				dd.seed = silkRAND(dd.seed)
+				// The window ending at sLPC_Q14[NSQ_LPC_BUF_LENGTH-1+i] is always
+				// in range (i < length <= 120).
+				lpcPredQ14 := silkLPCPredictQ10((*[silkMaxLPCOrder]int32)(dd.sLPCQ14[i:i+silkMaxLPCOrder]), aQ12, predictLPCOrder)
+				lpcPredQ14 = silkLSHIFT32(lpcPredQ14, 4)
 
-			var nARQ14 int32
-			if useLanes {
-				nARQ14 = warNAR[k]
-			} else {
 				sAR2 := dd.sAR2Q14[:shapingLPCOrder]
 				ar := arShpQ13[:len(sAR2)]
 				tmp2 := silkSMLAWB(dd.diffQ14, sAR2[0], warp)
 				tmp1 := silkSMLAWB(sAR2[0], silkSUB32Ovflw(sAR2[1], tmp2), warp)
 				sAR2[0] = tmp2
-				nARQ14 = int32(shapingLPCOrder >> 1)
+				nARQ14 := int32(shapingLPCOrder >> 1)
 				nARQ14 = silkSMLAWB(nARQ14, tmp2, ar[0])
 				for j := 2; j+1 < len(sAR2); j += 2 {
 					tmp2 = silkSMLAWB(sAR2[j-1], silkSUB32Ovflw(sAR2[j], tmp1), warp)
@@ -577,44 +572,44 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 				nARQ14 = silkLSHIFT32(nARQ14, 1)
 				nARQ14 = silkSMLAWB(nARQ14, dd.lfARQ14, int16(tiltQ14))
 				nARQ14 = silkLSHIFT32(nARQ14, 2)
-			}
 
-			nLFQ14 := silkSMULWB(dd.shapeQ14[sIdx], int16(lfShpQ14))
-			nLFQ14 = silkSMLAWT(nLFQ14, dd.lfARQ14, lfShpQ14)
-			nLFQ14 = silkLSHIFT32(nLFQ14, 2)
+				nLFQ14 := silkSMULWB(dd.shapeQ14[sIdx], int16(lfShpQ14))
+				nLFQ14 = silkSMLAWT(nLFQ14, dd.lfARQ14, lfShpQ14)
+				nLFQ14 = silkLSHIFT32(nLFQ14, 2)
 
-			tmp1 := silkADDSAT32(nARQ14, nLFQ14)
-			tmp2 := silkADD32Ovflw(nLTPQ14, lpcPredQ14)
-			tmp1 = silkSUBSAT32(tmp2, tmp1)
-			tmp1 = silkRShiftRound(int64(tmp1), 4)
-			rQ10 := silkSUB32(xQ10[i], tmp1)
-			if dd.seed < 0 {
-				rQ10 = -rQ10
-			}
-			rQ10 = silkLIMIT32(rQ10, -(31 << 10), 30<<10)
-			q1Q10, q2Q10, rd1Q10, rd2Q10 := nsqQuantCandidates(rQ10, offsetQ10, lambdaQ10)
-			if rd1Q10 < rd2Q10 {
-				ss[0].rdQ10 = silkADD32(dd.rdQ10, rd1Q10)
-				ss[1].rdQ10 = silkADD32(dd.rdQ10, rd2Q10)
-				ss[0].qQ10, ss[1].qQ10 = q1Q10, q2Q10
-			} else {
-				ss[0].rdQ10 = silkADD32(dd.rdQ10, rd2Q10)
-				ss[1].rdQ10 = silkADD32(dd.rdQ10, rd1Q10)
-				ss[0].qQ10, ss[1].qQ10 = q2Q10, q1Q10
-			}
-			for c := 0; c < 2; c++ {
-				excQ14 := silkLSHIFT32(ss[c].qQ10, 4)
+				tmp1 = silkADDSAT32(nARQ14, nLFQ14)
+				tmp2 = silkADD32Ovflw(nLTPQ14, lpcPredQ14)
+				tmp1 = silkSUBSAT32(tmp2, tmp1)
+				tmp1 = silkRShiftRound(int64(tmp1), 4)
+				rQ10 := silkSUB32(xQ10[i], tmp1)
 				if dd.seed < 0 {
-					excQ14 = -excQ14
+					rQ10 = -rQ10
 				}
-				lpcExcQ14 := silkADD32(excQ14, ltpPredQ14)
-				xqQ14 := silkADD32Ovflw(lpcExcQ14, lpcPredQ14)
-				ss[c].diffQ14 = silkSUB32Ovflw(xqQ14, silkLSHIFT32(xQ10[i], 4))
-				sLFARShpQ14 := silkSUB32Ovflw(ss[c].diffQ14, nARQ14)
-				ss[c].sLTPShpQ14 = silkSUBSAT32(sLFARShpQ14, nLFQ14)
-				ss[c].lfARQ14 = sLFARShpQ14
-				ss[c].lpcExcQ14 = lpcExcQ14
-				ss[c].xqQ14 = xqQ14
+				rQ10 = silkLIMIT32(rQ10, -(31 << 10), 30<<10)
+				q1Q10, q2Q10, rd1Q10, rd2Q10 := nsqQuantCandidates(rQ10, offsetQ10, lambdaQ10)
+				if rd1Q10 < rd2Q10 {
+					cand.RDc[0][k] = silkADD32(dd.rdQ10, rd1Q10)
+					cand.RDc[1][k] = silkADD32(dd.rdQ10, rd2Q10)
+					cand.Q[0][k], cand.Q[1][k] = q1Q10, q2Q10
+				} else {
+					cand.RDc[0][k] = silkADD32(dd.rdQ10, rd2Q10)
+					cand.RDc[1][k] = silkADD32(dd.rdQ10, rd1Q10)
+					cand.Q[0][k], cand.Q[1][k] = q2Q10, q1Q10
+				}
+				for c := 0; c < 2; c++ {
+					excQ14 := silkLSHIFT32(cand.Q[c][k], 4)
+					if dd.seed < 0 {
+						excQ14 = -excQ14
+					}
+					lpcExcQ14 := silkADD32(excQ14, ltpPredQ14)
+					xqQ14 := silkADD32Ovflw(lpcExcQ14, lpcPredQ14)
+					cand.Diff[c][k] = silkSUB32Ovflw(xqQ14, silkLSHIFT32(xQ10[i], 4))
+					sLFARShpQ14 := silkSUB32Ovflw(cand.Diff[c][k], nARQ14)
+					cand.LTPShp[c][k] = silkSUBSAT32(sLFARShpQ14, nLFQ14)
+					cand.LFOut[c][k] = sLFARShpQ14
+					cand.LPCExc[c][k] = lpcExcQ14
+					cand.XQ[c][k] = xqQ14
+				}
 			}
 		}
 
@@ -630,28 +625,28 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 		}
 
 		winner := 0
-		rdMin := sampleState[0][0].rdQ10
+		rdMin := cand.RDc[0][0]
 		for k := 1; k < nStatesDelayedDecision; k++ {
-			if sampleState[k][0].rdQ10 < rdMin {
-				rdMin = sampleState[k][0].rdQ10
+			if cand.RDc[0][k] < rdMin {
+				rdMin = cand.RDc[0][k]
 				winner = k
 			}
 		}
 		winnerRand := delDec[winner].randState[lastIdx]
 		for k := 0; k < nStatesDelayedDecision; k++ {
 			if delDec[k].randState[lastIdx] != winnerRand {
-				sampleState[k][0].rdQ10 = silkADD32(sampleState[k][0].rdQ10, math.MaxInt32>>4)
-				sampleState[k][1].rdQ10 = silkADD32(sampleState[k][1].rdQ10, math.MaxInt32>>4)
+				cand.RDc[0][k] = silkADD32(cand.RDc[0][k], math.MaxInt32>>4)
+				cand.RDc[1][k] = silkADD32(cand.RDc[1][k], math.MaxInt32>>4)
 			}
 		}
-		rdMax, rdMin2 := sampleState[0][0].rdQ10, sampleState[0][1].rdQ10
+		rdMax, rdMin2 := cand.RDc[0][0], cand.RDc[1][0]
 		rdMaxInd, rdMinInd := 0, 0
 		for k := 1; k < nStatesDelayedDecision; k++ {
-			if sampleState[k][0].rdQ10 > rdMax {
-				rdMax, rdMaxInd = sampleState[k][0].rdQ10, k
+			if cand.RDc[0][k] > rdMax {
+				rdMax, rdMaxInd = cand.RDc[0][k], k
 			}
-			if sampleState[k][1].rdQ10 < rdMin2 {
-				rdMin2, rdMinInd = sampleState[k][1].rdQ10, k
+			if cand.RDc[1][k] < rdMin2 {
+				rdMin2, rdMinInd = cand.RDc[1][k], k
 			}
 		}
 		if rdMin2 < rdMax {
@@ -664,7 +659,7 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 					lpc.H[j][rdMaxInd] = lpc.H[j][rdMinInd]
 				}
 			}
-			sampleState[rdMaxInd][0] = sampleState[rdMinInd][1]
+			cand.CopyRank(rdMaxInd, rdMinInd)
 		}
 
 		dd := &delDec[winner]
@@ -693,20 +688,20 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 
 		for k := 0; k < nStatesDelayedDecision; k++ {
 			dd := &delDec[k]
-			ss := &sampleState[k][0]
-			dd.lfARQ14 = ss.lfARQ14
-			dd.diffQ14 = ss.diffQ14
-			dd.sLPCQ14[silkMaxLPCOrder+i] = ss.xqQ14
+			xqQ14, qQ10 := cand.XQ[0][k], cand.Q[0][k]
+			dd.lfARQ14 = cand.LFOut[0][k]
+			dd.diffQ14 = cand.Diff[0][k]
+			dd.sLPCQ14[silkMaxLPCOrder+i] = xqQ14
 			if useLanes {
-				lpc.H[silkMaxLPCOrder+i][k] = ss.xqQ14
+				lpc.H[silkMaxLPCOrder+i][k] = xqQ14
 			}
-			dd.xqQ14[sIdx] = ss.xqQ14
-			dd.qQ10[sIdx] = ss.qQ10
-			dd.predQ15[sIdx] = silkLSHIFT32(ss.lpcExcQ14, 1)
-			dd.shapeQ14[sIdx] = ss.sLTPShpQ14
-			dd.seed = silkADD32Ovflw(dd.seed, silkRShiftRound(int64(ss.qQ10), 10))
+			dd.xqQ14[sIdx] = xqQ14
+			dd.qQ10[sIdx] = qQ10
+			dd.predQ15[sIdx] = silkLSHIFT32(cand.LPCExc[0][k], 1)
+			dd.shapeQ14[sIdx] = cand.LTPShp[0][k]
+			dd.seed = silkADD32Ovflw(dd.seed, silkRShiftRound(int64(qQ10), 10))
 			dd.randState[sIdx] = dd.seed
-			dd.rdQ10 = ss.rdQ10
+			dd.rdQ10 = cand.RDc[0][k]
 		}
 		delayedGainQ10[sIdx] = gainQ10
 	}

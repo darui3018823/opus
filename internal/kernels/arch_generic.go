@@ -24,3 +24,5 @@ func hasStateLanes() bool { return false }
 func warpedAR4Arch(w *WarpedAR4, diff, lfAR, out *[4]int32) bool { return false }
 
 func lpc4Arch(p *LPC4, i int, out *[4]int32) bool { return false }
+
+func nsqCand4Arch(c *NSQCand4) bool { return false }

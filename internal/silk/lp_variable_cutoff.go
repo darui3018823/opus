@@ -298,5 +298,8 @@ func (e *Encoder) SetInternalRateLimits(minHz, maxHz int) {
 // encoder runs at 16 kHz with no transition filter active, so the Opus
 // layer may move to SWB/FB.
 func (e *Encoder) InWBModeWithoutVariableLP() bool {
+	if e.controlHeld {
+		return e.heldInWBWithoutLP
+	}
 	return e.sampleRate == 16000 && e.lp.Mode == 0
 }

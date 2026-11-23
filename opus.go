@@ -275,6 +275,9 @@ type Encoder struct {
 	// packetStereoWidth is the packet's compute_stereo_width result.
 	libopusMode       int
 	packetStereoWidth float32
+	// voiceRatio is st->voice_ratio: the analysis' speech percentage, kept
+	// through silent frames, -1 when unknown. OPUS_RESET_STATE keeps it.
+	voiceRatio int
 	// libopusModePolicy selects opus_encode_native's automatic mode /
 	// bandwidth decision (decideLibopusMode) instead of the Go encoder's
 	// bitrate-boundary rules; see SetModePolicy.
@@ -385,6 +388,7 @@ func NewEncoder(sampleRate, channels int, application Application) (*Encoder, er
 		libopusMode:          framing.ModeHybrid,
 		libopusForcedMode:    -1,
 		variableHPSmth2Q15:   variableHPSmth2Initial(),
+		voiceRatio:           -1,
 	}
 	enc.celtEncoders[3] = celtEnc
 
@@ -733,6 +737,7 @@ func (e *Encoder) encodeFloatPacket(pcm []float64, frameSize int) ([]byte, error
 		// is_digital_silence, the peak signal energy and silk_mode.useDTX:
 		// SILK's own DTX only runs when the generalized DTX cannot.
 		isSilence := isDigitalSilence(raw, lsbDepth)
+		e.updateVoiceRatio(isSilence, analysisInfo)
 		e.trackPeakSignalEnergy(raw, isSilence, analysisInfo)
 		e.packetStereoWidth = 0
 		if e.channels == 2 && e.forceChannels != ChannelsMono {
@@ -2711,10 +2716,11 @@ func (e *Encoder) applyBitrateSetting(frameSize int) error {
 		}
 	}
 	e.reportedBitrate = bitrate
-	if e.libopusModePolicy && e.outDataBytes == 0 {
+	if e.libopusModePolicy {
 		// user_bitrate_to_bitrate: OPUS_BITRATE_MAX is 1.5 Mb/s and a
-		// numeric setting is used as is; max_data_bytes bounds both when
-		// the packet is coded (applyOutDataBytes).
+		// numeric setting is used as is, bounded only by max_data_bytes
+		// (the multistream encoder's per-stream budget while it codes a
+		// stream), not by the 1275-byte frame size.
 		switch e.bitrateSetting {
 		case BitrateAuto:
 		case BitrateMax:

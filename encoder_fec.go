@@ -180,7 +180,7 @@ func (e *Encoder) decideStreamChannelsLibopus(frameSize, maxDataBytes int, analy
 	if e.rateMode == celt.RateModeCBR {
 		bitrate = bitsToBitrate(maxDataBytes*8, e.sampleRate, frameSize)
 	}
-	e.decideStreamChannelsWith(frameSize, framing.ModeSILKOnly, bitrate, e.libopusVoiceEst(analysis))
+	e.decideStreamChannelsWith(frameSize, framing.ModeSILKOnly, bitrate, e.libopusVoiceEst())
 }
 
 func (e *Encoder) decideStreamChannelsWith(frameSize, mode, bitrate, ve int) {

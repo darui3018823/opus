@@ -57,6 +57,35 @@ func BenchmarkPerfDefault(b *testing.B) {
 	}
 }
 
+// BenchmarkPerfDefaultComplexity10 runs the SILK and hybrid default-policy
+// workloads at complexity 10, where the SILK quantizer keeps four delayed
+// decision states with a 24th-order shaping filter (complexity 5, the
+// NewEncoder default, keeps two with a 16th-order filter).
+func BenchmarkPerfDefaultComplexity10(b *testing.B) {
+	for _, wl := range perfDefaultWorkloads() {
+		if wl.wantMode == "celt" {
+			continue
+		}
+		b.Run("encode/"+wl.name, func(b *testing.B) {
+			enc := newPerfDefaultEncoder(b, wl)
+			if err := enc.SetComplexity(10); err != nil {
+				b.Fatal(err)
+			}
+			frames := perfInputFrames(wl)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				pkt, err := enc.EncodeFloat(frames[i%len(frames)], perfFrameSize)
+				if err != nil {
+					b.Fatal(err)
+				}
+				perfPacketSink = pkt
+				perfRangeSink = enc.FinalRange()
+			}
+		})
+	}
+}
+
 func TestPerfDefaultPolicyPacketRegression(t *testing.T) {
 	want := map[string]string{
 		"celt/mono/96k":     "eff84d0ddf84d8d2f24727c25fa55883f984f1076042563b45fc554e81eb26c4",

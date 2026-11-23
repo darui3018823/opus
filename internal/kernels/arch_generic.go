@@ -26,3 +26,17 @@ func warpedAR4Arch(w *WarpedAR4, diff, lfAR, out *[4]int32) bool { return false 
 func lpc4Arch(p *LPC4, i int, out *[4]int32) bool { return false }
 
 func nsqCand4Arch(c *NSQCand4) bool { return false }
+
+func hasFFT() bool { return false }
+
+func fftRadix4Arch(f, t []float32, m, groups, mm int) bool { return false }
+
+func fftRadix3Arch(f, t []float32, epi float32, m, groups, mm int) bool { return false }
+
+func fftRadix5Arch(f, t []float32, ya, yb [2]float32, m, groups, mm int) bool { return false }
+
+func imdctPreArch(fout []float32, x []float64, trig []float32, bitrev []int, n4 int) int {
+	return 0
+}
+
+func imdctPostArch(buf []float64, fout, trig []float32, n4 int) int { return 0 }

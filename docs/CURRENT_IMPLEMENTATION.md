@@ -26,8 +26,8 @@ The `oggopus` subpackage implements Ogg page and Ogg Opus container APIs.
 Constants are in `constants.go` and package-level error values in `errors.go`.
 Public version constants are generated into `version_gen.go` from the
 repository-level `VERSION` file; `go generate ./...` refreshes them and CI
-rejects generated-file drift. The current released baseline is `v1.7.1`;
-`VERSION` holds the `v1.8.0` release candidate.
+rejects generated-file drift. The current released baseline is `v1.8.0`;
+`VERSION` holds the `v1.8.1` release candidate.
 Release preparation follows [`docs/RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
 and compatibility-breaking cleanup is recorded separately in
 [`docs/V2_API_CANDIDATES.md`](V2_API_CANDIDATES.md).
@@ -1667,6 +1667,21 @@ Behavior changes from the audit fixes that callers can observe:
   1-3% faster CELT decode, and a `toolchain go1.27.3` line (the module
   minimum stays Go 1.24.11). Record:
   `.claude/tasks/investigation/libopus-parity-hunt-2026-10-19.md`.
+- v1.8.1 (PRs #39 and #40) is a patch release with no public API change.
+  PR #39 applies the 2026-11-22 memory and speed audits without changing
+  packet bytes, final ranges or decoded PCM: CELT decoders are created on
+  first use, `DecodeFEC` stages into a reused decoder, and CELT, SILK and
+  hybrid decode no longer allocate per frame (`NewDecoder(48000, 2)` drops
+  from 1.44 MB to 47 KB, the `DecodeFEC` API from 2.77 MB to 119 KB). It
+  also makes `oggopus` `SeekPCM` bisection always converge. PR #40 fixes
+  five encoder differences from plain-C libopus 1.6.1 found by random
+  mid-stream CTL scripts: the equivalent rate of a CELT packet after a
+  delayed stereo-to-mono switch, `voice_ratio` across silent frames and
+  Reset, the SILK mode outputs after Reset, LBRR with prediction disabled,
+  and the multistream per-stream bitrate at `OPUS_BITRATE_MAX`. The module
+  pins `toolchain go1.27.4` (minimum Go 1.24.11). Records:
+  `.claude/tasks/implementation/perf-audit-fixes-2026-11-22.md` and
+  `.claude/tasks/investigation/v1.8.1-chaos-ctl-hunt-2026-11-23.md`.
 - `oggopus`: `PacketWriter` keeps the granule of a packet completed on a page
   that ends inside the next packet (it wrote -1, which `Reader` rejected);
   `Writer.Close` before any audio packet returns `ErrInvalidOpusStream`;

@@ -181,7 +181,10 @@ decoded PCM, final ranges or encoded bytes. v1.7.1 fixes four encoder
 differences from plain-C libopus found on real audio, so encoded bytes
 change on the frames they affect; decoding is unchanged. v1.8.0 removes the
 remaining encoder and decoder differences from plain-C libopus 1.6.1 found
-in a 5690-cell real-audio comparison. These are regression fixtures and local measurements,
+in a 5690-cell real-audio comparison. v1.8.1 cuts decoder construction and
+FEC memory by more than 95% and removes the remaining per-frame decode
+allocations, without changing output, and fixes five encoder differences from
+plain-C libopus that appear only after mid-stream control changes. These are regression fixtures and local measurements,
 not universal quality or performance guarantees; see
 [the real-corpus scoreboard](docs/REAL_CORPUS_SCOREBOARD.md) and
 [the performance baseline](docs/PERF_BASELINE.md) for conditions and values.

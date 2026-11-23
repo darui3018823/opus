@@ -1,6 +1,10 @@
 package silk
 
-import "math"
+import (
+	"math"
+
+	"github.com/darui3018823/opus/internal/kernels"
+)
 
 type silkNSQState struct {
 	xq            []int16
@@ -457,6 +461,32 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 	gainQ10 := silkRSHIFT32(gainQ16, 6)
 	warp := int16(warpingQ16)
 	sIdx := *smplBufIdx
+	// With two or more states the warped AR noise-shaping filter runs for
+	// all states at once in a vector kernel, one state per lane (as in
+	// libopus's NSQ_del_dec_avx2.c). Its state lives in war.S for the
+	// subframe and is written back at the end.
+	useLanes := nStatesDelayedDecision >= 2 && nStatesDelayedDecision <= 4 && kernels.HasStateLanes()
+	var war kernels.WarpedAR4
+	var warDiff, warLF, warNAR [4]int32
+	// The short-term prediction runs the same way on lpc.H, a per-lane
+	// mirror of each state's sLPC_Q14 that gets the same writes and copies
+	// as the per-state arrays below.
+	var lpc kernels.LPC4
+	var lpcPred [4]int32
+	if useLanes {
+		lpc.SetCoefficients(aQ12, predictLPCOrder, nStatesDelayedDecision)
+		for k := 0; k < nStatesDelayedDecision; k++ {
+			for j, v := range delDec[k].sLPCQ14[:silkMaxLPCOrder] {
+				lpc.H[j][k] = v
+			}
+		}
+		war.SetCoefficients(arShpQ13, shapingLPCOrder, warp, int16(tiltQ14), nStatesDelayedDecision)
+		for k := 0; k < nStatesDelayedDecision; k++ {
+			for j, v := range delDec[k].sAR2Q14[:shapingLPCOrder] {
+				war.S[j][k] = v
+			}
+		}
+	}
 	for i := 0; i < length; i++ {
 		ltpPredQ14 := int32(0)
 		if signalType == SignalTypeVoiced {
@@ -501,42 +531,60 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 			nLTPQ14 = silkSUBLSHIFT32(ltpPredQ14, nLTPQ14, 2)
 		}
 
+		if useLanes {
+			for k := 0; k < nStatesDelayedDecision; k++ {
+				warDiff[k] = delDec[k].diffQ14
+				warLF[k] = delDec[k].lfARQ14
+			}
+			war.Step(&warDiff, &warLF, &warNAR)
+			lpc.Predict(i, &lpcPred)
+		}
 		for k := 0; k < nStatesDelayedDecision; k++ {
 			dd := &delDec[k]
 			ss := &sampleState[k]
 			dd.seed = silkRAND(dd.seed)
 			// The window ending at sLPC_Q14[NSQ_LPC_BUF_LENGTH-1+i] is always
 			// in range (i < length <= 120).
-			lpcPredQ14 := silkLPCPredictQ10((*[silkMaxLPCOrder]int32)(dd.sLPCQ14[i:i+silkMaxLPCOrder]), aQ12, predictLPCOrder)
-			lpcPredQ14 = silkLSHIFT32(lpcPredQ14, 4)
-
-			sAR2 := dd.sAR2Q14[:shapingLPCOrder]
-			ar := arShpQ13[:len(sAR2)]
-			tmp2 := silkSMLAWB(dd.diffQ14, sAR2[0], warp)
-			tmp1 := silkSMLAWB(sAR2[0], silkSUB32Ovflw(sAR2[1], tmp2), warp)
-			sAR2[0] = tmp2
-			nARQ14 := int32(shapingLPCOrder >> 1)
-			nARQ14 = silkSMLAWB(nARQ14, tmp2, ar[0])
-			for j := 2; j+1 < len(sAR2); j += 2 {
-				tmp2 = silkSMLAWB(sAR2[j-1], silkSUB32Ovflw(sAR2[j], tmp1), warp)
-				sAR2[j-1] = tmp1
-				nARQ14 = silkSMLAWB(nARQ14, tmp1, ar[j-1])
-				tmp1 = silkSMLAWB(sAR2[j], silkSUB32Ovflw(sAR2[j+1], tmp2), warp)
-				sAR2[j] = tmp2
-				nARQ14 = silkSMLAWB(nARQ14, tmp2, ar[j])
+			var lpcPredQ14 int32
+			if useLanes {
+				lpcPredQ14 = lpcPred[k]
+			} else {
+				lpcPredQ14 = silkLPCPredictQ10((*[silkMaxLPCOrder]int32)(dd.sLPCQ14[i:i+silkMaxLPCOrder]), aQ12, predictLPCOrder)
+				lpcPredQ14 = silkLSHIFT32(lpcPredQ14, 4)
 			}
-			sAR2[len(sAR2)-1] = tmp1
-			nARQ14 = silkSMLAWB(nARQ14, tmp1, ar[len(ar)-1])
-			nARQ14 = silkLSHIFT32(nARQ14, 1)
-			nARQ14 = silkSMLAWB(nARQ14, dd.lfARQ14, int16(tiltQ14))
-			nARQ14 = silkLSHIFT32(nARQ14, 2)
+
+			var nARQ14 int32
+			if useLanes {
+				nARQ14 = warNAR[k]
+			} else {
+				sAR2 := dd.sAR2Q14[:shapingLPCOrder]
+				ar := arShpQ13[:len(sAR2)]
+				tmp2 := silkSMLAWB(dd.diffQ14, sAR2[0], warp)
+				tmp1 := silkSMLAWB(sAR2[0], silkSUB32Ovflw(sAR2[1], tmp2), warp)
+				sAR2[0] = tmp2
+				nARQ14 = int32(shapingLPCOrder >> 1)
+				nARQ14 = silkSMLAWB(nARQ14, tmp2, ar[0])
+				for j := 2; j+1 < len(sAR2); j += 2 {
+					tmp2 = silkSMLAWB(sAR2[j-1], silkSUB32Ovflw(sAR2[j], tmp1), warp)
+					sAR2[j-1] = tmp1
+					nARQ14 = silkSMLAWB(nARQ14, tmp1, ar[j-1])
+					tmp1 = silkSMLAWB(sAR2[j], silkSUB32Ovflw(sAR2[j+1], tmp2), warp)
+					sAR2[j] = tmp2
+					nARQ14 = silkSMLAWB(nARQ14, tmp2, ar[j])
+				}
+				sAR2[len(sAR2)-1] = tmp1
+				nARQ14 = silkSMLAWB(nARQ14, tmp1, ar[len(ar)-1])
+				nARQ14 = silkLSHIFT32(nARQ14, 1)
+				nARQ14 = silkSMLAWB(nARQ14, dd.lfARQ14, int16(tiltQ14))
+				nARQ14 = silkLSHIFT32(nARQ14, 2)
+			}
 
 			nLFQ14 := silkSMULWB(dd.shapeQ14[sIdx], int16(lfShpQ14))
 			nLFQ14 = silkSMLAWT(nLFQ14, dd.lfARQ14, lfShpQ14)
 			nLFQ14 = silkLSHIFT32(nLFQ14, 2)
 
-			tmp1 = silkADDSAT32(nARQ14, nLFQ14)
-			tmp2 = silkADD32Ovflw(nLTPQ14, lpcPredQ14)
+			tmp1 := silkADDSAT32(nARQ14, nLFQ14)
+			tmp2 := silkADD32Ovflw(nLTPQ14, lpcPredQ14)
 			tmp1 = silkSUBSAT32(tmp2, tmp1)
 			tmp1 = silkRShiftRound(int64(tmp1), 4)
 			rQ10 := silkSUB32(xQ10[i], tmp1)
@@ -608,6 +656,14 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 		}
 		if rdMin2 < rdMax {
 			copyDelayedDecisionSuffix(&delDec[rdMaxInd], &delDec[rdMinInd], i)
+			if useLanes {
+				for j := 0; j < shapingLPCOrder; j++ {
+					war.S[j][rdMaxInd] = war.S[j][rdMinInd]
+				}
+				for j := i; j < i+silkMaxLPCOrder; j++ {
+					lpc.H[j][rdMaxInd] = lpc.H[j][rdMinInd]
+				}
+			}
 			sampleState[rdMaxInd][0] = sampleState[rdMinInd][1]
 		}
 
@@ -641,6 +697,9 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 			dd.lfARQ14 = ss.lfARQ14
 			dd.diffQ14 = ss.diffQ14
 			dd.sLPCQ14[silkMaxLPCOrder+i] = ss.xqQ14
+			if useLanes {
+				lpc.H[silkMaxLPCOrder+i][k] = ss.xqQ14
+			}
 			dd.xqQ14[sIdx] = ss.xqQ14
 			dd.qQ10[sIdx] = ss.qQ10
 			dd.predQ15[sIdx] = silkLSHIFT32(ss.lpcExcQ14, 1)
@@ -652,6 +711,13 @@ func (e *Encoder) silkNoiseShapeQuantizerDelDec(
 		delayedGainQ10[sIdx] = gainQ10
 	}
 	*smplBufIdx = sIdx
+	if useLanes {
+		for k := 0; k < nStatesDelayedDecision; k++ {
+			for j := range delDec[k].sAR2Q14[:shapingLPCOrder] {
+				delDec[k].sAR2Q14[j] = war.S[j][k]
+			}
+		}
+	}
 	for k := 0; k < nStatesDelayedDecision; k++ {
 		copy(delDec[k].sLPCQ14[:silkMaxLPCOrder], delDec[k].sLPCQ14[length:length+silkMaxLPCOrder])
 	}

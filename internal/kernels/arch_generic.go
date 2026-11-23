@@ -40,3 +40,13 @@ func imdctPreArch(fout []float32, x []float64, trig []float32, bitrev []int, n4 
 }
 
 func imdctPostArch(buf []float64, fout, trig []float32, n4 int) int { return 0 }
+
+func combConstArch(x []float32, start, n, period int, g0, g1, g2 float32) int { return 0 }
+
+func combOverlapArch(x []float32, start, n, p0, p1 int, g *CombGains, w []float32) int {
+	return 0
+}
+
+func f64to32Arch(dst []float32, src []float64) int { return 0 }
+
+func f32to64Arch(dst []float64, src []float32) int { return 0 }

@@ -622,3 +622,19 @@ phase 1, min of 25 interleaved runs pinned to one CPU, against phase 1:
 
 The gain grows with the state count (2 at complexity 2–5, 4 at 8–10).
 Details: [SIMD kernels spec](../.claude/specs/simd-kernels-v2.md).
+
+## SIMD Kernels, Phase 2b (2026-11-24)
+
+The same branch also runs the rest of each state's quantizer sample
+(residual, the two candidates and their state) in lanes. Cumulative
+against phase 1, min of 25 interleaved runs pinned to one CPU:
+
+| Workload | complexity 5 (default) | complexity 10 |
+|---|---:|---:|
+| silk/mono/12k | −8.5% | −37.7% |
+| silk/stereo/12k | +2.3% | −34.6% |
+| hybrid/mono/24k | +0.3% | −15.7% |
+| hybrid/stereo/36k | −4.3% | −17.0% |
+
+Complexity 5 results are within this VM's noise. Packets are unchanged on
+amd64 and arm64 (qemu).

@@ -3,12 +3,13 @@
 - **Objective:** speed up the hottest inner loops with vector instructions
   while every packet, final range and decoded sample stays bit-identical to
   the scalar build on every architecture.
-- **Status (last updated 2026-11-24):** phase 1 is implemented on
+- **Status (last updated 2026-11-24, 2b):** phase 1 is implemented on
   `perf/simd-pitch-xcorr` (PR #42): the `internal/kernels` package with
   three amd64 kernels, its tests, and the CI guards. The first part of
   phase 2 (warped AR noise shaping and short-term prediction across
   delayed-decision states) is on `perf/simd-nsq-deldec`, stacked on it.
-  Neither is merged. The rest of phase 2 and phases 3 and 4 are proposals.
+  Phase 2b (the rest of each state's sample) is on the same branch.
+  Neither is merged. Phases 3 and 4 are proposals.
 - **Inputs:** the four 2026-11-22 performance audits (ARCH-03 in
   [the Gemini high audit](../memory/audits/2026-11-22-perf-memory-optimization-audit.md)),
   CPU profiles of `BenchmarkPerfDefault` and `BenchmarkDecodeOfficialVectors`
@@ -197,20 +198,61 @@ digests, and a SILK-focused random matrix (800 cells, VoIP, 6–40 kb/s,
 complexity 2–10, DTX/FEC/PLC; 27,327 packets) with the same digest for this
 branch, `-tags purego` and `main`.
 
-### 2b (proposed)
+### 2b (implemented)
 
-What is left in the quantizer at complexity 10, by profile share of the
-SILK encode: the per-state scalar bookkeeping in the function itself
-(~22%), `nsqQuantCandidates` (~5%), survivor copies (~6% including the
-lane copies). Vectorising the candidates needs branch-free selects for the
-four `q1_Q0` cases and the rate-distortion ordering; the survivor
-selection stays scalar. Expected gain is smaller than 2a; measure on a
-quieter machine before deciding.
+`NSQCand4.Step` runs the rest of each state's sample: `silk_RAND`, `n_LF`,
+the saturating residual, the sign flip and limiter, the two quantizer
+candidates and their rate-distortion costs, the ranking, and both
+candidates' `xq`, `Diff`, `LF_AR`, `sLTP_shp` and `LPC_exc`. Four states
+fit one XMM as int32 lanes (SSE4.1 `PMULLD`, `PMAXSD`/`PMINSD`,
+`PBLENDW`); the two `SMULW*` products use `PMULDQ` on even and odd lanes.
+Every branch is a lane mask:
 
-Outside the quantizer: `silkWarpedAutocorrelationFLP32` (serial all-pass
-chain, not vectorisable exactly), `silkInnerProductFLP32` (float64
-accumulation order), `silkNLSFDelDecQuantInto` (vectorisable across
-survivors, medium effort).
+- `silk_ADD_SAT32`/`silk_SUB_SAT32` detect overflow from the sign bits
+  (`(a^s) & (b^s)`, `(a^b) & (a^s)`) and select `a>>31 ^ INT32_MAX`.
+- The four `q1_Q0` cases collapse to
+  `q1 = (q<<10) + offset + (q>0 ? -80 : q<0 ? 80 : 0)` and
+  `q2 = q1 + 1024 - (q ∈ {0, -1} ? 80 : 0)`, with the rate terms negated
+  where `q < 0` (for `q1`) and `q < -1` (for `q2`). The `Lambda_Q10 > 2048`
+  rate-distortion offset is a branch on a per-subframe scalar.
+- Ranking selects rank 0 with the `rd1 < rd2` mask and gets rank 1 as
+  `q1 ^ q2 ^ rank0`.
+
+The quantizer's per-sample candidate storage (`sampleState`) is now this
+struct of arrays in both paths, so the survivor selection reads the kernel
+output in place; copying it into the per-state structs cancelled the
+kernel's gain in a first attempt. The scalar path writes the same arrays.
+
+Kernel tests: 200,000 random and extreme cases per path, plus every
+residual in [-33·1024, 32·1024] for lambda on both sides of 2048 and four
+offsets. Two deliberate mutations (a shift and the 2048 boundary) were
+checked to fail them. The SILK matrix digest is unchanged on amd64 (SIMD
+and `purego`) and on arm64 (`qemu-aarch64`), and the arm64 test suite,
+including the official-vector digests, passes under qemu.
+
+Cumulative against phase 1, min of 25 interleaved runs pinned to one CPU:
+
+| Workload (default policy) | phase 1 | 2a + 2b | change |
+|---|---:|---:|---:|
+| silk/mono/12k, complexity 10 | 847.9 µs | 527.9 µs | −37.7% |
+| silk/stereo/12k, complexity 10 | 878.0 µs | 574.3 µs | −34.6% |
+| hybrid/mono/24k, complexity 10 | 379.5 µs | 319.9 µs | −15.7% |
+| hybrid/stereo/36k, complexity 10 | 1149.7 µs | 953.7 µs | −17.0% |
+| silk/mono/12k, complexity 5 | 402.3 µs | 368.2 µs | −8.5% |
+| silk/stereo/12k, complexity 5 | 417.4 µs | 427.1 µs | +2.3% |
+| hybrid/mono/24k, complexity 5 | 227.2 µs | 227.9 µs | +0.3% |
+| hybrid/stereo/36k, complexity 5 | 634.6 µs | 607.2 µs | −4.3% |
+
+At complexity 5 (two states) the changes are within this VM's noise; the
+order of the runs alone moved the minimum by up to 8%. The pure Go path
+(`purego`) showed no consistent change.
+
+### Left in the SILK encoder
+
+`silkWarpedAutocorrelationFLP32` (serial all-pass chain, not vectorisable
+exactly), `silkInnerProductFLP32` (float64 accumulation order),
+`silkNLSFDelDecQuantInto` (vectorisable across survivors, medium effort),
+and the scalar survivor selection and per-state bookkeeping.
 
 ## Phase 3: CELT transform and remaining CELT encoder loops
 

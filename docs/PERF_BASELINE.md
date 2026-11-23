@@ -580,3 +580,27 @@ build the oracle tests compare against) and once with its SSE/AVX kernels:
 v1.7.0 takes 1.5x to 1.6x plain-C libopus's time for both encode and
 decode (2.5x to 3.8x for v1.6.0). A 20 ms frame costs it about 0.2 to 0.3 ms
 to encode and 0.07 ms to decode.
+
+## SIMD Kernels, Phase 1 (2026-11-23)
+
+Branch `perf/simd-pitch-xcorr` adds `internal/kernels` with amd64 SSE/AVX
+versions of the CELT pitch cross-correlation, the SILK IIR/FIR resampler's
+8-tap interpolation and the float-to-int16 PCM conversion. Output is
+bit-identical (official-vector and packet digests, a 600-cell random codec
+matrix against `main` and `-tags purego`). Interleaved A/B against `main`
+(`8f3b430`), 8 rounds, `-cpu=1`, on a 2-vCPU Intel Xeon (2.3 GHz) Linux VM
+with Go 1.27.4:
+
+| Benchmark | main | branch | change |
+|---|---:|---:|---:|
+| encode celt/mono/96k | 90.8 µs | 83.7 µs | −7.7% |
+| encode celt/stereo/128k | 143.2 µs | 137.4 µs | −4.1% |
+| decode FEC voip/stereo/24k | 43.3 µs | 33.9 µs | −21.7% |
+| tv02 | 31.8 ms | 21.6 ms | −32.2% |
+| tv03 | 30.0 ms | 22.1 ms | −26.3% |
+| tv04 | 42.3 ms | 31.2 ms | −26.1% |
+| tv12 | 34.4 ms | 27.6 ms | −19.9% |
+
+Geometric mean over the 21 benchmarks: −10.4%; SILK/hybrid encode is
+unchanged. Method, all rows and the next phases:
+[SIMD kernels spec](../.claude/specs/simd-kernels-v2.md).

@@ -788,6 +788,28 @@ DSP support includes:
 - CELT-oriented IMDCT mode in `mdct_celt.go`
 - Hann, Hamming, Blackman, sine, and Vorbis windows
 
+### `internal/kernels`
+
+Vectorised inner loops with pure Go references. Each accelerated kernel must
+return the same bits as its reference for every input other than NaN
+payloads, so packets, final ranges and decoded PCM do not depend on the CPU
+or the build. On amd64 (without the `purego` tag):
+
+- `PitchXcorr32` (CELT pitch search, PLC and LPC autocorrelation) gives each
+  lag its own SSE or AVX lane, with MULPS/ADDPS and no FMA. AVX is chosen
+  at init from CPUID and XCR0.
+- `FIR8Interp` (the SILK IIR/FIR resampler's 8-tap interpolation) uses SSE2
+  PMADDWD; the int32 sums wrap like the scalar code.
+- `Float32ToInt16` (the int16 `Decode` output) scales, clamps with
+  MAXPS/MINPS (whose NaN rule matches the scalar clamp) and rounds half to
+  even with CVTPS2DQ; it is checked against the reference for all 2^32
+  float32 inputs.
+
+Other architectures and `-tags purego` builds use the references. Kernel
+tests compare every path (AVX, SSE, fallback) against the reference,
+including subnormals, infinities and int16 overflow. The design and the
+remaining candidates are in `.claude/specs/simd-kernels-v2.md`.
+
 ### `internal/resampler`
 
 The resampler accepts the five Opus rates and mono/stereo audio. It uses

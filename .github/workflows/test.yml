@@ -55,8 +55,31 @@ jobs:
             exit 1
           fi
 
+      - name: No fused multiply-add in assembly kernels
+        # The -S check above only sees compiled Go. Hand-written kernels in
+        # internal/kernels must not fuse either; see its package comment.
+        run: |
+          if grep -rnwE '(V?FN?M(ADD|SUB)[0-9A-Z]*|V?FML[AS](L|L2)?)' --include='*.s' .; then
+            echo "fused multiply-add in assembly"
+            exit 1
+          fi
+
       - name: go vet
-        run: go vet ./...
+        run: |
+          go vet ./...
+          go vet -tags purego ./...
+
+      - name: Minimum Go version builds (pure Go arm64 kernels)
+        # The NEON kernels need Go 1.27's assembler; older toolchains must
+        # still build every architecture with the pure Go references.
+        run: |
+          GOTOOLCHAIN=go1.24.11 go build ./...
+          GOTOOLCHAIN=go1.24.11 GOARCH=arm64 go build ./...
+
+      - name: go test (purego reference kernels)
+        # Default builds use the amd64 vector kernels; this keeps the pure Go
+        # references that other architectures run covered on amd64 too.
+        run: go test -count=1 -tags purego ./...
 
   native-test:
     name: native test (${{ matrix.os }}/${{ matrix.arch }})

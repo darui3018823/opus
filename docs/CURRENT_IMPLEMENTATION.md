@@ -788,6 +788,56 @@ DSP support includes:
 - CELT-oriented IMDCT mode in `mdct_celt.go`
 - Hann, Hamming, Blackman, sine, and Vorbis windows
 
+### `internal/kernels`
+
+Vectorised inner loops with pure Go references. Each accelerated kernel must
+return the same bits as its reference for every input other than NaN
+payloads, so packets, final ranges and decoded PCM do not depend on the CPU
+or the build. On amd64 (without the `purego` tag):
+
+- `PitchXcorr32` (CELT pitch search, PLC and LPC autocorrelation) gives each
+  lag its own SSE or AVX lane, with MULPS/ADDPS and no FMA. AVX is chosen
+  at init from CPUID and XCR0.
+- `FIR8Interp` (the SILK IIR/FIR resampler's 8-tap interpolation) uses SSE2
+  PMADDWD; the int32 sums wrap like the scalar code.
+- `WarpedAR4`, `LPC4` and `NSQCand4` (the SILK delayed-decision
+  quantizer, two or more states) run the warped AR noise-shaping filter, the
+  short-term prediction and the residual/candidate step for all states at
+  once, one state per lane, with SSE4.1 and branches as lane masks. Without
+  SSE4.1 the quantizer's per-state loop fills the same per-sample candidate
+  arrays.
+- `FFTRadix3/4/5` (the static-mode KISS FFT stages with m > 1) and
+  `IMDCTPreRotate`/`IMDCTPostRotate` (the backward MDCT rotations) run four
+  butterflies or rotations per pass with SSE, real and imaginary parts in
+  separate registers and the scalar operation order in each lane.
+- `CombConst` and `CombOverlap` (the decoder's comb post-filter) filter
+  four consecutive samples per pass on a float32 copy of the reachable
+  history and the frame; the filter's period of at least 15 keeps each
+  block's reads behind it. Builds without SSE keep the scalar filter.
+- `Float32ToInt16` (the int16 `Decode` output) scales, clamps with
+  MAXPS/MINPS (whose NaN rule matches the scalar clamp) and rounds half to
+  even with CVTPS2DQ; it is checked against the reference for all 2^32
+  float32 inputs.
+- `LPCAnalysisFilter` (silk_LPC_analysis_filter: decoder LTP rewhitening,
+  PLC and the encoder's NSQ) computes four outputs per pass with SSE2
+  PMADDWD over 16 taps (zero-padded for order 10); the int16 products are
+  exact and the int32 sum wraps, so the term order is free.
+
+The CELT decoder runs the de-emphasis of both stereo channels in one loop
+(pure Go, every architecture); each channel keeps its operation order.
+
+On arm64 built with Go 1.27 or later (the module's toolchain), every
+kernel has a NEON version with the same contract; arm64 with Go 1.24 to
+1.26, other architectures and `-tags purego` builds use the references. The
+SILK decoder's short-term prediction (`silkLPCPredictQ10`) sums its
+older taps as a tree and adds the newest last, on every architecture;
+the int32 sum wraps, so this is exact. Kernel
+tests compare every path (AVX, SSE, fallback) against the reference,
+including subnormals, infinities and int16 overflow; `FuzzKernelsFloat` and
+`FuzzKernelsFixed` run nightly on amd64 and arm64, and the opusref workflow
+compares against a plain-C libopus 1.6.1 build on both architectures. The design and the
+remaining candidates are in `.claude/specs/simd-kernels-v2.md`.
+
 ### `internal/resampler`
 
 The resampler accepts the five Opus rates and mono/stereo audio. It uses

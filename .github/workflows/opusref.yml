@@ -95,3 +95,71 @@ jobs:
 
       - name: Decoder reference (12/12 vectors)
         run: go test -tags opusref -count=1 -run TestCGORef .
+
+  plainc-oracle:
+    # The packet- and sample-exact comparison against a plain scalar C build
+    # of libopus 1.6.1 on both architectures, so the arm64 NEON kernels are
+    # checked against libopus directly and not only against the pure Go
+    # references.
+    name: plain-C libopus oracle (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Report toolchain
+        run: |
+          go version
+          go env GOARCH
+
+      - name: Install libopus and PowerShell
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y libopus-dev cmake
+          echo "CGO_CFLAGS=$(pkg-config --cflags opus)" >> "$GITHUB_ENV"
+          if ! command -v pwsh >/dev/null; then
+            sudo snap install powershell --classic
+          fi
+
+      - name: Vendor libopus 1.6.1 source
+        run: |
+          curl -sL -o opus-src.tar.gz https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz
+          tar -xzf opus-src.tar.gz
+          mv opus-1.6.1 libopus
+
+      - name: Build the plain-C oracles
+        # Scalar builds (gcc -O1 -ffp-contract=off, no SIMD, no FMA).
+        shell: pwsh
+        run: |
+          ./scripts/oracle/build.ps1
+          ./scripts/oracle/build_encoder.ps1
+          ./scripts/oracle/build_encoder_audit.ps1
+          ./scripts/oracle/decoder_audit/build.ps1
+
+      - name: Encoder and decoder oracles
+        run: go test -tags opusref -count=1 -timeout 60m -run '^(TestCELTEncoderOracle|TestHybridEncoderOracle|TestSILKEncoder(InputPipeline|Stereo)Oracle.*|TestAutoModeOracle|TestAutoModeOracleSweep|TestAutoModeTransitionOracle|TestDTXOracle|TestMultistreamEncoderOracle|TestDecoderPLCOracle|TestDecoderVectorOracle|TestDecoderShortFrameOracle|TestHybridFECBustOracle)$' .
+
+      - name: libopus audit, parity hunt and chaos CTL cells
+        # NaN input cells are skipped: they differ from libopus on main as
+        # well and are tracked separately.
+        env:
+          OPUS_LIBOPUS_AUDIT: "1"
+        run: |
+          go test -tags opusref -count=1 -timeout 60m \
+            -run '^(TestAudit|TestHunt|TestChaosEncoderCTLOracle)' \
+            -skip 'TestAuditEdgeInputs/nan/' .
+          go test -tags opusref -count=1 -timeout 30m ./internal/audit/decoder/

@@ -3,6 +3,9 @@ package dsp
 import (
 	"math"
 	"sync"
+	"unsafe"
+
+	"github.com/darui3018823/opus/internal/kernels"
 )
 
 // opusComplex is the scalar type used by the floating-point libopus KISS FFT.
@@ -33,6 +36,12 @@ type opusFFTPlan struct {
 	factors  []int
 	bitrev   []int
 	twiddles []opusComplex
+	// stageTw[i] is stage i's twiddles laid out for the vector kernels, or
+	// nil where the stage runs in scalar code (radix 2, m = 1, or m not a
+	// multiple of 4).
+	stageTw [][]float32
+	// bitrevK is bitrev checked once for the MDCT rotation kernels.
+	bitrevK *kernels.BitRev
 }
 
 // opusFFTPlans holds the plans for the four static-mode sizes, indexed by
@@ -116,7 +125,33 @@ func buildOpusFFTPlan(n int) *opusFFTPlan {
 	buildBitrev(0, 0, 1, 0)
 
 	plan.twiddles = opusFFTTwiddles()
+	plan.buildStageTwiddles()
+	plan.bitrevK = kernels.NewBitRev(plan.bitrev)
 	return plan
+}
+
+// buildStageTwiddles fills stageTw with the same twiddles transform's
+// scalar stages read: twiddles[j*fstride*q] for butterfly j, q = 1..p-1.
+func (p *opusFFTPlan) buildStageTwiddles() {
+	stages := len(p.factors) / 2
+	p.stageTw = make([][]float32, stages)
+	fstride := 1
+	for i := 0; i < stages; i++ {
+		radix, m := p.factors[2*i], p.factors[2*i+1]
+		if (radix == 3 || radix == 4 || radix == 5) && m > 1 && m%4 == 0 {
+			fs := fstride << p.shift
+			p.stageTw[i] = kernels.FFTTwiddleTable(radix, m, func(q, j int) (float32, float32) {
+				w := p.twiddles[j*fs*q]
+				return w.r, w.i
+			})
+		}
+		fstride *= radix
+	}
+}
+
+// floats views interleaved complex values as float32 pairs.
+func floats(c []opusComplex) []float32 {
+	return unsafe.Slice((*float32)(unsafe.Pointer(unsafe.SliceData(c))), 2*len(c))
 }
 
 var (
@@ -189,6 +224,21 @@ func (p *opusFFTPlan) transform(fout []opusComplex) {
 		m2 := 1
 		if i != 0 {
 			m2 = p.factors[2*i-1]
+		}
+		if tw := p.stageTw[i]; tw != nil && kernels.HasFFT() {
+			fs := fstride[i] << p.shift
+			f := floats(fout)
+			switch p.factors[2*i] {
+			case 3:
+				kernels.FFTRadix3(f, tw, p.twiddles[fs*m].i, m, fstride[i], m2)
+			case 4:
+				kernels.FFTRadix4(f, tw, m, fstride[i], m2)
+			case 5:
+				ya, yb := p.twiddles[fs*m], p.twiddles[fs*2*m]
+				kernels.FFTRadix5(f, tw, [2]float32{ya.r, ya.i}, [2]float32{yb.r, yb.i}, m, fstride[i], m2)
+			}
+			m = m2
+			continue
 		}
 		switch p.factors[2*i] {
 		case 2:

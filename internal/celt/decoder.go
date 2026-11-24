@@ -42,6 +42,7 @@ type Decoder struct {
 	// Synthesis scratch reused between frames. outBuf is the slice returned
 	// by Decode and DecodeHybrid, valid until the next decode call.
 	synthBuf  []float64
+	synthBuf1 []float64 // channel 1 of a stereo frame (see applyDeemphasis2)
 	synthCopy []float64
 	subTail   []float64
 	subCoeffs []float64
@@ -489,11 +490,19 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 	nBase := d.mode.NBase // = NBase (e.g. 120 for 48kHz)
 	M := 1 << uint(lm)    // number of sub-frames for transient
 
+	// Stereo output runs the de-emphasis of both channels in one loop (see
+	// applyDeemphasis2), so channel 0 keeps its own synthesis buffer and
+	// waits for channel 1.
+	var pending0 []float64
 	for c := 0; c < cc; c++ {
 		coeffs := synth[c]
 		var samplesOut []float64
 		if d.prefilterAndFold {
 			d.prefilterAndFoldCarry(c)
+		}
+		synthBuf := &d.synthBuf
+		if c == 1 {
+			synthBuf = &d.synthBuf1
 		}
 
 		if isTransient && lm > 0 {
@@ -502,8 +511,8 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			subTail := d.subTail
 			copy(subTail, d.overlap[c])
 
-			d.synthBuf = growFloat64(d.synthBuf, frameSize)
-			samplesOut = d.synthBuf
+			*synthBuf = growFloat64(*synthBuf, frameSize)
+			samplesOut = *synthBuf
 			d.subCoeffs = growFloat64(d.subCoeffs, nBase)
 			subCoeffs := d.subCoeffs
 			for k := 0; k < M; k++ {
@@ -518,10 +527,9 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 			}
 			copy(d.overlap[c], subTail)
 		} else {
-			// Non-transient: single N-point IMDCT. samplesOut is consumed
-			// into output before the next channel reuses synthBuf.
-			d.synthBuf = growFloat64(d.synthBuf, frameSize)
-			samplesOut = d.celtMode.CLTMDCTBackwardInto(coeffs, d.overlap[c], d.synthBuf)
+			// Non-transient: single N-point IMDCT.
+			*synthBuf = growFloat64(*synthBuf, frameSize)
+			samplesOut = d.celtMode.CLTMDCTBackwardInto(coeffs, d.overlap[c], *synthBuf)
 		}
 		if d.synthesisStageHook != nil {
 			d.synthesisStageHook("synthesis", c, samplesOut)
@@ -540,23 +548,18 @@ func (d *Decoder) decodeCELTRange(dec *entcode.Decoder, totalBytes, start, end i
 		if d.synthesisStageHook != nil {
 			d.synthesisStageHook("postfilter", c, samplesOut)
 		}
+		if cc == 2 {
+			if c == 0 {
+				pending0 = samplesOut
+				continue
+			}
+			d.applyDeemphasis2(pending0, samplesOut)
+			d.emitChannel(output, pending0, 0, cc, frameSize)
+			d.emitChannel(output, samplesOut, 1, cc, frameSize)
+			continue
+		}
 		d.applyDeemphasis(c, samplesOut)
-		if d.synthesisStageHook != nil {
-			d.synthesisStageHook("pcm", c, samplesOut)
-		}
-
-		ds := d.downsample
-		outLen := frameSize / ds
-		if ds == 1 {
-			out := output[c:]
-			for i, v := range samplesOut[:outLen] {
-				out[i*cc] = v * celtFloatScale
-			}
-		} else {
-			for i := 0; i < outLen; i++ {
-				output[i*cc+c] = samplesOut[i*ds] * celtFloatScale
-			}
-		}
+		d.emitChannel(output, samplesOut, c, cc, frameSize)
 	}
 
 	d.lastFinalRange = dec.GetRng()
@@ -737,7 +740,7 @@ func (d *Decoder) CopyAllStateFrom(src *Decoder) {
 	}
 	*d = *src
 	// Scratch buffers must not be shared with src.
-	d.synthBuf, d.synthCopy, d.subTail, d.subCoeffs, d.outBuf = nil, nil, nil, nil, nil
+	d.synthBuf, d.synthBuf1, d.synthCopy, d.subTail, d.subCoeffs, d.outBuf = nil, nil, nil, nil, nil, nil
 	d.mdctBuf = [2][]float64{}
 	d.bandX, d.collapse = nil, nil
 	d.qab = quantAllBandsScratch{}
@@ -800,6 +803,69 @@ func (d *Decoder) applyDeemphasis(ch int, samples []float64) {
 		}
 	}
 	d.preemphMem[ch] = mem
+}
+
+// applyDeemphasis2 is applyDeemphasis for channels 0 and 1 in one loop.
+// Each channel's recursion is a serial chain of float32 adds and a
+// multiply; running the two chains side by side lets the CPU overlap them.
+// Every channel still performs exactly applyDeemphasis's operations in the
+// same order, so the output bits are unchanged.
+func (d *Decoder) applyDeemphasis2(s0, s1 []float64) {
+	const (
+		coef      = float32(0.850006103515625)
+		verySmall = float32(1e-30)
+	)
+	if len(s0) != len(s1) {
+		d.applyDeemphasis(0, s0)
+		d.applyDeemphasis(1, s1)
+		return
+	}
+	s1 = s1[:len(s0)]
+	m0, m1 := d.preemphMem[0], d.preemphMem[1]
+	if d.accum && d.downsample == 1 {
+		for i, x0 := range s0 {
+			y0 := float32(x0) + m0
+			y1 := float32(s1[i]) + m1
+			y0 += verySmall
+			y1 += verySmall
+			m0 = coef * y0
+			m1 = coef * y1
+			s0[i] = float64(y0)
+			s1[i] = float64(y1)
+		}
+	} else {
+		for i, x0 := range s0 {
+			y0 := float32(x0) + verySmall
+			y1 := float32(s1[i]) + verySmall
+			y0 += m0
+			y1 += m1
+			m0 = coef * y0
+			m1 = coef * y1
+			s0[i] = float64(y0)
+			s1[i] = float64(y1)
+		}
+	}
+	d.preemphMem[0], d.preemphMem[1] = m0, m1
+}
+
+// emitChannel reports the de-emphasised channel to the test hook and writes
+// it, scaled and downsampled, into the interleaved output.
+func (d *Decoder) emitChannel(output, samples []float64, c, cc, frameSize int) {
+	if d.synthesisStageHook != nil {
+		d.synthesisStageHook("pcm", c, samples)
+	}
+	ds := d.downsample
+	outLen := frameSize / ds
+	if ds == 1 {
+		out := output[c:]
+		for i, v := range samples[:outLen] {
+			out[i*cc] = v * celtFloatScale
+		}
+	} else {
+		for i := 0; i < outLen; i++ {
+			output[i*cc+c] = samples[i*ds] * celtFloatScale
+		}
+	}
 }
 
 // SetAccumulate selects the deemphasis variant libopus uses when the frame

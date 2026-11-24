@@ -8,6 +8,7 @@ import (
 	framing "github.com/darui3018823/opus/internal"
 	"github.com/darui3018823/opus/internal/celt"
 	"github.com/darui3018823/opus/internal/entcode"
+	"github.com/darui3018823/opus/internal/kernels"
 	"github.com/darui3018823/opus/internal/resampler"
 	"github.com/darui3018823/opus/internal/silk"
 )
@@ -5472,22 +5473,7 @@ func floatToInt24(dst []int32, src []float64) {
 // float32ToInt16 is floatToInt16 for float32 samples; float32(float64(v))
 // is exact, so both give the same result.
 func float32ToInt16(dst []int16, src []float32) {
-	dst = dst[:len(src)]
-	for i, v := range src {
-		dst[i] = libopusFloat32ToInt16(v)
-	}
-}
-
-// libopusFloat32ToInt16 is libopusFloatToInt16 for a float32 sample.
-func libopusFloat32ToInt16(sample float32) int16 {
-	scaled := sample * float32(32768)
-	if !(scaled > -32768) {
-		scaled = -32768
-	}
-	if !(scaled < 32767) {
-		scaled = 32767
-	}
-	return int16(math.RoundToEven(float64(scaled)))
+	kernels.Float32ToInt16(dst, src)
 }
 
 func floatToInt16(dst []int16, src []float64) {

@@ -3,6 +3,8 @@ package silk
 import (
 	"fmt"
 	"slices"
+
+	"github.com/darui3018823/opus/internal/kernels"
 )
 
 // This file is a bit-exact port of the libopus SILK sample-rate converter
@@ -385,6 +387,17 @@ func (s *Resampler) iirFIR(out []int16, in []int16) []int16 {
 	return out
 }
 
+// silkResamplerFIR8Table lays silkResamplerFracFIR12 out per phase in
+// buffer order: taps 0-3 from row t, taps 4-7 from row 11-t reversed.
+var silkResamplerFIR8Table = func() (t kernels.FIR8Table) {
+	for i := range t {
+		c0 := silkResamplerFracFIR12[i]
+		c1 := silkResamplerFracFIR12[11-i]
+		t[i] = [8]int16{c0[0], c0[1], c0[2], c0[3], c1[3], c1[2], c1[1], c1[0]}
+	}
+	return t
+}()
+
 func iirFIRInterpol(out []int16, buf []int16, maxIndexQ16, idxInc int32) []int16 {
 	if maxIndexQ16 <= 0 {
 		return out
@@ -394,7 +407,11 @@ func iirFIRInterpol(out []int16, buf []int16, maxIndexQ16, idxInc int32) []int16
 	base := len(out)
 	out = slices.Grow(out, n)[:base+n]
 	dst := out[base:]
-	indexQ16 := int32(0)
+	// The vector kernel writes the leading multiple of four samples; the
+	// loop below finishes the rest with the same arithmetic.
+	done := kernels.FIR8Interp(dst, buf, &silkResamplerFIR8Table, 0, idxInc)
+	indexQ16 := int32(done) * idxInc
+	dst = dst[done:]
 	for i := range dst {
 		// silk_SMULWB(index_Q16 & 0xFFFF, 12): the product fits in int32.
 		tableIndex := ((indexQ16 & 0xFFFF) * 12) >> 16

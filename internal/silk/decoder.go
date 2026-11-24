@@ -6,6 +6,7 @@ import (
 	"math/bits"
 
 	"github.com/darui3018823/opus/internal/entcode"
+	"github.com/darui3018823/opus/internal/kernels"
 )
 
 // Signal types per RFC 6716 Section 4.2.7.3
@@ -2425,18 +2426,7 @@ func silkInverse32VarQ(b32 int32, qres int) int32 {
 }
 
 func silkLPCAnalysisFilter(out []int16, in []int32, b []int16, length, order int) {
-	for ix := order; ix < length; ix++ {
-		inPtr := ix - 1
-		out32Q12 := int32(int16(in[inPtr])) * int32(b[0])
-		for j := 1; j < order; j++ {
-			out32Q12 += int32(int16(in[inPtr-j])) * int32(b[j])
-		}
-		out32Q12 = (int32(in[ix]) << 12) - out32Q12
-		out[ix] = clamp16(silkRShiftRound(int64(out32Q12), 12))
-	}
-	for ix := 0; ix < order && ix < length; ix++ {
-		out[ix] = 0
-	}
+	kernels.LPCAnalysisFilter(out, in, b, length, order)
 }
 
 // synthesize performs inverse NSQ (noise-shaping quantizer) synthesis.
@@ -2444,41 +2434,38 @@ func silkLPCAnalysisFilter(out []int16, in []int32, b []int16, length, order int
 // synthesize implements libopus silk/decode_core.c, producing int32 Q14 output samples.
 // The output is the unscaled LPC synthesis; caller applies gain and converts to float.
 // silkLPCPredictQ10 is the short-term prediction of silk_decode_core:
-// order>>1 plus sum_j SMULWB(hist[15-j], a[j]), accumulated in j order.
-// hist holds the last silkMaxLPCOrder sLPC_Q14 samples, newest last.
+// order>>1 plus sum_j SMULWB(hist[15-j], a[j]). hist holds the last
+// silkMaxLPCOrder sLPC_Q14 samples, newest last.
+//
+// libopus accumulates in j order, but every term is rounded on its own and
+// the int32 sum wraps, so any association gives the same bits. The older
+// terms are summed as a tree and the newest one (hist[15], the sample the
+// recursive synthesis has just produced) is added last: the next sample
+// then waits for one multiply and one add instead of the whole chain.
 func silkLPCPredictQ10(hist *[silkMaxLPCOrder]int32, a []int16, order int) int32 {
 	acc := int32(order >> 1)
 	switch {
 	case order == 16 && len(a) >= 16:
 		c := (*[16]int16)(a[:16])
-		acc = silkSMLAWB(acc, hist[15], c[0])
-		acc = silkSMLAWB(acc, hist[14], c[1])
-		acc = silkSMLAWB(acc, hist[13], c[2])
-		acc = silkSMLAWB(acc, hist[12], c[3])
-		acc = silkSMLAWB(acc, hist[11], c[4])
-		acc = silkSMLAWB(acc, hist[10], c[5])
-		acc = silkSMLAWB(acc, hist[9], c[6])
-		acc = silkSMLAWB(acc, hist[8], c[7])
-		acc = silkSMLAWB(acc, hist[7], c[8])
-		acc = silkSMLAWB(acc, hist[6], c[9])
-		acc = silkSMLAWB(acc, hist[5], c[10])
-		acc = silkSMLAWB(acc, hist[4], c[11])
-		acc = silkSMLAWB(acc, hist[3], c[12])
-		acc = silkSMLAWB(acc, hist[2], c[13])
-		acc = silkSMLAWB(acc, hist[1], c[14])
-		acc = silkSMLAWB(acc, hist[0], c[15])
+		s0 := silkSMULWB(hist[14], c[1]) + silkSMULWB(hist[13], c[2])
+		s1 := silkSMULWB(hist[12], c[3]) + silkSMULWB(hist[11], c[4])
+		s2 := silkSMULWB(hist[10], c[5]) + silkSMULWB(hist[9], c[6])
+		s3 := silkSMULWB(hist[8], c[7]) + silkSMULWB(hist[7], c[8])
+		s4 := silkSMULWB(hist[6], c[9]) + silkSMULWB(hist[5], c[10])
+		s5 := silkSMULWB(hist[4], c[11]) + silkSMULWB(hist[3], c[12])
+		s6 := silkSMULWB(hist[2], c[13]) + silkSMULWB(hist[1], c[14])
+		s7 := acc + silkSMULWB(hist[0], c[15])
+		acc = ((s0 + s1) + (s2 + s3)) + ((s4 + s5) + (s6 + s7))
+		return acc + silkSMULWB(hist[15], c[0])
 	case order == 10 && len(a) >= 10:
 		c := (*[10]int16)(a[:10])
-		acc = silkSMLAWB(acc, hist[15], c[0])
-		acc = silkSMLAWB(acc, hist[14], c[1])
-		acc = silkSMLAWB(acc, hist[13], c[2])
-		acc = silkSMLAWB(acc, hist[12], c[3])
-		acc = silkSMLAWB(acc, hist[11], c[4])
-		acc = silkSMLAWB(acc, hist[10], c[5])
-		acc = silkSMLAWB(acc, hist[9], c[6])
-		acc = silkSMLAWB(acc, hist[8], c[7])
-		acc = silkSMLAWB(acc, hist[7], c[8])
-		acc = silkSMLAWB(acc, hist[6], c[9])
+		s0 := silkSMULWB(hist[14], c[1]) + silkSMULWB(hist[13], c[2])
+		s1 := silkSMULWB(hist[12], c[3]) + silkSMULWB(hist[11], c[4])
+		s2 := silkSMULWB(hist[10], c[5]) + silkSMULWB(hist[9], c[6])
+		s3 := silkSMULWB(hist[8], c[7]) + silkSMULWB(hist[7], c[8])
+		s4 := acc + silkSMULWB(hist[6], c[9])
+		acc = ((s0 + s1) + (s2 + s3)) + s4
+		return acc + silkSMULWB(hist[15], c[0])
 	default:
 		for j := 0; j < order; j++ {
 			acc = silkSMLAWB(acc, hist[silkMaxLPCOrder-1-j], a[j])

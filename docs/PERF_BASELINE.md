@@ -580,3 +580,93 @@ build the oracle tests compare against) and once with its SSE/AVX kernels:
 v1.7.0 takes 1.5x to 1.6x plain-C libopus's time for both encode and
 decode (2.5x to 3.8x for v1.6.0). A 20 ms frame costs it about 0.2 to 0.3 ms
 to encode and 0.07 ms to decode.
+
+## SIMD Kernels, Phase 1 (2026-11-23)
+
+Branch `perf/simd-pitch-xcorr` adds `internal/kernels` with amd64 SSE/AVX
+versions of the CELT pitch cross-correlation, the SILK IIR/FIR resampler's
+8-tap interpolation and the float-to-int16 PCM conversion. Output is
+bit-identical (official-vector and packet digests, a 600-cell random codec
+matrix against `main` and `-tags purego`). Interleaved A/B against `main`
+(`8f3b430`), 8 rounds, `-cpu=1`, on a 2-vCPU Intel Xeon (2.3 GHz) Linux VM
+with Go 1.27.4:
+
+| Benchmark | main | branch | change |
+|---|---:|---:|---:|
+| encode celt/mono/96k | 90.8 µs | 83.7 µs | −7.7% |
+| encode celt/stereo/128k | 143.2 µs | 137.4 µs | −4.1% |
+| decode FEC voip/stereo/24k | 43.3 µs | 33.9 µs | −21.7% |
+| tv02 | 31.8 ms | 21.6 ms | −32.2% |
+| tv03 | 30.0 ms | 22.1 ms | −26.3% |
+| tv04 | 42.3 ms | 31.2 ms | −26.1% |
+| tv12 | 34.4 ms | 27.6 ms | −19.9% |
+
+Geometric mean over the 21 benchmarks: −10.4%; SILK/hybrid encode is
+unchanged. Method, all rows and the next phases:
+[SIMD kernels spec](../.claude/specs/simd-kernels-v2.md).
+
+## SIMD Kernels, Phase 2a (2026-11-24)
+
+Branch `perf/simd-nsq-deldec` (on phase 1) runs the SILK delayed-decision
+quantizer's warped AR noise-shaping filter and short-term prediction for
+all decision states at once (SSE4.1). Packets are unchanged (digests and
+an 800-cell SILK matrix against `main` and `-tags purego`). Same VM as
+phase 1, min of 25 interleaved runs pinned to one CPU, against phase 1:
+
+| Workload | complexity 5 (default) | complexity 10 |
+|---|---:|---:|
+| silk/mono/12k | −5.3% | −18.8% |
+| silk/stereo/12k | −4.4% | −21.3% |
+| hybrid/mono/24k | −3.0% | −14.2% |
+| hybrid/stereo/36k | −4.1% | −16.3% |
+
+The gain grows with the state count (2 at complexity 2–5, 4 at 8–10).
+Details: [SIMD kernels spec](../.claude/specs/simd-kernels-v2.md).
+
+## SIMD Kernels, Phase 2b (2026-11-24)
+
+The same branch also runs the rest of each state's quantizer sample
+(residual, the two candidates and their state) in lanes. Cumulative
+against phase 1, min of 25 interleaved runs pinned to one CPU:
+
+| Workload | complexity 5 (default) | complexity 10 |
+|---|---:|---:|
+| silk/mono/12k | −8.5% | −37.7% |
+| silk/stereo/12k | +2.3% | −34.6% |
+| hybrid/mono/24k | +0.3% | −15.7% |
+| hybrid/stereo/36k | −4.3% | −17.0% |
+
+Complexity 5 results are within this VM's noise. Packets are unchanged on
+amd64 and arm64 (qemu).
+
+## SIMD Kernels, Phase 3a (2026-11-24)
+
+Branch `perf/simd-celt-fft` (on phase 2) adds SSE kernels for the CELT
+FFT's radix-3/4/5 stages and the backward MDCT rotations, and reassociates
+the SILK decoder's short-term prediction sum (pure Go). Output unchanged
+(digests, matrices on amd64 and arm64 under qemu). Min of 15 interleaved
+runs pinned to one CPU, against phase 2:
+
+| Benchmark | change |
+|---|---:|
+| 12 RFC 8251 vectors, total decode time | −8.2% |
+| tv01 / tv06 / tv11 (CELT-heavy) | −14.3% / −17.4% / −14.1% |
+| encode celt/mono/96k, celt/stereo/128k | −6.8%, −5.1% |
+
+Details: [SIMD kernels spec](../.claude/specs/simd-kernels-v2.md).
+
+## SIMD Kernels, Phase 3b (2026-11-24)
+
+Branch `perf/simd-combfilter` (on phase 3a) runs the decoder's comb
+post-filter four samples at a time on SSE builds. Output unchanged. CPU
+profiles of tv01/tv09/tv10/tv11 show `PostFilter.Apply` falling from 7.0%
+to 3.8% of decode time; timed runs on this VM could not resolve the
+change (an unchanged build varied by ±2–3% in total against itself).
+
+## SIMD Kernels, Phase 4 (2026-11-24)
+
+Branch `perf/simd-neon` (on phase 3b) adds NEON versions of every kernel
+for arm64 with Go 1.27+. Output is identical to amd64 (digests and both
+random matrices under qemu). No arm64 timings are recorded: the only
+arm64 available was qemu user-mode emulation. The CI `bench (arm64)` job
+will give the first hardware numbers.

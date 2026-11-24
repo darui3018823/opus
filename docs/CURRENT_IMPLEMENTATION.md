@@ -819,7 +819,9 @@ or the build. On amd64 (without the `purego` tag):
   even with CVTPS2DQ; it is checked against the reference for all 2^32
   float32 inputs.
 
-Other architectures and `-tags purego` builds use the references. The
+On arm64 built with Go 1.27 or later (the module's toolchain), every
+kernel has a NEON version with the same contract; arm64 with Go 1.24 to
+1.26, other architectures and `-tags purego` builds use the references. The
 SILK decoder's short-term prediction (`silkLPCPredictQ10`) sums its
 older taps as a tree and adds the newest last, on every architecture;
 the int32 sum wraps, so this is exact. Kernel

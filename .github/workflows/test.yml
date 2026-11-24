@@ -69,6 +69,13 @@ jobs:
           go vet ./...
           go vet -tags purego ./...
 
+      - name: Minimum Go version builds (pure Go arm64 kernels)
+        # The NEON kernels need Go 1.27's assembler; older toolchains must
+        # still build every architecture with the pure Go references.
+        run: |
+          GOTOOLCHAIN=go1.24.11 go build ./...
+          GOTOOLCHAIN=go1.24.11 GOARCH=arm64 go build ./...
+
       - name: go test (purego reference kernels)
         # Default builds use the amd64 vector kernels; this keeps the pure Go
         # references that other architectures run covered on amd64 too.

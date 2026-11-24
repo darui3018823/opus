@@ -12,8 +12,8 @@
   Phase 3a (CELT FFT stages and backward-MDCT rotations, plus a
   reassociated SILK synthesis prediction) is on `perf/simd-celt-fft`,
   stacked on phase 2. Phase 3b (the decoder's comb post-filter) is on
-  `perf/simd-combfilter`, stacked on 3a. None is merged. Phase 4 is a
-  proposal.
+  `perf/simd-combfilter`, stacked on 3a. Phase 4 (arm64 NEON versions of
+  every kernel) is on `perf/simd-neon`, stacked on 3b. None is merged.
 - **Inputs:** the four 2026-11-22 performance audits (ARCH-03 in
   [the Gemini high audit](../memory/audits/2026-11-22-perf-memory-optimization-audit.md)),
   CPU profiles of `BenchmarkPerfDefault` and `BenchmarkDecodeOfficialVectors`
@@ -356,17 +356,51 @@ Smaller remaining candidates that are exact: the forward MDCT rotations
 (about 1% of CELT encode), the radix-2 and m = 1 radix-4 FFT stages (~2%
 of decode), and `interleaveSILKOutInto` (a shuffle).
 
-## Phase 4: arm64 NEON
+## Phase 4: arm64 NEON (implemented)
 
-- Same kernels with FMUL/FADD (never FMLA) and SMULL/ADDP for the integer
-  ones. The Go arm64 assembler lacks some NEON mnemonics; use `WORD`
-  encodings with a comment, as the standard library does.
-- No feature detection is needed (NEON/ASIMD is mandatory on arm64).
-- CI already runs native linux/macos/windows arm64 tests and the official
-  vector digests on arm64, which is exactly the coverage the kernels need.
-- Note: the Go compiler fuses `x*y + z` on arm64 unless an explicit
-  conversion intervenes, so kernel *references* must keep their
-  `float32(...)` wrappers; the existing `-S` FMA guard covers them.
+Every kernel has a NEON version, built with `arm64 && go1.27 && !purego`.
+Go 1.27's assembler added the vector floating-point and widening integer
+instructions (`VFADD`, `VFMUL`, `VFCVTN`, `VSMULL`, `VSHRN`, `VSQADD`,
+...); Go 1.24 to 1.26 lack them, so those toolchains build the pure Go
+references on arm64 (CI builds both architectures with Go 1.24.11, the
+module minimum). NEON is mandatory on arm64, so there is no feature
+detection.
+
+Notes per kernel, beyond the SSE versions:
+
+- Every float kernel uses separate `FMUL` and `FADD`/`FSUB`; never a
+  fused multiply-add. Advanced SIMD honours FPCR like the scalar unit, so
+  subnormals behave the same (unlike 32-bit ARM NEON, which flushes them).
+- `VLD2`/`VST2` split interleaved complex values into real and imaginary
+  vectors and back, so the FFT stages need no shuffles; `VLD2` on `.D2`
+  does the same for the MDCT's float64 even/odd inputs.
+- `REV64` then `EXT #8` reverses four lanes.
+- `Float32ToInt16`: `FMAX`/`FMIN` propagate NaN, unlike x86 `MAXPS`, so
+  the clamp is a `FCMGT` mask and `BSL`, which sends NaN to -32768 as the
+  scalar `!(x > -32768)` does. Rounding is `FRINTN` (ties to even) then
+  `FCVTZS`, then `XTN`.
+- `silk_SMULWB` is `SMULL`/`SMULL2` (int32 x int32 -> int64) then
+  `SHRN #16`, which keeps bits 16-47; one register holds four states, and
+  the two-state variants use `.S2` and leave lanes 2 and 3 untouched.
+- `NSQCand4` uses `SQADD`/`SQSUB` for the saturating add and subtract and
+  `SRSHR` for the rounding shift, which the SSE version builds from sign
+  tests.
+- `FIR8Interp` widens with `SMULL`/`SMULL2` and sums four outputs with two
+  `ADDP` levels, then `SQXTN` saturates.
+
+Verification, all under `qemu-aarch64` on the amd64 VM: the kernel tests
+on the NEON and fallback paths (including the PCM float32 sweep), the
+packages' full test suites (official-vector and packet digests
+included), and both random matrices, whose digests equal the amd64 ones.
+Ten deliberate asm mutations across the kernels were run; nine failed the
+tests and the tenth (`FCMGT` to `FCMGE` in the PCM clamp) is equivalent,
+since both send -32768 to -32768; two non-equivalent PCM mutations were
+caught. The CI FMA guard also scans comments, so the asm avoids naming
+fused instructions.
+
+Not measured: qemu timings say nothing about hardware. The CI `bench
+(arm64)` job and the native arm64 test cells run once the PRs target
+`main`.
 
 ## Not planned
 

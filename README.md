@@ -184,7 +184,11 @@ remaining encoder and decoder differences from plain-C libopus 1.6.1 found
 in a 5690-cell real-audio comparison. v1.8.1 cuts decoder construction and
 FEC memory by more than 95% and removes the remaining per-frame decode
 allocations, without changing output, and fixes five encoder differences from
-plain-C libopus that appear only after mid-stream control changes. These are regression fixtures and local measurements,
+plain-C libopus that appear only after mid-stream control changes. v1.9.0
+adds bit-exact SSE/AVX (amd64) and NEON (arm64) kernels for the hottest
+loops, about 13% faster on average and up to 22% faster decode in the
+recorded amd64 benchmarks, with packets, final ranges and decoded PCM
+unchanged; `-tags purego` keeps the pure Go paths. These are regression fixtures and local measurements,
 not universal quality or performance guarantees; see
 [the real-corpus scoreboard](docs/REAL_CORPUS_SCOREBOARD.md) and
 [the performance baseline](docs/PERF_BASELINE.md) for conditions and values.

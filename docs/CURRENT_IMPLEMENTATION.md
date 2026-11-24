@@ -26,8 +26,8 @@ The `oggopus` subpackage implements Ogg page and Ogg Opus container APIs.
 Constants are in `constants.go` and package-level error values in `errors.go`.
 Public version constants are generated into `version_gen.go` from the
 repository-level `VERSION` file; `go generate ./...` refreshes them and CI
-rejects generated-file drift. The current released baseline is `v1.8.0`;
-`VERSION` holds the `v1.8.1` release candidate.
+rejects generated-file drift. The current released baseline is `v1.8.1`;
+`VERSION` holds the `v1.9.0` release candidate.
 Release preparation follows [`docs/RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md),
 and compatibility-breaking cleanup is recorded separately in
 [`docs/V2_API_CANDIDATES.md`](V2_API_CANDIDATES.md).
@@ -1732,6 +1732,16 @@ Behavior changes from the audit fixes that callers can observe:
   pins `toolchain go1.27.4` (minimum Go 1.24.11). Records:
   `.claude/tasks/implementation/perf-audit-fixes-2026-11-22.md` and
   `.claude/tasks/investigation/v1.8.1-chaos-ctl-hunt-2026-11-23.md`.
+- v1.9.0 (PRs #42 to #47) is a minor release with no public API change.
+  It adds `internal/kernels`: SSE/SSE4.1/AVX (amd64) and NEON (arm64, Go
+  1.27+) versions of the pitch cross-correlation, SILK resampler FIR, SILK
+  delayed-decision quantizer, CELT FFT/IMDCT rotations, comb post-filter,
+  int16 output conversion and SILK LPC analysis filter, plus a two-channel
+  CELT de-emphasis loop. Each lane keeps the scalar operation order (no
+  FMA), so packets, final ranges and decoded PCM are unchanged on every
+  architecture; `-tags purego` selects the pure Go references. On an
+  i7-11700 the geometric mean over 25 benchmarks is -13% against v1.8.1,
+  decode -15% to -22%. Record: `.claude/specs/simd-kernels-v2.md`.
 - `oggopus`: `PacketWriter` keeps the granule of a packet completed on a page
   that ends inside the next packet (it wrote -1, which `Reader` rejected);
   `Writer.Close` before any audio packet returns `ErrInvalidOpusStream`;

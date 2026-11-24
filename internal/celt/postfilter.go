@@ -2,6 +2,7 @@ package celt
 
 import (
 	"github.com/darui3018823/opus/internal/entcode"
+	"github.com/darui3018823/opus/internal/kernels"
 )
 
 // Post-filter constants from libopus celt_decoder.c / celt.h.
@@ -24,6 +25,10 @@ type PostFilter struct {
 	prevTapset int     // Previous post-filter tapset
 	// History buffer — must hold at least combFilterMaxPeriod + overlap samples.
 	buf []float64
+	// ext and win are float32 scratch for the vector path: the reachable
+	// history plus the frame, and the overlap window.
+	ext []float32
+	win []float32
 }
 
 // NewPostFilter allocates a PostFilter with an empty history.
@@ -133,6 +138,13 @@ func (pf *PostFilter) Apply(samples []float64, period int, gain float64, tapset 
 
 	pf.period = max(pf.period, combFilterMinPeriod)
 	pf.prevPeriod = max(pf.prevPeriod, combFilterMinPeriod)
+
+	if kernels.HasComb() {
+		pf.applyLanes(samples, period, gain, tapset, shortMdctSize, lm, window)
+		pf.updateHistory(samples)
+		pf.advanceState(period, gain, tapset, lm)
+		return samples
+	}
 
 	pf.combFilter(samples, 0, shortMdctSize,
 		pf.prevPeriod, pf.period,
@@ -254,6 +266,99 @@ func (pf *PostFilter) combFilterConst(samples []float64, offset, n, period int, 
 		x2 = x1
 		x1 = x0
 	}
+}
+
+// applyLanes is Apply's filtering on the vector kernels. It filters the
+// same samples with the same float32 operations as the combFilter path.
+func (pf *PostFilter) applyLanes(samples []float64, period int, gain float64, tapset int, shortMdctSize, lm int, window []float64) {
+	n := len(samples)
+	second := lm != 0 && shortMdctSize < n
+
+	// The filter runs in place on ext: the history the taps can reach
+	// (period + 2 samples back, zero before the start of pf.buf) followed by
+	// the frame, all as float32 like libopus's float build. Only the samples
+	// the filter writes are copied back.
+	reach := max(pf.prevPeriod, pf.period)
+	if second {
+		reach = max(reach, period)
+	}
+	reach = max(reach, combFilterMinPeriod) + 2
+	if cap(pf.ext) < reach+n {
+		pf.ext = make([]float32, reach+n)
+	}
+	ext := pf.ext[:reach+n]
+	bufLen := len(pf.buf)
+	// History older than pf.buf reads as zero, as in getHistorySample.
+	h := bufLen - reach
+	if h < 0 {
+		clear(ext[:-h])
+		kernels.Float64sToFloat32s(ext[-h:reach], pf.buf)
+	} else {
+		kernels.Float64sToFloat32s(ext[:reach], pf.buf[h:])
+	}
+	kernels.Float64sToFloat32s(ext[reach:], samples)
+	if len(pf.win) != len(window) {
+		pf.win = make([]float32, len(window))
+	}
+	kernels.Float64sToFloat32s(pf.win, window)
+
+	end := pf.combFilterExt(ext, reach, 0, shortMdctSize,
+		pf.prevPeriod, pf.period,
+		pf.prevGain, pf.gain,
+		pf.prevTapset, pf.tapset)
+	kernels.Float32sToFloat64s(samples[:end], ext[reach:reach+end])
+
+	if second {
+		end := pf.combFilterExt(ext, reach, shortMdctSize, n-shortMdctSize,
+			pf.period, period,
+			pf.gain, gain,
+			pf.tapset, tapset)
+		kernels.Float32sToFloat64s(samples[shortMdctSize:shortMdctSize+end], ext[reach+shortMdctSize:reach+shortMdctSize+end])
+	}
+}
+
+// combFilterExt is libopus comb_filter (float build) in place on ext, whose
+// sample reach+i is frame sample i. It filters frame samples
+// [offset, offset+n) and returns how many of them, from offset, it wrote.
+func (pf *PostFilter) combFilterExt(ext []float32, reach, offset, n, period0, period1 int, gain0, gain1 float64, tapset0, tapset1 int) int {
+	if n <= 0 {
+		return 0
+	}
+	if gain0 == 0 && gain1 == 0 {
+		return 0
+	}
+	period0 = max(period0, combFilterMinPeriod)
+	period1 = max(period1, combFilterMinPeriod)
+	if tapset0 < 0 || tapset0 >= len(pfCombGains) {
+		tapset0 = 0
+	}
+	if tapset1 < 0 || tapset1 >= len(pfCombGains) {
+		tapset1 = 0
+	}
+
+	// opus_val16, celt_coef, and opus_val32 are all float in a floating-point
+	// libopus build, so every tap and accumulator operation is float32.
+	g := kernels.CombGains{
+		float32(float32(gain0) * float32(pfCombGains[tapset0][0])),
+		float32(float32(gain0) * float32(pfCombGains[tapset0][1])),
+		float32(float32(gain0) * float32(pfCombGains[tapset0][2])),
+		float32(float32(gain1) * float32(pfCombGains[tapset1][0])),
+		float32(float32(gain1) * float32(pfCombGains[tapset1][1])),
+		float32(float32(gain1) * float32(pfCombGains[tapset1][2])),
+	}
+
+	overlap := len(pf.win)
+	if gain0 == gain1 && period0 == period1 && tapset0 == tapset1 {
+		overlap = 0
+	}
+	overlap = min(overlap, n)
+	start := reach + offset
+	kernels.CombOverlap(ext, start, overlap, period0, period1, &g, pf.win)
+	if gain1 == 0 {
+		return overlap
+	}
+	kernels.CombConst(ext, start+overlap, n-overlap, period1, g[3], g[4], g[5])
+	return n
 }
 
 // getHistorySample retrieves sample at index i relative to current frame start.

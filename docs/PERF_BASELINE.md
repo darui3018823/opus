@@ -654,3 +654,11 @@ runs pinned to one CPU, against phase 2:
 | encode celt/mono/96k, celt/stereo/128k | −6.8%, −5.1% |
 
 Details: [SIMD kernels spec](../.claude/specs/simd-kernels-v2.md).
+
+## SIMD Kernels, Phase 3b (2026-11-24)
+
+Branch `perf/simd-combfilter` (on phase 3a) runs the decoder's comb
+post-filter four samples at a time on SSE builds. Output unchanged. CPU
+profiles of tv01/tv09/tv10/tv11 show `PostFilter.Apply` falling from 7.0%
+to 3.8% of decode time; timed runs on this VM could not resolve the
+change (an unchanged build varied by ±2–3% in total against itself).

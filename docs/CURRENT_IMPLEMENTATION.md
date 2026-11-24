@@ -818,6 +818,13 @@ or the build. On amd64 (without the `purego` tag):
   MAXPS/MINPS (whose NaN rule matches the scalar clamp) and rounds half to
   even with CVTPS2DQ; it is checked against the reference for all 2^32
   float32 inputs.
+- `LPCAnalysisFilter` (silk_LPC_analysis_filter: decoder LTP rewhitening,
+  PLC and the encoder's NSQ) computes four outputs per pass with SSE2
+  PMADDWD over 16 taps (zero-padded for order 10); the int16 products are
+  exact and the int32 sum wraps, so the term order is free.
+
+The CELT decoder runs the de-emphasis of both stereo channels in one loop
+(pure Go, every architecture); each channel keeps its operation order.
 
 On arm64 built with Go 1.27 or later (the module's toolchain), every
 kernel has a NEON version with the same contract; arm64 with Go 1.24 to
@@ -826,7 +833,9 @@ SILK decoder's short-term prediction (`silkLPCPredictQ10`) sums its
 older taps as a tree and adds the newest last, on every architecture;
 the int32 sum wraps, so this is exact. Kernel
 tests compare every path (AVX, SSE, fallback) against the reference,
-including subnormals, infinities and int16 overflow. The design and the
+including subnormals, infinities and int16 overflow; `FuzzKernelsFloat` and
+`FuzzKernelsFixed` run nightly on amd64 and arm64, and the opusref workflow
+compares against a plain-C libopus 1.6.1 build on both architectures. The design and the
 remaining candidates are in `.claude/specs/simd-kernels-v2.md`.
 
 ### `internal/resampler`

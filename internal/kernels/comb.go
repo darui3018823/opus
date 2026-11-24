@@ -11,7 +11,10 @@ package kernels
 type CombGains [6]float32
 
 func combCheck(x []float32, start, n, period int) {
-	if n < 0 || period < combMinPeriodForLanes || start-period-2 < 0 {
+	// Every comparison is between values already known to be in range, so
+	// no argument can overflow its way past the check.
+	if n < 0 || start < 0 || start > len(x) || n > len(x) ||
+		period < combMinPeriodForLanes || period > start-2 {
 		panic("kernels: comb filter reads before the buffer")
 	}
 	_ = x[start+n-1]

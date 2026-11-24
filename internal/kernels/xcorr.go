@@ -15,10 +15,13 @@ func PitchXcorr32(x, y, xcorr []float32, length, maxPitch int) {
 	if maxPitch <= 0 {
 		return
 	}
-	// Bounds are checked once here so the assembly can run unchecked.
-	_ = x[:length]
-	_ = y[:length+maxPitch-1]
-	_ = xcorr[:maxPitch]
+	// Bounds are checked once here so the assembly can run unchecked. x and
+	// y are resliced as the reference does, so their lengths (not their
+	// capacities) bound what the assembly reads. xcorr is checked by index,
+	// which uses its length, as the reference's writes do.
+	x = x[:length]
+	y = y[:length+maxPitch-1]
+	_ = xcorr[maxPitch-1]
 	done := pitchXcorr32Arch(x, y, xcorr, length, maxPitch)
 	pitchXcorr32Lags(x, y, xcorr, length, done, maxPitch)
 }

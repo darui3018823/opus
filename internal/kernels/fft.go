@@ -38,6 +38,12 @@ func fftCheck(f, t []float32, p, m, groups, mm int) {
 	if m <= 0 || m%4 != 0 || groups <= 0 {
 		panic("kernels: bad FFT stage shape")
 	}
+	// The assembly steps mm complex values between groups without checks.
+	// Bounding every factor by len(f) keeps the products below from
+	// overflowing, so the index check at the end covers every group.
+	if mm < 0 || m > len(f) || groups > len(f) || mm > len(f) {
+		panic("kernels: bad FFT stage stride")
+	}
 	if len(t) < 2*(p-1)*m {
 		panic("kernels: short twiddle table")
 	}

@@ -1,5 +1,7 @@
 package kernels
 
+import "slices"
+
 // The pre- and post-rotations of the float libopus backward MDCT
 // (clt_mdct_backward_c) for the static-mode sizes, around the N/4-point
 // complex FFT. fout is the FFT buffer as interleaved complex float32, trig
@@ -18,7 +20,19 @@ func NewBitRev(perm []int) *BitRev {
 			panic("kernels: bitrev index out of range")
 		}
 	}
-	return &BitRev{idx: perm}
+	// Keep a private copy: the kernels trust these indices, so a later
+	// change to the caller's slice must not reach them.
+	return &BitRev{idx: slices.Clone(perm)}
+}
+
+// mdctCheck checks that each length holds at least 2*n4 values. n4 is
+// compared with half the length so that 2*n4 is never computed unchecked.
+func mdctCheck(n4 int, lens ...int) {
+	for _, l := range lens {
+		if n4 > l/2 {
+			panic("kernels: MDCT buffer shorter than 2*n4")
+		}
+	}
 }
 
 // IMDCTPreRotate writes the pre-rotated coefficients into the bit-reversed
@@ -29,9 +43,10 @@ func NewBitRev(perm []int) *BitRev {
 //
 // bitrev must have exactly n4 entries.
 func IMDCTPreRotate(fout []float32, x []float64, trig []float32, bitrev *BitRev, n4 int) {
-	_ = x[2*n4-1]
-	_ = trig[2*n4-1]
-	_ = fout[2*n4-1]
+	if n4 <= 0 {
+		return
+	}
+	mdctCheck(n4, len(x), len(trig), len(fout))
 	br := bitrev.idx
 	if len(br) != n4 {
 		panic("kernels: bitrev size mismatch")
@@ -68,9 +83,10 @@ func imdctPreGeneric(fout []float32, x []float64, trig []float32, bitrev []int, 
 //	buf[2i], buf[2*n4-1-2i]   from fout[i] and trig[i], trig[n4+i]
 //	buf[2*n4-2-2i], buf[2i+1] from fout[k] and trig[n4-1-i], trig[2*n4-1-i]
 func IMDCTPostRotate(buf []float64, fout []float32, trig []float32, n4 int) {
-	_ = buf[2*n4-1]
-	_ = trig[2*n4-1]
-	_ = fout[2*n4-1]
+	if n4 <= 0 {
+		return
+	}
+	mdctCheck(n4, len(buf), len(trig), len(fout))
 	done := imdctPostArch(buf, fout, trig, n4)
 	imdctPostGeneric(buf, fout, trig, n4, done)
 }

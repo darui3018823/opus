@@ -43,6 +43,11 @@ func (p *LPC4) SetCoefficients(a []int16, order, states int) {
 //
 // The int32 sum wraps, so its order does not matter.
 func (p *LPC4) Predict(i int, out *[4]int32) {
+	// The assembly reads rows i+16-Order through i+15 without checks, so
+	// the whole window H[i : i+16] must lie inside H.
+	if i < 0 {
+		panic("kernels: negative LPC row")
+	}
 	_ = p.H[i+15]
 	if lpc4Arch(p, i, out) {
 		return

@@ -662,3 +662,11 @@ post-filter four samples at a time on SSE builds. Output unchanged. CPU
 profiles of tv01/tv09/tv10/tv11 show `PostFilter.Apply` falling from 7.0%
 to 3.8% of decode time; timed runs on this VM could not resolve the
 change (an unchanged build varied by ±2–3% in total against itself).
+
+## SIMD Kernels, Phase 4 (2026-11-24)
+
+Branch `perf/simd-neon` (on phase 3b) adds NEON versions of every kernel
+for arm64 with Go 1.27+. Output is identical to amd64 (digests and both
+random matrices under qemu). No arm64 timings are recorded: the only
+arm64 available was qemu user-mode emulation. The CI `bench (arm64)` job
+will give the first hardware numbers.

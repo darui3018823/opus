@@ -3,6 +3,8 @@ package dsp
 import (
 	"math"
 	"sync"
+
+	"github.com/darui3018823/opus/internal/kernels"
 )
 
 //go:generate go run generate_mdct_twiddles.go
@@ -182,22 +184,30 @@ func (m *CELTMode) imdctRawStatic(X []float64, buf []float64) []float64 {
 		m.bwdIn = make([]opusComplex, N4)
 	}
 	fout := m.bwdIn
-	bitrev := plan.bitrev[:N4]
 	X = X[:N2]
-	for i := 0; i < N4; i++ {
-		xp1 := float32(X[2*i])
-		xp2 := float32(X[N2-1-2*i])
-		t0 := trig[i]
-		t1 := trig[N4+i]
-		yr := float32(xp2*t0) + float32(xp1*t1)
-		yi := float32(xp1*t0) - float32(xp2*t1)
-		fout[bitrev[i]] = opusComplex{r: yi, i: yr}
+	if kernels.HasFFT() {
+		kernels.IMDCTPreRotate(floats(fout), X, trig, plan.bitrevK, N4)
+	} else {
+		bitrev := plan.bitrev[:N4]
+		for i := 0; i < N4; i++ {
+			xp1 := float32(X[2*i])
+			xp2 := float32(X[N2-1-2*i])
+			t0 := trig[i]
+			t1 := trig[N4+i]
+			yr := float32(xp2*t0) + float32(xp1*t1)
+			yi := float32(xp1*t0) - float32(xp2*t1)
+			fout[bitrev[i]] = opusComplex{r: yi, i: yr}
+		}
 	}
 	plan.transform(fout)
 
 	// fout[k] holds the pair buf[2k], buf[2k+1] of the generic path; every
 	// pair is read before the rotation below overwrites it.
 	buf = buf[:N2]
+	if kernels.HasFFT() {
+		kernels.IMDCTPostRotate(buf, floats(fout), trig, N4)
+		return buf
+	}
 	for i := 0; i < (N4+1)/2; i++ {
 		yp0 := 2 * i
 		yp1 := N2 - 2 - 2*i

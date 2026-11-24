@@ -168,7 +168,10 @@ elementary packet の長さを変えずに、決定的な 5.1 / 7.1 fixture の 
 実音声比較で見つかった plain-C libopus 1.6.1 とのエンコーダ・デコーダ差分を
 すべて解消しました。v1.8.1 は出力を変えずにデコーダ生成と FEC のメモリを 95% 以上
 削減し、フレームごとのデコード確保をなくしました。あわせて、ストリーム途中で
-制御設定を変えたときだけ現れる plain-C libopus とのエンコーダ差分 5 件を修正しました。これらは回帰用
+制御設定を変えたときだけ現れる plain-C libopus とのエンコーダ差分 5 件を修正しました。v1.9.0 は
+最も重いループに bit-exact な SSE/AVX (amd64) と NEON (arm64) kernel を追加し、記録済み
+amd64 benchmark で平均約 13%、デコードは最大 22% 速くなりました。packet、final range、
+デコード PCM は変わりません。`-tags purego` で pure Go の経路を使えます。これらは回帰用
 fixture とローカル測定であり、一般的な品質・性能保証ではありません。条件と数値は
 [real-corpus scoreboard](docs/REAL_CORPUS_SCOREBOARD.md) と
 [performance baseline](docs/PERF_BASELINE.md) を参照してください。

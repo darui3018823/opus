@@ -6,6 +6,7 @@ import (
 	"math/bits"
 
 	"github.com/darui3018823/opus/internal/entcode"
+	"github.com/darui3018823/opus/internal/kernels"
 )
 
 // Signal types per RFC 6716 Section 4.2.7.3
@@ -2425,18 +2426,7 @@ func silkInverse32VarQ(b32 int32, qres int) int32 {
 }
 
 func silkLPCAnalysisFilter(out []int16, in []int32, b []int16, length, order int) {
-	for ix := order; ix < length; ix++ {
-		inPtr := ix - 1
-		out32Q12 := int32(int16(in[inPtr])) * int32(b[0])
-		for j := 1; j < order; j++ {
-			out32Q12 += int32(int16(in[inPtr-j])) * int32(b[j])
-		}
-		out32Q12 = (int32(in[ix]) << 12) - out32Q12
-		out[ix] = clamp16(silkRShiftRound(int64(out32Q12), 12))
-	}
-	for ix := 0; ix < order && ix < length; ix++ {
-		out[ix] = 0
-	}
+	kernels.LPCAnalysisFilter(out, in, b, length, order)
 }
 
 // synthesize performs inverse NSQ (noise-shaping quantizer) synthesis.

@@ -113,7 +113,7 @@ func FuzzKernelsFloat(f *testing.F) {
 }
 
 func FuzzKernelsFixed(f *testing.F) {
-	for i := byte(0); i < 4; i++ {
+	for i := byte(0); i < 5; i++ {
 		f.Add([]byte{i, 1, 2, 3, 4, 5, 6, 7})
 		f.Add([]byte{i, 0xff, 0xff, 0xff, 0x7f, 0, 0, 0, 0x80})
 	}
@@ -121,7 +121,7 @@ func FuzzKernelsFixed(f *testing.F) {
 		if len(data) == 0 {
 			return
 		}
-		which := data[0] % 4
+		which := data[0] % 5
 		withPaths(t, func(t *testing.T) {
 			s := newFuzzSource(data[1:])
 			switch which {
@@ -133,6 +133,8 @@ func FuzzKernelsFixed(f *testing.F) {
 				fuzzLPC4(t, s)
 			case 3:
 				fuzzNSQCand(t, s)
+			case 4:
+				fuzzLPCAnalysis(t, s)
 			}
 		})
 	})
@@ -353,6 +355,28 @@ func fuzzLPC4(t *testing.T, s *fuzzSource) {
 	}
 	if got != want {
 		t.Fatalf("lpc4 order %d row %d: got %v want %v", order, i, got, want)
+	}
+}
+
+func fuzzLPCAnalysis(t *testing.T, s *fuzzSource) {
+	order := 1 + s.intn(16)
+	length := s.intn(lpcAnalysisMaxLen + 40)
+	in := make([]int32, length)
+	for i := range in {
+		in[i] = s.i32()
+	}
+	b := make([]int16, order)
+	for i := range b {
+		b[i] = s.i16()
+	}
+	got := make([]int16, length)
+	want := make([]int16, length)
+	LPCAnalysisFilter(got, in, b, length, order)
+	LPCAnalysisFilterGeneric(want, in, b, length, order)
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("lpc analysis order %d length %d: out[%d] got %d want %d", order, length, i, got[i], want[i])
+		}
 	}
 }
 

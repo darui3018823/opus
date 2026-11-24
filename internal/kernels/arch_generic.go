@@ -50,3 +50,5 @@ func combOverlapArch(x []float32, start, n, p0, p1 int, g *CombGains, w []float3
 func f64to32Arch(dst []float32, src []float64) int { return 0 }
 
 func f32to64Arch(dst []float64, src []float32) int { return 0 }
+
+func lpcAnalysisArch(out []int16, in []int32, b []int16, length, order int) int { return 0 }

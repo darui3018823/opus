@@ -402,6 +402,34 @@ Not measured: qemu timings say nothing about hardware. The CI `bench
 (arm64)` job and the native arm64 test cells run once the PRs target
 `main`.
 
+## Phase 5 (implemented): remaining exact candidates
+
+Profiled on the i7-11700 after phases 1-4. The remaining hot spots are mostly
+serial (SILK synthesis, entropy and PVQ decoding, the PVQ search, warped
+autocorrelation, float inner products). Two exact candidates were taken:
+
+| Change | Method | Profile share (stereo decode benchmarks) |
+|---|---|---:|
+| `kernels.LPCAnalysisFilter` | FIR with exact int16 products and a wrapping int32 sum: four outputs per pass, PMADDWD (SSE2) / SMULL+SMULL2 (NEON) over 16 zero-padded taps, vector Q12 rounding and int16 saturation | 3.14% → 0.79% |
+| Stereo de-emphasis in one loop (pure Go) | the two channels' serial recursions run side by side so the CPU overlaps them; each channel keeps its operation order | 5.16% → 1.98% |
+
+End to end (6 interleaved rounds against phase 1-4): CELT stereo decode
+-6.7%, hybrid stereo decode -8.9%; the other rows were within this run's
+noise (+/-10-20%).
+
+Considered and not taken: the NLSF delayed-decision quantizer
+(`silkNLSFDelDecQuantInto`, about 3% of encode). Its per-state work is
+dominated by table lookups (two output tables and the rate table per
+state and coefficient), which need scalar gathers on SSE/NEON, so a lane
+version would not pay for itself.
+
+Verification added with this phase: `FuzzKernelsFloat`/`FuzzKernelsFixed`
+(nightly, amd64 and arm64) and a plain-C oracle job in the opusref
+workflow on ubuntu-latest and ubuntu-24.04-arm (encoder/decoder oracles,
+libopus audit, parity hunt and chaos CTL cells). The libopus audit's NaN
+input cells (`TestAuditEdgeInputs/nan/`) differ from libopus on `main` as
+well and are skipped there.
+
 ## Not planned
 
 - Reassociating float reductions (`innerProd32`, `dualInnerProd32`,

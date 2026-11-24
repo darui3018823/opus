@@ -9,7 +9,11 @@
   phase 2 (warped AR noise shaping and short-term prediction across
   delayed-decision states) is on `perf/simd-nsq-deldec`, stacked on it.
   Phase 2b (the rest of each state's sample) is on the same branch.
-  Neither is merged. Phases 3 and 4 are proposals.
+  Phase 3a (CELT FFT stages and backward-MDCT rotations, plus a
+  reassociated SILK synthesis prediction) is on `perf/simd-celt-fft`,
+  stacked on phase 2. Phase 3b (the decoder's comb post-filter) is on
+  `perf/simd-combfilter`, stacked on 3a. None is merged. Phase 4 is a
+  proposal.
 - **Inputs:** the four 2026-11-22 performance audits (ARCH-03 in
   [the Gemini high audit](../memory/audits/2026-11-22-perf-memory-optimization-audit.md)),
   CPU profiles of `BenchmarkPerfDefault` and `BenchmarkDecodeOfficialVectors`
@@ -254,16 +258,103 @@ exactly), `silkInnerProductFLP32` (float64 accumulation order),
 `silkNLSFDelDecQuantInto` (vectorisable across survivors, medium effort),
 and the scalar survivor selection and per-state bookkeeping.
 
-## Phase 3: CELT transform and remaining CELT encoder loops
+## Phase 3: CELT transform and the rest of the decoder
 
-| Function | Share | Plan |
+### 3a (implemented)
+
+**FFT stages.** The static-mode KISS FFTs (60/120/240/480 points) factor
+as `[5,3,4]`, `[5,3,2,4]`, `[5,3,4,4]` and `[5,3,4,2,4]`; every radix-3,
+-4 and -5 stage with m > 1 has m divisible by 4. `FFTRadix3/4/5` run four
+consecutive butterflies of a group per pass, real and imaginary parts
+deinterleaved into separate registers on load (`SHUFPS $0x88/$0xDD`) and
+interleaved on store (`UNPCKLPS/UNPCKHPS`). `C_MUL` is
+`ar*br - ai*bi`, `ar*bi + ai*br` with each product rounded; every lane
+follows `kf_bfly3/4/5`'s scalar order, negation included (an XOR of the
+sign bit is exact). The strided twiddles `tw[j*fstride*q]` are copied once
+per plan into a per-stage table laid out in blocks of four butterflies.
+The radix-2 stage and the m = 1 radix-4 stage stay scalar (1.9% of decode
+together).
+
+**Backward MDCT rotations.** `IMDCTPreRotate` reads `x[2i]` and
+`x[N2-1-2i]` four at a time (`CVTPD2PS` is `float32(x)`), rotates, and
+scatters each complex result to `bitrev[i]` with `MOVQ`/`MOVHPS`; the
+permutation is range-checked once per plan (`kernels.BitRev`).
+`IMDCTPostRotate` walks from both ends, reversing the backward stream's
+lanes with `SHUFPS $0x1B`, so both float64 output windows are contiguous
+(`CVTPS2PD` widening is exact).
+
+**SILK synthesis prediction (pure Go, all architectures).** The decoder's
+`silkLPCPredictQ10` summed 16 taps in `j` order, newest sample first, so
+each synthesized sample waited for the whole add chain of the previous
+one. Its terms are each rounded and the int32 sum wraps, so the older
+taps are now summed as a tree and the newest added last; the recursive
+dependency shrinks to one multiply and one add.
+
+Kernel speedups: radix-5 stage 5.5x, rotations 2.5x. All FFT, rotation and
+NSQ kernel paths were mutation-checked: a changed operand or shuffle in
+each makes the kernel tests fail.
+
+End-to-end against phase 2, min of 15 interleaved runs pinned to one CPU:
+
+| Benchmark | phase 2 | 3a | change |
+|---|---:|---:|---:|
+| 12 RFC 8251 vectors, total | 875.2 ms | 803.0 ms | −8.2% |
+| tv01 (CELT) | 135.5 ms | 116.1 ms | −14.3% |
+| tv06 (hybrid/CELT) | 83.3 ms | 68.8 ms | −17.4% |
+| tv11 (CELT) | 99.7 ms | 85.7 ms | −14.1% |
+| encode celt/mono/96k | 89.7 µs | 83.6 µs | −6.8% |
+| encode celt/stereo/128k | 157.4 µs | 149.4 µs | −5.1% |
+
+Single SILK-only vectors moved by −8% to +6% between runs; their sum
+change is within noise here. An earlier pass that measured only the
+prediction change gave −1% to −9% on the SILK vectors.
+
+Verification: official-vector and packet digests, the 600-cell and SILK
+matrices (amd64 default and `purego`), and on arm64 under qemu the dsp
+tests, the digests and a 300-cell matrix with the same digest as amd64.
+
+### 3b (implemented): the comb post-filter
+
+The decoder's pitch post-filter (`comb_filter` in place) is recursive, but
+output `i` reads samples no later than `i - period + 2` with
+`period >= 15`, so a block of four consecutive outputs reads only samples
+written before the block. `CombConst` and `CombOverlap` run four outputs
+per pass with the scalar operation order.
+
+The scalar filter reads through `getHistorySample`, which branches on
+every tap. The vector path instead copies the reachable history
+(`period + 2` samples, zeros before the start of `pf.buf`) and the frame
+into one float32 buffer, filters it, and copies back only the samples the
+filter wrote (so samples it skips keep their float64 bits). A first
+version did the conversions in Go loops; they then cost four times the
+filtering itself, so they now use `CVTPD2PS`/`CVTPS2PD`
+(`Float64sToFloat32s`, `Float32sToFloat64s`), which round like Go's
+conversions. Without the kernels the conversions would only add work, so
+other builds keep the existing scalar filter unchanged.
+
+Effect, from CPU profiles of the CELT-heavy vectors (tv01, tv09, tv10,
+tv11): `PostFilter.Apply` fell from 7.0% to 3.8% of decode time, i.e.
+about 3% of CELT decoding. Timed runs on this VM could not resolve a
+change that small: an unchanged pure Go build measured +2.3% against
+itself in the same session.
+
+### Not vectorisable without changing bits
+
+These remain in the profiles and are why the bit-exact plan ends here for
+the encoder:
+
+| Function | Share | Why |
 |---|---:|---|
-| `imdctRawStatic` + `bfly2/3/4/5` (decode) | ~16% of decode | The KISS FFT data is already `float32` (`opusComplex`). Within one stage the `m` butterflies are independent, so vectorise across them with the scalar per-element operation order; pre/post-rotation loops are element-wise. Needs a split real/imag (SoA) scratch or shuffles; benchmark both. |
-| `cltMDCTForward` (encode) | 3.6% | Same transform |
-| `combFilter32`, `PostFilter.combFilter` | 1–4% | 5-tap FIR per output sample: one output per lane. |
-| `opPVQSearch` | 5% of encode | The pulse-placement argmax compares `Rxy²·best_den > best_num·Ryy` per position with first-index tie-breaking: compute the candidates in lanes, reduce with an index-aware max that keeps the lowest index. Medium risk; needs the PVQ oracle. |
-| `transientAnalysis32`, `spreadingDecision32`, `toneLPC` | ~1% each | Element-wise parts only. Low priority. |
-| `applyDeemphasis` (decode) | 4% | Recursive; only across channels (2 lanes). Low value. |
+| `opPVQSearch` | 5.7% of encode | Pulse placement keeps the first maximum under `best_den*Rxy > Ryy*best_num`, compared with float32 rounding against the running best. That comparison is not transitive, so per-lane maxima merged afterwards can pick another index in near-ties. (libopus's SSE version is not bit-exact with its C version for this reason.) |
+| `innerProd32`, `dualInnerProd32`, energy sums | ~3% of encode | Float32 reductions: lanes would reassociate the sum. |
+| `pitchDownsample32` FIR, `celtLPC32` | ~2% of encode | Serial recurrences. |
+| `silkWarpedAutocorrelationFLP32`, `silkInnerProductFLP32` | ~6% of encode | A serial all-pass chain; a float64 sum. |
+| `applyDeemphasis` | 3.3% of decode | First-order IIR per channel; only the two channels of a stereo stream are independent. |
+| `up2HQInternal` | 2–5% of SILK decode | Serial all-pass sections per channel. |
+
+Smaller remaining candidates that are exact: the forward MDCT rotations
+(about 1% of CELT encode), the radix-2 and m = 1 radix-4 FFT stages (~2%
+of decode), and `interleaveSILKOutInto` (a shuffle).
 
 ## Phase 4: arm64 NEON
 

@@ -806,12 +806,23 @@ or the build. On amd64 (without the `purego` tag):
   once, one state per lane, with SSE4.1 and branches as lane masks. Without
   SSE4.1 the quantizer's per-state loop fills the same per-sample candidate
   arrays.
+- `FFTRadix3/4/5` (the static-mode KISS FFT stages with m > 1) and
+  `IMDCTPreRotate`/`IMDCTPostRotate` (the backward MDCT rotations) run four
+  butterflies or rotations per pass with SSE, real and imaginary parts in
+  separate registers and the scalar operation order in each lane.
+- `CombConst` and `CombOverlap` (the decoder's comb post-filter) filter
+  four consecutive samples per pass on a float32 copy of the reachable
+  history and the frame; the filter's period of at least 15 keeps each
+  block's reads behind it. Builds without SSE keep the scalar filter.
 - `Float32ToInt16` (the int16 `Decode` output) scales, clamps with
   MAXPS/MINPS (whose NaN rule matches the scalar clamp) and rounds half to
   even with CVTPS2DQ; it is checked against the reference for all 2^32
   float32 inputs.
 
-Other architectures and `-tags purego` builds use the references. Kernel
+Other architectures and `-tags purego` builds use the references. The
+SILK decoder's short-term prediction (`silkLPCPredictQ10`) sums its
+older taps as a tree and adds the newest last, on every architecture;
+the int32 sum wraps, so this is exact. Kernel
 tests compare every path (AVX, SSE, fallback) against the reference,
 including subnormals, infinities and int16 overflow. The design and the
 remaining candidates are in `.claude/specs/simd-kernels-v2.md`.

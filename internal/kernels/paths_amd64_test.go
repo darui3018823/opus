@@ -8,13 +8,13 @@ import "testing"
 // kernel off (pure Go fallback through the public entry point).
 func disableAVXForTest(t *testing.T, f func(t *testing.T)) {
 	t.Helper()
-	avx, sse := useAVX, useSSE
-	defer func() { useAVX, useSSE = avx, sse }()
+	avx, sse, sse41 := useAVX, useSSE, useSSE41
+	defer func() { useAVX, useSSE, useSSE41 = avx, sse, sse41 }()
 	if avx {
 		useAVX = false
 		t.Run("sse", f)
 	}
-	useAVX, useSSE = false, false
+	useAVX, useSSE, useSSE41 = false, false, false
 	t.Run("fallback", f)
 }
 
